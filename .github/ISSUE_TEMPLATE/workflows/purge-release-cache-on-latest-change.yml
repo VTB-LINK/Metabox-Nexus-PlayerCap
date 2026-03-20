@@ -1,0 +1,100 @@
+name: Purge Release Cache On Latest Change
+
+on:
+  release:
+    types:
+      - published
+      - edited
+
+permissions:
+  contents: read
+
+jobs:
+  purge-cache:
+    if: github.event.release.draft == false
+    runs-on: Ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      CURRENT_RELEASE_ID: ${{ github.event.release.id }}
+      ACTION: ${{ github.event.action }}
+      CACHE_PURGE_URL: ${{ secrets.RELEASE_CACHE_PURGE_URL }}
+      KONG_ADMIN_TOKEN: ${{ secrets.KONG_ADMIN_TOKEN }}
+
+    steps:
+      - name: Set up GitHub CLI
+        run: |
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh already installed: $(gh --version | head -1)"
+          else
+            echo "Installing GitHub CLI..."
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            sudo apt-get update
+            sudo apt-get install -y gh
+            echo "Installed: $(gh --version | head -1)"
+          fi
+
+      - name: Detect latest release change
+        id: detect
+        run: |
+          set -euo pipefail
+
+          LATEST_ID="$(gh api "repos/${GH_REPO}/releases/latest" --jq '.id')"
+          IS_LATEST=false
+          SHOULD_PURGE=false
+          REASON="no latest change"
+          HAS_MAKE_LATEST_CHANGE=false
+
+          # edited 事件时，从原始 payload 检测是否包含 make_latest 变更字段
+          if [ "${ACTION}" = "edited" ] && grep -q '"make_latest"' "$GITHUB_EVENT_PATH"; then
+            HAS_MAKE_LATEST_CHANGE=true
+          fi
+
+          if [ "${LATEST_ID}" = "${CURRENT_RELEASE_ID}" ]; then
+            IS_LATEST=true
+          fi
+
+          if [ "${ACTION}" = "published" ] && [ "${IS_LATEST}" = "true" ]; then
+            SHOULD_PURGE=true
+            REASON="new latest release published"
+          fi
+
+          if [ "${ACTION}" = "edited" ] && [ "${IS_LATEST}" = "true" ] && [ "${HAS_MAKE_LATEST_CHANGE}" = "true" ]; then
+            SHOULD_PURGE=true
+            REASON="release edited and make_latest changed"
+          fi
+
+          echo "latest_id=${LATEST_ID}" >> "$GITHUB_OUTPUT"
+          echo "is_latest=${IS_LATEST}" >> "$GITHUB_OUTPUT"
+          echo "should_purge=${SHOULD_PURGE}" >> "$GITHUB_OUTPUT"
+          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
+
+          echo "action=${ACTION}, current_release_id=${CURRENT_RELEASE_ID}, latest_id=${LATEST_ID}, is_latest=${IS_LATEST}, should_purge=${SHOULD_PURGE}, reason=${REASON}"
+
+      - name: Purge release API cache
+        if: steps.detect.outputs.should_purge == 'true'
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CACHE_PURGE_URL:-}" ]; then
+            echo "::error::Missing secret RELEASE_CACHE_PURGE_URL"
+            exit 1
+          fi
+
+          if [ -z "${KONG_ADMIN_TOKEN:-}" ]; then
+            echo "::error::Missing secret KONG_ADMIN_TOKEN"
+            exit 1
+          fi
+
+          curl --fail-with-body --silent --show-error \
+            --request DELETE \
+            --url "${CACHE_PURGE_URL}" \
+            --header "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}"
+
+          echo "Release API cache purged successfully."
+
+      - name: Skip purge log
+        if: steps.detect.outputs.should_purge != 'true'
+        run: |
+          echo "Skip purge: ${{ steps.detect.outputs.reason }}"
