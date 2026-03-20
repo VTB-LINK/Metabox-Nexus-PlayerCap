@@ -29,8 +29,10 @@
 - ✅ **无需 Cheat Engine** — 直接调用 Windows API 读取进程内存
 - ✅ **跨重启稳定** — AOB 特征搜索，地址动态定位
 
+### 运行
+
 ```bash
-# 直接运行（使用 config.yml 或默认配置）
+# 双击或直接运行（使用 config.yml 或默认配置）
 .\Metabox-Nexus-WesingCap.exe
 
 # 歌词提前 500ms 显示
