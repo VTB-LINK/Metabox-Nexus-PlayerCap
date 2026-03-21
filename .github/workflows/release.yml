@@ -1,0 +1,159 @@
+name: Release on Tag
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: [self-hosted,Linux]
+    environment: build-production
+    env:
+      GOOS: windows
+      GOARCH: amd64
+      OUTPUT_NAME: Metabox-Nexus-WesingCap
+      GH_HOST: github.com
+      GH_TOKEN: ${{ secrets.GH_DOTCOM_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.25'
+
+      - name: Set up GitHub CLI
+        run: |
+          if command -v gh &>/dev/null; then
+            echo "gh already installed: $(gh --version | head -1)"
+          else
+            echo "Installing GitHub CLI..."
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update && sudo apt-get install -y gh
+            echo "Installed: $(gh --version | head -1)"
+          fi
+
+      - name: Extract version from tag
+        id: vars
+        run: |
+          # 从 refs/tags/vX.Y.Z 中提取版本号
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG_NAME#v}"
+          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Release version: ${VERSION} (tag: ${TAG_NAME})"
+
+      - name: Build Windows executable
+        run: |
+          VERSION=${{ steps.vars.outputs.VERSION }}
+          TAG_NAME=${{ steps.vars.outputs.TAG_NAME }}
+
+          # 输出文件名带版本号：Metabox-Nexus-WesingCap-Vx.y.z.exe
+          # EXE_NAME="${OUTPUT_NAME}-V${VERSION}.exe"
+          EXE_NAME="${OUTPUT_NAME}.exe"
+          echo "EXE_NAME=${EXE_NAME}" >> $GITHUB_ENV
+
+          go build -ldflags "-X 'main.Version=${VERSION}'" -o "${EXE_NAME}"
+
+          if [ -f "${EXE_NAME}" ]; then
+            ls -lh "${EXE_NAME}"
+            echo "Build successful: ${EXE_NAME}"
+          else
+            echo "Build failed!"
+            exit 1
+          fi
+
+      - name: Prepare files for packaging
+        run: |
+          VERSION=${{ steps.vars.outputs.VERSION }}
+
+          PACKAGE_DIR="${OUTPUT_NAME}-V${VERSION}"
+          mkdir -p "${PACKAGE_DIR}"
+
+          cp "${EXE_NAME}" "${PACKAGE_DIR}/"
+          cp config.yml "${PACKAGE_DIR}/"
+          cp lyric_display.html "${PACKAGE_DIR}/"
+          cp doc/API_RESPONSE_EXAMPLES.md "${PACKAGE_DIR}/"
+          cp README.md "${PACKAGE_DIR}/" 2>/dev/null || true
+
+          echo "PACKAGE_DIR=${PACKAGE_DIR}" >> $GITHUB_ENV
+
+      - name: Create compressed archive
+        run: |
+          VERSION=${{ steps.vars.outputs.VERSION }}
+          ARCHIVE_NAME="${OUTPUT_NAME}-V${VERSION}.zip"
+
+          cd "${PACKAGE_DIR}"
+          zip -r "../${ARCHIVE_NAME}" .
+          cd ..
+
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+
+          if [ -f "${ARCHIVE_NAME}" ]; then
+            ls -lh "${ARCHIVE_NAME}"
+            echo "Archive created: ${ARCHIVE_NAME}"
+          else
+            echo "Archive creation failed!"
+            exit 1
+          fi
+
+      - name: Create Release Draft (本仓库)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.TAG_NAME }}
+          name: ${{ steps.vars.outputs.TAG_NAME }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            ${{ env.OUTPUT_NAME }}-V${{ steps.vars.outputs.VERSION }}.zip
+            ${{ env.OUTPUT_NAME }}.exe
+            # ${{ env.OUTPUT_NAME }}-V${{ steps.vars.outputs.VERSION }}.exe
+
+      - name: Create Release Draft (VTB-LINK on github.com)
+        run: |
+          TAG_NAME=${{ steps.vars.outputs.TAG_NAME }}
+
+          # 尝试创建 tag（若远程仓库尚无此 tag，需先在该仓库创建）
+          gh api "repos/VTB-LINK/Metabox-Nexus-WesingCap/git/refs" \
+            --method POST \
+            -f ref="refs/tags/${TAG_NAME}" \
+            -f sha="$(git rev-parse HEAD)" 2>/dev/null || true
+
+          # 生成自动 release notes
+          gh api "repos/VTB-LINK/Metabox-Nexus-WesingCap/releases/generate-notes" \
+            --method POST \
+            -f tag_name="${TAG_NAME}" \
+            --jq '.body' > auto-release-notes.md
+
+          # 这里写自定义多行说明（可按需修改）
+          cat > custom-release-notes.md <<'EOF'
+          ### 发布说明
+          - 感谢您使用VTB-TOOLS Metabox Nexus WesingCap！这是一个专为K歌爱好者设计的工具，旨在提升您的K歌与直播体验。
+          - 问题反馈请前往Discussions：https://github.com/VTB-LINK/Metabox-Nexus-WesingCap/discussions
+          - API文档请前往：https://wesingcap.nexus.metabox.apifox.vtb.link
+          EOF
+
+          # 合并：自定义内容在前，自动生成内容在后
+          {
+            cat custom-release-notes.md
+            echo
+            echo "---"
+            echo
+            echo "### 自动生成变更"
+            echo
+            cat auto-release-notes.md
+          } > combined-release-notes.md
+
+          # 创建 Release Draft 并上传两个独立文件（exe + lyric html）
+          gh release create "${TAG_NAME}" "${EXE_NAME}" "lyric_display.html" \
+            --repo "VTB-LINK/Metabox-Nexus-WesingCap" \
+            --title "${TAG_NAME}" \
+            --draft \
+            --notes-file combined-release-notes.md

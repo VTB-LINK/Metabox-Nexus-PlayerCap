@@ -1,0 +1,70 @@
+# Go 相关
+*.exe
+*.exe~
+*.dll
+*.so
+*.so.*
+*.dylib
+*.test
+*.out
+*.o
+*.obj
+*.a
+
+# 构建产物
+dist/
+build/
+bin/
+
+# 依赖
+vendor/
+go.sum
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+
+# 日志和运行时
+*.log
+logs/
+*.pdb
+
+# 操作系统
+Thumbs.db
+.DS_Store
+ehthumbs.db
+Desktop.ini
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# 本地配置
+.env
+.env.local
+config.local.yml
+*.local
+
+# 数据文件
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# 缓存
+.cache/
+*.cache

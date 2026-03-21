@@ -1,0 +1,122 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: self-hosted
+    environment: build-dev
+    env:
+      GOOS: windows
+      GOARCH: amd64
+      OUTPUT_NAME: Metabox-Nexus-WesingCap
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.25'
+      
+      - name: Prepare variables
+        id: vars
+        run: |
+          # 获取commit hash（短版本）
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "COMMIT_HASH=${COMMIT_HASH}" >> $GITHUB_OUTPUT
+          
+          # 获取当前日期时间（格式：YYYYMMDD-HHMMSS）
+          BUILD_TIME=$(date +%Y%m%d-%H%M%S)
+          echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_OUTPUT
+          
+          # 获取完整的timestamp用于展示
+          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+          echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_OUTPUT
+          
+          echo "Build Info: Commit=$COMMIT_HASH, Time=$BUILD_TIME"
+      
+      - name: Build Windows executable
+        run: |
+          # 获取commit hash和build time
+          COMMIT_HASH=${{ steps.vars.outputs.COMMIT_HASH }}
+          BUILD_TIME=${{ steps.vars.outputs.BUILD_TIME }}
+          
+          # 版本号与文件名保持一致：<name>-<date-time>-<commit-hash>
+          VERSION="${OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
+          
+          # 构建可执行文件，文件名格式：<name>-<date-time>-<commit-hash>.exe
+          EXE_NAME="${VERSION}.exe"
+          echo "EXE_NAME=${EXE_NAME}" >> $GITHUB_ENV
+          
+          go build -ldflags "-X 'main.Version=${VERSION}'" -o "${EXE_NAME}"
+          
+          if [ -f "${EXE_NAME}" ]; then
+            ls -lh "${EXE_NAME}"
+            echo "Build successful!"
+          else
+            echo "Build failed!"
+            exit 1
+          fi
+      
+      - name: Prepare files for packaging
+        run: |
+          # 获取commit hash和build time
+          COMMIT_HASH=${{ steps.vars.outputs.COMMIT_HASH }}
+          BUILD_TIME=${{ steps.vars.outputs.BUILD_TIME }}
+          
+          # 创建临时目录用于打包
+          PACKAGE_DIR="Metabox-Nexus-WesingCap-${BUILD_TIME}-${COMMIT_HASH}"
+          mkdir -p "${PACKAGE_DIR}"
+          
+          # 复制需要的文件
+          cp "${EXE_NAME}" "${PACKAGE_DIR}/"
+          cp config.yml "${PACKAGE_DIR}/"
+          cp lyric_display.html "${PACKAGE_DIR}/"
+          cp doc/API_RESPONSE_EXAMPLES.md "${PACKAGE_DIR}/"
+          cp README.md "${PACKAGE_DIR}/" 2>/dev/null || true
+          
+          echo "PACKAGE_DIR=${PACKAGE_DIR}" >> $GITHUB_ENV
+      
+      - name: Create compressed archive
+        run: |
+          # 获取commit hash和build time
+          COMMIT_HASH=${{ steps.vars.outputs.COMMIT_HASH }}
+          BUILD_TIME=${{ steps.vars.outputs.BUILD_TIME }}
+          
+          # 创建zip压缩包
+          ARCHIVE_NAME="Metabox-Nexus-WesingCap-${BUILD_TIME}-${COMMIT_HASH}.zip"
+          
+          # 进入目录后压缩，这样zip内不会包含目录层级
+          cd "${PACKAGE_DIR}"
+          zip -r "../${ARCHIVE_NAME}" .
+          cd ..
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+          
+          if [ -f "${ARCHIVE_NAME}" ]; then
+            ls -lh "${ARCHIVE_NAME}"
+            echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+            echo "Archive created successfully!"
+          else
+            echo "Archive creation failed!"
+            exit 1
+          fi
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: Metabox-Nexus-WesingCap-${{ steps.vars.outputs.BUILD_TIME }}-${{ steps.vars.outputs.COMMIT_HASH }}
+          path: ${{ env.ARCHIVE_NAME }}
+          retention-days: 30
+      
+      - name: List artifacts
+        run: |
+          echo "Build completed successfully!"
+          echo "Executable: ${{ env.EXE_NAME }}"
+          echo "Archive: ${{ env.ARCHIVE_NAME }}"
+          echo "Commit: ${{ steps.vars.outputs.COMMIT_HASH }}"
+          echo "Build Time: ${{ steps.vars.outputs.TIMESTAMP }}"

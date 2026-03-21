@@ -12,7 +12,7 @@ permissions:
 jobs:
   purge-cache:
     if: github.event.release.draft == false
-    runs-on: Ubuntu-latest
+    runs-on: self-hosted
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
