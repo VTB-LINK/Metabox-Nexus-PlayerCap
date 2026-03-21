@@ -123,6 +123,7 @@ jobs:
       - name: Create Release Draft (VTB-LINK on github.com)
         run: |
           TAG_NAME=${{ steps.vars.outputs.TAG_NAME }}
+          DOWNLOAD_PROXY_BASE="https://github.boki.moe/https://github.com/VTB-LINK/Metabox-Nexus-WesingCap/releases/download"
 
           # 尝试创建 tag（若远程仓库尚无此 tag，需先在该仓库创建）
           gh api "repos/VTB-LINK/Metabox-Nexus-WesingCap/git/refs" \
@@ -137,7 +138,14 @@ jobs:
             --jq '.body' > auto-release-notes.md
 
           # 这里写自定义多行说明（可按需修改）
-          cat > custom-release-notes.md <<'EOF'
+          cat > custom-release-notes.md <<EOF
+          ## 一键下载
+
+          | 文件 | 最新版 | 当前版本 |
+          | --- | --- | --- |
+          | Metabox-Nexus-WesingCap.exe | [下载](${DOWNLOAD_PROXY_BASE}/latest/Metabox-Nexus-WesingCap.exe) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/Metabox-Nexus-WesingCap.exe) |
+          | lyric_display.html | [下载](${DOWNLOAD_PROXY_BASE}/latest/lyric_display.html) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/lyric_display.html) |
+
           ### 发布说明
           - 感谢您使用VTB-TOOLS Metabox Nexus WesingCap！这是一个专为K歌爱好者设计的工具，旨在提升您的K歌与直播体验。
           - 问题反馈请前往Discussions：https://github.com/VTB-LINK/Metabox-Nexus-WesingCap/discussions
