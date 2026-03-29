@@ -208,9 +208,9 @@ func runSession(handle syscall.Handle, pid uint32, server *ws.Server, offsetSec 
 		initialPlayTime, _ := lyric.ReadPlayTime(handle, timeAddr)
 
 		// 读取歌曲信息
-		songTitle, songName, singer := getSongInfo(handle, pid, lastTitle)
+		songTitle, songName, singer, coverURL, coverBase64 := getSongInfo(handle, pid, lastTitle)
 		server.SetStatus("playing", songTitle)
-		server.SetSongInfo(songName, singer, songTitle)
+		server.SetSongInfo(songName, singer, songTitle, coverURL, coverBase64)
 		server.BroadcastAllLyrics(songTitle, lyricItems, initialPlayTime)
 		lastPhase = proc.PhasePlaying
 
@@ -284,23 +284,39 @@ func initSong(handle syscall.Handle, pid uint32, modules []proc.Module, cachedTi
 	return lyrics, timeAddr, true
 }
 
-// getSongInfo 获取歌曲信息（返回显示标题、歌曲名、歌手名）
-func getSongInfo(handle syscall.Handle, pid uint32, windowTitle string) (string, string, string) {
+// getSongInfo 获取歌曲信息（返回显示标题、歌曲名、歌手名、封面URL、封面base64）
+func getSongInfo(handle syscall.Handle, pid uint32, windowTitle string) (string, string, string, string, string) {
 	songInfo, err := lyric.FindSongInfo(handle, windowTitle)
+
+	// 搜索封面 URL 并下载为 base64（使用 MID 精确匹配当前歌曲）
+	coverURL := ""
+	coverBase64 := ""
+	songMID := ""
+	if err == nil {
+		songMID = songInfo.Mid
+	}
+	if songMID != "" {
+		coverURL = lyric.FindCoverURL(handle, songMID)
+		if coverURL != "" {
+			fmt.Printf("[+] 封面 URL: %s\n", coverURL)
+			coverBase64 = lyric.FetchCoverBase64(coverURL)
+		}
+	}
+
 	if err == nil {
 		if songInfo.Singer != "" {
 			title := fmt.Sprintf("%s - %s", songInfo.Name, songInfo.Singer)
-			fmt.Printf("[♪] 歌曲: %s  歌手: %s\n", songInfo.Name, songInfo.Singer)
-			return title, songInfo.Name, songInfo.Singer
+			fmt.Printf("[♪] 歌曲: %s  歌手: %s  MID: %s\n", songInfo.Name, songInfo.Singer, songMID)
+			return title, songInfo.Name, songInfo.Singer, coverURL, coverBase64
 		}
-		return songInfo.Name, songInfo.Name, ""
+		return songInfo.Name, songInfo.Name, "", coverURL, coverBase64
 	}
 	title := proc.GetSongTitle(pid)
 	name := title
 	if title != "" {
 		fmt.Printf("[♪] 当前歌曲: %s\n", title)
 	}
-	return title, name, ""
+	return title, name, "", coverURL, coverBase64
 }
 
 // exitReason 轮询退出原因

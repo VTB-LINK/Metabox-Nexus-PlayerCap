@@ -50,9 +50,11 @@ type StatusMessage struct {
 
 // SongInfoUpdate 歌曲信息更新消息
 type SongInfoUpdate struct {
-	Name   string `json:"name,omitempty"`
-	Singer string `json:"singer,omitempty"`
-	Title  string `json:"title,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Singer      string `json:"singer,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Cover       string `json:"cover,omitempty"`
+	CoverBase64 string `json:"cover_base64,omitempty"`
 }
 
 // ServiceInfo 服务配置信息
@@ -140,8 +142,8 @@ func (s *Server) SetStatus(status, detail string) {
 }
 
 // SetSongInfo 发送歌曲信息更新
-func (s *Server) SetSongInfo(name, singer, title string) {
-	msg := SongInfoUpdate{Name: name, Singer: singer, Title: title}
+func (s *Server) SetSongInfo(name, singer, title, cover, coverBase64 string) {
+	msg := SongInfoUpdate{Name: name, Singer: singer, Title: title, Cover: cover, CoverBase64: coverBase64}
 	s.mu.Lock()
 	s.lastSongInfo = &msg
 	s.mu.Unlock()

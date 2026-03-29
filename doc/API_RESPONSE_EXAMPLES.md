@@ -264,7 +264,9 @@
   "data": {
     "name": "告白",
     "singer": "花澤香菜",
-    "title": "告白 - 花澤香菜"
+    "title": "告白 - 花澤香菜",
+    "cover": "http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg",
+    "cover_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
   }
 }
 ```
@@ -376,14 +378,14 @@ data: {"type":"song_info_update","data":{}}
 
 **初始发送（有歌曲信息时）：**
 ```
-data: {"type":"song_info_update","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜"}}
+data: {"type":"song_info_update","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜","cover":"http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg"}}
 ```
 
 **播放过程中，每当歌曲切换、信息更新（不关K歌窗口直接 A->B）时接收：**
 ```
-data: {"type":"song_info_update","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜"}}
+data: {"type":"song_info_update","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜","cover":"http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg"}}
 
-data: {"type":"song_info_update","data":{"name":"Winter Night Fantasy","singer":"Azuki Azusa","title":"Winter Night Fantasy - Azuki Azusa"}}
+data: {"type":"song_info_update","data":{"name":"Winter Night Fantasy","singer":"Azuki Azusa","title":"Winter Night Fantasy - Azuki Azusa","cover":"http://imgcache.qq.com/music/photo/mid_album_500/c/d/002cDeFg45HiJk.jpg"}}
 ```
 
 **K歌窗口关闭时（只发送一次）：**
@@ -399,16 +401,16 @@ data: {"type":"song_info_update","data":{}}
 data: {"type":"song_info_update","data":{}}
 
 （用户打开歌曲A）
-data: {"type":"song_info_update","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2"}}
+data: {"type":"song_info_update","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://imgcache.qq.com/music/photo/mid_album_500/e/f/003eFgHi67JkLm.jpg"}}
 
 （用户关闭K歌窗口）
 data: {"type":"song_info_update","data":{}}
 
 （用户打开歌曲B）
-data: {"type":"song_info_update","data":{"name":"如愿","singer":"王菲","title":"如愿 - 王菲"}}
+data: {"type":"song_info_update","data":{"name":"如愿","singer":"王菲","title":"如愿 - 王菲","cover":"http://imgcache.qq.com/music/photo/mid_album_500/g/h/004gHiJk89LmNo.jpg"}}
 
 （用户没有关闭K歌窗口，打开歌曲C）
-data: {"type":"song_info_update","data":{"name":"留什么给你","singer":"孙楠","title":"留什么给你 - 孙楠"}}
+data: {"type":"song_info_update","data":{"name":"留什么给你","singer":"孙楠","title":"留什么给你 - 孙楠","cover":"http://imgcache.qq.com/music/photo/mid_album_500/i/j/005iJkLm01NoPq.jpg"}}
 
 ```
 
@@ -528,7 +530,9 @@ curl -N http://localhost:8765/song_info-SSE
   "data": {
     "name": "告白",
     "singer": "花澤香菜",
-    "title": "告白 - 花澤香菜"
+    "title": "告白 - 花澤香菜",
+    "cover": "http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg",
+    "cover_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
   }
 }
 ```
@@ -652,7 +656,7 @@ play_time 重新推进时发送：
 
 （用户打开K歌窗口，选择歌曲A）
 ← {"type":"status_update","data":{"status":"loading","detail":"有点甜"}}
-← {"type":"song_info_update","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2"}}
+← {"type":"song_info_update","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://imgcache.qq.com/music/photo/mid_album_500/e/f/003eFgHi67JkLm.jpg"}}
 ← {"type":"status_update","data":{"status":"playing","detail":"有点甜 - 汪苏泷/BY2"}}
 ← {"type":"all_lyrics","data":{"song_title":"有点甜 - 汪苏泷/BY2","duration":236.0,"play_time":0.5,"count":28,"lyrics":[...]}}
 ← {"type":"lyric_update","data":{"line_index":0,"text":"男：摘一颗苹果","timestamp":18.326,"play_time":18.15,"progress":0.05}}
@@ -667,7 +671,7 @@ play_time 重新推进时发送：
 
 （用户重新打开K歌窗口，选择歌曲B）
 ← {"type":"status_update","data":{"status":"loading","detail":"如愿"}}
-← {"type":"song_info_update","data":{"name":"如愿","singer":"王菲","title":"如愿 - 王菲"}}
+← {"type":"song_info_update","data":{"name":"如愿","singer":"王菲","title":"如愿 - 王菲","cover":"http://imgcache.qq.com/music/photo/mid_album_500/g/h/004gHiJk89LmNo.jpg"}}
 ← {"type":"status_update","data":{"status":"playing","detail":"如愿 - 王菲"}}
 ← {"type":"all_lyrics","data":{"song_title":"如愿 - 王菲","duration":280.0,"play_time":0.3,"count":35,"lyrics":[...]}}
 ← {"type":"lyric_update","data":{"line_index":0,"text":"我在时间尽头等你","timestamp":25.5,"play_time":25.3,"progress":0.03}}
@@ -679,7 +683,7 @@ play_time 重新推进时发送：
 ← {"type":"lyric_idle","data":{}}
 
 ← {"type":"status_update","data":{"status":"loading","detail":"留什么给你"}}
-← {"type":"song_info_update","data":{"name":"留什么给你","singer":"孙楠","title":"留什么给你 - 孙楠"}}
+← {"type":"song_info_update","data":{"name":"留什么给你","singer":"孙楠","title":"留什么给你 - 孙楠","cover":"http://imgcache.qq.com/music/photo/mid_album_500/i/j/005iJkLm01NoPq.jpg"}}
 ← {"type":"status_update","data":{"status":"playing","detail":"留什么给你 - 孙楠"}}
 ← {"type":"all_lyrics","data":{"song_title":"留什么给你 - 孙楠","duration":255.0,"play_time":0.4,"count":32,"lyrics":[...]}}
 ← {"type":"lyric_update","data":{"line_index":0,"text":"最初的爱给了你","timestamp":19.2,"play_time":19.0,"progress":0.04}}
@@ -760,7 +764,7 @@ ws.onerror = (error) => {
 | 事件类型 | 有数据时 `data` | 无数据时 `data` | 客户端判断有无数据 |
 |---|---|---|---|
 | `status_update` | `{"status":"...","detail":"..."}` | `{}` | `msg.data && msg.data.status` |
-| `song_info_update` | `{"name":"...","singer":"...","title":"..."}` | `{}` | `msg.data && msg.data.title` |
+| `song_info_update` | `{"name":"...","singer":"...","title":"...","cover":"...","cover_base64":"..."}` | `{}` | `msg.data && msg.data.title` |
 | `all_lyrics` | `{"song_title":"...","duration":N,"play_time":N,"count":N,"lyrics":[...]}` | `{}` | `msg.data && msg.data.lyrics` |
 | `lyric_update` | `{"line_index":N,"text":"...","timestamp":N,...}` | `{}` | `msg.data && msg.data.text` |
 | `lyric_idle` | — | `{}`（始终） | 收到即为空闲 |

@@ -81,7 +81,84 @@
         }
         
         .header {
-            margin-bottom: 40px;
+            margin-bottom: 20px;
+        }
+
+        .song-info-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+
+        .cover-art {
+            position: relative;
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            overflow: hidden;
+            flex-shrink: 0;
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 0 20px rgba(255, 107, 107, 0.15), 0 4px 15px rgba(0, 0, 0, 0.3);
+            animation: cover-spin 12s linear infinite paused;
+            transition: opacity 0.5s ease, transform 0.5s ease;
+            opacity: 0;
+            transform: scale(0.8);
+        }
+
+        .cover-art.visible {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .cover-art.spinning {
+            animation-play-state: running;
+        }
+
+        .cover-art img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .cover-art::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 16px;
+            height: 16px;
+            background: #1a1a2e;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            border: 2px solid rgba(255, 255, 255, 0.1);
+        }
+
+        @keyframes cover-spin {
+            from { transform: scale(1) rotate(0deg); }
+            to { transform: scale(1) rotate(360deg); }
+        }
+
+        .song-meta {
+            text-align: left;
+        }
+
+        .song-meta .song-name {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: rgba(255, 255, 255, 0.85);
+            letter-spacing: 1px;
+            line-height: 1.4;
+        }
+
+        .song-meta .song-singer {
+            font-size: 0.8rem;
+            font-weight: 300;
+            color: rgba(255, 255, 255, 0.4);
+            letter-spacing: 1px;
+            margin-top: 2px;
         }
         
         .header h1 {
@@ -309,7 +386,8 @@
             max-width: 100%;
         }
         
-        body.pure-mode .header {
+        body.pure-mode .header,
+        body.pure-mode .song-info-row {
             display: none;
         }
         
@@ -381,6 +459,16 @@
                 <span id="statusText">连接中...</span>
             </div>
             <div class="song-title" id="songTitle" style="margin-top:8px;font-size:0.95rem;font-weight:400;color:rgba(255,255,255,0.5);letter-spacing:2px;min-height:1.2em;"></div>
+        </div>
+
+        <div class="song-info-row" id="songInfoRow" style="display:none;">
+            <div class="cover-art" id="coverArt">
+                <img id="coverImg" src="" alt="">
+            </div>
+            <div class="song-meta">
+                <div class="song-name" id="songName"></div>
+                <div class="song-singer" id="songSinger"></div>
+            </div>
         </div>
 
         <div class="lyrics-display" id="lyricsDisplay">
@@ -468,9 +556,13 @@
                 }
 
                 if (data.type === 'song_info_update') {
-                    // 中途连入时更新歌曲信息
                     if (data.data && data.data.title) {
                         document.getElementById('songTitle').textContent = '♪ ' + data.data.title;
+                        // 更新封面和歌曲信息行
+                        updateSongInfoRow(data.data);
+                    } else {
+                        // 歌曲信息清空
+                        hideSongInfoRow();
                     }
                 }
 
@@ -636,6 +728,7 @@
                 document.getElementById('lineInfo').textContent = '--';
                 document.getElementById('timeInfo').textContent = '--:-- / --:--';
                 document.getElementById('songTitle').textContent = '';
+                hideSongInfoRow();
                 stopInterpolation();
             } else {
                 // 播放/暂停状态：清除 loading/idle 提示，歌词保持不变
@@ -709,6 +802,38 @@
             document.getElementById('progressFill').style.width = `${(progress * 100).toFixed(1)}%`;
             document.getElementById('timeInfo').textContent = `${formatTime(currentTime)} / ${formatTime(songDuration)}`;
             rafId = requestAnimationFrame(tickTime);
+        }
+
+        // === 封面和歌曲信息 ===
+        function updateSongInfoRow(info) {
+            if (pureMode) return;
+            const row = document.getElementById('songInfoRow');
+            const coverArt = document.getElementById('coverArt');
+            const coverImg = document.getElementById('coverImg');
+            const songName = document.getElementById('songName');
+            const songSinger = document.getElementById('songSinger');
+
+            songName.textContent = info.name || '';
+            songSinger.textContent = info.singer || '';
+
+            // 优先使用 base64，其次使用 URL
+            const coverSrc = info.cover_base64 || info.cover || '';
+            if (coverSrc) {
+                coverImg.src = coverSrc;
+                coverArt.classList.add('visible', 'spinning');
+            } else {
+                coverArt.classList.remove('visible', 'spinning');
+            }
+
+            row.style.display = 'flex';
+        }
+
+        function hideSongInfoRow() {
+            if (pureMode) return;
+            const row = document.getElementById('songInfoRow');
+            const coverArt = document.getElementById('coverArt');
+            row.style.display = 'none';
+            coverArt.classList.remove('visible', 'spinning');
         }
 
         connect();
