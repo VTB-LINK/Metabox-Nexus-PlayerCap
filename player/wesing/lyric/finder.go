@@ -3,8 +3,12 @@ package lyric
 import (
 	"fmt"
 	"syscall"
-	"Metabox-Nexus-WesingCap/proc"
+
+	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
+
+var log = logger.New("Wesing")
 
 // FindLyricHost 定位 LyricHost 实例地址
 // 流程: KSongsLyric.dll 导出表 → CreateLyricHost → 构造函数 → vtable → 堆搜索
@@ -20,28 +24,28 @@ func FindLyricHost(handle syscall.Handle, modules []proc.Module) (hostAddr uint3
 	if lyricMod == nil {
 		return 0, 0, fmt.Errorf("未找到 KSongsLyric.dll，请确保 WeSing 正在显示歌词")
 	}
-	fmt.Printf("[+] KSongsLyric.dll 基址: 0x%08X (大小: 0x%X)\n", lyricMod.Base, lyricMod.Size)
+	log.Detail("KSongsLyric.dll 基址: 0x%08X (大小: 0x%X)", lyricMod.Base, lyricMod.Size)
 
 	// 2. 解析 PE 导出表，找到 CreateLyricHost
 	createAddr, err := findExportFunction(handle, lyricMod.Base, "CreateLyricHost")
 	if err != nil {
 		return 0, 0, fmt.Errorf("查找 CreateLyricHost 失败: %v", err)
 	}
-	fmt.Printf("[+] CreateLyricHost: 0x%08X\n", createAddr)
+	log.Detail("CreateLyricHost: 0x%08X", createAddr)
 
 	// 3. 在 CreateLyricHost 函数体中搜索第一条 CALL 指令 → 构造函数
 	constructorAddr, err := findFirstCall(handle, createAddr, 128)
 	if err != nil {
 		return 0, 0, fmt.Errorf("查找构造函数失败: %v", err)
 	}
-	fmt.Printf("[+] 构造函数: 0x%08X\n", constructorAddr)
+	log.Detail("构造函数: 0x%08X", constructorAddr)
 
 	// 4. 在构造函数中搜索 mov [edi], imm32 → vtable 地址
 	vtableAddr, err := findVtableAssignment(handle, constructorAddr, 200)
 	if err != nil {
 		return 0, 0, fmt.Errorf("查找 vtable 失败: %v", err)
 	}
-	fmt.Printf("[+] vtable: 0x%08X\n", vtableAddr)
+	log.Detail("vtable: 0x%08X", vtableAddr)
 
 	// 5. 在堆上搜索 vtable 值 → LyricHost 实例
 	regions := proc.EnumWritableRegions(handle)
@@ -54,8 +58,8 @@ func FindLyricHost(handle syscall.Handle, modules []proc.Module) (hostAddr uint3
 
 	hostAddr = results[0]
 	subStructAddr = hostAddr + 0x0C // 歌词子结构偏移
-	fmt.Printf("[+] LyricHost 实例: 0x%08X\n", hostAddr)
-	fmt.Printf("[+] 歌词子结构: 0x%08X\n", subStructAddr)
+	log.Detail("LyricHost 实例: 0x%08X", hostAddr)
+	log.Detail("歌词子结构: 0x%08X", subStructAddr)
 	return hostAddr, subStructAddr, nil
 }
 

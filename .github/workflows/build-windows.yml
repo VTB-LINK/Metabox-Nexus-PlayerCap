@@ -12,7 +12,7 @@ jobs:
     env:
       GOOS: windows
       GOARCH: amd64
-      OUTPUT_NAME: Metabox-Nexus-WesingCap
+      OUTPUT_NAME: Metabox-Nexus-PlayerCap
       HTML_FILE_NAME: lyric_display.html
     
     steps:

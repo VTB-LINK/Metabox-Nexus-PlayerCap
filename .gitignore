@@ -68,3 +68,5 @@ data/
 # 缓存
 .cache/
 *.cache
+/node_modules
+/testtool

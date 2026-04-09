@@ -1,4 +1,4 @@
-# Metabox-Nexus-WesingCap 配置文件
+# Metabox-Nexus-PlayerCap 配置文件
 # 优先级：命令行参数 > config.yml > 内置默认值
 
 # WebSocket 监听地址
@@ -9,3 +9,18 @@ offset: 200
 
 # 轮询间隔（毫秒），范围 10~2000
 poll: 30
+
+# 优先播放器
+prior-player:
+- wesing
+
+# 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
+prior-player-expire: 15
+
+# 全民K歌配置
+# wesing-offset: 0
+# wesing-poll: 30
+
+# 网易云音乐 v3 配置
+cloudmusicv3-offset: 500
+# cloudmusicv3-poll: 30

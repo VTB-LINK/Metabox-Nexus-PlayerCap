@@ -3,7 +3,8 @@ package lyric
 import (
 	"fmt"
 	"syscall"
-	"Metabox-Nexus-WesingCap/proc"
+
+	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
 
 // LyricLine 表示一行歌词
@@ -15,7 +16,8 @@ type LyricLine struct {
 
 // LoadLyrics 从内存中加载所有歌词行
 // 数据结构: subStructAddr+0x48 = vector<LyricEntry*> begin
-//           subStructAddr+0x50 = vector<LyricEntry*> end
+//
+//	subStructAddr+0x50 = vector<LyricEntry*> end
 func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error) {
 	// 读取歌词条目向量的 begin 和 end 指针
 	beginPtr, err := proc.ReadUint32(handle, subStructAddr+0x48)
@@ -120,7 +122,7 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 // PrintLyrics 打印所有歌词行
 func PrintLyrics(lyrics []LyricLine) {
 	for _, l := range lyrics {
-		fmt.Printf("    [%2d] %6.1fs  %s\n", l.Index, l.Time, l.Text)
+		log.Detail("[%2d] %6.1fs  %s", l.Index, l.Time, l.Text)
 	}
 }
 

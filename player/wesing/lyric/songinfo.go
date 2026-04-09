@@ -9,7 +9,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf16"
-	"Metabox-Nexus-WesingCap/proc"
+
+	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
 
 // SongInfo 歌曲信息
@@ -244,7 +245,7 @@ func FetchCoverBase64(coverURL string) string {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(coverURL)
 	if err != nil {
-		fmt.Printf("[!] 下载封面失败: %v\n", err)
+		log.Warn("下载封面失败: %v", err)
 		return ""
 	}
 	defer resp.Body.Close()
@@ -266,7 +267,7 @@ func FetchCoverBase64(coverURL string) string {
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(body)
-	fmt.Printf("[+] 封面已获取 (%d bytes → base64)\n", len(body))
+	log.Detail("封面已获取 (%d bytes → base64)", len(body))
 	return "data:" + mimeType + ";base64," + encoded
 }
 

@@ -15,10 +15,10 @@ jobs:
     env:
       GOOS: windows
       GOARCH: amd64
-      OUTPUT_NAME: Metabox-Nexus-WesingCap
-      DOTCOM_ARCHIVE_NAME: Metabox-Nexus-WesingCap.zip
+      OUTPUT_NAME: Metabox-Nexus-PlayerCap
+      DOTCOM_ARCHIVE_NAME: Metabox-Nexus-PlayerCap.zip
       DOTCOM_OWNER: VTB-LINK
-      DOTCOM_REPO_NAME: Metabox-Nexus-WesingCap
+      DOTCOM_REPO_NAME: Metabox-Nexus-PlayerCap
       DOTCOM_GITHUB_BASE: https://github.com
       DOWNLOAD_PROXY_PREFIX: https://github.boki.moe
       HTML_FILE_NAME: lyric_display.html
@@ -162,9 +162,9 @@ jobs:
           | ${HTML_FILE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${HTML_FILE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${HTML_FILE_NAME}) |
 
           ### 发布说明
-          - 感谢您使用VTB-TOOLS Metabox Nexus WesingCap！这是一个专为K歌爱好者设计的工具，旨在提升您的K歌与直播体验。
+          - 感谢您使用VTB-TOOLS Metabox Nexus PlayerCap！这是一个多播放器歌词实时推送工具，旨在提升您的K歌与直播体验。
           - 问题反馈请前往Discussions：${DOTCOM_DISCUSSIONS_URL}
-          - API文档请前往：https://wesingcap.nexus.metabox.apifox.vtb.link
+          - API文档请前往：http://playercap.nexus.metabox.apifox.vtb.link/
           EOF
 
           # 合并：自定义内容在前，自动生成内容在后

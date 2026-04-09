@@ -1,5 +1,5 @@
 blank_issues_enabled: true # 核心！这会彻底禁用“提交空白 Issue”的按钮
 contact_links:
   - name: 💡 提问或建议请前往 Discussions
-    url: https://github.com/VTB-LINK/Metabox-Nexus-WesingCap/discussions/new/choose
+    url: https://github.com/VTB-LINK/Metabox-Nexus-PlayerCap/discussions/new/choose
     about: 普通用户请在此交流，维护者评估后会转为正式的开发 Issue。

@@ -3,7 +3,8 @@ package lyric
 import (
 	"fmt"
 	"syscall"
-	"Metabox-Nexus-WesingCap/proc"
+
+	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
 
 // FindPlayTimeAddr 通过 AOB 特征搜索定位播放时间的 float 地址
@@ -17,7 +18,7 @@ import (
 //
 // 搜索策略：分别尝试已知的模式组合
 func FindPlayTimeAddr(handle syscall.Handle) (uint32, error) {
-	fmt.Println("[*] 通过特征搜索定位播放时间...")
+	log.Info("通过特征搜索定位播放时间...")
 
 	patterns := []struct {
 		name    string
@@ -35,11 +36,11 @@ func FindPlayTimeAddr(handle syscall.Handle) (uint32, error) {
 		if len(results) == 0 {
 			continue
 		}
-		fmt.Printf("[*] 模式 %s 命中 %d 处，验证...\n", p.name, len(results))
+		log.Info("模式 %s 命中 %d 处，验证...", p.name, len(results))
 
 		for _, hitAddr := range results {
 			if addr, ok := validateTimeAddr(handle, hitAddr); ok {
-				fmt.Printf("[+] 播放时间地址: 0x%08X (当前: %.2fs) [%s]\n", addr, readTimeOrZero(handle, addr), p.name)
+				log.Detail("播放时间地址: 0x%08X (当前: %.2fs) [%s]", addr, readTimeOrZero(handle, addr), p.name)
 				return addr, nil
 			}
 		}
@@ -103,7 +104,7 @@ func FindSongDuration(handle syscall.Handle) (float32, error) {
 		duration := float32(totalMin*60 + totalSec)
 
 		if duration > 0 {
-			fmt.Printf("[+] 歌曲总时长: %s (%02d:%02d = %.0fs)\n", text, totalMin, totalSec, duration)
+			log.Detail("歌曲总时长: %s (%02d:%02d = %.0fs)", text, totalMin, totalSec, duration)
 			return duration, nil
 		}
 	}

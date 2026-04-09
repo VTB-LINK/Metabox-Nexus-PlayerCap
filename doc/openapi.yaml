@@ -1,0 +1,1755 @@
+openapi: 3.1.0
+info:
+  title: Metabox-Nexus-PlayerCap API
+  version: 3.0.0
+  description: |
+    多播放器歌词捕获服务 API。
+
+    **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器（如 `"wesing"`、`"cloudmusicv3"`）。
+
+    **空数据约定：** 所有事件在无数据时统一返回 `"data": {}`（空对象），而非 `null`。
+
+    **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
+
+servers:
+  - url: http://localhost:8765
+    description: 本地开发服务器
+
+tags:
+  - name: 系统
+    description: 健康检查和服务状态
+  - name: 歌词
+    description: 歌词相关接口（完整歌词列表、当前歌词）
+  - name: 状态
+    description: 播放状态查询
+  - name: 歌曲信息
+    description: 歌曲元数据（名称、歌手、封面等）
+  - name: SSE推送
+    description: Server-Sent Events 实时推送接口
+  - name: WebSocket
+    description: WebSocket 实时双向通信接口
+
+paths:
+  # ============================================================
+  # 全局端点（无 player 参数）
+  # ============================================================
+  /health-check:
+    get:
+      tags: [系统]
+      summary: 健康检查
+      operationId: healthCheck
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/HealthCheckData"
+              examples:
+                success:
+                  summary: 成功
+                  value:
+                    code: 0
+                    msg: success
+                    player: internal
+                    data:
+                      now_time: "2026-03-19T12:34:56+08:00"
+
+  /service-status:
+    get:
+      tags: [系统]
+      summary: 服务状态信息
+      operationId: serviceStatus
+      description: |
+        返回完整的服务状态信息，包括版本、配置、播放器状态、已连接客户端等。
+
+        **version 说明：**
+        - 编译时通过 `-ldflags "-X main.Version=3.0.0"` 注入
+        - 默认值为 `0.0.0`
+
+        **config_sources 说明：**
+        - 显示配置来源的完整链路，按优先级顺序排列
+        - 可能的值：`"内置默认"`、`"config.yml"`、`"命令行参数"`
+
+        **config_overwritten 说明：**
+        - 列出被更高优先级来源覆盖的配置键名
+        - 仅在有覆盖时出现非空数组
+
+        **player_support 说明：**
+        - 系统编译时注册的所有播放器标识名列表
+
+        **player_running 说明：**
+        - 当前正在运行（非 `offline` / `standby` / `waiting_process`）的播放器列表
+
+        **player_status 说明：**
+        - 所有支持的播放器及其当前状态（按注册顺序），值为 status 字符串
+        - 可能的状态值：`"offline"` / `"waiting_process"` / `"waiting_song"` / `"loading"` / `"playing"` / `"paused"` / `"standby"`
+
+        **ws_connected 说明：**
+        - `connected` - 布尔值，表示是否有客户端连接
+        - `clients` - 字符串数组，已连接的客户端 IP 地址列表（RemoteAddr 格式）
+
+        **endpoints 说明：**
+        - 返回所有可用接口的完整地址（含 Per-player 端点）
+        - WebSocket 使用 `ws://`，HTTP/SSE 使用 `http://`
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ServiceStatusData"
+              examples:
+                success:
+                  summary: 成功
+                  value:
+                    code: 0
+                    msg: success
+                    player: internal
+                    data:
+                      version: "3.0.0"
+                      addr: "0.0.0.0:8765"
+                      now_time: "2026-03-19T12:34:56+08:00"
+                      config_sources: ["config.yml", "命令行参数"]
+                      config:
+                        addr: "0.0.0.0:8765"
+                        offset: 200
+                        poll: 30
+                        prior-player: ["wesing"]
+                        prior-player-expire: 15
+                        wesing-offset: 200
+                        wesing-poll: 30
+                        cloudmusicv3-offset: 500
+                        cloudmusicv3-poll: 30
+                      config_overwritten: ["offset", "wesing-poll"]
+                      player_support: ["wesing", "cloudmusicv3"]
+                      player_running: ["wesing"]
+                      player_status:
+                        wesing: playing
+                        cloudmusicv3: waiting_process
+                      endpoints:
+                        health-check: "http://0.0.0.0:8765/health-check"
+                        service-status: "http://0.0.0.0:8765/service-status"
+                        ws: "ws://0.0.0.0:8765/ws"
+                        all_lyrics: "http://0.0.0.0:8765/all_lyrics"
+                        lyric_update: "http://0.0.0.0:8765/lyric_update"
+                        status_update: "http://0.0.0.0:8765/status_update"
+                        song_info: "http://0.0.0.0:8765/song_info"
+                        lyric_update-SSE: "http://0.0.0.0:8765/lyric_update-SSE"
+                        song_info-SSE: "http://0.0.0.0:8765/song_info-SSE"
+                        wesing:
+                          ws: "ws://0.0.0.0:8765/wesing/ws"
+                          all_lyrics: "http://0.0.0.0:8765/wesing/all_lyrics"
+                          lyric_update: "http://0.0.0.0:8765/wesing/lyric_update"
+                          status_update: "http://0.0.0.0:8765/wesing/status_update"
+                          song_info: "http://0.0.0.0:8765/wesing/song_info"
+                          lyric_update-SSE: "http://0.0.0.0:8765/wesing/lyric_update-SSE"
+                          song_info-SSE: "http://0.0.0.0:8765/wesing/song_info-SSE"
+                        cloudmusicv3:
+                          ws: "ws://0.0.0.0:8765/cloudmusicv3/ws"
+                          all_lyrics: "http://0.0.0.0:8765/cloudmusicv3/all_lyrics"
+                          lyric_update: "http://0.0.0.0:8765/cloudmusicv3/lyric_update"
+                          status_update: "http://0.0.0.0:8765/cloudmusicv3/status_update"
+                          song_info: "http://0.0.0.0:8765/cloudmusicv3/song_info"
+                          lyric_update-SSE: "http://0.0.0.0:8765/cloudmusicv3/lyric_update-SSE"
+                          song_info-SSE: "http://0.0.0.0:8765/cloudmusicv3/song_info-SSE"
+                      client_count: 2
+                      ws_connected:
+                        connected: true
+                        clients:
+                          - "192.168.1.100:54321"
+                          - "192.168.1.200:54322"
+
+  # ============================================================
+  # 根端点（跟随活跃播放器）
+  # ============================================================
+  /all_lyrics:
+    get:
+      tags: [歌词]
+      summary: 完整歌词列表
+      operationId: getAllLyrics
+      description: |
+        返回当前活跃播放器正在播放歌曲的完整歌词列表。
+
+        - `player` - 数据来源播放器（根端点时为当前活跃播放器）
+        - `duration` - 歌曲总时长（秒）
+        - `play_time` - 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
+        - `count` - 歌词行数
+        - `lyrics` - 按 index 排序的歌词数组
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/AllLyricsData"
+                          - $ref: "#/components/schemas/EmptyObject"
+              examples:
+                有歌词时:
+                  summary: 有歌词时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data:
+                      song_title: "告白 - 花澤香菜"
+                      duration: 236.0
+                      play_time: 1.2
+                      count: 12
+                      lyrics:
+                        - { index: 0, time: 0.5, text: "いつもそばにいるのに" }
+                        - { index: 1, time: 2.1, text: "ふと気付くと遠すぎて" }
+                        - { index: 2, time: 3.8, text: "手を伸ばしても届かない" }
+                        - { index: 3, time: 5.5, text: "深い森の奥へ迷い込む" }
+                        - { index: 4, time: 7.2, text: "君に逢いたい" }
+                        - { index: 5, time: 9.0, text: "君に嘘をついていた" }
+                        - { index: 6, time: 11.2, text: "心は静かに落ち着かず" }
+                        - { index: 7, time: 13.5, text: "何もかもが手から零れ落ちる" }
+                        - { index: 8, time: 15.8, text: "ずっと歩いてくよ" }
+                        - { index: 9, time: 18.2, text: "迷えるまま" }
+                        - { index: 10, time: 20.5, text: "君を探す" }
+                        - { index: 11, time: 22.8, text: "その先へ" }
+                无歌词时:
+                  summary: 无歌词时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data: {}
+
+  /lyric_update:
+    get:
+      tags: [歌词]
+      summary: 当前歌词（最新一条）
+      operationId: getLyricUpdate
+      description: |
+        返回当前活跃播放器正在播放的最新一行歌词。
+
+        - `line_index` - 歌词行号
+        - `text` - 主歌词文本
+        - `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
+        - `timestamp` - 歌词时间戳（秒）
+        - `play_time` - 实际播放时间（秒）；根据偏移量调整后的时间
+        - `progress` - 播放进度（0-1）
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/LyricUpdateData"
+                          - $ref: "#/components/schemas/EmptyObject"
+              examples:
+                播放中:
+                  summary: 播放中（有歌词时）
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data:
+                      line_index: 5
+                      text: "君に嘘をついていた"
+                      sub_text: ""
+                      timestamp: 9.0
+                      play_time: 9.15
+                      progress: 0.4167
+                无歌词时:
+                  summary: 无歌词时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data: {}
+
+  /status_update:
+    get:
+      tags: [状态]
+      summary: 播放状态
+      operationId: getStatusUpdate
+      description: |
+        返回当前活跃播放器的播放状态。
+
+        **status 可能的值及含义：**
+        - `"waiting_process"` - 播放器进程未启动
+        - `"waiting_song"` - 播放器已启动但未选择歌曲
+        - `"loading"` - 歌曲加载中，detail 为歌曲名称
+        - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
+        - `"paused"` - 暂停中（play_time 停止推进时自动检测），detail 为歌曲标题
+        - `"standby"` - 待机状态，播放器已退出
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/StatusInfo"
+                          - $ref: "#/components/schemas/EmptyObject"
+              examples:
+                播放中:
+                  summary: 播放中
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data:
+                      status: playing
+                      detail: "告白 - 花澤香菜"
+                尚未获取到状态时:
+                  summary: 尚未获取到状态时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data: {}
+
+  /song_info:
+    get:
+      tags: [歌曲信息]
+      summary: 歌曲信息
+      operationId: getSongInfo
+      description: |
+        返回当前活跃播放器正在播放歌曲的元数据。
+
+        - 直接切歌（A→B）时，不会先返回空再返回 B，而是直接返回 B 的信息
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/SongInfo"
+                          - $ref: "#/components/schemas/EmptyObject"
+              examples:
+                有歌曲信息时:
+                  summary: 有歌曲信息时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data:
+                      name: "告白"
+                      singer: "花澤香菜"
+                      title: "告白 - 花澤香菜"
+                      cover: "http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg"
+                      cover_base64: "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+                无歌曲信息时:
+                  summary: 无歌曲信息时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data: {}
+
+  /lyric_update-SSE:
+    get:
+      tags: [SSE推送]
+      summary: 实时歌词推送
+      operationId: lyricUpdateSSE
+      description: |
+        Server-Sent Events 实时歌词推送。
+
+        **连接建立时：** 始终立即发送一条当前歌词状态（有歌词时发送歌词数据，无歌词时发送 `"data":{}`）。
+
+        **初始发送（无歌词时）：**
+        ```
+        data: {"type":"lyric_update","player":"wesing","data":{}}
+        ```
+
+        **初始发送（有歌词时）：**
+        ```
+        data: {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+        ```
+
+        **播放过程中，每当歌词更新时接收：**
+        ```
+        data: {"type":"lyric_update","player":"wesing","data":{"line_index":3,"text":"手を伸ばしても届かない","sub_text":"","timestamp":3.8,"play_time":3.85,"progress":0.25}}
+        ```
+
+        **完整生命周期示例：**
+        ```
+        （连接建立，当前无歌词）
+        data: {"type":"lyric_update","player":"wesing","data":{}}
+
+        （用户开始播放歌曲）
+        data: {"type":"lyric_update","player":"wesing","data":{"line_index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05}}
+        data: {"type":"lyric_update","player":"wesing","data":{"line_index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1}}
+
+        （切歌 — 服务端不发送清空消息，前端自行根据新歌数据重置显示）
+        data: {"type":"lyric_update","player":"wesing","data":{"line_index":0,"text":"新歌第一行歌词","sub_text":"","timestamp":15.0,"play_time":15.1,"progress":0.04}}
+        ```
+
+        **特性：**
+        - 完全支持 UTF-8 编码（中文、日文、韩文、俄文等所有语言）
+        - 服务器设置了 `Content-Type: text/event-stream; charset=utf-8`
+        - 连接时始终立即发送当前状态
+        - 实时推送，延迟极低
+        - 支持跨域（CORS）
+
+        **客户端使用示例（JavaScript）：**
+        ```javascript
+        const eventSource = new EventSource('http://localhost:8765/lyric_update-SSE');
+
+        eventSource.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          console.log(`[${msg.player}]`, msg.data.text || '(empty)');
+        };
+        ```
+      responses:
+        "200":
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/SSELyricUpdateEvent"
+              examples:
+                有歌词时:
+                  summary: 有歌词时
+                  value: |
+                    data: {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+                无歌词时:
+                  summary: 无歌词时
+                  value: |
+                    data: {"type":"lyric_update","player":"wesing","data":{}}
+
+  /song_info-SSE:
+    get:
+      tags: [SSE推送]
+      summary: 实时歌曲信息推送
+      operationId: songInfoSSE
+      description: |
+        Server-Sent Events 实时歌曲信息推送。
+
+        **连接建立时：** 始终立即发送一条当前歌曲信息状态。
+
+        **初始发送（无歌曲信息时）：**
+        ```
+        data: {"type":"song_info_update","player":"wesing","data":{}}
+        ```
+
+        **初始发送（有歌曲信息时）：**
+        ```
+        data: {"type":"song_info_update","player":"wesing","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜","cover":"http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg","cover_base64":"data:image/jpeg;base64,..."}}
+        ```
+
+        **播放过程中，歌曲切换时接收：**
+        ```
+        data: {"type":"song_info_update","player":"wesing","data":{"name":"Winter Night Fantasy","singer":"Azuki Azusa","title":"Winter Night Fantasy - Azuki Azusa","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}
+        ```
+
+        **歌曲结束/窗口关闭时：**
+        ```
+        data: {"type":"song_info_update","player":"wesing","data":{}}
+        ```
+        - 直接切歌（A→B）时，不会先发送空再发送 B，而是直接发送 B 的信息
+
+        **特性：**
+        - 完全支持 UTF-8 编码
+        - 连接时始终立即发送当前状态
+        - 实时推送，延迟极低
+        - 支持跨域（CORS）
+
+        **客户端使用示例（JavaScript）：**
+        ```javascript
+        const eventSource = new EventSource('http://localhost:8765/song_info-SSE');
+
+        eventSource.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          if (msg.data && msg.data.title) {
+            console.log(`♪ [${msg.player}] ${msg.data.title}`);
+          }
+        };
+        ```
+      responses:
+        "200":
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/SSESongInfoUpdateEvent"
+              examples:
+                有歌曲信息时:
+                  summary: 有歌曲信息时
+                  value: |
+                    data: {"type":"song_info_update","player":"wesing","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜","cover":"http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg","cover_base64":"data:image/jpeg;base64,..."}}
+                无歌曲信息时:
+                  summary: 无歌曲信息时
+                  value: |
+                    data: {"type":"song_info_update","player":"wesing","data":{}}
+
+  /ws:
+    get:
+      tags: [WebSocket]
+      summary: WebSocket 连接（根端点，跟随活跃播放器）
+      operationId: wsRoot
+      description: |
+        WebSocket 实时双向通信接口。连接后跟随当前活跃播放器接收所有事件。
+
+        > **注意：** 此端点实际为 WebSocket 协议（`ws://`），在 OpenAPI 中以 GET 方式描述。导入 Apifox 后请手动修改接口类型为 WebSocket。
+
+        > **统一事件格式：** 所有 WebSocket 和 SSE 推送的消息均使用 `{"type": "事件名", "player": "播放器名", "data": 载荷}` 格式。
+        > 所有事件无数据时 `data` 均为 `{}`（空对象）。
+        > 下游客户端统一按 `msg.type` 分发，`msg.player` 识别来源，`msg.data` 读取载荷即可。
+
+        **连接建立时立即接收以下 4 条消息（始终全部发送，无数据时 data 为 {}）：**
+
+        ---
+
+        **1. `status_update` - 状态更新**
+
+        有状态时：
+        ```json
+        {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"告白 - 花澤香菜"}}
+        ```
+        无状态时（服务刚启动尚未获取到状态）：
+        ```json
+        {"type":"status_update","player":"wesing","data":{}}
+        ```
+
+        status 可能的值及含义：
+        - `"waiting_process"` - 播放器进程未启动
+        - `"waiting_song"` - 播放器已启动但未选择歌曲
+        - `"loading"` - 歌曲加载中，detail 为歌曲名称
+        - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
+        - `"paused"` - 暂停中（play_time 停止推进时自动检测），detail 为歌曲标题
+        - `"standby"` - 待机状态，播放器已退出
+
+        ---
+
+        **2. `song_info_update` - 歌曲信息更新**
+
+        有歌曲信息时：
+        ```json
+        {"type":"song_info_update","player":"wesing","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜","cover":"http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg","cover_base64":"data:image/jpeg;base64,/9j/4AAQSkZJRg..."}}
+        ```
+        无歌曲信息时：
+        ```json
+        {"type":"song_info_update","player":"wesing","data":{}}
+        ```
+
+        **异步封面（wesing）：** 部分播放器的封面 base64 通过异步 HTTP 下载获取。歌曲开始播放时会先发送一条**不含 `cover_base64`** 的 `song_info_update`（仅含 `cover` URL），待封面下载完成后再补发一条含 `cover_base64` 的完整版本。前端应使用最新收到的数据覆盖即可。
+
+        ---
+
+        **3. `lyric_update` - 实时歌词更新**
+
+        播放中（有歌词时）：
+        ```json
+        {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.4167}}
+        ```
+        无歌词时：
+        ```json
+        {"type":"lyric_update","player":"wesing","data":{}}
+        ```
+
+        ---
+
+        **4. `all_lyrics` - 完整歌词列表**
+
+        有歌词时：
+        ```json
+        {"type":"all_lyrics","player":"wesing","data":{"song_title":"告白 - 花澤香菜","duration":236.0,"play_time":1.2,"count":12,"lyrics":[{"index":0,"time":0.5,"text":"いつもそばにいるのに"},{"index":1,"time":2.1,"text":"ふと気付くと遠すぎて"},{"index":2,"time":3.8,"text":"手を伸ばしても届かない"}]}}
+        ```
+        无歌词时：
+        ```json
+        {"type":"all_lyrics","player":"wesing","data":{}}
+        ```
+
+        ---
+
+        **5. `lyric_idle` - 歌词空闲通知**
+
+        当歌曲播放结束、切歌或窗口关闭时发送：
+        ```json
+        {"type":"lyric_idle","player":"wesing","data":{}}
+        ```
+        `lyric_idle` 为纯通知事件，`data` 始终为 `{}`。服务端**不会**发送清空歌词数据的消息，前端可自行决定是否响应。
+
+        ---
+
+        **6. `playback_pause` - 暂停播放**
+
+        当 play_time 连续多次不变时检测为暂停：
+        ```json
+        {"type":"playback_pause","player":"wesing","data":{"play_time":45.2}}
+        ```
+
+        ---
+
+        **7. `playback_resume` - 恢复播放**
+
+        play_time 重新推进时发送：
+        ```json
+        {"type":"playback_resume","player":"wesing","data":{"play_time":45.2}}
+        ```
+        前端收到 `playback_pause` 应停止时间插值，收到 `playback_resume` 应以 `play_time` 为锚点重新开始插值。
+
+        ---
+
+        **8. `player_switch` - 播放器切换（仅根订阅者收到）**
+
+        当活跃播放器发生变化时，根订阅者（`/ws`）会收到此事件：
+        ```json
+        {"type":"player_switch","player":"cloudmusicv3","data":{"from":"wesing","to":"cloudmusicv3"}}
+        ```
+        - `player` 字段为切换后的新播放器
+        - `from` - 切换前的播放器标识名
+        - `to` - 切换后的播放器标识名
+        - Per-player 订阅者（如 `/wesing/ws`）**不会**收到此事件
+        - 紧随其后会收到新播放器的**已缓存**状态事件（`status_update` + `song_info_update` + `all_lyrics` + `lyric_update` 中已有的部分）
+
+        ---
+
+        **WS 完整生命周期示例：**
+        ```
+        （客户端连接根端点 /ws，当前活跃播放器为 wesing，尚无歌曲）
+        ← {"type":"status_update","player":"wesing","data":{"status":"waiting_song","detail":"等待打开K歌窗口"}}
+        ← {"type":"song_info_update","player":"wesing","data":{}}
+        ← {"type":"lyric_update","player":"wesing","data":{}}
+        ← {"type":"all_lyrics","player":"wesing","data":{}}
+
+        （wesing 开始播放歌曲A）
+        ← {"type":"status_update","player":"wesing","data":{"status":"loading","detail":"有点甜"}}
+        ← {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"有点甜 - 汪苏泷/BY2"}}
+        ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":""}}
+        ← {"type":"all_lyrics","player":"wesing","data":{"song_title":"有点甜 - 汪苏泷/BY2","duration":236.0,"play_time":0.5,"count":28,"lyrics":[...]}}
+        ← {"type":"lyric_update","player":"wesing","data":{"line_index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05}}
+        ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}
+
+        （cloudmusicv3 开始播放 — 触发播放器切换）
+        ← {"type":"player_switch","player":"cloudmusicv3","data":{"from":"wesing","to":"cloudmusicv3"}}
+        ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"playing","detail":"如愿 - 王菲"}}
+
+        （用户暂停播放）
+        ← {"type":"playback_pause","player":"cloudmusicv3","data":{"play_time":45.2}}
+
+        （用户恢复播放）
+        ← {"type":"playback_resume","player":"cloudmusicv3","data":{"play_time":45.2}}
+
+        （歌曲播放完毕）
+        ← {"type":"lyric_idle","player":"cloudmusicv3","data":{}}
+
+        （播放器退出）
+        ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"standby","detail":"播放器已退出"}}
+        ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"waiting_process","detail":"播放器未启动"}}
+        ```
+
+        **客户端使用示例（JavaScript）：**
+        ```javascript
+        const ws = new WebSocket('ws://localhost:8765/ws');
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          switch (msg.type) {
+            case 'status_update':
+              if (msg.data && msg.data.status) {
+                console.log(`[${msg.player}] 状态: ${msg.data.status} - ${msg.data.detail}`);
+              }
+              break;
+            case 'song_info_update':
+              if (msg.data && msg.data.title) {
+                console.log(`[${msg.player}] ♪ ${msg.data.name} - ${msg.data.singer}`);
+              }
+              break;
+            case 'all_lyrics':
+              if (msg.data && msg.data.lyrics) {
+                console.log(`[${msg.player}] 共 ${msg.data.count} 行歌词`);
+              }
+              break;
+            case 'lyric_update':
+              if (msg.data && msg.data.text) {
+                console.log(`[${msg.player}] [${msg.data.line_index}] ${msg.data.text}`);
+              }
+              break;
+            case 'lyric_idle':
+              console.log(`[${msg.player}] 歌词空闲`);
+              break;
+            case 'playback_pause':
+              console.log(`[${msg.player}] 暂停 @ ${msg.data.play_time}s`);
+              break;
+            case 'playback_resume':
+              console.log(`[${msg.player}] 恢复 @ ${msg.data.play_time}s`);
+              break;
+            case 'player_switch':
+              console.log(`播放器切换: ${msg.data.from} → ${msg.data.to}`);
+              break;
+          }
+        };
+        ```
+      responses:
+        "101":
+          description: WebSocket 握手成功，协议升级
+
+  # ============================================================
+  # Per-player 端点（指定播放器）
+  # ============================================================
+  /{player}/all_lyrics:
+    get:
+      tags: [歌词]
+      summary: 完整歌词列表（指定播放器）
+      operationId: getPlayerAllLyrics
+      description: |
+        返回指定播放器正在播放歌曲的完整歌词列表。
+        Per-player 端点始终返回指定播放器的数据，不受路由切换影响。响应格式与根端点相同，`player` 字段固定为对应播放器名。
+
+        - `duration` - 歌曲总时长（秒）
+        - `play_time` - 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
+        - `count` - 歌词行数
+        - `lyrics` - 按 index 排序的歌词数组
+      parameters:
+        - $ref: "#/components/parameters/PlayerParam"
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/AllLyricsData"
+                          - $ref: "#/components/schemas/EmptyObject"
+              examples:
+                有歌词时:
+                  summary: 有歌词时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data:
+                      song_title: "告白 - 花澤香菜"
+                      duration: 236.0
+                      play_time: 1.2
+                      count: 12
+                      lyrics:
+                        - { index: 0, time: 0.5, text: "いつもそばにいるのに" }
+                        - { index: 1, time: 2.1, text: "ふと気付くと遠すぎて" }
+                        - { index: 2, time: 3.8, text: "手を伸ばしても届かない" }
+                        - { index: 3, time: 5.5, text: "深い森の奥へ迷い込む" }
+                        - { index: 4, time: 7.2, text: "君に逢いたい" }
+                        - { index: 5, time: 9.0, text: "君に嘘をついていた" }
+                        - { index: 6, time: 11.2, text: "心は静かに落ち着かず" }
+                        - { index: 7, time: 13.5, text: "何もかもが手から零れ落ちる" }
+                        - { index: 8, time: 15.8, text: "ずっと歩いてくよ" }
+                        - { index: 9, time: 18.2, text: "迷えるまま" }
+                        - { index: 10, time: 20.5, text: "君を探す" }
+                        - { index: 11, time: 22.8, text: "その先へ" }
+                无歌词时:
+                  summary: 无歌词时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data: {}
+
+  /{player}/lyric_update:
+    get:
+      tags: [歌词]
+      summary: 当前歌词（指定播放器）
+      operationId: getPlayerLyricUpdate
+      description: |
+        返回指定播放器正在播放的最新一行歌词。
+        Per-player 端点始终返回指定播放器的数据，不受路由切换影响。
+
+        - `line_index` - 歌词行号
+        - `text` - 主歌词文本
+        - `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
+        - `timestamp` - 歌词时间戳（秒）
+        - `play_time` - 实际播放时间（秒）；根据偏移量调整后的时间
+        - `progress` - 播放进度（0-1）
+      parameters:
+        - $ref: "#/components/parameters/PlayerParam"
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/LyricUpdateData"
+                          - $ref: "#/components/schemas/EmptyObject"
+              examples:
+                播放中:
+                  summary: 播放中（有歌词时）
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data:
+                      line_index: 5
+                      text: "君に嘘をついていた"
+                      sub_text: ""
+                      timestamp: 9.0
+                      play_time: 9.15
+                      progress: 0.4167
+                无歌词时:
+                  summary: 无歌词时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data: {}
+
+  /{player}/status_update:
+    get:
+      tags: [状态]
+      summary: 播放状态（指定播放器）
+      operationId: getPlayerStatusUpdate
+      description: |
+        返回指定播放器的播放状态。
+        Per-player 端点始终返回指定播放器的数据，不受路由切换影响。
+
+        **status 可能的值及含义：**
+        - `"waiting_process"` - 播放器进程未启动
+        - `"waiting_song"` - 播放器已启动但未选择歌曲
+        - `"loading"` - 歌曲加载中，detail 为歌曲名称
+        - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
+        - `"paused"` - 暂停中（play_time 停止推进时自动检测），detail 为歌曲标题
+        - `"standby"` - 待机状态，播放器已退出
+      parameters:
+        - $ref: "#/components/parameters/PlayerParam"
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/StatusInfo"
+                          - $ref: "#/components/schemas/EmptyObject"
+              examples:
+                播放中:
+                  summary: 播放中
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data:
+                      status: playing
+                      detail: "告白 - 花澤香菜"
+                尚未获取到状态时:
+                  summary: 尚未获取到状态时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data: {}
+
+  /{player}/song_info:
+    get:
+      tags: [歌曲信息]
+      summary: 歌曲信息（指定播放器）
+      operationId: getPlayerSongInfo
+      description: |
+        返回指定播放器正在播放歌曲的元数据。
+        Per-player 端点始终返回指定播放器的数据，不受路由切换影响。
+
+        - 直接切歌（A→B）时，不会先返回空再返回 B，而是直接返回 B 的信息
+      parameters:
+        - $ref: "#/components/parameters/PlayerParam"
+      responses:
+        "200":
+          description: 200 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/HTTPResponse"
+                  - type: object
+                    properties:
+                      data:
+                        oneOf:
+                          - $ref: "#/components/schemas/SongInfo"
+                          - $ref: "#/components/schemas/EmptyObject"
+              examples:
+                有歌曲信息时:
+                  summary: 有歌曲信息时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data:
+                      name: "告白"
+                      singer: "花澤香菜"
+                      title: "告白 - 花澤香菜"
+                      cover: "http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg"
+                      cover_base64: "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+                无歌曲信息时:
+                  summary: 无歌曲信息时
+                  value:
+                    code: 0
+                    msg: success
+                    player: wesing
+                    data: {}
+
+  /{player}/lyric_update-SSE:
+    get:
+      tags: [SSE推送]
+      summary: 实时歌词推送（指定播放器）
+      operationId: playerLyricUpdateSSE
+      description: |
+        Server-Sent Events 实时歌词推送（指定播放器）。
+        Per-player 端点始终推送指定播放器的歌词事件，不受路由切换影响。
+
+        **连接建立时：** 始终立即发送一条当前歌词状态。
+
+        **事件格式：**
+        ```
+        data: {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+        ```
+
+        **特性：**
+        - 完全支持 UTF-8 编码
+        - 连接时始终立即发送当前状态
+        - 实时推送，延迟极低
+        - 支持跨域（CORS）
+      parameters:
+        - $ref: "#/components/parameters/PlayerParam"
+      responses:
+        "200":
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/SSELyricUpdateEvent"
+              examples:
+                有歌词时:
+                  summary: 有歌词时
+                  value: |
+                    data: {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+                无歌词时:
+                  summary: 无歌词时
+                  value: |
+                    data: {"type":"lyric_update","player":"wesing","data":{}}
+
+  /{player}/song_info-SSE:
+    get:
+      tags: [SSE推送]
+      summary: 实时歌曲信息推送（指定播放器）
+      operationId: playerSongInfoSSE
+      description: |
+        Server-Sent Events 实时歌曲信息推送（指定播放器）。
+        Per-player 端点始终推送指定播放器的歌曲信息事件，不受路由切换影响。
+
+        **连接建立时：** 始终立即发送一条当前歌曲信息状态。
+
+        **事件格式：**
+        ```
+        data: {"type":"song_info_update","player":"wesing","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}
+        ```
+
+        **歌曲结束/窗口关闭时：**
+        ```
+        data: {"type":"song_info_update","player":"wesing","data":{}}
+        ```
+        - 直接切歌（A→B）时，不会先发送空再发送 B，而是直接发送 B 的信息
+
+        **特性：**
+        - 完全支持 UTF-8 编码
+        - 连接时始终立即发送当前状态
+        - 实时推送，延迟极低
+        - 支持跨域（CORS）
+      parameters:
+        - $ref: "#/components/parameters/PlayerParam"
+      responses:
+        "200":
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/SSESongInfoUpdateEvent"
+              examples:
+                有歌曲信息时:
+                  summary: 有歌曲信息时
+                  value: |
+                    data: {"type":"song_info_update","player":"wesing","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜","cover":"http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg","cover_base64":"data:image/jpeg;base64,..."}}
+                无歌曲信息时:
+                  summary: 无歌曲信息时
+                  value: |
+                    data: {"type":"song_info_update","player":"wesing","data":{}}
+
+  /{player}/ws:
+    get:
+      tags: [WebSocket]
+      summary: WebSocket 连接（指定播放器）
+      operationId: wsPlayer
+      description: |
+        WebSocket 实时双向通信接口（指定播放器）。始终接收指定播放器事件，不受路由切换影响。
+
+        > **注意：** 此端点实际为 WebSocket 协议（`ws://`），在 OpenAPI 中以 GET 方式描述。导入 Apifox 后请手动修改接口类型为 WebSocket。
+
+        行为与根端点 `/ws` 相同，但：
+        - 始终接收指定播放器的事件
+        - **不会**收到 `player_switch` 事件
+
+        连接建立时立即接收 4 条消息：`status_update`、`song_info_update`、`lyric_update`、`all_lyrics`。
+        后续实时事件类型：`status_update`、`song_info_update`、`lyric_update`、`all_lyrics`、`lyric_idle`、`playback_pause`、`playback_resume`。
+
+        详细事件格式请参阅根端点 `/ws` 的描述。
+      parameters:
+        - $ref: "#/components/parameters/PlayerParam"
+      responses:
+        "101":
+          description: WebSocket 握手成功，协议升级
+
+# ============================================================
+# WebSocket 事件（以 webhooks 描述服务端推送的事件结构）
+# ============================================================
+webhooks:
+  status_update:
+    post:
+      tags: [WebSocket]
+      summary: 状态更新事件
+      operationId: onStatusUpdate
+      description: |
+        播放状态发生变化时推送。连接建立时立即发送一次当前状态。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: status_update
+                player:
+                  type: string
+                  example: wesing
+                data:
+                  oneOf:
+                    - $ref: "#/components/schemas/StatusInfo"
+                    - $ref: "#/components/schemas/EmptyObject"
+            examples:
+              有状态时:
+                value:
+                  type: status_update
+                  player: wesing
+                  data:
+                    status: playing
+                    detail: "告白 - 花澤香菜"
+              无状态时:
+                value:
+                  type: status_update
+                  player: wesing
+                  data: {}
+      responses:
+        "200":
+          description: 事件已接收
+
+  song_info_update:
+    post:
+      tags: [WebSocket]
+      summary: 歌曲信息更新事件
+      operationId: onSongInfoUpdate
+      description: |
+        歌曲信息发生变化时推送。连接建立时立即发送一次。
+        部分播放器的封面 base64 异步获取，会先发送不含 cover_base64 的版本，待下载完成后补发完整版本。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: song_info_update
+                player:
+                  type: string
+                  example: wesing
+                data:
+                  oneOf:
+                    - $ref: "#/components/schemas/SongInfo"
+                    - $ref: "#/components/schemas/EmptyObject"
+            examples:
+              有歌曲信息时:
+                value:
+                  type: song_info_update
+                  player: wesing
+                  data:
+                    name: "告白"
+                    singer: "花澤香菜"
+                    title: "告白 - 花澤香菜"
+                    cover: "http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg"
+                    cover_base64: "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+              无歌曲信息时:
+                value:
+                  type: song_info_update
+                  player: wesing
+                  data: {}
+      responses:
+        "200":
+          description: 事件已接收
+
+  lyric_update:
+    post:
+      tags: [WebSocket]
+      summary: 实时歌词更新事件
+      operationId: onLyricUpdate
+      description: |
+        歌词行发生变化时推送。连接建立时立即发送一次当前歌词。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: lyric_update
+                player:
+                  type: string
+                  example: wesing
+                data:
+                  oneOf:
+                    - $ref: "#/components/schemas/LyricUpdateData"
+                    - $ref: "#/components/schemas/EmptyObject"
+            examples:
+              有歌词时:
+                value:
+                  type: lyric_update
+                  player: wesing
+                  data:
+                    line_index: 5
+                    text: "君に嘘をついていた"
+                    sub_text: ""
+                    timestamp: 9.0
+                    play_time: 9.15
+                    progress: 0.4167
+              无歌词时:
+                value:
+                  type: lyric_update
+                  player: wesing
+                  data: {}
+      responses:
+        "200":
+          description: 事件已接收
+
+  all_lyrics:
+    post:
+      tags: [WebSocket]
+      summary: 完整歌词列表事件
+      operationId: onAllLyrics
+      description: |
+        新歌曲开始播放时推送完整歌词列表。连接建立时立即发送一次。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: all_lyrics
+                player:
+                  type: string
+                  example: wesing
+                data:
+                  oneOf:
+                    - $ref: "#/components/schemas/AllLyricsData"
+                    - $ref: "#/components/schemas/EmptyObject"
+            examples:
+              有歌词时:
+                value:
+                  type: all_lyrics
+                  player: wesing
+                  data:
+                    song_title: "告白 - 花澤香菜"
+                    duration: 236.0
+                    play_time: 1.2
+                    count: 3
+                    lyrics:
+                      - { index: 0, time: 0.5, text: "いつもそばにいるのに" }
+                      - { index: 1, time: 2.1, text: "ふと気付くと遠すぎて" }
+                      - { index: 2, time: 3.8, text: "手を伸ばしても届かない" }
+              无歌词时:
+                value:
+                  type: all_lyrics
+                  player: wesing
+                  data: {}
+      responses:
+        "200":
+          description: 事件已接收
+
+  lyric_idle:
+    post:
+      tags: [WebSocket]
+      summary: 歌词空闲通知事件
+      operationId: onLyricIdle
+      description: |
+        歌曲播放结束、切歌或窗口关闭时发送。纯通知事件，`data` 始终为 `{}`。
+        服务端不会发送清空歌词数据的消息，前端可自行决定是否响应。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: lyric_idle
+                player:
+                  type: string
+                  example: wesing
+                data:
+                  $ref: "#/components/schemas/EmptyObject"
+            example:
+              type: lyric_idle
+              player: wesing
+              data: {}
+      responses:
+        "200":
+          description: 事件已接收
+
+  playback_pause:
+    post:
+      tags: [WebSocket]
+      summary: 暂停播放事件
+      operationId: onPlaybackPause
+      description: |
+        当 play_time 连续多次不变时检测为暂停。前端收到后应停止时间插值。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: playback_pause
+                player:
+                  type: string
+                  example: wesing
+                data:
+                  $ref: "#/components/schemas/PlaybackTimeInfo"
+            example:
+              type: playback_pause
+              player: wesing
+              data:
+                play_time: 45.2
+      responses:
+        "200":
+          description: 事件已接收
+
+  playback_resume:
+    post:
+      tags: [WebSocket]
+      summary: 恢复播放事件
+      operationId: onPlaybackResume
+      description: |
+        play_time 重新推进时发送。前端收到后应以 play_time 为锚点重新开始插值。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: playback_resume
+                player:
+                  type: string
+                  example: wesing
+                data:
+                  $ref: "#/components/schemas/PlaybackTimeInfo"
+            example:
+              type: playback_resume
+              player: wesing
+              data:
+                play_time: 45.2
+      responses:
+        "200":
+          description: 事件已接收
+
+  player_switch:
+    post:
+      tags: [WebSocket]
+      summary: 播放器切换事件
+      operationId: onPlayerSwitch
+      description: |
+        活跃播放器发生变化时推送。仅根订阅者（`/ws`）收到此事件，Per-player 订阅者不会收到。
+        紧随其后会收到新播放器的已缓存状态事件。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: player_switch
+                player:
+                  type: string
+                  description: 切换后的新播放器
+                  example: cloudmusicv3
+                data:
+                  $ref: "#/components/schemas/PlayerSwitchInfo"
+            example:
+              type: player_switch
+              player: cloudmusicv3
+              data:
+                from: wesing
+                to: cloudmusicv3
+      responses:
+        "200":
+          description: 事件已接收
+
+# ============================================================
+# 复用组件定义
+# ============================================================
+components:
+  parameters:
+    PlayerParam:
+      name: player
+      in: path
+      required: true
+      description: 播放器标识名
+      schema:
+        type: string
+        enum:
+          - wesing
+          - cloudmusicv3
+        example: wesing
+
+  schemas:
+    # ----------------------------------------------------------
+    # 响应信封
+    # ----------------------------------------------------------
+    HTTPResponse:
+      type: object
+      required: [code, msg, player, data]
+      properties:
+        code:
+          type: integer
+          description: 状态码，0 表示成功
+          example: 0
+        msg:
+          type: string
+          description: 状态消息
+          example: success
+        player:
+          type: string
+          description: 数据来源播放器标识名（系统端点为 `"internal"`）
+          example: wesing
+        data:
+          description: 响应载荷，无数据时为空对象 `{}`
+
+    WSEvent:
+      type: object
+      required: [type, player, data]
+      description: WebSocket / SSE 统一事件格式
+      properties:
+        type:
+          type: string
+          description: 事件类型名
+          enum:
+            - status_update
+            - song_info_update
+            - lyric_update
+            - all_lyrics
+            - lyric_idle
+            - playback_pause
+            - playback_resume
+            - player_switch
+        player:
+          type: string
+          description: 数据来源播放器标识名
+          example: wesing
+        data:
+          description: 事件载荷，无数据时为空对象 `{}`
+
+    # ----------------------------------------------------------
+    # 空对象
+    # ----------------------------------------------------------
+    EmptyObject:
+      type: object
+      description: 空对象 `{}`，表示无数据
+      maxProperties: 0
+
+    # ----------------------------------------------------------
+    # 数据载荷
+    # ----------------------------------------------------------
+    HealthCheckData:
+      type: object
+      required: [now_time]
+      properties:
+        now_time:
+          type: string
+          format: date-time
+          description: 当前服务器时间
+          example: "2026-03-19T12:34:56+08:00"
+
+    ServiceStatusData:
+      type: object
+      required: [version, addr, now_time, config_sources, config, config_overwritten, player_support, player_running, player_status, endpoints, client_count, ws_connected]
+      properties:
+        version:
+          type: string
+          description: 服务版本号（编译时通过 `-ldflags` 注入，默认值为 `0.0.0`）
+          example: "3.0.0"
+        addr:
+          type: string
+          description: 服务监听地址
+          example: "0.0.0.0:8765"
+        now_time:
+          type: string
+          format: date-time
+          description: 当前服务器时间
+          example: "2026-03-19T12:34:56+08:00"
+        config_sources:
+          type: array
+          description: |
+            配置来源的完整链路，按优先级顺序排列。
+            可能的值：`"内置默认"`、`"config.yml"`、`"命令行参数"`
+          items:
+            type: string
+          example: ["config.yml", "命令行参数"]
+        config:
+          type: object
+          description: 当前生效的配置项
+          properties:
+            addr:
+              type: string
+              example: "0.0.0.0:8765"
+            offset:
+              type: integer
+              description: 全局歌词偏移量（毫秒）
+              example: 200
+            poll:
+              type: integer
+              description: 全局轮询间隔（毫秒）
+              example: 30
+            prior-player:
+              type: array
+              description: 优先播放器列表
+              items:
+                type: string
+              example: ["wesing"]
+            prior-player-expire:
+              type: integer
+              description: 优先播放器过期时间（秒）
+              example: 15
+            wesing-offset:
+              type: integer
+              description: wesing 歌词偏移量（毫秒）
+              example: 200
+            wesing-poll:
+              type: integer
+              description: wesing 轮询间隔（毫秒）
+              example: 30
+            cloudmusicv3-offset:
+              type: integer
+              description: cloudmusicv3 歌词偏移量（毫秒）
+              example: 500
+            cloudmusicv3-poll:
+              type: integer
+              description: cloudmusicv3 轮询间隔（毫秒）
+              example: 30
+        config_overwritten:
+          type: array
+          description: 被更高优先级来源覆盖的配置键名列表
+          items:
+            type: string
+          example: ["offset", "wesing-poll"]
+        player_support:
+          type: array
+          description: 系统编译时注册的所有播放器标识名列表
+          items:
+            type: string
+          example: ["wesing", "cloudmusicv3"]
+        player_running:
+          type: array
+          description: 当前正在运行（非 offline / standby / waiting_process）的播放器列表
+          items:
+            type: string
+          example: ["wesing"]
+        player_status:
+          type: object
+          description: |
+            所有支持的播放器及其当前状态（按注册顺序）。
+            可能的状态值：`"offline"` / `"waiting_process"` / `"waiting_song"` / `"loading"` / `"playing"` / `"paused"` / `"standby"`
+          additionalProperties:
+            type: string
+            enum: [offline, waiting_process, waiting_song, loading, playing, paused, standby]
+          example:
+            wesing: playing
+            cloudmusicv3: waiting_process
+        endpoints:
+          type: object
+          description: |
+            所有可用接口的完整地址（含 Per-player 端点）。
+            WebSocket 使用 `ws://`，HTTP/SSE 使用 `http://`。
+            结构为根端点地址 + 每个播放器的子对象。
+        client_count:
+          type: integer
+          description: 当前已连接的客户端总数
+          example: 2
+        ws_connected:
+          type: object
+          description: WebSocket 连接状态
+          required: [connected, clients]
+          properties:
+            connected:
+              type: boolean
+              description: 是否有客户端连接
+              example: true
+            clients:
+              type: array
+              description: 已连接的客户端 IP 地址列表（RemoteAddr 格式）
+              items:
+                type: string
+              example: ["192.168.1.100:54321", "192.168.1.200:54322"]
+
+    StatusInfo:
+      type: object
+      required: [status, detail]
+      properties:
+        status:
+          type: string
+          description: |
+            播放状态。可能的值：
+            - `"waiting_process"` - 播放器进程未启动
+            - `"waiting_song"` - 播放器已启动但未选择歌曲
+            - `"loading"` - 歌曲加载中，detail 为歌曲名称
+            - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
+            - `"paused"` - 暂停中（play_time 停止推进时自动检测），detail 为歌曲标题
+            - `"standby"` - 待机状态，播放器已退出
+          enum:
+            - waiting_process
+            - waiting_song
+            - loading
+            - playing
+            - paused
+            - standby
+          example: playing
+        detail:
+          type: string
+          description: 状态详情（歌曲标题或状态说明）
+          example: "告白 - 花澤香菜"
+
+    SongInfo:
+      type: object
+      required: [name, singer, title, cover, cover_base64]
+      properties:
+        name:
+          type: string
+          description: 歌曲名称
+          example: "告白"
+        singer:
+          type: string
+          description: 歌手名称
+          example: "花澤香菜"
+        title:
+          type: string
+          description: 歌曲标题（格式：歌曲名 - 歌手）
+          example: "告白 - 花澤香菜"
+        cover:
+          type: string
+          description: 封面图片 URL
+          example: "http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg"
+        cover_base64:
+          type: string
+          description: |
+            封面图片 Base64 编码。
+            部分播放器的封面 base64 通过异步 HTTP 下载获取，歌曲开始播放时会先发送一条不含 cover_base64 的 song_info_update（仅含 cover URL），待封面下载完成后再补发一条含 cover_base64 的完整版本。前端应使用最新收到的数据覆盖即可。
+          example: "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+
+    LyricUpdateData:
+      type: object
+      required: [line_index, text, sub_text, timestamp, play_time, progress]
+      properties:
+        line_index:
+          type: integer
+          description: 歌词行号
+          example: 5
+        text:
+          type: string
+          description: 主歌词文本
+          example: "君に嘘をついていた"
+        sub_text:
+          type: string
+          description: 副歌词文本（翻译/音译等，无时为空字符串）
+          example: ""
+        timestamp:
+          type: number
+          format: float
+          description: 歌词时间戳（秒）
+          example: 9.0
+        play_time:
+          type: number
+          format: float
+          description: 实际播放时间（秒）；根据偏移量调整后的时间
+          example: 9.15
+        progress:
+          type: number
+          format: float
+          description: 播放进度（0-1）
+          example: 0.4167
+
+    LyricLine:
+      type: object
+      required: [index, time, text]
+      properties:
+        index:
+          type: integer
+          description: 歌词行索引
+          example: 0
+        time:
+          type: number
+          format: float
+          description: 歌词时间戳（秒）
+          example: 0.5
+        text:
+          type: string
+          description: 歌词文本
+          example: "いつもそばにいるのに"
+
+    AllLyricsData:
+      type: object
+      required: [song_title, duration, play_time, count, lyrics]
+      properties:
+        song_title:
+          type: string
+          description: 歌曲标题（格式：歌曲名 - 歌手）
+          example: "告白 - 花澤香菜"
+        duration:
+          type: number
+          format: float
+          description: 歌曲总时长（秒）
+          example: 236.0
+        play_time:
+          type: number
+          format: float
+          description: 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
+          example: 1.2
+        count:
+          type: integer
+          description: 歌词行数
+          example: 12
+        lyrics:
+          type: array
+          description: 按 index 排序的歌词数组
+          items:
+            $ref: "#/components/schemas/LyricLine"
+
+    PlaybackTimeInfo:
+      type: object
+      required: [play_time]
+      properties:
+        play_time:
+          type: number
+          format: float
+          description: 当前播放时间（秒）
+          example: 45.2
+
+    PlayerSwitchInfo:
+      type: object
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          description: 切换前的播放器标识名
+          example: wesing
+        to:
+          type: string
+          description: 切换后的播放器标识名
+          example: cloudmusicv3
+
+    # ----------------------------------------------------------
+    # SSE 事件 schema（用于 text/event-stream 响应描述）
+    # ----------------------------------------------------------
+    SSELyricUpdateEvent:
+      type: object
+      description: |
+        SSE 歌词更新事件。每行以 `data: ` 前缀发送 JSON。
+        格式：`data: {"type":"lyric_update","player":"...","data":{...}}`
+      required: [type, player, data]
+      properties:
+        type:
+          type: string
+          const: lyric_update
+        player:
+          type: string
+          example: wesing
+        data:
+          oneOf:
+            - $ref: "#/components/schemas/LyricUpdateData"
+            - $ref: "#/components/schemas/EmptyObject"
+
+    SSESongInfoUpdateEvent:
+      type: object
+      description: |
+        SSE 歌曲信息更新事件。每行以 `data: ` 前缀发送 JSON。
+        格式：`data: {"type":"song_info_update","player":"...","data":{...}}`
+      required: [type, player, data]
+      properties:
+        type:
+          type: string
+          const: song_info_update
+        player:
+          type: string
+          example: wesing
+        data:
+          oneOf:
+            - $ref: "#/components/schemas/SongInfo"
+            - $ref: "#/components/schemas/EmptyObject"
