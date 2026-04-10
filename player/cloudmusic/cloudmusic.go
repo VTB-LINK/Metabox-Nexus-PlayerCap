@@ -180,13 +180,21 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			songTitle := songName + " - " + songArtist
 			currentSongTitle = songTitle
 
-			// Download cover → base64 (2s timeout, non-blocking on failure)
-			coverBase64 := player.FetchCoverBase64(songCover, 2*time.Second)
-
+			// 先发不带 base64 的 songinfo，异步下载封面后补发
 			p.emit(player.EventSongInfoUpdate, &player.SongInfo{
 				Name: songName, Singer: songArtist, Title: songTitle,
-				Cover: songCover, CoverBase64: coverBase64,
+				Cover: songCover,
 			})
+
+			// 异步获取封面 base64，完成后补发 song_info_update
+			go func(name, artist, title, cover string) {
+				if b64 := player.FetchCoverBase64(cover, 5*time.Second); b64 != "" {
+					p.emit(player.EventSongInfoUpdate, &player.SongInfo{
+						Name: name, Singer: artist, Title: title,
+						Cover: cover, CoverBase64: b64,
+					})
+				}
+			}(songName, songArtist, songTitle, songCover)
 
 			// Fetch lyrics via CDP
 			lrcText, err := client.FetchLyricsViaCDP(activeSongID)
