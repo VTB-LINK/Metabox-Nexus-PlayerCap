@@ -434,7 +434,11 @@ func (c *Client) FetchCoverViaCDP(songID string) (string, error) {
 			const r = await fetch('https://music.163.com/api/song/detail/?ids=[%s]&id=%s');
 			const d = await r.json();
 			if (d.songs && d.songs.length > 0 && d.songs[0].album && d.songs[0].album.picUrl) {
-				return d.songs[0].album.picUrl;
+				let url = d.songs[0].album.picUrl;
+				if (url && !url.includes('param=')) {
+					url += (url.includes('?') ? '&' : '?') + 'param=800y800';
+				}
+				return url;
 			}
 			return '';
 		} catch(e) { return 'err:' + e.message; }
