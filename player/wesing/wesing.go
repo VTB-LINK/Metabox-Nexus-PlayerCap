@@ -216,7 +216,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			if coverURL == "" {
 				return
 			}
-			if b64 := lyric.FetchCoverBase64(coverURL); b64 != "" {
+			if b64 := player.FetchCoverBase64(coverURL, 5*time.Second); b64 != "" {
 				p.emit(player.EventSongInfoUpdate, &player.SongInfo{
 					Name: name, Singer: singer, Title: title,
 					Cover: coverURL, CoverBase64: b64,

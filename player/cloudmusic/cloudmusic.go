@@ -182,9 +182,6 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 
 			// Download cover → base64 (2s timeout, non-blocking on failure)
 			coverBase64 := player.FetchCoverBase64(songCover, 2*time.Second)
-			if coverBase64 != "" {
-				log.Detail("封面已获取 → base64")
-			}
 
 			p.emit(player.EventSongInfoUpdate, &player.SongInfo{
 				Name: songName, Singer: songArtist, Title: songTitle,

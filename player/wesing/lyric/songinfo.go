@@ -1,14 +1,9 @@
 package lyric
 
 import (
-	"encoding/base64"
 	"fmt"
-	"io"
-	"net/http"
-	"strconv"
 	"strings"
 	"syscall"
-	"time"
 	"unicode/utf16"
 
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
@@ -235,51 +230,6 @@ func stringToUTF16LEAOB(s string) ([]byte, []bool) {
 		mask[i*2+1] = true
 	}
 	return pattern, mask
-}
-
-// FetchCoverBase64 下载封面图片并返回 base64 编码的 data URI
-func FetchCoverBase64(coverURL string) string {
-	if coverURL == "" {
-		return ""
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(coverURL)
-	if err != nil {
-		log.Warn("下载封面失败: %v", err)
-		return ""
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-
-	// 限制最大 5MB；读 maxSize+1 检测超限，防止 LimitReader 静默截断
-	const maxSize = 5 * 1024 * 1024
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
-	if err != nil {
-		return ""
-	}
-	if int64(len(body)) > maxSize {
-		return "" // 超过上限，放弃 base64，让前端 fallback 到 URL 加载
-	}
-	// 校验 Content-Length（如有），防止网络中断导致下载不完整
-	if cl := resp.Header.Get("Content-Length"); cl != "" {
-		if expected, err := strconv.ParseInt(cl, 10, 64); err == nil && int64(len(body)) < expected {
-			return "" // 下载不完整
-		}
-	}
-
-	// 根据内容类型确定 MIME
-	mimeType := "image/jpeg"
-	if strings.HasSuffix(coverURL, ".png") {
-		mimeType = "image/png"
-	}
-
-	encoded := base64.StdEncoding.EncodeToString(body)
-	log.Detail("封面已获取 (%d bytes → base64)", len(body))
-	return "data:" + mimeType + ";base64," + encoded
 }
 
 func utf16LEBytesToString(buf []byte) string {
