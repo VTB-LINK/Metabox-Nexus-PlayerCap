@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -254,10 +255,20 @@ func FetchCoverBase64(coverURL string) string {
 		return ""
 	}
 
-	// 限制最大 2MB
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	// 限制最大 5MB；读 maxSize+1 检测超限，防止 LimitReader 静默截断
+	const maxSize = 5 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
 		return ""
+	}
+	if int64(len(body)) > maxSize {
+		return "" // 超过上限，放弃 base64，让前端 fallback 到 URL 加载
+	}
+	// 校验 Content-Length（如有），防止网络中断导致下载不完整
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if expected, err := strconv.ParseInt(cl, 10, 64); err == nil && int64(len(body)) < expected {
+			return "" // 下载不完整
+		}
 	}
 
 	// 根据内容类型确定 MIME
