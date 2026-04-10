@@ -1233,6 +1233,11 @@
         const coverSpinSpeed = parseFloat(urlParams.get('cover_spin_speed') || '12');
         const coverSize = parseInt(urlParams.get('cover_size') || '80');
 
+        // 字号缩放 & 文本对齐
+        const fontScale = Math.max(0.5, Math.min(3, parseFloat(urlParams.get('font_scale')) || 1));
+        const textAlignRaw = urlParams.get('text_align') || 'center';
+        const textAlign = ['left', 'center', 'right'].includes(textAlignRaw) ? textAlignRaw : 'center';
+
         // === 编辑器模式检测 ===
         const isEditorMode = urlParams.toString() === '';
         if (isEditorMode) {
@@ -1285,6 +1290,43 @@
             if (extraRules.length) {
                 const style = document.createElement('style');
                 style.textContent = `.lyric-line.current { ${extraRules.join(' ')} }`;
+                document.head.appendChild(style);
+            }
+        }
+
+        // 字号缩放 & 文本对齐 动态样式
+        if (!isEditorMode) {
+            const layoutRules = [];
+            if (fontScale !== 1) {
+                layoutRules.push(`.lyric-line { font-size: calc(1.2rem * ${fontScale}); }`);
+                layoutRules.push(`.lyric-line.prev { font-size: calc(1rem * ${fontScale}); }`);
+                layoutRules.push(`.lyric-line.current { font-size: calc(2rem * ${fontScale}); }`);
+                layoutRules.push(`.lyric-line.next { font-size: calc(1rem * ${fontScale}); }`);
+                layoutRules.push(`.lyric-sub-text { font-size: calc(0.85rem * ${fontScale}); }`);
+            }
+            if (textAlign !== 'center') {
+                layoutRules.push(`.lyric-line, .lyric-sub-text { text-align: ${textAlign}; width: 100%; }`);
+                // 缩放原点跟随对齐方向，防止放大后裁切
+                const origin = textAlign === 'left' ? 'left center' : 'right center';
+                const dir = textAlign === 'left' ? -1 : 1;
+                layoutRules.push(`.lyric-line { transform-origin: ${origin}; }`);
+                // prev/next 偏移：都往远离对齐边的方向偏移，避免裁切
+                const away = textAlign === 'left' ? 1 : -1;
+                layoutRules.push(`.lyric-line.prev { transform: translateX(${3 * away}px); }`);
+                layoutRules.push(`.lyric-line.next { transform: translateX(${5 * away}px); }`);
+                // 出入场动画改为水平滑动
+                layoutRules.push(`@keyframes lyric-appear {
+                    from { opacity: 0; transform: translateX(${30 * dir}px) scale(0.95); filter: blur(4px); }
+                    to { opacity: 1; transform: translateX(0) scale(1.02); filter: blur(0); }
+                }`);
+                layoutRules.push(`@keyframes lyric-exit {
+                    from { opacity: 1; transform: translateX(0) scale(1.02); filter: blur(0); }
+                    to { opacity: 0; transform: translateX(${-30 * dir}px) scale(0.95); filter: blur(4px); }
+                }`);
+            }
+            if (layoutRules.length) {
+                const style = document.createElement('style');
+                style.textContent = layoutRules.join('\n');
                 document.head.appendChild(style);
             }
         }
@@ -1839,6 +1881,19 @@
                                     <span class="toggle-slider"></span>
                                 </label>
                             </div>
+                            <div class="editor-row">
+                                <label>字号缩放</label>
+                                <input type="range" id="cfgFontScale" min="0.5" max="3" value="1" step="0.1">
+                                <span class="editor-range-value" id="fontScaleVal">1×</span>
+                            </div>
+                            <div class="editor-row">
+                                <label>文本对齐</label>
+                                <select id="cfgTextAlign">
+                                    <option value="center">居中</option>
+                                    <option value="left">靠左</option>
+                                    <option value="right">靠右</option>
+                                </select>
+                            </div>
                         </div>
 
                         <!-- 歌词样式 -->
@@ -2077,6 +2132,12 @@
                 }
                 if (fontName) params.set('font', fontName);
 
+                // 字号缩放 & 文本对齐
+                const fs = document.getElementById('cfgFontScale').value;
+                if (fs && fs !== '1') params.set('font_scale', fs);
+                const ta = document.getElementById('cfgTextAlign').value;
+                if (ta && ta !== 'center') params.set('text_align', ta);
+
                 // 封面
                 const cs = document.getElementById('cfgCoverStyle').value;
                 if (cs && cs !== 'disc') params.set('cover_style', cs);
@@ -2114,7 +2175,7 @@
             }
 
             // 绑定所有控件事件
-            const controls = ['cfgOneLine', 'cfgPlayer', 'cfgColor',
+            const controls = ['cfgOneLine', 'cfgFontScale', 'cfgTextAlign', 'cfgPlayer', 'cfgColor',
                 'cfgGlow', 'cfgGlowColor', 'cfgStroke', 'cfgStrokeWidth', 'cfgStrokeColor',
                 'cfgBg', 'cfgBgTransparent',
                 'cfgCoverStyle', 'cfgCoverRotate', 'cfgSpinSpeed', 'cfgCoverSize'];
@@ -2125,6 +2186,9 @@
             });
 
             // 滑块值显示
+            document.getElementById('cfgFontScale').addEventListener('input', () => {
+                document.getElementById('fontScaleVal').textContent = document.getElementById('cfgFontScale').value + '×';
+            });
             document.getElementById('cfgSpinSpeed').addEventListener('input', () => {
                 document.getElementById('spinSpeedVal').textContent = document.getElementById('cfgSpinSpeed').value + 's';
             });
