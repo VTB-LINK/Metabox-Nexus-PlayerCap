@@ -505,7 +505,7 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 }
 ```
 
-**异步封面（wesing）：** 部分播放器的封面 base64 通过异步 HTTP 下载获取。歌曲开始播放时会先发送一条**不含 `cover_base64`** 的 `song_info_update`（仅含 `cover` URL），待封面下载完成后再补发一条含 `cover_base64` 的完整版本。前端应使用最新收到的数据覆盖即可。cloudmusicv3 不提供 `cover_base64`，无此行为。
+**异步封面：** 部分播放器的封面 base64 通过异步 HTTP 下载获取。歌曲开始播放时会先发送一条**不含 `cover_base64`** 的 `song_info_update`（仅含 `cover` URL），待封面下载完成后再补发一条含 `cover_base64` 的完整版本。前端应使用最新收到的数据覆盖即可。cloudmusicv3 不提供 `cover_base64`，无此行为。
 
 #### 3. `lyric_update` - 实时歌词更新
 

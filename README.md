@@ -292,6 +292,7 @@ Metabox-Nexus-PlayerCap/
 │   └── logger.go          # 统一日志包（5 级别）
 ├── player/
 │   ├── player.go          # Player 接口、公共类型（Event / LyricLine / SongInfo 等）
+│   ├── cover.go           # 公共封面下载（HTTP → base64，含大小校验与截断检测）
 │   ├── wesing/            # 全民K歌 —— 基于内存读取
 │   │   ├── wesing.go      # 主轮询循环、状态机、暂停/恢复检测
 │   │   ├── proc/
@@ -300,7 +301,7 @@ Metabox-Nexus-PlayerCap/
 │   │       ├── finder.go  # PE 导出表解析 → vtable → 堆扫描定位 LyricHost
 │   │       ├── reader.go  # 歌词数据结构解码（UTF-16LE → []LyricLine）
 │   │       ├── timer.go   # 播放时间地址定位（结构体签名扫描）+ 歌曲时长提取
-│   │       └── songinfo.go# 歌曲元信息提取（歌名/歌手/MID/封面 URL）
+│   │       └── songinfo.go# 歌曲元信息提取（歌名/歌手/MID/封面 URL 定位）
 │   └── cloudmusic/        # 网易云音乐 —— 基于 CDP
 │       ├── cloudmusic.go  # 主轮询循环、本地时钟同步、seek 检测
 │       ├── cdp/

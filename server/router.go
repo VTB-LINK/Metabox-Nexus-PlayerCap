@@ -123,6 +123,8 @@ func (r *Router) switchTo(newPlayer string) bool {
 	if old != newPlayer && newPlayer != "" {
 		routerLog.Info("播放器切换: [%s] → [%s]，推送完整状态", old, newPlayer)
 		sentTypes := r.server.NotifySubscribersFullState(old, newPlayer)
+		// 不抑制 status_update：状态变更是关键事件，loading→playing 极快时会被错误吞掉
+		delete(sentTypes, player.EventStatusUpdate)
 		// 仅抑制 FullState 实际发送过的事件类型（缓存为空时不设抑制，避免吞首次数据）
 		if len(sentTypes) > 0 {
 			r.switchSkipPlayer = newPlayer

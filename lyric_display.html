@@ -1527,6 +1527,10 @@
                     document.getElementById('progressFill').style.width = '0%';
                     document.getElementById('lineInfo').textContent = '--';
                     document.getElementById('timeInfo').textContent = '--:-- / --:--';
+                    // 丝滑过渡清空歌词区（像切到空行一样退场）
+                    if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
+                    const display = document.getElementById('lyricsDisplay');
+                    transitionOut(display, () => { display.innerHTML = ''; });
                     // 在状态栏短暂显示切换信息（主歌词区会被 FullState 事件填充）
                     const to = (data.data && data.data.to) || '?';
                     const statusText = document.getElementById('statusText');
