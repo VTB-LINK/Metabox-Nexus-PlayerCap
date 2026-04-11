@@ -619,13 +619,44 @@ play_time 重新推进时发送：
 }
 ```
 
+**活跃播放器清除时（`to` 为空）：**
+```json
+{
+  "type": "player_switch",
+  "player": "",
+  "data": {
+    "from": "cloudmusicv3",
+    "to": ""
+  }
+}
+```
+
 **说明：**
 - `player` 字段为切换后的新播放器
 - `from` - 切换前的播放器标识名
-- `to` - 切换后的播放器标识名
+- `to` - 切换后的播放器标识名；**当所有普通组播放器均无活动时，`to` 为空字符串 `""`**，表示没有活跃播放器
+- 当 `to` 为空时，紧随其后会收到一条 `player_clear` 事件（见下方第 9 条）
 - Per-player 订阅者（如 `/wesing/ws`）**不会**收到此事件
-- 紧随其后会收到新播放器的**已缓存**状态事件（`status_update` + `song_info_update` + `all_lyrics` + `lyric_update` 中已有的部分）。如果新播放器刚启动、缓存尚未建立（如正处于 loading 阶段），则只会收到已有的事件（可能仅 `status_update`），其余事件在播放器实际上报后才会到达
+- 当 `to` 非空时，紧随其后会收到新播放器的**已缓存**状态事件（`status_update` + `song_info_update` + `all_lyrics` + `lyric_update` 中已有的部分）。如果新播放器刚启动、缓存尚未建立（如正处于 loading 阶段），则只会收到已有的事件（可能仅 `status_update`），其余事件在播放器实际上报后才会到达
 - 服务端会自动抑制 FullState 已推送的事件类型，避免后续实时事件重复到达。仅抑制 FullState 实际包含的类型，不会吞掉缓存中不存在的首次数据
+
+#### 9. `player_clear` - 活跃播放器清除（仅根订阅者收到）
+
+当所有播放器均无活动、活跃播放器被清空时发送。始终在 `player_switch`（`to=""`）之后紧跟发送：
+```json
+{
+  "type": "player_clear",
+  "player": "",
+  "data": {}
+}
+```
+
+**说明：**
+- `player` 字段为空字符串（无活跃播放器）
+- `data` 始终为 `{}`（纯通知事件）
+- 前端收到后应清空所有歌词、歌曲信息、进度等显示
+- 常见触发场景：优先播放器唱完后释放给普通组，但普通组所有播放器也都处于暂停/空闲状态
+- Per-player 订阅者**不会**收到此事件
 
 ---
 
@@ -671,6 +702,10 @@ play_time 重新推进时发送：
 （播放器退出）
 ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"standby","detail":"播放器已退出"}}
 ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"waiting_process","detail":"播放器未启动"}}
+
+（所有播放器均无活动 —— 活跃播放器清除）
+← {"type":"player_switch","player":"","data":{"from":"cloudmusicv3","to":""}}
+← {"type":"player_clear","player":"","data":{}}
 ```
 
 ---
@@ -723,7 +758,15 @@ ws.onmessage = (event) => {
       break;
       
     case 'player_switch':
-      console.log(`播放器切换: ${msg.data.from} → ${msg.data.to}`);
+      if (msg.data.to) {
+        console.log(`播放器切换: ${msg.data.from} → ${msg.data.to}`);
+      } else {
+        console.log(`活跃播放器已清除（原: ${msg.data.from}）`);
+      }
+      break;
+      
+    case 'player_clear':
+      console.log('无活跃播放器，清空显示');
       break;
   }
 };
@@ -742,7 +785,8 @@ ws.onmessage = (event) => {
 | `lyric_idle` | — | `{}`（始终） | 收到即为空闲通知（前端自行决定是否响应） |
 | `playback_pause` | `{"play_time":N}` | — | 收到即为暂停 |
 | `playback_resume` | `{"play_time":N}` | — | 收到即为恢复 |
-| `player_switch` | `{"from":"...","to":"..."}` | — | 收到即为切换 |
+| `player_switch` | `{"from":"...","to":"..."}` | — | 收到即为切换；`to` 为空时表示清除 |
+| `player_clear` | — | `{}`（始终） | 收到即清空显示 |
 
 ---
 
@@ -756,7 +800,8 @@ ws.onmessage = (event) => {
 |------|----------|----------|
 | 切歌 | 收到新的 `all_lyrics` + `song_info_update` | 用新数据直接覆盖旧数据即可，无需先清空 |
 | 播放器退出 | `status_update` → `standby` / `waiting_process` | 清空歌词与歌曲信息 |
-| 播放器切换 | `player_switch` | 重置显示，等待紧随其后的新播放器初始状态 |
+| 播放器切换 | `player_switch`（`to` 非空） | 重置显示，等待紧随其后的新播放器初始状态 |
+| 所有播放器无活动 | `player_switch`（`to=""`）+ `player_clear` | 清空所有显示（歌词、封面、进度等） |
 | 歌曲播放结束 | `lyric_idle` | 可选：清空歌词或保持最后一行显示 |
 
 > **推荐做法：** 用 `status_update` 的 `status` 字段作为主判断依据。当 status 为 `playing` 或 `paused` 时显示歌词，其他状态时清空。

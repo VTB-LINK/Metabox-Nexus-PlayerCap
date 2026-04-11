@@ -67,6 +67,9 @@ Router（事件合并主循环）
 ├─ 优先播放器（prior-player）播放/加载时立即抢占输出
 ├─ 优先播放器暂停时保持 holding，超时（prior-player-expire）后释放
 ├─ 优先播放器空闲时释放控制权给普通播放器
+├─ 普通播放器也有独立的状态追踪和组级超时（与优先组对称）
+├─ 优先组释放时强制清除普通组 holding 状态，仅 playing/loading 的普通播放器存活
+├─ 普通组全员无活动时清空输出（player_clear 事件）
 ├─ 根订阅者（/ws）只收活跃播放器事件
 ├─ 单播放器订阅者（/<player>/ws）始终收对应播放器事件
 └─ 播放器切换时推送 player_switch 事件 + 新播放器完整初始状态
@@ -218,6 +221,10 @@ cloudmusicv3-offset: 500
 // 活跃播放器切换（仅根订阅者收到）
 {"type": "player_switch", "player": "cloudmusicv3", "data": {"from": "wesing", "to": "cloudmusicv3"}}
 // 紧随其后会收到新播放器的完整初始状态（status_update + song_info_update + all_lyrics + lyric_update）
+
+// 活跃播放器清除（所有播放器都停止输出时，仅根订阅者收到）
+{"type": "player_switch", "player": "", "data": {"from": "wesing", "to": ""}}
+{"type": "player_clear", "player": "", "data": {}}
 ```
 
 **status 可能的值：** `waiting_process` · `waiting_song` · `loading` · `playing` · `paused` · `standby`

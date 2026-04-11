@@ -91,8 +91,11 @@ Router 维护 `activePlayer`（当前主输出播放器），规则：
 1. **优先播放器**（`prior-player` 列表，默认 `["wesing"]`）播放/加载时立即抢占。
 2. 优先播放器**暂停**时保持抢占（holding），直到超过 `prior-player-expire` 秒自动释放。
 3. 优先播放器**空闲**（进程退出/待机）时释放控制权给普通播放器。
-4. 根订阅者（`/ws`）只收到 `activePlayer` 的事件；单播放器订阅者（`/wesing/ws`）始终收到对应播放器事件。
-5. 播放器切换时，`switchTo()` 同步调用 `NotifySubscribersFullState()`，向根订阅者推送 `player_switch` 事件 + 新播放器**已缓存的**初始状态（缓存为空则仅推 `player_switch`）。函数返回实际推送过的事件类型集合，用于后续 `switchSkip` 抑制（避免实时事件与 FullState 重复，但不吞首次数据）。
+4. **普通播放器**也有独立的状态追踪（playing/loading/paused/idle）和组级超时机制，与优先组完全对称。
+5. 优先组释放时，**强制清除所有普通组 holding 状态**（prior 播放期间暂停的 normal 播放器不应被切入），仅 playing/loading 的普通播放器存活。
+6. 普通组全员 inert 时，`activePlayer` 设为空，向根订阅者推送 `player_switch`(to="") + `player_clear` 双重通知。
+7. 根订阅者（`/ws`）只收到 `activePlayer` 的事件；单播放器订阅者（`/wesing/ws`）始终收到对应播放器事件。
+8. 播放器切换时，`switchTo()` 同步调用 `NotifySubscribersFullState()`，向根订阅者推送 `player_switch` 事件 + 新播放器**已缓存的**初始状态（缓存为空则仅推 `player_switch`）。函数返回实际推送过的事件类型集合，用于后续 `switchSkip` 抑制（避免实时事件与 FullState 重复，但不吞首次数据）。
 
 ### 2.3 并发模型
 
@@ -101,7 +104,7 @@ Router 维护 `activePlayer`（当前主输出播放器），规则：
 | `router.Run()` | 阻塞主 goroutine | 合并所有播放器事件通道 |
 | `player.Start()` | 独立 goroutine | 每个播放器独立轮询 |
 | `srv.Start()` | 独立 goroutine | `http.ListenAndServe` |
-| `watchPriorExpire()` | 独立 goroutine + 1s Ticker | 优先播放器超时检查 |
+| `watchExpire()` | 独立 goroutine + 1s Ticker | 播放器超时检查（prior + normal） |
 | WS 写出 | 每连接一个 goroutine | 从 `subscriber.ch` 读取并写入 |
 | SSE 处理 | 阻塞在请求 handler 中 | 通过 `Flusher` 推送 |
 
@@ -235,6 +238,7 @@ func (p *MyPlayer) Stop()                      { close(p.stopCh) }
 | `EventLyricIdle` | `nil` | 歌词空闲 |
 | `EventClearSongData` | `nil` | 清除歌曲数据 |
 | `EventPlayerSwitch` | `PlayerSwitchInfo` | 播放器切换（由 Router 发出） |
+| `EventPlayerClear` | `struct{}{}` | 活跃播放器清除，无播放器输出（由 Router 发出） |
 
 ### 4.4 StatusInfo 状态值约定
 

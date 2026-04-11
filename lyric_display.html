@@ -112,12 +112,13 @@
             background: rgba(255, 255, 255, 0.05);
             border: none;
             box-shadow: none;
-            transition: opacity 0.5s ease;
+            transition: opacity 0.35s cubic-bezier(0.64, 0, 0.78, 0);
             opacity: 0;
         }
 
         .cover-art.visible {
             opacity: 1;
+            transition: opacity 0.5s ease;
         }
 
         .cover-spinner {
@@ -1558,6 +1559,16 @@
                     isPlaying = false;
                     resetCoverState();
                     _currentCoverURL = '';
+                    clearTimeout(_coverTransitionTimer);
+                    // 封面淡出（与歌词退场同步），完成后再清理资源
+                    document.getElementById('coverArt').classList.remove('visible');
+                    clearTimeout(window._coverCleanupTimer);
+                    window._coverCleanupTimer = setTimeout(() => {
+                        document.getElementById('coverImg').src = '';
+                        document.getElementById('coverImgOld').src = '';
+                        document.getElementById('songName').textContent = '';
+                        document.getElementById('songSinger').textContent = '';
+                    }, 300);
                     document.getElementById('allLyrics').innerHTML = '';
                     document.getElementById('progressFill').style.width = '0%';
                     document.getElementById('lineInfo').textContent = '--';
@@ -1566,15 +1577,55 @@
                     if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
                     const display = document.getElementById('lyricsDisplay');
                     transitionOut(display, () => { display.innerHTML = ''; });
-                    // 在状态栏短暂显示切换信息（主歌词区会被 FullState 事件填充）
-                    const to = (data.data && data.data.to) || '?';
+                    // 在状态栏显示切换信息
+                    const to = (data.data && data.data.to) || '';
                     const statusText = document.getElementById('statusText');
-                    statusText.textContent = '🔄 切换至: ' + to;
+                    if (to) {
+                        statusText.textContent = '🔄 切换至: ' + to;
+                    } else {
+                        statusText.textContent = '💤 无活跃播放器';
+                    }
                     clearTimeout(window._switchTimer);
                     window._switchTimer = setTimeout(() => {
                         // 恢复为当前状态文字（由后续 status_update 覆盖，此为兜底）
-                        if (statusText.textContent.startsWith('🔄')) {
+                        if (statusText.textContent.startsWith('🔄') || statusText.textContent.startsWith('💤')) {
                             statusText.textContent = '已连接';
+                        }
+                    }, 3000);
+                }
+
+                if (data.type === 'player_clear') {
+                    // 活跃播放器已清除：重置所有显示
+                    currentIndex = -1;
+                    allLyrics = [];
+                    songDuration = 0;
+                    stopInterpolation();
+                    isPlaying = false;
+                    resetCoverState();
+                    _currentCoverURL = '';
+                    clearTimeout(_coverTransitionTimer);
+                    // 封面淡出（与歌词退场同步），完成后再清理资源
+                    document.getElementById('coverArt').classList.remove('visible');
+                    clearTimeout(window._coverCleanupTimer);
+                    window._coverCleanupTimer = setTimeout(() => {
+                        document.getElementById('coverImg').src = '';
+                        document.getElementById('coverImgOld').src = '';
+                        document.getElementById('songName').textContent = '';
+                        document.getElementById('songSinger').textContent = '';
+                    }, 300);
+                    document.getElementById('allLyrics').innerHTML = '';
+                    document.getElementById('progressFill').style.width = '0%';
+                    document.getElementById('lineInfo').textContent = '--';
+                    document.getElementById('timeInfo').textContent = '--:-- / --:--';
+                    if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
+                    const clearDisplay = document.getElementById('lyricsDisplay');
+                    transitionOut(clearDisplay, () => { clearDisplay.innerHTML = ''; });
+                    const clearStatus = document.getElementById('statusText');
+                    clearStatus.textContent = '💤 无活跃播放器';
+                    clearTimeout(window._switchTimer);
+                    window._switchTimer = setTimeout(() => {
+                        if (clearStatus.textContent.startsWith('💤')) {
+                            clearStatus.textContent = '已连接';
                         }
                     }, 3000);
                 }

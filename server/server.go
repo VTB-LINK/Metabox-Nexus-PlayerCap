@@ -259,6 +259,41 @@ func (s *Server) SetActivePlayer(name string) {
 	s.mu.Unlock()
 }
 
+// NotifySubscribersClear 向根订阅者推送活跃播放器清除通知
+// 发送 player_switch(to="") + player_clear 双重事件
+func (s *Server) NotifySubscribersClear(oldPlayer string) {
+	switchEvt := WSEvent{
+		Type:   player.EventPlayerSwitch,
+		Player: "",
+		Data:   &player.PlayerSwitchInfo{From: oldPlayer, To: ""},
+	}
+	clearEvt := WSEvent{
+		Type:   player.EventPlayerClear,
+		Player: "",
+		Data:   struct{}{},
+	}
+
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+	for sub := range s.subscribers {
+		if sub.player != "" {
+			continue // 仅推送给根订阅者
+		}
+		if sub.matchesType(switchEvt.Type) {
+			select {
+			case sub.ch <- switchEvt:
+			default:
+			}
+		}
+		if sub.matchesType(clearEvt.Type) {
+			select {
+			case sub.ch <- clearEvt:
+			default:
+			}
+		}
+	}
+}
+
 // getPlayerState 获取/创建播放器状态
 func (s *Server) getPlayerState(playerName string) *PlayerState {
 	if ps, ok := s.playerStates[playerName]; ok {

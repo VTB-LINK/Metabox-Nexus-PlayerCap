@@ -58,6 +58,7 @@ Desktop.ini
 .env.local
 config.local.yml
 *.local
+.vscode/
 
 # 数据文件
 *.db

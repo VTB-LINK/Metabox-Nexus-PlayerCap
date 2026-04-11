@@ -139,12 +139,6 @@ jobs:
           rm -f "${DOTCOM_ARCHIVE_NAME}"
           zip -j "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}"
 
-          # 尝试创建 tag（若远程仓库尚无此 tag，需先在该仓库创建）
-          gh api "repos/${DOTCOM_REPO}/git/refs" \
-            --method POST \
-            -f ref="refs/tags/${TAG_NAME}" \
-            -f sha="$(git rev-parse HEAD)" 2>/dev/null || true
-
           # 生成自动 release notes
           gh api "repos/${DOTCOM_REPO}/releases/generate-notes" \
             --method POST \

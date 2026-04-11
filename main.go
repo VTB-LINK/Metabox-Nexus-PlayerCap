@@ -133,7 +133,7 @@ func main() {
 	cp := cloudmusic.New(cfg.GetPlayerOffset("cloudmusicv3"), cfg.GetPlayerPoll("cloudmusicv3"))
 
 	// 创建路由器
-	router := server.NewRouter(&cfg, srv)
+	router := server.NewRouter(&cfg, srv, playerNames)
 	router.Register(wp)
 	router.Register(cp)
 

@@ -64,6 +64,7 @@ const (
 	EventLyricIdle      = "lyric_idle"
 	EventClearSongData  = "clear_song_data"
 	EventPlayerSwitch   = "player_switch"
+	EventPlayerClear    = "player_clear"
 )
 
 // PlayerSwitchInfo 播放器切换事件载荷

@@ -627,9 +627,21 @@ paths:
         ```
         - `player` 字段为切换后的新播放器
         - `from` - 切换前的播放器标识名
-        - `to` - 切换后的播放器标识名
+        - `to` - 切换后的播放器标识名（为空字符串 `""` 时表示活跃播放器已清除，无播放器输出）
         - Per-player 订阅者（如 `/wesing/ws`）**不会**收到此事件
-        - 紧随其后会收到新播放器的**已缓存**状态事件（`status_update` + `song_info_update` + `all_lyrics` + `lyric_update` 中已有的部分）
+        - 当 `to` 非空时，紧随其后会收到新播放器的**已缓存**状态事件（`status_update` + `song_info_update` + `all_lyrics` + `lyric_update` 中已有的部分）
+
+        ---
+
+        **9. `player_clear` - 活跃播放器清除（仅根订阅者收到）**
+
+        当所有播放器都停止输出（全员 inert）时，根订阅者收到此事件，表示应清空显示：
+        ```json
+        {"type":"player_clear","player":"","data":{}}
+        ```
+        - 总是与 `player_switch`(to="") 一起发送（双重通知，向后兼容）
+        - 前端应清空歌词、封面、进度等所有显示内容
+        - Per-player 订阅者（如 `/wesing/ws`）**不会**收到此事件
 
         ---
 
@@ -1025,7 +1037,7 @@ paths:
 
         行为与根端点 `/ws` 相同，但：
         - 始终接收指定播放器的事件
-        - **不会**收到 `player_switch` 事件
+        - **不会**收到 `player_switch`、`player_clear` 事件
 
         连接建立时立即接收 4 条消息：`status_update`、`song_info_update`、`lyric_update`、`all_lyrics`。
         后续实时事件类型：`status_update`、`song_info_update`、`lyric_update`、`all_lyrics`、`lyric_idle`、`playback_pause`、`playback_resume`。
@@ -1354,6 +1366,41 @@ webhooks:
         "200":
           description: 事件已接收
 
+  player_clear:
+    post:
+      tags: [WebSocket]
+      summary: 活跃播放器清除事件
+      operationId: onPlayerClear
+      description: |
+        所有播放器都停止输出（全员 inert）时推送。仅根订阅者（`/ws`）收到此事件。
+        总是与 `player_switch`(to="") 一起发送（双重通知，向后兼容）。
+        前端应清空歌词、封面、进度等所有显示内容。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, player, data]
+              properties:
+                type:
+                  type: string
+                  const: player_clear
+                player:
+                  type: string
+                  description: 空字符串
+                  example: ""
+                data:
+                  type: object
+                  description: 空对象
+            example:
+              type: player_clear
+              player: ""
+              data: {}
+      responses:
+        "200":
+          description: 事件已接收
+
 # ============================================================
 # 复用组件定义
 # ============================================================
@@ -1411,6 +1458,7 @@ components:
             - playback_pause
             - playback_resume
             - player_switch
+            - player_clear
         player:
           type: string
           description: 数据来源播放器标识名
