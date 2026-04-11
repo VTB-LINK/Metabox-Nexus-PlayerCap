@@ -120,10 +120,26 @@
             opacity: 1;
         }
 
-        .cover-art img {
+        .cover-spinner {
+            width: 100%;
+            height: 100%;
+        }
+
+        .cover-spinner img {
             width: 100%;
             height: 100%;
             object-fit: cover;
+        }
+
+        .cover-art .cover-img-old {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: 1;
+            transition: opacity 0.8s ease;
         }
 
         .cover-art::after {
@@ -137,6 +153,7 @@
             border-radius: 50%;
             transform: translate(-50%, -50%);
             border: 2px solid rgba(255, 255, 255, 0.1);
+            z-index: 2;
         }
 
         @keyframes cover-spin {
@@ -1184,7 +1201,10 @@
 
         <div class="song-info-row" id="songInfoRow" style="display:none;">
             <div class="cover-art" id="coverArt">
-                <img id="coverImg" src="" alt="">
+                <img class="cover-img-old" id="coverImgOld" src="" alt="" style="opacity:0;">
+                <div class="cover-spinner" id="coverSpinner">
+                    <img id="coverImg" src="" alt="">
+                </div>
             </div>
             <div class="song-meta">
                 <div class="song-name" id="songName"></div>
@@ -1305,7 +1325,8 @@
                 layoutRules.push(`.lyric-sub-text { font-size: calc(0.85rem * ${fontScale}); }`);
             }
             if (textAlign !== 'center') {
-                layoutRules.push(`.lyric-line, .lyric-sub-text { text-align: ${textAlign}; width: 100%; }`);
+                const pad = textAlign === 'left' ? 'padding-left: 4px;' : 'padding-right: 4px;';
+                layoutRules.push(`.lyric-line, .lyric-sub-text { text-align: ${textAlign}; width: 100%; ${pad} box-sizing: border-box; }`);
                 // 缩放原点跟随对齐方向，防止放大后裁切
                 const origin = textAlign === 'left' ? 'left center' : 'right center';
                 const dir = textAlign === 'left' ? -1 : 1;
@@ -1376,12 +1397,17 @@
         let coverLastTs = 0;
         let coverSpinning = false; // 当前逻辑状态
         let _currentCoverURL = ''; // 当前封面原始 URL，用于区分切歌 vs base64 升级
+        let oldCoverAngle = 0;     // 旧封面淡出时的旋转角度
+        let oldCoverSpd = 0;       // 旧封面淡出时的旋转速度 (deg/s)
 
-        function setCoverPlaying(spinning) {
-            // 防止同状态重复调用
-            if (spinning === coverSpinning) return;
+        function setCoverPlaying(spinning, instant) {
+            // 防止同状态重复调用（instant 强制跳过）
+            if (!instant && spinning === coverSpinning) return;
             coverSpinning = spinning;
             coverTargetSpd = spinning ? (360 / coverSpinSpeed) : 0;
+            if (instant && spinning) {
+                coverCurrentSpd = coverTargetSpd; // 跳过缓入，立即满速
+            }
             if (!coverAnimFrame) {
                 coverLastTs = performance.now();
                 coverAnimFrame = requestAnimationFrame(tickCoverSpin);
@@ -1401,9 +1427,18 @@
             const alpha = 1 - Math.exp(-3 * dt);
             coverCurrentSpd += (coverTargetSpd - coverCurrentSpd) * alpha;
             coverAngle = (coverAngle + coverCurrentSpd * dt) % 360;
-            const el = document.getElementById('coverArt');
-            if (el && el.classList.contains('visible')) {
-                el.style.transform = `rotate(${coverAngle.toFixed(2)}deg)`;
+            const spinner = document.getElementById('coverSpinner');
+            const art = document.getElementById('coverArt');
+            if (spinner && art && art.classList.contains('visible')) {
+                spinner.style.transform = `rotate(${coverAngle.toFixed(2)}deg)`;
+            }
+            // 旧封面淡出时继续旋转
+            if (oldCoverSpd > 0) {
+                oldCoverAngle = (oldCoverAngle + oldCoverSpd * dt) % 360;
+                const oldEl = document.getElementById('coverImgOld');
+                if (oldEl && oldEl.src) {
+                    oldEl.style.transform = `rotate(${oldCoverAngle.toFixed(2)}deg)`;
+                }
             }
             if (Math.abs(coverCurrentSpd) > 0.1 || coverTargetSpd > 0) {
                 coverAnimFrame = requestAnimationFrame(tickCoverSpin);
@@ -1794,25 +1829,61 @@
             const isSameSong = incomingURL !== '' && incomingURL === _currentCoverURL;
             _currentCoverURL = incomingURL;
 
+            const coverImgOld = document.getElementById('coverImgOld');
+
             if (coverSrc) {
                 const isAlreadyVisible = coverArt.classList.contains('visible');
                 const isSameSrc = coverImg.src === coverSrc;
 
                 if (isAlreadyVisible && !isSameSrc && !isSameSong) {
-                    // 切歌：先淡出旧封面，再换图淡入
+                    // 切歌：旧封面（old 层，在 spinner 外面不受旋转影响）淡出
                     clearTimeout(_coverTransitionTimer);
-                    coverArt.classList.remove('visible');
-                    resetCoverState();
+                    coverImg.onload = null;
+                    const savedAngle = coverAngle;
+                    const spinnerEl = document.getElementById('coverSpinner');
+                    // old 层拷贝旧图，固定在当前旋转角度（不受 spinner 旋转影响）
+                    coverImgOld.src = coverImg.src;
+                    // 强制清除旧 transition 状态（快速切歌场景）
+                    coverImgOld.style.transition = 'none';
+                    coverImgOld.style.opacity = '1';
+                    coverImgOld.style.transform = `rotate(${savedAngle.toFixed(2)}deg)`;
+                    // 记录旧封面旋转状态，淡出时继续转
+                    oldCoverAngle = savedAngle;
+                    oldCoverSpd = coverCurrentSpd;
+                    // 强制回流后恢复 transition
+                    void coverImgOld.offsetWidth;
+                    coverImgOld.style.transition = '';
+                    // spinner 角度归零，新封面从 0° 开始
+                    coverAngle = 0;
+                    coverCurrentSpd = 0;
+                    if (spinnerEl) spinnerEl.style.transform = 'rotate(0deg)';
+                    // 新图在 old 层下面加载
+                    coverImg.src = coverSrc;
+                    // 启动旋转
+                    if (coverRotate === 'always') {
+                        setCoverPlaying(true, true);
+                    } else if (coverRotate === 'playback') {
+                        setCoverPlaying(isPlaying, true);
+                    }
+                    // 等新图加载完再淡出 old 层
+                    const fadeOutOld = () => {
+                        coverImg.onload = null;
+                        requestAnimationFrame(() => {
+                            coverImgOld.style.opacity = '0';
+                        });
+                    };
+                    if (coverImg.complete && coverImg.naturalWidth > 0) {
+                        fadeOutOld();
+                    } else {
+                        coverImg.onload = fadeOutOld;
+                    }
+                    // 过渡完成后清理
                     _coverTransitionTimer = setTimeout(() => {
-                        coverImg.src = coverSrc;
-                        coverAngle = 0; // 新歌重置角度
-                        coverArt.classList.add('visible');
-                        if (coverRotate === 'always') {
-                            setCoverPlaying(true);
-                        } else if (coverRotate === 'playback') {
-                            setCoverPlaying(isPlaying);
-                        }
-                    }, 500); // 等待 opacity transition 完成
+                        coverImgOld.src = '';
+                        coverImgOld.style.transform = '';
+                        coverImg.onload = null;
+                        oldCoverSpd = 0;
+                    }, 1200);
                 } else {
                     // 首次显示 / 同封面 / base64 升级：静默更新，不触发动效
                     clearTimeout(_coverTransitionTimer);
