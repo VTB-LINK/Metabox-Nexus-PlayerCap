@@ -116,6 +116,14 @@ func Load() Config {
 		}
 	} else if os.IsNotExist(err) {
 		generateDefaultConfig()
+		// 生成后立即加载，使本次运行也应用生成的配置
+		if data, err := os.ReadFile("config.yml"); err == nil {
+			var m map[string]interface{}
+			if err := yaml.Unmarshal(data, &m); err == nil {
+				mergeYAML(&cfg, m)
+				cfg.Sources = []string{"config.yml"}
+			}
+		}
 	}
 
 	// 命令行参数覆盖
@@ -303,11 +311,11 @@ prior-player:
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
 
-# 全民K歌配置
+# 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
 
-#网易云音乐 v3 配置
+# 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 30
 `

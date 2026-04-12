@@ -145,8 +145,14 @@ jobs:
             -f tag_name="${TAG_NAME}" \
             --jq '.body' > auto-release-notes.md
 
-          # 这里写自定义多行说明（可按需修改）
-          cat > custom-release-notes.md <<EOF
+          # 从仓库读取自定义发布内容
+          cp RELEASE_BODY.md custom-release-notes.md
+
+          # 拼接模板化的固定内容（下载表格 + 项目信息）
+          cat >> custom-release-notes.md <<EOF
+
+          ---
+
           ### 一键下载
 
           | 文件 | 最新版 | 当前版本 |
@@ -155,13 +161,13 @@ jobs:
           | ${EXE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${EXE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${EXE_NAME}) |
           | ${HTML_FILE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${HTML_FILE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${HTML_FILE_NAME}) |
 
-          ### 发布说明
+          ### 关于
           - 感谢您使用VTB-TOOLS Metabox Nexus PlayerCap！这是一个多播放器歌词实时推送工具，旨在提升您的K歌与直播体验。
           - 问题反馈请前往Discussions：${DOTCOM_DISCUSSIONS_URL}
           - API文档请前往：http://playercap.nexus.metabox.apifox.vtb.link/
           EOF
 
-          # 合并：自定义内容在前，自动生成内容在后
+          # 合并：自定义内容 + 固定模板在前，自动生成变更在后
           {
             cat custom-release-notes.md
             echo

@@ -17,7 +17,7 @@ prior-player:
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
 
-# 全民K歌配置
+# 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
 

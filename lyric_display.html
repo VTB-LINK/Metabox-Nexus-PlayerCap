@@ -1864,6 +1864,8 @@
 
         function updateSongInfoRow(info) {
             if (pureMode) return;
+            // 取消 player_clear/player_switch 的延迟清理，避免覆盖新封面
+            clearTimeout(window._coverCleanupTimer);
             const row = document.getElementById('songInfoRow');
             const coverArt = document.getElementById('coverArt');
             const coverImg = document.getElementById('coverImg');

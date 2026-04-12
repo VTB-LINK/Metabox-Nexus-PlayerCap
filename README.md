@@ -325,6 +325,7 @@ Metabox-Nexus-PlayerCap/
 ├── config.yml             # 默认配置文件（首次运行自动生成）
 ├── doc/
 │   └── API_RESPONSE_EXAMPLES.md  # API 响应示例（离线参考）
+│   └── openapi.yml  # OpenAPI格式 响应示例
 └── build-assets/
     └── winicon/           # Windows .exe 图标资源 (.syso)
 ```

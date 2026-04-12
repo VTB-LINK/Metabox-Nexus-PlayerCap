@@ -505,7 +505,7 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 }
 ```
 
-**异步封面：** 部分播放器的封面 base64 通过异步 HTTP 下载获取。歌曲开始播放时会先发送一条**不含 `cover_base64`** 的 `song_info_update`（仅含 `cover` URL），待封面下载完成后再补发一条含 `cover_base64` 的完整版本。前端应使用最新收到的数据覆盖即可。cloudmusicv3 不提供 `cover_base64`，无此行为。
+**异步封面：** 部分播放器的封面 base64 通过异步 HTTP 下载获取。歌曲开始播放时会先发送一条**不含 `cover_base64`** 的 `song_info_update`（仅含 `cover` URL），待封面下载完成后再补发一条含 `cover_base64` 的完整版本。前端应使用最新收到的数据覆盖即可。
 
 #### 3. `lyric_update` - 实时歌词更新
 
@@ -817,15 +817,17 @@ ws.onmessage = (event) => {
 
 ### 时间插值
 
-服务端每次推送 `lyric_update` 时携带 `play_time`（实际播放时间，秒）。建议前端实现本地时间插值以获得流畅的进度条/歌词高亮：
+服务端每次推送 `all_lyrics` 和 `lyric_update` 时携带 `play_time`（实际播放时间，秒）。建议前端实现本地时间插值以获得流畅的进度条/歌词高亮：
 
 ```
-收到 lyric_update → 记录 play_time 为锚点，记录本地时间
+收到 all_lyrics → 记录 play_time 为初始锚点，立即开始插值（不必等 lyric_update）
+收到 lyric_update → 用新 play_time 校正锚点（消除累积误差）
 每帧更新 → 当前播放时间 = play_time + (now - 收到时间)
 收到 playback_pause → 停止插值，冻结显示
 收到 playback_resume → 以新 play_time 为锚点重新开始插值
-收到新 lyric_update → 用新 play_time 校正锚点（消除累积误差）
 ```
+
+> **为什么用 `all_lyrics` 的 `play_time` 起步？** 部分歌曲从开始播放到第一条 `lyric_update` 可能有较长的前奏间隔（如 15-30 秒）。`all_lyrics` 在歌曲加载完成后立即推送，其 `play_time` 可作为插值的首个锚点，让进度条在前奏阶段就开始推进。
 
 ### 切歌与 Replay
 
