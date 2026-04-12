@@ -234,8 +234,11 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		}
 
 		// Redux lyrics appeared later（切歌 tick 跳过，避免旧歌词回写覆盖新歌词）
+		// 额外校验 Redux 歌曲 ID 与当前一致，防止切歌后 Redux 尚未更新导致旧歌词覆盖
 		if !songChanged && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) {
-			activeLyrics = data.Lyrics
+			if activeSongID == "" || data.CurPlaying.ID == activeSongID {
+				activeLyrics = data.Lyrics
+			}
 		}
 
 		// Update clock

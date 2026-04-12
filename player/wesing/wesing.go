@@ -148,10 +148,16 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			if state.SongTitle != lastLoadingTitle {
 				log.Info("歌曲加载中: %s", state.SongTitle)
 				lastLoadingTitle = state.SongTitle
-				p.emit(player.EventStatusUpdate, &player.StatusInfo{
-					Status: "loading",
-					Detail: fmt.Sprintf("加载中: %s", state.SongTitle),
-				})
+				// NOTE: 不向 router 发送 loading 事件。
+				// wesing 的 loading 可能持续很久（超过 prior-player-expire），
+				// 期间无音频/歌词输出，若触发优先组抢占会导致普通组被中断并出现空白窗口，
+				// loading 超时回退后又会再次切换，观感不佳。
+				// 改为仅在 PhasePlaying 时才通知 router，实现一次性精准切换。
+				//
+				// p.emit(player.EventStatusUpdate, &player.StatusInfo{
+				// 	Status: "loading",
+				// 	Detail: fmt.Sprintf("加载中: %s", state.SongTitle),
+				// })
 				lastPhase = proc.PhaseLoading
 			}
 			time.Sleep(500 * time.Millisecond)
