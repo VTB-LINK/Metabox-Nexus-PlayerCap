@@ -82,6 +82,7 @@ jobs:
           cp "${EXE_NAME}" "${PACKAGE_DIR}/"
           cp config.yml "${PACKAGE_DIR}/"
           cp "${HTML_FILE_NAME}" "${PACKAGE_DIR}/"
+          cp lyric_page.html "${PACKAGE_DIR}/"
           cp doc/API_RESPONSE_EXAMPLES.md "${PACKAGE_DIR}/"
           cp README.md "${PACKAGE_DIR}/" 2>/dev/null || true
           

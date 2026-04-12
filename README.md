@@ -263,7 +263,18 @@ cloudmusicv3-offset: 500
 
 ### 示例 HTML 页面
 
-详见 `lyric_display.html`（本地文件，直接用浏览器打开即可）
+歌词显示页采用 **Loader + Content 双文件架构**，自动解决 OBS 浏览器源缓存问题：
+
+| 文件 | 角色 | 说明 |
+|------|------|------|
+| `lyric_display.html` | **Loader（引导页）** | 极简引导页，每次加载时自动拉取最新的 `lyric_page.html` 并渲染。**OBS 浏览器源应添加此文件** |
+| `lyric_page.html` | **Content（内容页）** | 实际的歌词显示页面，包含所有样式、WS 连接、歌词渲染逻辑 |
+
+> ⚠️ **请始终使用 `lyric_display.html` 作为 OBS 浏览器源地址**，不要直接使用 `lyric_page.html`。
+> Loader 会在每次加载时附加时间戳参数绕过 OBS 缓存，确保你始终看到最新版本的歌词页面。
+> 直接使用 `lyric_page.html` 虽然功能正常，但无法享受自动缓存刷新保护。
+
+> 📋 **从旧版升级？** 如果你是从 v2.x 之前的版本升级，请在 OBS 中右键浏览器源 → **刷新页面的缓存**（仅需操作一次，之后所有更新将自动生效）。
 
 #### HTML 页面 URL 参数
 
@@ -322,6 +333,8 @@ Metabox-Nexus-PlayerCap/
 │   ├── server.go          # HTTP/WS/SSE 统一服务器：订阅者管理、状态缓存、广播
 │   ├── router.go          # 多播放器优先级路由 + 超时状态机
 │   └── types.go           # WSEvent / HTTPResponse 传输层类型
+├── lyric_display.html     # 歌词显示引导页（Loader，OBS 浏览器源添加此文件）
+├── lyric_page.html        # 歌词显示内容页（Content，由 Loader 自动加载）
 ├── config.yml             # 默认配置文件（首次运行自动生成）
 ├── doc/
 │   └── API_RESPONSE_EXAMPLES.md  # API 响应示例（离线参考）

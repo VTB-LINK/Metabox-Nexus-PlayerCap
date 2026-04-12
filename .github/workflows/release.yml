@@ -90,6 +90,7 @@ jobs:
           cp "${EXE_NAME}" "${PACKAGE_DIR}/"
           cp config.yml "${PACKAGE_DIR}/"
           cp "${HTML_FILE_NAME}" "${PACKAGE_DIR}/"
+          cp lyric_page.html "${PACKAGE_DIR}/"
           cp doc/API_RESPONSE_EXAMPLES.md "${PACKAGE_DIR}/"
           cp README.md "${PACKAGE_DIR}/" 2>/dev/null || true
 
@@ -137,7 +138,7 @@ jobs:
 
           # 生成 github.com 发布用压缩包（仅 exe + html）
           rm -f "${DOTCOM_ARCHIVE_NAME}"
-          zip -j "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}"
+          zip -j "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" lyric_page.html
 
           # 生成自动 release notes
           gh api "repos/${DOTCOM_REPO}/releases/generate-notes" \
@@ -160,6 +161,7 @@ jobs:
           | ${DOTCOM_ARCHIVE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${DOTCOM_ARCHIVE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${DOTCOM_ARCHIVE_NAME}) |
           | ${EXE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${EXE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${EXE_NAME}) |
           | ${HTML_FILE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${HTML_FILE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${HTML_FILE_NAME}) |
+          | lyric_page.html | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/lyric_page.html) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/lyric_page.html) |
 
           ### 关于
           - 感谢您使用VTB-TOOLS Metabox Nexus PlayerCap！这是一个多播放器歌词实时推送工具，旨在提升您的K歌与直播体验。
@@ -179,7 +181,7 @@ jobs:
           } > combined-release-notes.md
 
           # 创建 Release Draft 并上传 zip + 两个独立文件
-          gh release create "${TAG_NAME}" "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" \
+          gh release create "${TAG_NAME}" "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" lyric_page.html \
             --repo "${DOTCOM_REPO}" \
             --title "${TAG_NAME}" \
             --draft \
