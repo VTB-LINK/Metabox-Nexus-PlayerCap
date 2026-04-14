@@ -1493,6 +1493,8 @@
 
                 if (data.type === 'all_lyrics') {
                     if (data.data && data.data.lyrics) {
+                        // 同播放器切歌：重置歌词状态
+                        currentIndex = -1;
                         allLyrics = data.data.lyrics;
                         songDuration = data.data.duration || 0;
                         renderAllLyrics();
@@ -1501,20 +1503,21 @@
                         }
                         // 用 play_time 启动插值计时
                         startInterpolation(data.data.play_time || 0);
-                        // 如果此时主显示区为空（前奏/间奏，尚无 lyric_update），显示占位提示
-                        if (currentIndex === -1) {
-                            const display = document.getElementById('lyricsDisplay');
-                            if (!display.querySelector('.lyric-line')) {
-                                if (!pureMode) {
-                                    display.innerHTML = `
-                                        <div class="idle-text">
-                                            <span class="music-note">♪</span>
-                                            <span>前奏中</span>
-                                            <span class="music-note">♫</span>
-                                        </div>`;
-                                }
+                        // 丝滑过渡清空旧歌词（像切到空行一样退场），完成后显示占位
+                        if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
+                        const display = document.getElementById('lyricsDisplay');
+                        transitionOut(display, () => {
+                            display.innerHTML = '';
+                            // 前奏期间（尚无 lyric_update 覆盖）显示占位提示
+                            if (currentIndex === -1 && !pureMode) {
+                                display.innerHTML = `
+                                    <div class="idle-text">
+                                        <span class="music-note">♪</span>
+                                        <span>前奏中</span>
+                                        <span class="music-note">♫</span>
+                                    </div>`;
                             }
-                        }
+                        });
                     }
                 }
 
