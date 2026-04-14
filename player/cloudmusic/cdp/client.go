@@ -25,6 +25,49 @@ type DevToolsPage struct {
 	WebSocketDebuggerUrl string `json:"webSocketDebuggerUrl"`
 }
 
+// ForceFetchLyricsInRedux sends a one-off Redux dispatch to fetch lyrics.
+// Uses {force: true} payload, matching what NetEase's own cover-click triggers.
+func (c *Client) ForceFetchLyricsInRedux() error {
+	js := `(async () => {
+		try {
+			const root = document.querySelector('#root');
+			if (!root) return 'err: no root';
+			let fiber = null;
+			for (let k of Object.getOwnPropertyNames(root)) {
+				if (k.startsWith('__reactContainer')) {
+					fiber = root[k]; break;
+				}
+			}
+			if (!fiber) return 'err: no react';
+			let store = null;
+			function walk(node, depth) {
+				if (!node || depth > 80 || store) return;
+				if (node.memoizedProps && node.memoizedProps.store && typeof node.memoizedProps.store.getState === 'function') {
+					store = node.memoizedProps.store;
+					return;
+				}
+				walk(node.child, depth + 1);
+				if (!store) walk(node.sibling, depth + 1);
+			}
+			walk(fiber, 0);
+			if (store) {
+				store.dispatch({type: 'async:lyric/fetchLyric', payload: {force: true}});
+				return 'ok';
+			}
+			return 'err: no store';
+		} catch(e) { return 'err:' + e.message; }
+	})()`
+
+	res, err := c.EvaluateAsync(js)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(res, "err:") {
+		return fmt.Errorf(res)
+	}
+	return nil
+}
+
 // Client manages the CDP connection
 type Client struct {
 	wsUrl  string
@@ -267,9 +310,10 @@ func Connect() (*Client, error) {
 // Evaluate runs JS and parses our custom JSON payload
 func (c *Client) Extract() (*ExtractionData, error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	id := c.msgID
 	c.msgID++
-	c.mu.Unlock()
 
 	req := map[string]interface{}{
 		"id":     id,
@@ -279,10 +323,6 @@ func (c *Client) Extract() (*ExtractionData, error) {
 			"returnByValue": true,
 		},
 	}
-
-	// Because gorilla WebSocket doesn't support concurrent Read/Write on same stream easily without goroutines,
-	// and we are simply doing Request-Response synchronously in a loop:
-	// We only have one writer / reader in this isolated routine.
 
 	if err := c.conn.WriteJSON(req); err != nil {
 		c.closed = true
@@ -330,9 +370,10 @@ func (c *Client) IsClosed() bool {
 // EvaluateAsync runs async JS (e.g. fetch) and returns the string result
 func (c *Client) EvaluateAsync(expression string) (string, error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	id := c.msgID
 	c.msgID++
-	c.mu.Unlock()
 
 	req := map[string]interface{}{
 		"id":     id,
@@ -412,6 +453,8 @@ func (c *Client) FetchLyricsViaCDP(songID string) (string, error) {
 		try {
 			const r = await fetch('https://music.163.com/api/song/lyric?id=%s&lv=1&tv=1');
 			const d = await r.json();
+			if (d.pureMusic) return '[PURE_MUSIC]';
+			if (d.nolyric) return '[NO_LYRIC]';
 			if (d.lrc && d.lrc.lyric) return d.lrc.lyric;
 			return '';
 		} catch(e) { return 'err:' + e.message; }
@@ -421,8 +464,11 @@ func (c *Client) FetchLyricsViaCDP(songID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if result == "" || strings.HasPrefix(result, "err:") {
+	if strings.HasPrefix(result, "err:") {
 		return "", fmt.Errorf("lyrics fetch failed: %s", result)
+	}
+	if result == "" {
+		return "", fmt.Errorf("lyrics fetch failed: empty result")
 	}
 	return result, nil
 }

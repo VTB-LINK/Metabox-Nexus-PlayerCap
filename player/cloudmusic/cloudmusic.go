@@ -107,6 +107,8 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	var activeLyrics []cdp.ExtractedLyric
 	var activeSongID string
+	var lastSongChangeTime time.Time
+	var isPureMusic bool
 
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
 	if pollInterval < 50*time.Millisecond {
@@ -160,7 +162,9 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			lastLineIdx = -1
 			activeLyrics = nil
 			activeSongID = ""
+			isPureMusic = false
 			clock = baseRealClock{LastKnownLyricIndex: -1}
+			lastSongChangeTime = time.Now()
 
 			log.Info("Song: %s - %s", songName, songArtist)
 
@@ -200,9 +204,21 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			lrcText, err := client.FetchLyricsViaCDP(activeSongID)
 			if err != nil {
 				log.Warn("Lyrics fetch failed: %v", err)
-				if len(data.Lyrics) > 0 {
-					activeLyrics = data.Lyrics
+				// 不使用 data.Lyrics 兜底（可能是旧歌词），等 ForceFetchLyricsInRedux 更新后由 Redux fallback 统一推送
+			} else if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
+				log.Info("Detected pure/no lyric music, clearing lyrics.")
+				isPureMusic = true
+				// 立即发送空歌词
+				var durSec float32
+				if data.CurPlaying.Track.Duration > 0 {
+					durSec = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
+				p.emit(player.EventAllLyrics, &player.AllLyricsData{
+					SongTitle: songTitle, Duration: durSec, Lyrics: []player.LyricLine{}, Count: 0,
+				})
+				p.emit(player.EventLyricUpdate, &player.LyricUpdate{
+					LineIndex: -1, Text: "", Timestamp: 0, PlayTime: clock.GetCurrent(),
+				})
 			} else {
 				parsed := lyric.ParseLRC(lrcText)
 				for _, l := range parsed {
@@ -212,32 +228,51 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 			}
 
-			// Broadcast all lyrics
-			lyricItems := make([]player.LyricLine, len(activeLyrics))
-			for i, l := range activeLyrics {
-				lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
-			}
+			// Broadcast all lyrics（仅在有普通歌词时发送，避免空歌词 + Redux 补发导致双发）
+			if len(activeLyrics) > 0 {
+				lyricItems := make([]player.LyricLine, len(activeLyrics))
+				for i, l := range activeLyrics {
+					lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
+				}
 
-			var durSec float32
-			if data.CurPlaying.Track.Duration > 0 {
-				durSec = float32(data.CurPlaying.Track.Duration) / 1000.0
-			}
+				var durSec float32
+				if data.CurPlaying.Track.Duration > 0 {
+					durSec = float32(data.CurPlaying.Track.Duration) / 1000.0
+				}
 
-			p.emit(player.EventAllLyrics, &player.AllLyricsData{
-				SongTitle: songTitle, Duration: durSec, Lyrics: lyricItems, Count: len(lyricItems),
-			})
+				p.emit(player.EventAllLyrics, &player.AllLyricsData{
+					SongTitle: songTitle, Duration: durSec, Lyrics: lyricItems, Count: len(lyricItems),
+				})
+			}
 
 			// 切歌时主动发 status_update（lastPlayingState 不再重置，state change 段不会重复触发）
 			if data.PlayingState == 2 {
 				p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
 			}
+
+			// 异步强制 NetEase PC 发起内部底层 API 获取歌词
+			go client.ForceFetchLyricsInRedux()
 		}
 
 		// Redux lyrics appeared later（切歌 tick 跳过，避免旧歌词回写覆盖新歌词）
-		// 额外校验 Redux 歌曲 ID 与当前一致，防止切歌后 Redux 尚未更新导致旧歌词覆盖
-		if !songChanged && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) {
-			if activeSongID == "" || data.CurPlaying.ID == activeSongID {
+		// 等待 ForceFetchLyricsInRedux 完成后再接受 Redux 歌词（冷却 1.5 秒防止旧歌词被误采纳）
+		if !songChanged && !isPureMusic && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) && time.Since(lastSongChangeTime) > 1*time.Second {
+			if activeSongID == "" || data.CurPlaying.ID == activeSongID || data.CurPlaying.ID == "" || data.CurPlaying.Track.Name == lastDomSongName {
 				activeLyrics = data.Lyrics
+				log.Info("Redux fallback successful: loaded %d lines of lyrics", len(activeLyrics))
+
+				// 补发全量歌词给前端
+				lyricItems := make([]player.LyricLine, len(activeLyrics))
+				for i, l := range activeLyrics {
+					lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
+				}
+				var durSec float32
+				if data.CurPlaying.Track.Duration > 0 {
+					durSec = float32(data.CurPlaying.Track.Duration) / 1000.0
+				}
+				p.emit(player.EventAllLyrics, &player.AllLyricsData{
+					SongTitle: currentSongTitle, Duration: durSec, Lyrics: lyricItems, Count: len(lyricItems),
+				})
 			}
 		}
 
