@@ -96,6 +96,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 	var activeSongID string
 	var lastSongChangeTime time.Time
 	var isPureMusic bool
+	var cdpLyricsOK bool // CDP 已成功获取歌词，跳过 Redux fallback
 	var songDuration float32
 
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
@@ -151,6 +152,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			activeLyrics = nil
 			activeSongID = ""
 			isPureMusic = false
+			cdpLyricsOK = false
 			songDuration = 0
 			clock = baseRealClock{LastKnownLyricIndex: -1}
 			lastSongChangeTime = time.Now()
@@ -208,6 +210,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					LineIndex: -1, Text: "", Timestamp: 0, PlayTime: clock.GetCurrent(),
 				})
 			} else {
+				cdpLyricsOK = true
 				parsed := lyric.ParseLRC(lrcText)
 				for _, l := range parsed {
 					activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
@@ -243,7 +246,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 
 		// Redux lyrics appeared later（切歌 tick 跳过，避免旧歌词回写覆盖新歌词）
 		// 等待 ForceFetchLyricsInRedux 完成后再接受 Redux 歌词（冷却 1.5 秒防止旧歌词被误采纳）
-		if !songChanged && !isPureMusic && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) && time.Since(lastSongChangeTime) > 1*time.Second {
+		if !songChanged && !isPureMusic && !cdpLyricsOK && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) && time.Since(lastSongChangeTime) > 1*time.Second {
 			if activeSongID == "" || data.CurPlaying.ID == activeSongID || data.CurPlaying.ID == "" || data.CurPlaying.Track.Name == lastDomSongName {
 				activeLyrics = data.Lyrics
 				log.Info("Redux 备用歌词加载成功: %d 行", len(activeLyrics))
