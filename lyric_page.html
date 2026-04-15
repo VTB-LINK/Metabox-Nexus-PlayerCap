@@ -1522,9 +1522,8 @@
                 }
 
                 if (data.type === 'lyric_update') {
-                    // 处理空消息（窗口关闭或无歌词时，data 为 {}）
                     if (!data.data || !data.data.text) {
-                        showIdle();
+                        // 空消息：不做处理，保留当前封面/歌词状态
                     } else {
                         currentIndex = data.data.line_index;
                         updateDisplay(data.data);
@@ -1554,29 +1553,17 @@
                 }
 
                 if (data.type === 'player_switch') {
-                    // 活跃播放器切换：重置显示，等待新播放器状态到来
+                    // 活跃播放器切换：仅重置歌词/进度状态
+                    // 封面与旋转保留，由后续 song_info_update 自然触发切歌过渡动效
                     currentIndex = -1;
                     allLyrics = [];
                     songDuration = 0;
                     stopInterpolation();
-                    isPlaying = false;
-                    resetCoverState();
-                    _currentCoverURL = '';
-                    clearTimeout(_coverTransitionTimer);
-                    // 封面淡出（与歌词退场同步），完成后再清理资源
-                    document.getElementById('coverArt').classList.remove('visible');
-                    clearTimeout(window._coverCleanupTimer);
-                    window._coverCleanupTimer = setTimeout(() => {
-                        document.getElementById('coverImg').src = '';
-                        document.getElementById('coverImgOld').src = '';
-                        document.getElementById('songName').textContent = '';
-                        document.getElementById('songSinger').textContent = '';
-                    }, 300);
                     document.getElementById('allLyrics').innerHTML = '';
                     document.getElementById('progressFill').style.width = '0%';
                     document.getElementById('lineInfo').textContent = '--';
                     document.getElementById('timeInfo').textContent = '--:-- / --:--';
-                    // 丝滑过渡清空歌词区（像切到空行一样退场）
+                    // 丝滑过渡清空歌词区
                     if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
                     const display = document.getElementById('lyricsDisplay');
                     transitionOut(display, () => { display.innerHTML = ''; });
@@ -1590,7 +1577,6 @@
                     }
                     clearTimeout(window._switchTimer);
                     window._switchTimer = setTimeout(() => {
-                        // 恢复为当前状态文字（由后续 status_update 覆盖，此为兜底）
                         if (statusText.textContent.startsWith('🔄') || statusText.textContent.startsWith('💤')) {
                             statusText.textContent = '已连接';
                         }
@@ -1701,23 +1687,6 @@
             return null;
         }
 
-        function showIdle() {
-            const display = document.getElementById('lyricsDisplay');
-            const idleHTML = !pureMode ? `
-                    <div class="idle-text">
-                        <span class="music-note">♪</span>
-                        <span>等待歌曲播放</span>
-                        <span class="music-note">♫</span>
-                        <span class="music-note">♪</span>
-                    </div>` : '';
-
-            transitionOut(display, () => { display.innerHTML = idleHTML; });
-            document.getElementById('progressFill').style.width = '0%';
-            document.getElementById('lineInfo').textContent = '--';
-            document.getElementById('timeInfo').textContent = '--:-- / --:--';
-            stopInterpolation();
-        }
-
         function updateStatus(status, detail, songTitle) {
             const statusText = document.getElementById('statusText');
             const statusDot = document.getElementById('statusDot');
@@ -1765,24 +1734,9 @@
             statusDot.style.background = cfg.color;
             statusDot.style.boxShadow = `0 0 8px ${cfg.color}`;
 
-            // 非播放/暂停状态时在歌词区域显示状态
-            if (status !== 'playing' && status !== 'paused') {
-                const statusHTML = !pureMode ? `
-                        <div class="idle-text">
-                            <span style="font-size:2rem">${cfg.icon}</span>
-                            <span>${detail || cfg.text}</span>
-                        </div>` : '';
-                transitionOut(display, () => { display.innerHTML = statusHTML; });
-                document.getElementById('progressFill').style.width = '0%';
-                document.getElementById('lineInfo').textContent = '--';
-                document.getElementById('timeInfo').textContent = '--:-- / --:--';
-                document.getElementById('songTitle').textContent = '';
-                hideSongInfoRow();
-                stopInterpolation();
-                isPlaying = false;
-                resetCoverState();
-            } else {
-                // 播放/暂停状态：清除 loading/idle 提示，歌词保持不变
+            // 仅处理播放/暂停状态，其他状态只更新状态栏不影响封面/歌词
+            if (status === 'playing' || status === 'paused') {
+                // 清除可能残留的状态提示，歌词保持不变
                 const idleText = display.querySelector('.idle-text');
                 if (idleText) {
                     transitionOut(display, () => { display.innerHTML = ''; });
