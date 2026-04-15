@@ -20,8 +20,7 @@ var log = logger.New("Wesing")
 
 // WesingPlayer 全民K歌播放器
 type WesingPlayer struct {
-	events   chan player.Event
-	stopCh   chan struct{}
+	player.BaseEmitter
 	offsetMs int
 	pollMs   int
 }
@@ -29,21 +28,9 @@ type WesingPlayer struct {
 // New 创建全民K歌播放器
 func New(offsetMs, pollMs int) *WesingPlayer {
 	return &WesingPlayer{
-		events:   make(chan player.Event, 128),
-		stopCh:   make(chan struct{}),
-		offsetMs: offsetMs,
-		pollMs:   pollMs,
-	}
-}
-
-func (p *WesingPlayer) Name() string                { return PlayerName }
-func (p *WesingPlayer) Events() <-chan player.Event { return p.events }
-func (p *WesingPlayer) Stop()                       { close(p.stopCh) }
-
-func (p *WesingPlayer) emit(evtType string, data interface{}) {
-	select {
-	case p.events <- player.Event{PlayerName: PlayerName, Type: evtType, Data: data}:
-	default:
+		BaseEmitter: player.NewBaseEmitter(PlayerName),
+		offsetMs:    offsetMs,
+		pollMs:      pollMs,
 	}
 }
 
@@ -54,20 +41,20 @@ func (p *WesingPlayer) Start() {
 
 	for {
 		select {
-		case <-p.stopCh:
+		case <-p.StopCh:
 			return
 		default:
 		}
 
-		p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "K歌客户端未启动"})
-		p.emit(player.EventClearSongData, nil)
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "K歌客户端未启动"})
+		p.Emit(player.EventClearSongData, nil)
 
 		handle, pid := p.waitForProcess()
 		p.runSession(handle, pid, offsetSec, pollInterval)
 		proc.CloseProc(handle)
 
-		p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "K歌客户端已退出"})
-		p.emit(player.EventClearSongData, nil)
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "K歌客户端已退出"})
+		p.Emit(player.EventClearSongData, nil)
 		log.Info("会话结束，等待新的 WeSing 进程...")
 		time.Sleep(2 * time.Second)
 	}
@@ -78,7 +65,7 @@ func (p *WesingPlayer) waitForProcess() (syscall.Handle, uint32) {
 	printed := false
 	for {
 		select {
-		case <-p.stopCh:
+		case <-p.StopCh:
 			return 0, 0
 		default:
 		}
@@ -121,7 +108,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 
 	for {
 		select {
-		case <-p.stopCh:
+		case <-p.StopCh:
 			return
 		default:
 		}
@@ -135,9 +122,9 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		switch state.Phase {
 		case proc.PhaseStandby:
 			if lastPhase != proc.PhaseStandby {
-				p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: "K歌窗口未打开"})
-				p.emit(player.EventClearSongData, nil)
-				p.emit(player.EventLyricIdle, nil)
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: "K歌窗口未打开"})
+				p.Emit(player.EventClearSongData, nil)
+				p.Emit(player.EventLyricIdle, nil)
 				lastPhase = proc.PhaseStandby
 			}
 			lastTitle = ""
@@ -154,7 +141,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				// loading 超时回退后又会再次切换，观感不佳。
 				// 改为仅在 PhasePlaying 时才通知 router，实现一次性精准切换。
 				//
-				// p.emit(player.EventStatusUpdate, &player.StatusInfo{
+				// p.Emit(player.EventStatusUpdate, &player.StatusInfo{
 				// 	Status: "loading",
 				// 	Detail: fmt.Sprintf("加载中: %s", state.SongTitle),
 				// })
@@ -196,12 +183,12 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		songTitle, songName, singer, coverURL, songMID := p.getSongMeta(handle, pid, lastTitle)
 		initialPlayTime, _ := lyric.ReadPlayTime(handle, timeAddr)
 
-		p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
-		p.emit(player.EventSongInfoUpdate, &player.SongInfo{
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
+		p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 			Name: songName, Singer: singer, Title: songTitle,
 			Cover: coverURL,
 		})
-		p.emit(player.EventAllLyrics, &player.AllLyricsData{
+		p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 			SongTitle: songTitle, Duration: songDuration,
 			PlayTime: initialPlayTime, Lyrics: lyricItems, Count: len(lyricItems),
 		})
@@ -215,18 +202,22 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 					time.Sleep(1 * time.Second)
 					if found := lyric.FindCoverURL(handle, mid); found != "" {
 						coverURL = found
+						log.Info("封面 URL 重试第 %d 次获取成功", i+1)
 						break
 					}
 				}
 			}
 			if coverURL == "" {
+				log.Warn("封面 URL 获取失败，跳过 base64 编码")
 				return
 			}
 			if b64 := player.FetchCoverBase64(coverURL, 5*time.Second); b64 != "" {
-				p.emit(player.EventSongInfoUpdate, &player.SongInfo{
+				p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 					Name: name, Singer: singer, Title: title,
 					Cover: coverURL, CoverBase64: b64,
 				})
+			} else {
+				log.Warn("封面下载失败: %s", coverURL)
 			}
 		}(handle, songMID, songName, singer, songTitle, coverURL)
 
@@ -234,7 +225,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 
 		// 歌词轮询循环
 		exitR := p.pollLyrics(handle, pid, lyrics, timeAddr, offsetSec, pollInterval, lastTitle, songTitle, songDuration)
-		p.emit(player.EventLyricIdle, nil)
+		p.Emit(player.EventLyricIdle, nil)
 
 		switch exitR {
 		case exitProcessDied:
@@ -338,7 +329,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 
 	for {
 		select {
-		case <-p.stopCh:
+		case <-p.StopCh:
 			return exitProcessDied
 		default:
 		}
@@ -384,9 +375,9 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			lastLineIdx = -1
 			if paused {
 				paused = false
-				p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: fullSongTitle})
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: fullSongTitle})
 			}
-			p.emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
+			p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
 			frozen = false
 		}
 
@@ -421,15 +412,15 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 				}
 				if frozen && time.Since(frozenSince) >= pauseDuration && !paused {
 					paused = true
-					p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: fullSongTitle})
-					p.emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: playTime})
+					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: fullSongTitle})
+					p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: playTime})
 				}
 			} else {
 				frozen = false
 				if paused {
 					paused = false
-					p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: fullSongTitle})
-					p.emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
+					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: fullSongTitle})
+					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
 				}
 			}
 		}
@@ -442,12 +433,12 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 		if currentIdx != lastLineIdx && currentIdx >= 0 {
 			lastLineIdx = currentIdx
 			l := lyrics[currentIdx]
-			p.emit(player.EventLyricUpdate, &player.LyricUpdate{
+			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
 				LineIndex: l.Index,
 				Text:      l.Text,
 				Timestamp: l.Time,
 				PlayTime:  playTime,
-				Progress:  clampFloat32(playTime/songDuration, 0, 1),
+				Progress:  player.ClampFloat32(playTime/songDuration, 0, 1),
 			})
 		}
 
@@ -458,14 +449,4 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 func (p *WesingPlayer) isProcessAlive() bool {
 	_, err := proc.FindProcess("WeSing.exe")
 	return err == nil
-}
-
-func clampFloat32(v, min, max float32) float32 {
-	if v < min {
-		return min
-	}
-	if v > max {
-		return max
-	}
-	return v
 }

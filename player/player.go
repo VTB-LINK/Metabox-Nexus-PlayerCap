@@ -87,3 +87,42 @@ type Player interface {
 	// Events 返回事件通道，由主循环消费
 	Events() <-chan Event
 }
+
+// BaseEmitter 公共事件发射器，可嵌入各播放器结构体以复用 Emit/Events/Stop/Name 方法。
+type BaseEmitter struct {
+	PlayerName string
+	EventCh    chan Event
+	StopCh     chan struct{}
+}
+
+// NewBaseEmitter 创建 BaseEmitter
+func NewBaseEmitter(playerName string) BaseEmitter {
+	return BaseEmitter{
+		PlayerName: playerName,
+		EventCh:    make(chan Event, 128),
+		StopCh:     make(chan struct{}),
+	}
+}
+
+func (b *BaseEmitter) Name() string         { return b.PlayerName }
+func (b *BaseEmitter) Events() <-chan Event { return b.EventCh }
+func (b *BaseEmitter) Stop()                { close(b.StopCh) }
+
+// Emit 向事件通道发送事件，通道满时丢弃（非阻塞）。
+func (b *BaseEmitter) Emit(evtType string, data interface{}) {
+	select {
+	case b.EventCh <- Event{PlayerName: b.PlayerName, Type: evtType, Data: data}:
+	default:
+	}
+}
+
+// ClampFloat32 将值限制在 [min, max] 范围内
+func ClampFloat32(v, min, max float32) float32 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}

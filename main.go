@@ -120,13 +120,15 @@ func main() {
 		ConfigOverwritten: configOverwritten,
 	})
 
-	// 启动统一服务
+	// 启动统一服务（等待端口就绪后再启动播放器）
+	readyCh := make(chan struct{})
 	go func() {
-		if err := srv.Start(cfg.Addr); err != nil {
+		if err := srv.Start(cfg.Addr, readyCh); err != nil {
 			mainLog.Error("服务启动失败: %v", err)
 			os.Exit(1)
 		}
 	}()
+	<-readyCh
 
 	// 创建并启动播放器
 	wp := wesing.New(cfg.GetPlayerOffset("wesing"), cfg.GetPlayerPoll("wesing"))

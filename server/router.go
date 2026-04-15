@@ -54,10 +54,10 @@ type Router struct {
 	normalGroupPaused  bool                    // 普通组是否全员非活跃
 	normalGroupPauseAt time.Time               // 普通组级非活跃起始时间
 
-	// 切换后抑制重复事件：FullState 已推送的事件类型不再通过 NotifySubscribers 重复推给根订阅者
+	// 切换后抑制重复事件：基于内容哈希比对，FullState 已推送的相同内容不再重复推给根订阅者
 	switchSkipPlayer string
-	switchSkipTypes  map[string]struct{}
-	switchSkipAt     time.Time // 切换发生的时间，超过 2s 后 skip 自动失效
+	switchSkipHashes map[string]uint64 // 事件类型 → 内容 FNV 哈希
+	switchSkipAt     time.Time         // 切换发生时间，仅用于安全超时清理（10s）
 }
 
 // NewRouter 创建路由器
@@ -106,21 +106,28 @@ func (r *Router) Run() {
 		// 2. 更新路由逻辑（决定谁是 activePlayer，可能触发切换广播）
 		switched := r.updateRouting(evt)
 
-		// 3. 抑制切换后的重复事件（FullState 已推送过的类型，限 2 秒内有效）
+		// 3. 抑制切换后的重复事件（基于内容哈希比对，相同内容才抑制）
 		if !switched {
 			r.mu.Lock()
-			if r.switchSkipPlayer == evt.PlayerName && time.Since(r.switchSkipAt) < 2*time.Second {
-				if _, ok := r.switchSkipTypes[evt.Type]; ok {
-					delete(r.switchSkipTypes, evt.Type)
-					switched = true
-					if len(r.switchSkipTypes) == 0 {
+			if r.switchSkipPlayer == evt.PlayerName && r.switchSkipHashes != nil {
+				if oldHash, ok := r.switchSkipHashes[evt.Type]; ok {
+					newHash := hashEventData(evt.Type, evt.Data)
+					delete(r.switchSkipHashes, evt.Type)
+					if newHash == oldHash {
+						routerLog.Detail("抑制重复事件 [%s] (player=%s, hash=%x)", evt.Type, evt.PlayerName, newHash)
+						switched = true
+					} else {
+						routerLog.Detail("放行新内容事件 [%s] (player=%s, old=%x, new=%x)", evt.Type, evt.PlayerName, oldHash, newHash)
+					}
+					if len(r.switchSkipHashes) == 0 {
 						r.switchSkipPlayer = ""
+						r.switchSkipHashes = nil
 					}
 				}
-			} else if r.switchSkipPlayer != "" && time.Since(r.switchSkipAt) >= 2*time.Second {
-				// 超时自动清理
+			} else if r.switchSkipPlayer != "" && time.Since(r.switchSkipAt) >= 10*time.Second {
+				// 安全超时清理（正常流程中哈希会被逐条消费，此处仅防残留）
 				r.switchSkipPlayer = ""
-				r.switchSkipTypes = nil
+				r.switchSkipHashes = nil
 			}
 			r.mu.Unlock()
 		}
@@ -142,17 +149,17 @@ func (r *Router) switchTo(newPlayer string) bool {
 	r.server.SetActivePlayer(newPlayer)
 	if old != newPlayer && newPlayer != "" {
 		routerLog.Info("播放器切换: [%s] → [%s]，推送完整状态", old, newPlayer)
-		sentTypes := r.server.NotifySubscribersFullState(old, newPlayer)
+		sentHashes := r.server.NotifySubscribersFullState(old, newPlayer)
 		// 不抑制 status_update：状态变更是关键事件，loading→playing 极快时会被错误吞掉
-		delete(sentTypes, player.EventStatusUpdate)
+		delete(sentHashes, player.EventStatusUpdate)
 		// 仅抑制 FullState 实际发送过的事件类型（缓存为空时不设抑制，避免吞首次数据）
-		if len(sentTypes) > 0 {
+		if len(sentHashes) > 0 {
 			r.switchSkipPlayer = newPlayer
-			r.switchSkipTypes = sentTypes
+			r.switchSkipHashes = sentHashes
 			r.switchSkipAt = time.Now()
 		} else {
 			r.switchSkipPlayer = ""
-			r.switchSkipTypes = nil
+			r.switchSkipHashes = nil
 		}
 		return true
 	}
@@ -351,7 +358,7 @@ func (r *Router) clearActivePlayer() bool {
 	r.server.NotifySubscribersClear(old)
 	// 清除切换抑制（不再有 activePlayer）
 	r.switchSkipPlayer = ""
-	r.switchSkipTypes = nil
+	r.switchSkipHashes = nil
 	return true
 }
 

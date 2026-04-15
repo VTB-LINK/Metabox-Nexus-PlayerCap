@@ -20,8 +20,7 @@ var log = logger.New("CloudMusic")
 
 // CloudMusicPlayer 网易云音乐播放器
 type CloudMusicPlayer struct {
-	events   chan player.Event
-	stopCh   chan struct{}
+	player.BaseEmitter
 	offsetMs int
 	pollMs   int
 }
@@ -29,21 +28,9 @@ type CloudMusicPlayer struct {
 // New 创建网易云播放器
 func New(offsetMs, pollMs int) *CloudMusicPlayer {
 	return &CloudMusicPlayer{
-		events:   make(chan player.Event, 128),
-		stopCh:   make(chan struct{}),
-		offsetMs: offsetMs,
-		pollMs:   pollMs,
-	}
-}
-
-func (p *CloudMusicPlayer) Name() string                { return PlayerName }
-func (p *CloudMusicPlayer) Events() <-chan player.Event { return p.events }
-func (p *CloudMusicPlayer) Stop()                       { close(p.stopCh) }
-
-func (p *CloudMusicPlayer) emit(evtType string, data interface{}) {
-	select {
-	case p.events <- player.Event{PlayerName: PlayerName, Type: evtType, Data: data}:
-	default:
+		BaseEmitter: player.NewBaseEmitter(PlayerName),
+		offsetMs:    offsetMs,
+		pollMs:      pollMs,
 	}
 }
 
@@ -67,21 +54,21 @@ func (p *CloudMusicPlayer) Start() {
 	// 0. Patch Windows registry auto-start
 	watchdog.PatchRegistryAutoStart()
 
-	p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "网易云音乐未启动"})
+	p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "网易云音乐未启动"})
 
 	for {
 		select {
-		case <-p.stopCh:
+		case <-p.StopCh:
 			return
 		default:
 		}
 
 		restarted, err := watchdog.EnsureDebugMode()
 		if err != nil {
-			log.Error("Watchdog error: %v", err)
+			log.Error("Watchdog 错误: %v", err)
 		}
 		if restarted {
-			log.Info("App restarted. Waiting 5s...")
+			log.Info("已重启网易云音乐，等待 5s...")
 			time.Sleep(5 * time.Second)
 		}
 
@@ -91,10 +78,10 @@ func (p *CloudMusicPlayer) Start() {
 			continue
 		}
 
-		log.Info("CDP connected. Polling started...")
+		log.Info("CDP 已连接，开始轮询...")
 		p.runSession(client)
-		p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "网易云音乐已退出"})
-		p.emit(player.EventClearSongData, nil)
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "网易云音乐已退出"})
+		p.Emit(player.EventClearSongData, nil)
 	}
 }
 
@@ -109,6 +96,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 	var activeSongID string
 	var lastSongChangeTime time.Time
 	var isPureMusic bool
+	var songDuration float32
 
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
 	if pollInterval < 50*time.Millisecond {
@@ -119,7 +107,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 
 	for {
 		select {
-		case <-p.stopCh:
+		case <-p.StopCh:
 			return
 		case <-ticker.C:
 		}
@@ -127,7 +115,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		data, err := client.Extract()
 		if err != nil {
 			if !strings.Contains(err.Error(), "no root") {
-				log.Warn("Extract err: %v", err)
+				log.Warn("提取错误: %v", err)
 			}
 			if client.IsClosed() {
 				return
@@ -163,15 +151,16 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			activeLyrics = nil
 			activeSongID = ""
 			isPureMusic = false
+			songDuration = 0
 			clock = baseRealClock{LastKnownLyricIndex: -1}
 			lastSongChangeTime = time.Now()
 
-			log.Info("Song: %s - %s", songName, songArtist)
+			log.Info("♪ 歌曲: %s - %s", songName, songArtist)
 
 			// Search correct ID
 			searchID, err := client.SearchSongViaCDP(songName, songArtist)
 			if err != nil {
-				log.Warn("Search failed: %v, using Redux ID: %s", err, data.CurPlaying.ID)
+				log.Warn("搜索失败: %v，使用 Redux ID: %s", err, data.CurPlaying.ID)
 				searchID = data.CurPlaying.ID
 			}
 			activeSongID = searchID
@@ -185,7 +174,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			currentSongTitle = songTitle
 
 			// 先发不带 base64 的 songinfo，异步下载封面后补发
-			p.emit(player.EventSongInfoUpdate, &player.SongInfo{
+			p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 				Name: songName, Singer: songArtist, Title: songTitle,
 				Cover: songCover,
 			})
@@ -193,7 +182,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			// 异步获取封面 base64，完成后补发 song_info_update
 			go func(name, artist, title, cover string) {
 				if b64 := player.FetchCoverBase64(cover, 5*time.Second); b64 != "" {
-					p.emit(player.EventSongInfoUpdate, &player.SongInfo{
+					p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 						Name: name, Singer: artist, Title: title,
 						Cover: cover, CoverBase64: b64,
 					})
@@ -203,20 +192,19 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			// Fetch lyrics via CDP
 			lrcText, err := client.FetchLyricsViaCDP(activeSongID)
 			if err != nil {
-				log.Warn("Lyrics fetch failed: %v", err)
+				log.Warn("歌词获取失败: %v", err)
 				// 不使用 data.Lyrics 兜底（可能是旧歌词），等 ForceFetchLyricsInRedux 更新后由 Redux fallback 统一推送
 			} else if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
-				log.Info("Detected pure/no lyric music, clearing lyrics.")
+				log.Info("检测到纯音乐/无歌词，清空歌词")
 				isPureMusic = true
 				// 立即发送空歌词
-				var durSec float32
 				if data.CurPlaying.Track.Duration > 0 {
-					durSec = float32(data.CurPlaying.Track.Duration) / 1000.0
+					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
-				p.emit(player.EventAllLyrics, &player.AllLyricsData{
-					SongTitle: songTitle, Duration: durSec, Lyrics: []player.LyricLine{}, Count: 0,
+				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+					SongTitle: songTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: []player.LyricLine{}, Count: 0,
 				})
-				p.emit(player.EventLyricUpdate, &player.LyricUpdate{
+				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
 					LineIndex: -1, Text: "", Timestamp: 0, PlayTime: clock.GetCurrent(),
 				})
 			} else {
@@ -235,19 +223,18 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
 				}
 
-				var durSec float32
-				if data.CurPlaying.Track.Duration > 0 {
-					durSec = float32(data.CurPlaying.Track.Duration) / 1000.0
+				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
+					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
 
-				p.emit(player.EventAllLyrics, &player.AllLyricsData{
-					SongTitle: songTitle, Duration: durSec, Lyrics: lyricItems, Count: len(lyricItems),
+				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+					SongTitle: songTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: lyricItems, Count: len(lyricItems),
 				})
 			}
 
 			// 切歌时主动发 status_update（lastPlayingState 不再重置，state change 段不会重复触发）
 			if data.PlayingState == 2 {
-				p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
 			}
 
 			// 异步强制 NetEase PC 发起内部底层 API 获取歌词
@@ -259,19 +246,18 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		if !songChanged && !isPureMusic && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) && time.Since(lastSongChangeTime) > 1*time.Second {
 			if activeSongID == "" || data.CurPlaying.ID == activeSongID || data.CurPlaying.ID == "" || data.CurPlaying.Track.Name == lastDomSongName {
 				activeLyrics = data.Lyrics
-				log.Info("Redux fallback successful: loaded %d lines of lyrics", len(activeLyrics))
+				log.Info("Redux 备用歌词加载成功: %d 行", len(activeLyrics))
 
 				// 补发全量歌词给前端
 				lyricItems := make([]player.LyricLine, len(activeLyrics))
 				for i, l := range activeLyrics {
 					lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
 				}
-				var durSec float32
-				if data.CurPlaying.Track.Duration > 0 {
-					durSec = float32(data.CurPlaying.Track.Duration) / 1000.0
+				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
+					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
-				p.emit(player.EventAllLyrics, &player.AllLyricsData{
-					SongTitle: currentSongTitle, Duration: durSec, Lyrics: lyricItems, Count: len(lyricItems),
+				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+					SongTitle: currentSongTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: lyricItems, Count: len(lyricItems),
 				})
 			}
 		}
@@ -296,9 +282,9 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			}
 		}
 
-		// Seek detection
+		// Seek detection — 切歌后短暂抑制，等待 DOM 进度条刷新到新歌曲
 		seeked := false
-		if data.DomTimeSec >= 0 && clock.Playing {
+		if data.DomTimeSec >= 0 && clock.Playing && time.Since(lastSongChangeTime) > 500*time.Millisecond {
 			diff := float32(data.DomTimeSec) - clock.GetCurrent()
 			if diff < 0 {
 				diff = -diff
@@ -306,7 +292,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if diff > 1.5 {
 				clock.BaseRealTime = float32(data.DomTimeSec)
 				clock.AnchorTime = time.Now()
-				p.emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
 				seeked = true
 			}
 		}
@@ -315,13 +301,13 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		if data.PlayingState != lastPlayingState {
 			lastPlayingState = data.PlayingState
 			if data.PlayingState == 2 {
-				p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentSongTitle})
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentSongTitle})
 				if !seeked {
-					p.emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
+					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
 				}
 			} else {
-				p.emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentSongTitle})
-				p.emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentSongTitle})
+				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
 			}
 		}
 
@@ -330,9 +316,11 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if trueLineIdx != lastLineIdx {
 				lastLineIdx = trueLineIdx
 				currentLine := activeLyrics[trueLineIdx]
-				p.emit(player.EventLyricUpdate, &player.LyricUpdate{
+				playTime := clock.GetCurrent()
+				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
 					LineIndex: trueLineIdx, Text: currentLine.Text,
-					Timestamp: currentLine.Time, PlayTime: clock.GetCurrent(),
+					Timestamp: currentLine.Time, PlayTime: playTime,
+					Progress: player.ClampFloat32(playTime/songDuration, 0, 1),
 				})
 			}
 		}

@@ -309,7 +309,7 @@ Metabox-Nexus-PlayerCap/
 ├── logger/
 │   └── logger.go          # 统一日志包（5 级别）
 ├── player/
-│   ├── player.go          # Player 接口、公共类型（Event / LyricLine / SongInfo 等）
+│   ├── player.go          # Player 接口、BaseEmitter、公共类型（Event / LyricLine / SongInfo 等）、ClampFloat32
 │   ├── cover.go           # 公共封面下载（HTTP → base64，含大小校验与截断检测）
 │   ├── wesing/            # 全民K歌 —— 基于内存读取
 │   │   ├── wesing.go      # 主轮询循环、状态机、暂停/恢复检测
@@ -338,7 +338,7 @@ Metabox-Nexus-PlayerCap/
 ├── config.yml             # 默认配置文件（首次运行自动生成）
 ├── doc/
 │   └── API_RESPONSE_EXAMPLES.md  # API 响应示例（离线参考）
-│   └── openapi.yml  # OpenAPI格式 响应示例
+│   └── openapi.yaml  # OpenAPI格式 响应示例
 └── build-assets/
     └── winicon/           # Windows .exe 图标资源 (.syso)
 ```

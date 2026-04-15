@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -160,8 +161,8 @@ func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
 
 // NotifySubscribersFullState 向根订阅者推送指定播放器的完整缓存
 // 在 activePlayer 切换时调用，先发送 player_switch 事件再推缓存
-// 返回实际发送过的事件类型集合（供 switchSkip 使用）
-func (s *Server) NotifySubscribersFullState(oldPlayer, newPlayer string) map[string]struct{} {
+// 返回实际发送过的事件类型→内容哈希（供 switchSkip 内容比对使用）
+func (s *Server) NotifySubscribersFullState(oldPlayer, newPlayer string) map[string]uint64 {
 	switchEvt := WSEvent{
 		Type:   player.EventPlayerSwitch,
 		Player: newPlayer,
@@ -170,10 +171,10 @@ func (s *Server) NotifySubscribersFullState(oldPlayer, newPlayer string) map[str
 
 	events := s.buildInitEvents(newPlayer)
 
-	// 收集实际包含的事件类型
-	sentTypes := make(map[string]struct{}, len(events))
+	// 收集实际包含的事件类型及其内容哈希
+	sentHashes := make(map[string]uint64, len(events))
 	for _, evt := range events {
-		sentTypes[evt.Type] = struct{}{}
+		sentHashes[evt.Type] = hashEventData(evt.Type, evt.Data)
 	}
 
 	s.subMu.Lock()
@@ -200,7 +201,7 @@ func (s *Server) NotifySubscribersFullState(oldPlayer, newPlayer string) map[str
 			}
 		}
 	}
-	return sentTypes
+	return sentHashes
 }
 
 // buildInitEvents 构建指定播放器的完整缓存事件列表
@@ -362,8 +363,8 @@ func (s *Server) GetPlayerStatus(playerName string) string {
 
 // --- 启动 & 路由注册 ---
 
-// Start 启动 HTTP 服务
-func (s *Server) Start(addr string) error {
+// Start 启动 HTTP 服务；readyCh 非 nil 时，端口监听成功后会 close(readyCh) 通知调用方
+func (s *Server) Start(addr string, readyCh chan struct{}) error {
 	mux := http.NewServeMux()
 
 	// 声明式路由表：新增播放器零代码注册
@@ -403,8 +404,15 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("/health-check", s.handleHealthCheck)
 	mux.HandleFunc("/service-status", s.handleServiceStatus)
 
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
 	serverLog.Info("服务启动: %s", addr)
-	return http.ListenAndServe(addr, corsMiddleware(mux))
+	if readyCh != nil {
+		close(readyCh)
+	}
+	return http.Serve(ln, corsMiddleware(mux))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
