@@ -2,9 +2,10 @@ package player
 
 // LyricLine 歌词行
 type LyricLine struct {
-	Index int     `json:"index"`
-	Time  float32 `json:"time"`
-	Text  string  `json:"text"`
+	Index   int     `json:"index"`
+	Time    float32 `json:"time"`
+	Text    string  `json:"text"`
+	SubText string  `json:"sub_text"`
 }
 
 // SongInfo 歌曲信息

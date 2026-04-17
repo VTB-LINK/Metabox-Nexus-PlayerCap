@@ -232,14 +232,18 @@ func New(offsetMs, pollMs int) *MyPlayer {
 |------|-----------|------|
 | `EventStatusUpdate` | `StatusInfo` | 播放器状态变化 |
 | `EventSongInfoUpdate` | `SongInfo` | 歌曲元信息（歌名、歌手、封面） |
-| `EventLyricUpdate` | `LyricUpdate` | 当前歌词行（含进度） |
-| `EventAllLyrics` | `AllLyricsData` | 完整歌词列表 + 时长 |
+| `EventLyricUpdate` | `LyricUpdate` | 当前歌词行（含进度、`sub_text` 副歌词） |
+| `EventAllLyrics` | `AllLyricsData` | 完整歌词列表 + 时长（每行含 `sub_text`） |
 | `EventPlaybackPause` | `PlaybackTimeInfo` | 播放暂停 |
-| `EventPlaybackResume` | `PlaybackTimeInfo` | 播放恢复 |
+| `EventPlaybackResume` | `PlaybackTimeInfo` | 播放恢复（也用于 seek/时间跳转通知，见 §4.7） |
 | `EventLyricIdle` | `nil` | 歌词空闲 |
 | `EventClearSongData` | `nil` | 清除歌曲数据 |
 | `EventPlayerSwitch` | `PlayerSwitchInfo` | 播放器切换（由 Router 发出） |
 | `EventPlayerClear` | `struct{}{}` | 活跃播放器清除，无播放器输出（由 Router 发出） |
+
+#### 副歌词字段（`sub_text`）
+
+`LyricUpdate` 和 `LyricLine`（`AllLyricsData.Lyrics` 中的每行）均包含 `sub_text` 字段，用于携带翻译、音译等副歌词。该字段为 future-proof 设计，当前始终为空字符串 `""`。JSON 序列化时**保留字段**（不使用 `omitempty`），确保下游消费者无需判断字段是否存在。
 
 ### 4.4 StatusInfo 状态值约定
 
@@ -297,7 +301,18 @@ Start():
 - 播放器标识名（`Name()` 返回值）必须与配置中的 YAML key 前缀一致。
 - 配置字段遵循 `<name>-offset` / `<name>-poll` 命名模式。
 
-### 4.7 完整接入步骤
+### 4.7 播放器时间跳转（seek）复用 `playback_resume`
+
+播放中检测到大幅时间跳变（seek/回放）时，播放器**不发送独立的 seek 事件**，而是复用 `EventPlaybackResume`（携带跳转后的 `PlayTime`）。下游消费者通过 `PlaybackTimeInfo.PlayTime` 即可获取最新播放位置，无需区分"恢复播放"与"时间跳转"。
+
+| 播放器 | 检测方式 | 阈值 |
+|--------|----------|------|
+| WeSing | `playTime < lastPlayTime - 2.0`（内存读取的播放时间回退） | 2 秒 |
+| CloudMusic | `abs(domTimeSec - clock) > 1.5`（DOM 进度条与本地时钟偏差） | 1.5 秒 |
+
+两端检测到跳转后均重置内部时钟锚点并发射 `playback_resume`，使 `lyric_update` 后续行号同步到新位置。
+
+### 4.8 完整接入步骤
 
 1. 在 `player/<name>/` 下创建包，嵌入 `player.BaseEmitter` 并实现 `Start()` 方法。
 2. 声明 `const PlayerName = "<name>"` 和 `var log = logger.New("DisplayName")`。

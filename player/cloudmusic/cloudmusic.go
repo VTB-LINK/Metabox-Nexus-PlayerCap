@@ -197,6 +197,20 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				log.Warn("歌词获取失败: %v", err)
 				// 不使用 data.Lyrics 兜底（可能是旧歌词），等 ForceFetchLyricsInRedux 更新后由 Redux fallback 统一推送
 			} else if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
+				// 搜索 ID 返回纯音乐，但 Redux ID 可能是正确的（如组曲/混音歌曲搜索匹配到原曲）
+				reduxID := data.CurPlaying.ID
+				if reduxID != "" && reduxID != activeSongID {
+					log.Info("搜索 ID %s 返回纯音乐，尝试 Redux ID %s", activeSongID, reduxID)
+					lrcText2, err2 := client.FetchLyricsViaCDP(reduxID)
+					if err2 == nil && lrcText2 != "[PURE_MUSIC]" && lrcText2 != "[NO_LYRIC]" && lrcText2 != "" {
+						log.Info("Redux ID %s 歌词获取成功，使用 Redux 歌词", reduxID)
+						activeSongID = reduxID
+						lrcText = lrcText2
+					}
+				}
+			}
+
+			if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
 				log.Info("检测到纯音乐/无歌词，清空歌词")
 				isPureMusic = true
 				// 立即发送空歌词
