@@ -199,34 +199,33 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			} else if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
 				// CDP 返回纯音乐，用 Go HTTP API + Redux ID 二次确认（避免 CDP 上下文差异和 Redux 脏数据）
 				reduxID := data.CurPlaying.ID
+				log.Info("CDP 返回纯音乐(searchID=%s), Redux ID=%s", activeSongID, reduxID)
 				if reduxID != "" {
-					log.Info("CDP 返回纯音乐，用 Redux ID %s 直接请求 API 二次确认", reduxID)
 					if apiLyrics, err2 := lyric.FetchLyrics(reduxID); err2 == nil && len(apiLyrics) > 0 {
-						log.Info("API 二次确认有 %d 行歌词，使用 API 歌词", len(apiLyrics))
+						log.Info("API 二次确认(ID=%s)有 %d 行歌词，使用 API 歌词", reduxID, len(apiLyrics))
 						for _, l := range apiLyrics {
 							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
 								Index: l.Index, Time: l.Time, Text: l.Text,
 							})
 						}
 						cdpLyricsOK = true
-						lrcText = "" // 清除纯音乐标记
+					} else {
+						log.Info("API 二次确认(ID=%s)也无歌词，标记纯音乐", reduxID)
+						isPureMusic = true
+						if data.CurPlaying.Track.Duration > 0 {
+							songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
+						}
+						p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+							SongTitle: songTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: []player.LyricLine{}, Count: 0,
+						})
+						p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+							LineIndex: -1, Text: "", Timestamp: 0, PlayTime: clock.GetCurrent(),
+						})
 					}
+				} else {
+					// Redux ID 为空（切歌瞬间未更新），不标记纯音乐，交给 Redux fallback 补救
+					log.Info("Redux ID 为空，等待 Redux fallback 补救")
 				}
-			}
-
-			if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
-				log.Info("检测到纯音乐/无歌词，清空歌词")
-				isPureMusic = true
-				// 立即发送空歌词
-				if data.CurPlaying.Track.Duration > 0 {
-					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
-				}
-				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-					SongTitle: songTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: []player.LyricLine{}, Count: 0,
-				})
-				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					LineIndex: -1, Text: "", Timestamp: 0, PlayTime: clock.GetCurrent(),
-				})
 			} else {
 				cdpLyricsOK = true
 				parsed := lyric.ParseLRC(lrcText)
@@ -281,6 +280,21 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					SongTitle: currentSongTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: lyricItems, Count: len(lyricItems),
 				})
 			}
+		}
+
+		// 超时兜底：CDP 失败且 Redux fallback 超时后仍无歌词，清空前端
+		if !songChanged && !isPureMusic && !cdpLyricsOK && len(activeLyrics) == 0 && time.Since(lastSongChangeTime) > 3*time.Second {
+			log.Info("歌词获取超时，标记纯音乐并清空前端")
+			isPureMusic = true
+			if songDuration == 0 && data.CurPlaying != nil && data.CurPlaying.Track.Duration > 0 {
+				songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
+			}
+			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+				SongTitle: currentSongTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: []player.LyricLine{}, Count: 0,
+			})
+			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+				LineIndex: -1, Text: "", Timestamp: 0, PlayTime: clock.GetCurrent(),
+			})
 		}
 
 		// Update clock
