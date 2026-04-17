@@ -89,7 +89,7 @@ func FetchSongDetail(songID string) (*SongDetail, error) {
 			CoverUrl: s.Album.PicUrl,
 			Duration: s.Duration,
 		}
-		log.Detail("Song detail: %s - %s, cover: %s", detail.Name, detail.Artist, detail.CoverUrl)
+		log.Detail("歌曲详情: %s - %s, 封面: %s", detail.Name, detail.Artist, detail.CoverUrl)
 		return detail, nil
 	}
 
@@ -128,7 +128,7 @@ func FetchLyrics(songID string) ([]LyricLine, error) {
 	}
 
 	lines := ParseLRC(apiResp.Lrc.Lyric)
-	log.Info("Fetched %d lyrics from API for song %s", len(lines), songID)
+	log.Info("歌词加载完成(API): %d 行 (ID=%s)", len(lines), songID)
 	return lines, nil
 }
 
@@ -181,14 +181,14 @@ func SearchSongID(songName string, artist string) (string, error) {
 	for _, s := range searchResp.Result.Songs {
 		if s.Name == songName {
 			id := fmt.Sprintf("%d", s.ID)
-			log.Detail("Search: exact match %s (ID: %s)", s.Name, id)
+			log.Detail("搜索: 精确匹配 %s (ID: %s)", s.Name, id)
 			return id, nil
 		}
 	}
 
 	// Fallback to first result
 	id := fmt.Sprintf("%d", searchResp.Result.Songs[0].ID)
-	log.Detail("Search: using first result %s (ID: %s)", searchResp.Result.Songs[0].Name, id)
+	log.Detail("搜索: 使用首个结果 %s (ID: %s)", searchResp.Result.Songs[0].Name, id)
 	return id, nil
 }
 

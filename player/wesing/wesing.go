@@ -152,7 +152,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 
 		case proc.PhasePlaying:
 			if state.SongTitle != lastTitle {
-				log.Info("♪ 歌曲开始: %s", state.SongTitle)
+				log.Info("♪ 歌曲: %s", state.SongTitle)
 				lastTitle = state.SongTitle
 			}
 		}
@@ -252,7 +252,7 @@ func (p *WesingPlayer) initSong(handle syscall.Handle, pid uint32, modules []pro
 	if err != nil || len(lyrics) == 0 {
 		return nil, 0, false
 	}
-	log.Info("加载了 %d 行歌词", len(lyrics))
+	log.Info("歌词加载完成: %d 行", len(lyrics))
 
 	if cachedTimeAddr != 0 {
 		if t, err := lyric.ReadPlayTime(handle, cachedTimeAddr); err == nil && t >= 0 && t < 100000 {

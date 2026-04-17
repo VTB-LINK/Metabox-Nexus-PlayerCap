@@ -11,7 +11,7 @@ import (
 func PatchRegistryAutoStart() {
 	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
-		log.Error("Error opening Run key: %v", err)
+		log.Error("打开注册表 Run 键失败: %v", err)
 		return
 	}
 	defer key.Close()
@@ -26,11 +26,11 @@ func PatchRegistryAutoStart() {
 		newVal := val + " " + DebugFlag
 		err = key.SetStringValue("cloudmusic", newVal)
 		if err != nil {
-			log.Error("Error setting new run value: %v", err)
+			log.Error("设置注册表 Run 值失败: %v", err)
 		} else {
-			log.Success("Patched CloudMusic auto-start: %s", newVal)
+			log.Success("已修补网易云自启动参数: %s", newVal)
 		}
 	} else {
-		log.Info("CloudMusic auto-start is already patched.")
+		log.Info("网易云自启动调试参数已就绪")
 	}
 }

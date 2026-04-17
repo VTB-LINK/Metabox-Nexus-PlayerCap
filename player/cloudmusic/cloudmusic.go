@@ -266,7 +266,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		if !songChanged && !isPureMusic && !cdpLyricsOK && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) && time.Since(lastSongChangeTime) > 1*time.Second {
 			if activeSongID == "" || data.CurPlaying.ID == activeSongID || data.CurPlaying.ID == "" || data.CurPlaying.Track.Name == lastDomSongName {
 				activeLyrics = data.Lyrics
-				log.Info("Redux 备用歌词加载成功: %d 行", len(activeLyrics))
+				log.Info("歌词加载完成(Redux): %d 行", len(activeLyrics))
 
 				// 补发全量歌词给前端
 				lyricItems := make([]player.LyricLine, len(activeLyrics))
