@@ -1714,7 +1714,7 @@
                             cleanupScrollAnim();
                             transitionOut(display, () => {
                                 if (stOverflow !== 'wrap') {
-                                    display.innerHTML = `<div class="lyric-line current appear" style="overflow:hidden;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${displayText}</span></div>`;
+                                    display.innerHTML = `<div class="lyric-line current appear" style="overflow:hidden;text-align:left;width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${displayText}</span></div>`;
                                     requestAnimationFrame(() => {
                                         requestAnimationFrame(() => {
                                             const wrap = display.querySelector('.st-scroll-wrap');
@@ -1897,9 +1897,12 @@
         }
         function initScrollAnimation(wrapEl, cfg) {
             cleanupScrollAnim();
-            const container = document.getElementById('lyricsDisplay');
+            const clipEl = wrapEl.parentElement;
+            const cs = getComputedStyle(clipEl);
+            const padL = parseFloat(cs.paddingLeft) || 0;
+            const padR = parseFloat(cs.paddingRight) || 0;
             const textWidth = wrapEl.scrollWidth;
-            const containerWidth = container.clientWidth;
+            const containerWidth = clipEl.clientWidth - padL - padR;
             if (textWidth <= containerWidth) return; // 无溢出无需滚动
             const overflow = textWidth - containerWidth;
 
@@ -2000,7 +2003,7 @@
             } else {
                 // one_line 模式：只显示当前行
                 if (pureOverflow !== 'wrap') {
-                    html += `<div class="lyric-line current appear" style="overflow:hidden;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${data.text}</span></div>`;
+                    html += `<div class="lyric-line current appear" style="overflow:hidden;text-align:left;width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${data.text}</span></div>`;
                 } else {
                     html += `<div class="lyric-line current appear">${data.text}</div>`;
                 }
