@@ -180,6 +180,12 @@
             display: none;
         }
 
+        /* Cover pause shrink mode */
+        .cover-art.cover-shrunk {
+            transform-origin: center center;
+            transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.6s ease;
+        }
+
         .song-meta {
             text-align: left;
         }
@@ -495,11 +501,55 @@
             border: none;
             backdrop-filter: none;
             height: auto;
+            min-height: 0;
             overflow: visible;
             padding: 0;
         }
 
         body.pure-mode .lyrics-display::before {
+            display: none;
+        }
+
+        /* Song-title mode (reuse pure-mode layout) */
+
+        body.song-title-mode {
+            background: transparent;
+        }
+
+        body.song-title-mode .bg-particles {
+            display: none;
+        }
+
+        body.song-title-mode .container {
+            width: 100%;
+            max-width: 100%;
+        }
+
+        body.song-title-mode .header,
+        body.song-title-mode .song-info-row {
+            display: none;
+        }
+
+        body.song-title-mode .progress-bar,
+        body.song-title-mode .info-bar {
+            display: none;
+        }
+
+        body.song-title-mode .all-lyrics {
+            display: none;
+        }
+
+        body.song-title-mode .lyrics-display {
+            background: transparent;
+            border: none;
+            backdrop-filter: none;
+            height: auto;
+            min-height: 0;
+            overflow: visible;
+            padding: 0;
+        }
+
+        body.song-title-mode .lyrics-display::before {
             display: none;
         }
 
@@ -1154,8 +1204,19 @@
         .editor-range-value {
             font-size: 0.75rem;
             color: rgba(255, 255, 255, 0.5);
-            min-width: 32px;
+            min-width: 48px;
+            width: 48px;
+            flex: none;
             text-align: right;
+        }
+
+        /* 滑条旁数字框与文本值对齐 */
+        .editor-row input[type="number"].range-num-input {
+            width: 48px;
+            flex: none;
+            text-align: center;
+            padding: 3px 4px;
+            font-size: 0.78rem;
         }
 
 
@@ -1237,6 +1298,23 @@
         // URL 参数解析
         const urlParams = new URLSearchParams(window.location.search);
         const pureMode = urlParams.has('pure');
+        const songTitleMode = urlParams.has('song_title');
+        const songTitleFormat = urlParams.get('song_title_format') || 'name';
+        const songTitleSep = urlParams.get('song_title_sep') || ' / ';
+
+        // 歌名溢出模式参数
+        const stOverflow = urlParams.get('st_overflow') || 'wrap';
+        const stScrollSpeed = parseFloat(urlParams.get('st_scroll_speed') || '50');
+        const stPpTime = parseFloat(urlParams.get('st_pp_time') || '3');
+        const stPpPause = parseFloat(urlParams.get('st_pp_pause') || '1.5');
+        const stScrollEase = urlParams.get('st_scroll_ease') || 'ease-in-out';
+
+        // 歌词（纯）溢出模式参数
+        const pureOverflow = urlParams.get('overflow') || 'wrap';
+        const pureScrollSpeed = parseFloat(urlParams.get('scroll_speed') || '50');
+        const purePpTime = parseFloat(urlParams.get('pp_time') || '3');
+        const purePpPause = parseFloat(urlParams.get('pp_pause') || '1.5');
+        const pureScrollEase = urlParams.get('scroll_ease') || 'ease-in-out';
         const oneLineMode = urlParams.has('one_line');
         const fontColor = urlParams.get('color') || null;
         const customFont = urlParams.get('font') || null;
@@ -1253,6 +1331,13 @@
         const coverRotate = urlParams.get('cover_rotate') || 'playback';
         const coverSpinSpeed = parseFloat(urlParams.get('cover_spin_speed') || '12');
         const coverSize = parseInt(urlParams.get('cover_size') || '80');
+
+        // 封面暂停行为参数
+        // cover_pause: 'none'(默认，不处理) | 'hold'(暂停后等待N秒隐藏) | 'shrink'(缩小到角落，永不隐藏)
+        const coverPauseMode = urlParams.get('cover_pause') || 'none';
+        const coverPauseHold = parseFloat(urlParams.get('cover_pause_hold') ?? '-1'); // -1=永不隐藏, 0+=秒数
+        let coverPauseDir = urlParams.get('cover_pause_dir') || 'bl';
+        let coverPauseScale = Math.max(0, Math.min(1, parseFloat(urlParams.get('cover_pause_scale') || '0.25')));
 
         // 字号缩放 & 文本对齐
         const fontScale = Math.max(0.5, Math.min(3, parseFloat(urlParams.get('font_scale')) || 1));
@@ -1272,6 +1357,31 @@
             fontLink.rel = 'stylesheet';
             document.head.appendChild(fontLink);
             document.body.style.fontFamily = `'${customFont.replace(/\+/g, ' ')}', 'Noto Sans SC', sans-serif`;
+        }
+
+        // 根据 song_title 模式应用样式（复用 pure 逻辑）
+        if (songTitleMode) {
+            document.documentElement.style.backgroundColor = bgColor || 'transparent';
+            document.body.style.background = bgColor || 'transparent';
+            document.body.classList.add('song-title-mode');
+
+            const dynamicRules = [];
+            const textColor = fontColor || '#fff';
+            let shadowCSS = 'none';
+            if (glowEnabled) {
+                const gc = glowColor || 'rgba(255, 107, 107, 0.5)';
+                shadowCSS = `0 0 20px ${gc}, 0 0 40px ${gc}, 0 0 80px ${gc}`;
+            }
+            let strokeCSS = '';
+            if (strokeEnabled) {
+                strokeCSS = `-webkit-text-stroke: ${strokeWidth}px ${strokeColor}; paint-order: stroke fill;`;
+            }
+            dynamicRules.push(`.lyric-line.current { color: ${textColor} !important; text-shadow: ${shadowCSS} !important; ${strokeCSS} }`);
+            if (dynamicRules.length) {
+                const style = document.createElement('style');
+                style.textContent = dynamicRules.join('\n');
+                document.head.appendChild(style);
+            }
         }
 
         // 根据 pure 模式应用样式
@@ -1449,6 +1559,111 @@
             }
         }
 
+        // === 封面暂停行为引擎 ===
+        let _coverPauseTimer = null;
+        let _coverIsShrunk = false;
+        let _coverIsHidden = false;
+        let _coverPauseProtect = false; // 防止 player_clear 清除封面（shrink/hold -1 模式）
+
+        function getShrinkTransform(dir, artEl) {
+            // 在封面自身区域内缩小并移到指定角落/边
+            const scale = coverPauseScale;
+            const w = artEl.offsetWidth;
+            const h = artEl.offsetHeight;
+            const dx = w * (1 - scale) / 2;
+            const dy = h * (1 - scale) / 2;
+            const map = {
+                'tl': { x: -dx, y: -dy },
+                't':  { x: 0,   y: -dy },
+                'tr': { x:  dx, y: -dy },
+                'l':  { x: -dx, y: 0 },
+                'r':  { x:  dx, y: 0 },
+                'bl': { x: -dx, y:  dy },
+                'b':  { x: 0,   y:  dy },
+                'br': { x:  dx, y:  dy }
+            };
+            const offset = map[dir] || map['bl'];
+            return `translate(${offset.x.toFixed(1)}px, ${offset.y.toFixed(1)}px) scale(${scale})`;
+        }
+
+        function animateShrink(art) {
+            // 先重置到原始状态，再执行缩小动画
+            art.classList.remove('cover-shrunk');
+            art.style.transform = '';
+            void art.offsetWidth; // 强制回流
+            art.classList.add('cover-shrunk');
+            void art.offsetWidth;
+            art.style.transform = getShrinkTransform(coverPauseDir, art);
+            _coverIsShrunk = true;
+        }
+
+        function coverPauseAction() {
+            const art = document.getElementById('coverArt');
+            if (!art || !art.classList.contains('visible')) return;
+            clearTimeout(_coverPauseTimer);
+
+            if (coverPauseMode === 'shrink') {
+                _coverPauseProtect = true; // 永不被 player_clear 隐藏
+                animateShrink(art);
+            } else if (coverPauseMode === 'hold') {
+                if (coverPauseHold < 0) {
+                    // -1: 永不隐藏
+                    _coverPauseProtect = true;
+                } else {
+                    // 0 或正数：暂停后 N 秒隐藏，且 override player_clear
+                    _coverPauseProtect = true;
+                    _coverPauseTimer = setTimeout(() => {
+                        art.classList.remove('visible');
+                        _coverIsHidden = true;
+                        _coverPauseProtect = false;
+                    }, coverPauseHold * 1000);
+                }
+            }
+            // 'none' 模式：什么都不做，player_clear 正常清除
+        }
+
+        function coverResumeAction() {
+            const art = document.getElementById('coverArt');
+            if (!art) return;
+            clearTimeout(_coverPauseTimer);
+            _coverPauseProtect = false;
+
+            if (_coverIsShrunk) {
+                art.style.transform = '';
+                // 动画完成后移除 class
+                setTimeout(() => { art.classList.remove('cover-shrunk'); }, 650);
+                _coverIsShrunk = false;
+            }
+            if (_coverIsHidden) {
+                art.classList.add('visible');
+                _coverIsHidden = false;
+            }
+        }
+
+        // === 编辑器 → 预览 实时参数更新（免重载） ===
+        window.addEventListener('message', (event) => {
+            if (!event.data || event.data.type !== 'shrinkUpdate') return;
+            coverPauseScale = Math.max(0, Math.min(1, event.data.scale));
+            coverPauseDir = event.data.dir;
+            const art = document.getElementById('coverArt');
+            if (!art || !art.classList.contains('visible')) return;
+
+            if (_coverIsShrunk) {
+                // 暂停状态：用新参数重新执行缩小动画
+                animateShrink(art);
+            } else if (isPlaying) {
+                // 播放状态：执行一次 缩小→恢复 的预览动画
+                animateShrink(art);
+                setTimeout(() => {
+                    art.style.transform = '';
+                    setTimeout(() => {
+                        art.classList.remove('cover-shrunk');
+                        _coverIsShrunk = false;
+                    }, 650);
+                }, 700);
+            }
+        });
+
         function connect() {
             ws = new WebSocket(WS_URL);
 
@@ -1485,14 +1700,47 @@
                         document.getElementById('songTitle').textContent = '♪ ' + data.data.title;
                         // 更新封面和歌曲信息行
                         updateSongInfoRow(data.data);
+                        // song_title 模式：在歌词区显示歌名
+                        if (songTitleMode) {
+                            let displayText = '';
+                            if (songTitleFormat === 'title') {
+                                const n = data.data.name || '';
+                                const s = data.data.singer || '';
+                                displayText = (n && s) ? n + songTitleSep + s : (n || s || data.data.title);
+                            } else {
+                                displayText = data.data.name || data.data.title;
+                            }
+                            const display = document.getElementById('lyricsDisplay');
+                            cleanupScrollAnim();
+                            transitionOut(display, () => {
+                                if (stOverflow !== 'wrap') {
+                                    display.innerHTML = `<div class="lyric-line current appear" style="overflow:hidden;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${displayText}</span></div>`;
+                                    requestAnimationFrame(() => {
+                                        requestAnimationFrame(() => {
+                                            const wrap = display.querySelector('.st-scroll-wrap');
+                                            if (wrap) initScrollAnimation(wrap, _stScrollCfg);
+                                        });
+                                    });
+                                } else {
+                                    display.innerHTML = `<div class="lyric-line current appear">${displayText}</div>`;
+                                }
+                            });
+                        }
                     } else {
                         // 歌曲信息清空
                         hideSongInfoRow();
+                        if (songTitleMode) {
+                            cleanupScrollAnim();
+                            const display = document.getElementById('lyricsDisplay');
+                            transitionOut(display, () => { display.innerHTML = ''; });
+                        }
                     }
                 }
 
                 if (data.type === 'all_lyrics') {
-                    if (data.data && data.data.lyrics) {
+                    if (songTitleMode) {
+                        // song_title 模式忽略歌词事件，仅由 song_info_update 驱动
+                    } else if (data.data && data.data.lyrics) {
                         // 同播放器切歌：重置歌词状态
                         currentIndex = -1;
                         allLyrics = data.data.lyrics;
@@ -1522,7 +1770,9 @@
                 }
 
                 if (data.type === 'lyric_update') {
-                    if (!data.data || !data.data.text) {
+                    if (songTitleMode) {
+                        // song_title 模式忽略歌词更新
+                    } else if (!data.data || !data.data.text) {
                         // 空消息：不做处理，保留当前封面/歌词状态
                     } else {
                         currentIndex = data.data.line_index;
@@ -1538,6 +1788,7 @@
                     stopInterpolation();
                     isPlaying = false;
                     if (coverRotate === 'playback') setCoverPlaying(false);
+                    coverPauseAction();
                 }
 
                 if (data.type === 'playback_resume') {
@@ -1546,6 +1797,7 @@
                     }
                     isPlaying = true;
                     if (coverRotate === 'playback') setCoverPlaying(true);
+                    coverResumeAction();
                 }
 
                 if (data.type === 'lyric_idle') {
@@ -1564,6 +1816,7 @@
                     document.getElementById('lineInfo').textContent = '--';
                     document.getElementById('timeInfo').textContent = '--:-- / --:--';
                     // 丝滑过渡清空歌词区
+                    cleanupScrollAnim();
                     if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
                     const display = document.getElementById('lyricsDisplay');
                     transitionOut(display, () => { display.innerHTML = ''; });
@@ -1593,19 +1846,33 @@
                     resetCoverState();
                     _currentCoverURL = '';
                     clearTimeout(_coverTransitionTimer);
-                    // 封面淡出（与歌词退场同步），完成后再清理资源
-                    document.getElementById('coverArt').classList.remove('visible');
+                    const _clearCoverArt = document.getElementById('coverArt');
+                    if (_coverPauseProtect) {
+                        // shrink 或 hold(-1) 模式：保留封面，不清除
+                    } else {
+                        // 重置暂停行为状态
+                        clearTimeout(_coverPauseTimer);
+                        _coverIsShrunk = false;
+                        _coverIsHidden = false;
+                        _clearCoverArt.classList.remove('cover-shrunk');
+                        _clearCoverArt.style.transform = '';
+                        // 封面淡出（与歌词退场同步），完成后再清理资源
+                        _clearCoverArt.classList.remove('visible');
+                    }
                     clearTimeout(window._coverCleanupTimer);
                     window._coverCleanupTimer = setTimeout(() => {
-                        document.getElementById('coverImg').src = '';
-                        document.getElementById('coverImgOld').src = '';
-                        document.getElementById('songName').textContent = '';
-                        document.getElementById('songSinger').textContent = '';
+                        if (!_coverPauseProtect) {
+                            document.getElementById('coverImg').src = '';
+                            document.getElementById('coverImgOld').src = '';
+                            document.getElementById('songName').textContent = '';
+                            document.getElementById('songSinger').textContent = '';
+                        }
                     }, 300);
                     document.getElementById('allLyrics').innerHTML = '';
                     document.getElementById('progressFill').style.width = '0%';
                     document.getElementById('lineInfo').textContent = '--';
                     document.getElementById('timeInfo').textContent = '--:-- / --:--';
+                    cleanupScrollAnim();
                     if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
                     const clearDisplay = document.getElementById('lyricsDisplay');
                     transitionOut(clearDisplay, () => { clearDisplay.innerHTML = ''; });
@@ -1620,6 +1887,67 @@
                 }
             };
         }
+
+        // === 溢出滚动引擎（通用） ===
+        let _scrollAnim = null;
+        let _scrollPpTimer = null;
+        function cleanupScrollAnim() {
+            if (_scrollAnim) { _scrollAnim.cancel(); _scrollAnim = null; }
+            if (_scrollPpTimer) { clearTimeout(_scrollPpTimer); _scrollPpTimer = null; }
+        }
+        function initScrollAnimation(wrapEl, cfg) {
+            cleanupScrollAnim();
+            const container = document.getElementById('lyricsDisplay');
+            const textWidth = wrapEl.scrollWidth;
+            const containerWidth = container.clientWidth;
+            if (textWidth <= containerWidth) return; // 无溢出无需滚动
+            const overflow = textWidth - containerWidth;
+
+            if (cfg.mode === 'scroll') {
+                const gap = 80;
+                const origHTML = wrapEl.innerHTML;
+                wrapEl.innerHTML = origHTML + '<span style="display:inline-block;width:' + gap + 'px;"></span>' + origHTML;
+                const scrollDist = textWidth + gap;
+                const duration = (scrollDist / cfg.speed) * 1000;
+                _scrollAnim = wrapEl.animate([
+                    { transform: 'translateX(0)' },
+                    { transform: 'translateX(-' + scrollDist + 'px)' }
+                ], {
+                    duration: duration,
+                    iterations: Infinity,
+                    easing: 'linear'
+                });
+                wrapEl.style.opacity = '0';
+                requestAnimationFrame(() => {
+                    wrapEl.style.transition = 'opacity 0.4s ' + cfg.ease;
+                    wrapEl.style.opacity = '1';
+                });
+            } else if (cfg.mode === 'pingpong') {
+                function pingPongCycle() {
+                    _scrollAnim = wrapEl.animate([
+                        { transform: 'translateX(0)' },
+                        { transform: 'translateX(-' + overflow + 'px)' }
+                    ], { duration: cfg.ppTime * 1000, easing: cfg.ease, fill: 'forwards' });
+                    _scrollAnim.onfinish = () => {
+                        _scrollPpTimer = setTimeout(() => {
+                            _scrollAnim = wrapEl.animate([
+                                { transform: 'translateX(-' + overflow + 'px)' },
+                                { transform: 'translateX(0)' }
+                            ], { duration: cfg.ppTime * 1000, easing: cfg.ease, fill: 'forwards' });
+                            _scrollAnim.onfinish = () => {
+                                _scrollPpTimer = setTimeout(pingPongCycle, cfg.ppPause * 1000);
+                            };
+                        }, cfg.ppPause * 1000);
+                    };
+                }
+                _scrollPpTimer = setTimeout(pingPongCycle, cfg.ppPause * 1000);
+            }
+        }
+
+        // 便捷：歌名模式滚动配置
+        const _stScrollCfg = { mode: stOverflow, speed: stScrollSpeed, ppTime: stPpTime, ppPause: stPpPause, ease: stScrollEase };
+        // 便捷：歌词模式滚动配置
+        const _pureScrollCfg = { mode: pureOverflow, speed: pureScrollSpeed, ppTime: purePpTime, ppPause: purePpPause, ease: pureScrollEase };
 
         // === 歌词过渡动效引擎 ===
         let _exitTimer = null;
@@ -1671,13 +1999,28 @@
                 }
             } else {
                 // one_line 模式：只显示当前行
-                html += `<div class="lyric-line current appear">${data.text}</div>`;
+                if (pureOverflow !== 'wrap') {
+                    html += `<div class="lyric-line current appear" style="overflow:hidden;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${data.text}</span></div>`;
+                } else {
+                    html += `<div class="lyric-line current appear">${data.text}</div>`;
+                }
                 if (data.sub_text) {
                     html += `<div class="lyric-sub-text">${data.sub_text}</div>`;
                 }
             }
 
-            transitionOut(display, () => { display.innerHTML = html; });
+            cleanupScrollAnim();
+            transitionOut(display, () => {
+                display.innerHTML = html;
+                if (oneLineMode && pureOverflow !== 'wrap') {
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            const wrap = display.querySelector('.st-scroll-wrap');
+                            if (wrap) initScrollAnimation(wrap, _pureScrollCfg);
+                        });
+                    });
+                }
+            });
         }
 
         function findLyricByIndex(index) {
@@ -1820,7 +2163,7 @@
         let _coverTransitionTimer = null;
 
         function updateSongInfoRow(info) {
-            if (pureMode) return;
+            if (pureMode || songTitleMode) return;
             // 取消 player_clear/player_switch 的延迟清理，避免覆盖新封面
             clearTimeout(window._coverCleanupTimer);
             const row = document.getElementById('songInfoRow');
@@ -1831,6 +2174,15 @@
 
             songName.textContent = info.name || '';
             songSinger.textContent = info.singer || '';
+
+            // 重置暂停行为状态（切歌/新歌信息覆盖暂停状态）
+            clearTimeout(_coverPauseTimer);
+            if (_coverIsShrunk) {
+                coverArt.classList.remove('cover-shrunk');
+                coverArt.style.transform = '';
+                _coverIsShrunk = false;
+            }
+            _coverIsHidden = false;
 
             // 优先使用 base64，其次使用 URL
             const coverSrc = info.cover_base64 || info.cover || '';
@@ -1916,7 +2268,7 @@
         }
 
         function hideSongInfoRow() {
-            if (pureMode) return;
+            if (pureMode || songTitleMode) return;
             const row = document.getElementById('songInfoRow');
             const coverArt = document.getElementById('coverArt');
             row.style.display = 'none';
@@ -1944,7 +2296,8 @@
                                 <p>歌词配置编辑器</p>
                             </div>
                             <button class="editor-mode-btn active" data-mode="default"><span class="mode-icon">🎵</span> 默认</button>
-                            <button class="editor-mode-btn" data-mode="pure"><span class="mode-icon">📝</span> 纯净</button>
+                            <button class="editor-mode-btn" data-mode="pure"><span class="mode-icon">📝</span> 歌词</button>
+                            <button class="editor-mode-btn" data-mode="song_title"><span class="mode-icon">🎤</span> 歌名</button>
                             <button class="editor-mode-btn" data-mode="cover"><span class="mode-icon">💿</span> 封面</button>
                             <div class="editor-nav-bottom">
                                 <div class="editor-row"><label>播放器</label></div>
@@ -1956,7 +2309,7 @@
                             </div>
                         </div>
                         <div class="editor-detail" id="editorDetail">
-                        <!-- 显示 -->
+                        <!-- 显示（默认/歌词模式） -->
                         <div class="editor-group" data-modes="default pure">
                             <div class="editor-group-title">显示</div>
                             <div class="editor-row">
@@ -1981,7 +2334,110 @@
                             </div>
                         </div>
 
-                        <!-- 歌词样式 -->
+                        <!-- 溢出设置（歌词模式，单行时生效） -->
+                        <div class="editor-group" data-modes="pure">
+                            <div class="editor-group-title">溢出设置</div>
+                            <div class="editor-row">
+                                <label>溢出模式</label>
+                                <select id="cfgPureOverflow">
+                                    <option value="wrap">自动换行</option>
+                                    <option value="scroll">循环滚动</option>
+                                    <option value="pingpong">Ping-Pong</option>
+                                </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowPureScrollSpeed" style="display:none;">
+                                <label>滚动速度</label>
+                                <input type="range" id="cfgPureScrollSpeed" min="10" max="200" value="50" step="5">
+                                <span class="editor-range-value" id="pureScrollSpeedVal">50 px/s</span>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowPurePpTime" style="display:none;">
+                                <label>单程时间</label>
+                                <input type="range" id="cfgPurePpTime" min="1" max="15" value="3" step="0.5">
+                                <span class="editor-range-value" id="purePpTimeVal">3s</span>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowPurePpPause" style="display:none;">
+                                <label>端点停顿</label>
+                                <input type="range" id="cfgPurePpPause" min="0" max="5" value="1.5" step="0.5">
+                                <span class="editor-range-value" id="purePpPauseVal">1.5s</span>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowPureScrollEase" style="display:none;">
+                                <label>缓动效果</label>
+                                <select id="cfgPureScrollEase">
+                                    <option value="ease-in-out">平滑 (ease-in-out)</option>
+                                    <option value="linear">匀速 (linear)</option>
+                                    <option value="ease-in">渐入 (ease-in)</option>
+                                    <option value="ease-out">渐出 (ease-out)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- 显示（歌名模式） -->
+                        <div class="editor-group" data-modes="song_title">
+                            <div class="editor-group-title">显示</div>
+                            <div class="editor-row">
+                                <label>字号缩放</label>
+                                <input type="range" id="cfgStFontScale" min="0.5" max="3" value="1" step="0.1">
+                                <span class="editor-range-value" id="stFontScaleVal">1×</span>
+                            </div>
+                            <div class="editor-row">
+                                <label>文本对齐</label>
+                                <select id="cfgStTextAlign">
+                                    <option value="center">居中</option>
+                                    <option value="left">靠左</option>
+                                    <option value="right">靠右</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- 歌名设置 -->
+                        <div class="editor-group" data-modes="song_title">
+                            <div class="editor-group-title">歌名设置</div>
+                            <div class="editor-row">
+                                <label>显示格式</label>
+                                <select id="cfgSongTitleFormat">
+                                    <option value="name">仅歌名</option>
+                                    <option value="title">歌名 + 歌手</option>
+                                </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowSongTitleSep" style="display:none;">
+                                <label>分隔符</label>
+                                <input type="text" id="cfgSongTitleSep" value=" / " style="width:80px;text-align:center;">
+                            </div>
+                            <div class="editor-row">
+                                <label>溢出模式</label>
+                                <select id="cfgStOverflow">
+                                    <option value="wrap">自动换行</option>
+                                    <option value="scroll">循环滚动</option>
+                                    <option value="pingpong">Ping-Pong</option>
+                                </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowStScrollSpeed" style="display:none;">
+                                <label>滚动速度</label>
+                                <input type="range" id="cfgStScrollSpeed" min="10" max="200" value="50" step="5">
+                                <span class="editor-range-value" id="stScrollSpeedVal">50 px/s</span>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowStPpTime" style="display:none;">
+                                <label>单程时间</label>
+                                <input type="range" id="cfgStPpTime" min="1" max="15" value="3" step="0.5">
+                                <span class="editor-range-value" id="stPpTimeVal">3s</span>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowStPpPause" style="display:none;">
+                                <label>端点停顿</label>
+                                <input type="range" id="cfgStPpPause" min="0" max="5" value="1.5" step="0.5">
+                                <span class="editor-range-value" id="stPpPauseVal">1.5s</span>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowStScrollEase" style="display:none;">
+                                <label>缓动效果</label>
+                                <select id="cfgStScrollEase">
+                                    <option value="ease-in-out">平滑 (ease-in-out)</option>
+                                    <option value="linear">匀速 (linear)</option>
+                                    <option value="ease-in">渐入 (ease-in)</option>
+                                    <option value="ease-out">渐出 (ease-out)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- 歌词样式（歌词模式） -->
                         <div class="editor-group" data-modes="pure">
                             <div class="editor-group-title">歌词样式</div>
                             <div class="editor-row">
@@ -2028,8 +2484,55 @@
                             </div>
                         </div>
 
+                        <!-- 歌名样式（歌名模式） -->
+                        <div class="editor-group" data-modes="song_title">
+                            <div class="editor-group-title">歌名样式</div>
+                            <div class="editor-row">
+                                <label>歌名颜色</label>
+                                <div class="color-input-group">
+                                    <input type="color" id="cfgStColor" value="#ffffff">
+                                    <input type="text" class="color-hex" id="hexStColor" value="#ffffff" maxlength="7">
+                                    <button class="color-reset" data-target="cfgStColor" data-default="#ffffff" title="重置">↺</button>
+                                </div>
+                            </div>
+                            <div class="editor-row">
+                                <label>发光效果</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="cfgStGlow">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowStGlowColor" style="display:none;">
+                                <label>发光颜色</label>
+                                <div class="color-input-group">
+                                    <input type="color" id="cfgStGlowColor" value="#ff6b6b">
+                                    <input type="text" class="color-hex" id="hexStGlowColor" value="#ff6b6b" maxlength="7">
+                                    <button class="color-reset" data-target="cfgStGlowColor" data-default="#ff6b6b" title="重置">↺</button>
+                                </div>
+                            </div>
+                            <div class="editor-row">
+                                <label>描边效果</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="cfgStStroke">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowStStrokeWidth" style="display:none;">
+                                <label>描边厚度</label>
+                                <input type="number" id="cfgStStrokeWidth" value="1" min="0.5" max="5" step="0.5">
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowStStrokeColor" style="display:none;">
+                                <label>描边颜色</label>
+                                <div class="color-input-group">
+                                    <input type="color" id="cfgStStrokeColor" value="#000000">
+                                    <input type="text" class="color-hex" id="hexStStrokeColor" value="#000000" maxlength="7">
+                                    <button class="color-reset" data-target="cfgStStrokeColor" data-default="#000000" title="重置">↺</button>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- 字体 -->
-                        <div class="editor-group" data-modes="default pure">
+                        <div class="editor-group" data-modes="default pure song_title">
                             <div class="editor-group-title">字体</div>
                             <div class="editor-row" id="rowFontSource" style="display:none;">
                                 <label>字体来源</label>
@@ -2083,10 +2586,41 @@
                                 <input type="range" id="cfgCoverSize" min="40" max="500" value="120">
                                 <span class="editor-range-value" id="coverSizeVal">120px</span>
                             </div>
+                            <div class="editor-row">
+                                <label>暂停行为</label>
+                                <select id="cfgCoverPause">
+                                    <option value="none" selected>不处理</option>
+                                    <option value="hold">自定义隐藏</option>
+                                    <option value="shrink">缩小到角落</option>
+                                </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowCoverPauseHold" style="display:none;">
+                                <label>隐藏延迟</label>
+                                <input type="number" id="cfgCoverPauseHold" class="range-num-input" min="-1" value="-1" step="1">
+                                <span class="editor-range-value" style="font-size:0.7rem;color:#999;">-1永不 0+秒</span>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowCoverPauseScale" style="display:none;">
+                                <label>缩小倍率</label>
+                                <input type="range" id="cfgCoverPauseScale" min="0" max="1" value="0.25" step="0.01">
+                                <input type="number" id="cfgCoverPauseScaleNum" class="range-num-input" min="0" max="1" value="0.25" step="0.01">
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowCoverPauseDir" style="display:none;">
+                                <label>缩小方向</label>
+                                <select id="cfgCoverPauseDir">
+                                    <option value="tl">↖ 左上</option>
+                                    <option value="t">↑ 上</option>
+                                    <option value="tr">↗ 右上</option>
+                                    <option value="l">← 左</option>
+                                    <option value="r">→ 右</option>
+                                    <option value="bl" selected>↙ 左下</option>
+                                    <option value="b">↓ 下</option>
+                                    <option value="br">↘ 右下</option>
+                                </select>
+                            </div>
                         </div>
 
                         <!-- 背景 -->
-                        <div class="editor-group" data-modes="pure cover">
+                        <div class="editor-group" data-modes="pure song_title cover">
                             <div class="editor-group-title">背景</div>
                             <div class="editor-row">
                                 <label>背景透明</label>
@@ -2142,7 +2676,7 @@
                 // 更新复制按钮文字
                 const copyBtn = document.getElementById('btnCopyUrl');
                 if (copyBtn && !copyBtn.classList.contains('copied')) {
-                    const labels = { default: '📋 复制默认', pure: '📋 复制纯净', cover: '📋 复制封面' };
+                    const labels = { default: '📋 复制默认', pure: '📋 复制歌词', song_title: '📋 复制歌名', cover: '📋 复制封面' };
                     copyBtn.textContent = labels[mode] || labels.default;
                 }
                 toggleSubRows();
@@ -2159,12 +2693,20 @@
             });
 
             // 收集参数并更新 iframe
-            function refreshPreview() {
+            function refreshPreview(skipReload) {
                 const params = new URLSearchParams();
                 const mode = getActiveMode();
 
                 if (mode === 'pure') {
                     params.set('pure', '');
+                } else if (mode === 'song_title') {
+                    params.set('song_title', '');
+                    const stf = document.getElementById('cfgSongTitleFormat').value;
+                    if (stf && stf !== 'name') params.set('song_title_format', stf);
+                    if (stf === 'title') {
+                        const sep = document.getElementById('cfgSongTitleSep').value;
+                        if (sep !== ' / ') params.set('song_title_sep', sep);
+                    }
                 } else if (mode === 'cover') {
                     params.set('cover_only', '');
                 } else {
@@ -2175,27 +2717,47 @@
                     params.set('one_line', '');
                 }
 
+                // 歌词溢出设置（pure 模式 one_line 时生效）
+                const pOv = document.getElementById('cfgPureOverflow').value;
+                if (pOv && pOv !== 'wrap') {
+                    params.set('overflow', pOv);
+                    if (pOv === 'scroll') {
+                        const spd = document.getElementById('cfgPureScrollSpeed').value;
+                        if (spd && spd !== '50') params.set('scroll_speed', spd);
+                    }
+                    if (pOv === 'pingpong') {
+                        const ppTime = document.getElementById('cfgPurePpTime').value;
+                        if (ppTime && ppTime !== '3') params.set('pp_time', ppTime);
+                        const ppPause = document.getElementById('cfgPurePpPause').value;
+                        if (ppPause && ppPause !== '1.5') params.set('pp_pause', ppPause);
+                    }
+                    const ease = document.getElementById('cfgPureScrollEase').value;
+                    if (ease && ease !== 'ease-in-out') params.set('scroll_ease', ease);
+                }
+
                 const player = document.getElementById('cfgPlayer').value;
                 if (player) params.set('player', player);
 
-                const color = document.getElementById('cfgColor').value;
+                // 样式控件：根据模式读取不同 ID
+                const isSt = mode === 'song_title';
+                const color = document.getElementById(isSt ? 'cfgStColor' : 'cfgColor').value;
                 if (color && color !== '#ffffff') params.set('color', color);
 
-                if (document.getElementById('cfgGlow').checked) {
+                if (document.getElementById(isSt ? 'cfgStGlow' : 'cfgGlow').checked) {
                     params.set('glow', '');
-                    const gc = document.getElementById('cfgGlowColor').value;
+                    const gc = document.getElementById(isSt ? 'cfgStGlowColor' : 'cfgGlowColor').value;
                     if (gc && gc !== '#ff6b6b') params.set('glow_color', gc);
                 }
 
-                if (document.getElementById('cfgStroke').checked) {
+                if (document.getElementById(isSt ? 'cfgStStroke' : 'cfgStroke').checked) {
                     params.set('stroke', '');
-                    const sw = document.getElementById('cfgStrokeWidth').value;
+                    const sw = document.getElementById(isSt ? 'cfgStStrokeWidth' : 'cfgStrokeWidth').value;
                     if (sw && sw !== '1') params.set('stroke_width', sw);
-                    const sc = document.getElementById('cfgStrokeColor').value;
+                    const sc = document.getElementById(isSt ? 'cfgStStrokeColor' : 'cfgStrokeColor').value;
                     if (sc && sc !== '#000000') params.set('stroke_color', sc);
                 }
 
-                if (mode === 'pure' || mode === 'cover') {
+                if (mode === 'pure' || mode === 'song_title' || mode === 'cover') {
                     const bgTransparent = document.getElementById('cfgBgTransparent').checked;
                     if (!bgTransparent) {
                         params.set('bg', document.getElementById('cfgBg').value);
@@ -2217,11 +2779,31 @@
                 }
                 if (fontName) params.set('font', fontName);
 
-                // 字号缩放 & 文本对齐
-                const fs = document.getElementById('cfgFontScale').value;
+                // 字号缩放 & 文本对齐（根据模式读取不同控件）
+                const fs = document.getElementById(isSt ? 'cfgStFontScale' : 'cfgFontScale').value;
                 if (fs && fs !== '1') params.set('font_scale', fs);
-                const ta = document.getElementById('cfgTextAlign').value;
+                const ta = document.getElementById(isSt ? 'cfgStTextAlign' : 'cfgTextAlign').value;
                 if (ta && ta !== 'center') params.set('text_align', ta);
+
+                // 歌名溢出参数
+                if (mode === 'song_title') {
+                    const ov = document.getElementById('cfgStOverflow').value;
+                    if (ov && ov !== 'wrap') {
+                        params.set('st_overflow', ov);
+                        if (ov === 'scroll') {
+                            const spd = document.getElementById('cfgStScrollSpeed').value;
+                            if (spd && spd !== '50') params.set('st_scroll_speed', spd);
+                        }
+                        if (ov === 'pingpong') {
+                            const ppTime = document.getElementById('cfgStPpTime').value;
+                            if (ppTime && ppTime !== '3') params.set('st_pp_time', ppTime);
+                            const ppPause = document.getElementById('cfgStPpPause').value;
+                            if (ppPause && ppPause !== '1.5') params.set('st_pp_pause', ppPause);
+                        }
+                        const ease = document.getElementById('cfgStScrollEase').value;
+                        if (ease && ease !== 'ease-in-out') params.set('st_scroll_ease', ease);
+                    }
+                }
 
                 // 封面
                 const cs = document.getElementById('cfgCoverStyle').value;
@@ -2233,13 +2815,27 @@
                 const csz = document.getElementById('cfgCoverSize').value;
                 if (csz && csz !== '80') params.set('cover_size', csz);
 
+                // 封面暂停行为
+                const cpMode = document.getElementById('cfgCoverPause').value;
+                if (cpMode && cpMode !== 'none') params.set('cover_pause', cpMode);
+                if (cpMode === 'hold') {
+                    const holdTime = document.getElementById('cfgCoverPauseHold').value;
+                    if (holdTime) params.set('cover_pause_hold', holdTime);
+                }
+                if (cpMode === 'shrink') {
+                    const pScale = document.getElementById('cfgCoverPauseScale').value;
+                    if (pScale && pScale !== '0.25') params.set('cover_pause_scale', pScale);
+                    const dir = document.getElementById('cfgCoverPauseDir').value;
+                    if (dir && dir !== 'bl') params.set('cover_pause_dir', dir);
+                }
+
                 const qs = '?' + params.toString();
                 urlDisplay.textContent = qs;
                 urlDisplay.title = qs;
                 // 防闪烁：仅在 URL 变化时重新加载
                 if (qs !== lastPreviewQs) {
                     lastPreviewQs = qs;
-                    frame.src = qs;
+                    if (!skipReload) frame.src = qs;
                 }
             }
 
@@ -2252,18 +2848,59 @@
                 document.getElementById('rowStrokeWidth').style.display = strokeOn ? 'flex' : 'none';
                 document.getElementById('rowStrokeColor').style.display = strokeOn ? 'flex' : 'none';
 
+                // 歌名样式子控件
+                const stGlowOn = document.getElementById('cfgStGlow').checked;
+                document.getElementById('rowStGlowColor').style.display = stGlowOn ? 'flex' : 'none';
+                const stStrokeOn = document.getElementById('cfgStStroke').checked;
+                document.getElementById('rowStStrokeWidth').style.display = stStrokeOn ? 'flex' : 'none';
+                document.getElementById('rowStStrokeColor').style.display = stStrokeOn ? 'flex' : 'none';
+
                 const bgTransparent = document.getElementById('cfgBgTransparent').checked;
                 document.getElementById('rowBgColor').style.display = !bgTransparent ? 'flex' : 'none';
 
                 const rotateMode = document.getElementById('cfgCoverRotate').value;
                 document.getElementById('rowSpinSpeed').style.display = rotateMode !== 'none' ? 'flex' : 'none';
+
+                // 封面暂停子控件
+                const cpMode = document.getElementById('cfgCoverPause').value;
+                document.getElementById('rowCoverPauseHold').style.display = cpMode === 'hold' ? 'flex' : 'none';
+                document.getElementById('rowCoverPauseScale').style.display = cpMode === 'shrink' ? 'flex' : 'none';
+                document.getElementById('rowCoverPauseDir').style.display = cpMode === 'shrink' ? 'flex' : 'none';
+
+                const stfEl = document.getElementById('cfgSongTitleFormat');
+                if (stfEl) {
+                    document.getElementById('rowSongTitleSep').style.display = stfEl.value === 'title' ? 'flex' : 'none';
+                }
+
+                // 歌名溢出子控件
+                const stOverflow = document.getElementById('cfgStOverflow');
+                if (stOverflow) {
+                    const ov = stOverflow.value;
+                    document.getElementById('rowStScrollSpeed').style.display = ov === 'scroll' ? 'flex' : 'none';
+                    document.getElementById('rowStPpTime').style.display = ov === 'pingpong' ? 'flex' : 'none';
+                    document.getElementById('rowStPpPause').style.display = ov === 'pingpong' ? 'flex' : 'none';
+                    document.getElementById('rowStScrollEase').style.display = (ov === 'scroll' || ov === 'pingpong') ? 'flex' : 'none';
+                }
+
+                // 歌词溢出子控件
+                const pureOv = document.getElementById('cfgPureOverflow').value;
+                document.getElementById('rowPureScrollSpeed').style.display = pureOv === 'scroll' ? 'flex' : 'none';
+                document.getElementById('rowPurePpTime').style.display = pureOv === 'pingpong' ? 'flex' : 'none';
+                document.getElementById('rowPurePpPause').style.display = pureOv === 'pingpong' ? 'flex' : 'none';
+                document.getElementById('rowPureScrollEase').style.display = (pureOv === 'scroll' || pureOv === 'pingpong') ? 'flex' : 'none';
             }
 
             // 绑定所有控件事件
             const controls = ['cfgOneLine', 'cfgFontScale', 'cfgTextAlign', 'cfgPlayer', 'cfgColor',
                 'cfgGlow', 'cfgGlowColor', 'cfgStroke', 'cfgStrokeWidth', 'cfgStrokeColor',
                 'cfgBg', 'cfgBgTransparent',
-                'cfgCoverStyle', 'cfgCoverRotate', 'cfgSpinSpeed', 'cfgCoverSize'];
+                'cfgCoverStyle', 'cfgCoverRotate', 'cfgSpinSpeed', 'cfgCoverSize',
+                'cfgCoverPause', 'cfgCoverPauseHold',
+                'cfgSongTitleFormat', 'cfgSongTitleSep',
+                'cfgStColor', 'cfgStGlow', 'cfgStGlowColor', 'cfgStStroke', 'cfgStStrokeWidth', 'cfgStStrokeColor',
+                'cfgStOverflow', 'cfgStScrollSpeed', 'cfgStPpTime', 'cfgStPpPause', 'cfgStScrollEase',
+                'cfgStFontScale', 'cfgStTextAlign',
+                'cfgPureOverflow', 'cfgPureScrollSpeed', 'cfgPurePpTime', 'cfgPurePpPause', 'cfgPureScrollEase'];
             controls.forEach(id => {
                 const el = document.getElementById(id);
                 el.addEventListener('change', () => { toggleSubRows(); refreshPreview(); });
@@ -2280,13 +2917,66 @@
             document.getElementById('cfgCoverSize').addEventListener('input', () => {
                 document.getElementById('coverSizeVal').textContent = document.getElementById('cfgCoverSize').value + 'px';
             });
+            // 缩小参数：postMessage 实时更新（不重载 iframe）
+            const _scaleSlider = document.getElementById('cfgCoverPauseScale');
+            const _scaleNum = document.getElementById('cfgCoverPauseScaleNum');
+            const _dirSelect = document.getElementById('cfgCoverPauseDir');
+            function sendShrinkUpdate() {
+                // 更新 URL 显示（供复制），但不重载 iframe
+                refreshPreview(true); // true = skipReload
+                const frame = document.getElementById('previewFrame');
+                if (frame && frame.contentWindow) {
+                    frame.contentWindow.postMessage({
+                        type: 'shrinkUpdate',
+                        scale: parseFloat(_scaleSlider.value),
+                        dir: _dirSelect.value
+                    }, '*');
+                }
+            }
+            _scaleSlider.addEventListener('input', () => {
+                _scaleNum.value = _scaleSlider.value;
+                sendShrinkUpdate();
+            });
+            _scaleNum.addEventListener('input', () => {
+                let v = Math.max(0, Math.min(1, parseFloat(_scaleNum.value) || 0));
+                _scaleSlider.value = v;
+                sendShrinkUpdate();
+            });
+            _dirSelect.addEventListener('change', () => {
+                toggleSubRows();
+                sendShrinkUpdate();
+            });
+            document.getElementById('cfgStScrollSpeed').addEventListener('input', () => {
+                document.getElementById('stScrollSpeedVal').textContent = document.getElementById('cfgStScrollSpeed').value + ' px/s';
+            });
+            document.getElementById('cfgStPpTime').addEventListener('input', () => {
+                document.getElementById('stPpTimeVal').textContent = document.getElementById('cfgStPpTime').value + 's';
+            });
+            document.getElementById('cfgStPpPause').addEventListener('input', () => {
+                document.getElementById('stPpPauseVal').textContent = document.getElementById('cfgStPpPause').value + 's';
+            });
+            document.getElementById('cfgStFontScale').addEventListener('input', () => {
+                document.getElementById('stFontScaleVal').textContent = document.getElementById('cfgStFontScale').value + '×';
+            });
+            document.getElementById('cfgPureScrollSpeed').addEventListener('input', () => {
+                document.getElementById('pureScrollSpeedVal').textContent = document.getElementById('cfgPureScrollSpeed').value + ' px/s';
+            });
+            document.getElementById('cfgPurePpTime').addEventListener('input', () => {
+                document.getElementById('purePpTimeVal').textContent = document.getElementById('cfgPurePpTime').value + 's';
+            });
+            document.getElementById('cfgPurePpPause').addEventListener('input', () => {
+                document.getElementById('purePpPauseVal').textContent = document.getElementById('cfgPurePpPause').value + 's';
+            });
 
             // === 颜色 hex 输入同步 + 重置 ===
             const colorPairs = [
                 { color: 'cfgColor', hex: 'hexColor' },
                 { color: 'cfgGlowColor', hex: 'hexGlowColor' },
                 { color: 'cfgStrokeColor', hex: 'hexStrokeColor' },
-                { color: 'cfgBg', hex: 'hexBg' }
+                { color: 'cfgBg', hex: 'hexBg' },
+                { color: 'cfgStColor', hex: 'hexStColor' },
+                { color: 'cfgStGlowColor', hex: 'hexStGlowColor' },
+                { color: 'cfgStStrokeColor', hex: 'hexStStrokeColor' }
             ];
             colorPairs.forEach(({ color, hex }) => {
                 const colorEl = document.getElementById(color);

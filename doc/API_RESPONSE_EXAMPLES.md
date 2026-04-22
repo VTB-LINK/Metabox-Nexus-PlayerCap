@@ -144,18 +144,18 @@
     "play_time": 1.2,
     "count": 12,
     "lyrics": [
-      {"index": 0, "time": 0.5, "text": "いつもそばにいるのに"},
-      {"index": 1, "time": 2.1, "text": "ふと気付くと遠すぎて"},
-      {"index": 2, "time": 3.8, "text": "手を伸ばしても届かない"},
-      {"index": 3, "time": 5.5, "text": "深い森の奥へ迷い込む"},
-      {"index": 4, "time": 7.2, "text": "君に逢いたい"},
-      {"index": 5, "time": 9.0, "text": "君に嘘をついていた"},
-      {"index": 6, "time": 11.2, "text": "心は静かに落ち着かず"},
-      {"index": 7, "time": 13.5, "text": "何もかもが手から零れ落ちる"},
-      {"index": 8, "time": 15.8, "text": "ずっと歩いてくよ"},
-      {"index": 9, "time": 18.2, "text": "迷えるまま"},
-      {"index": 10, "time": 20.5, "text": "君を探す"},
-      {"index": 11, "time": 22.8, "text": "その先へ"}
+      {"index": 0, "time": 0.5, "text": "いつもそばにいるのに", "sub_text": ""},
+      {"index": 1, "time": 2.1, "text": "ふと気付くと遠すぎて", "sub_text": ""},
+      {"index": 2, "time": 3.8, "text": "手を伸ばしても届かない", "sub_text": ""},
+      {"index": 3, "time": 5.5, "text": "深い森の奥へ迷い込む", "sub_text": ""},
+      {"index": 4, "time": 7.2, "text": "君に逢いたい", "sub_text": ""},
+      {"index": 5, "time": 9.0, "text": "君に嘘をついていた", "sub_text": ""},
+      {"index": 6, "time": 11.2, "text": "心は静かに落ち着かず", "sub_text": ""},
+      {"index": 7, "time": 13.5, "text": "何もかもが手から零れ落ちる", "sub_text": ""},
+      {"index": 8, "time": 15.8, "text": "ずっと歩いてくよ", "sub_text": ""},
+      {"index": 9, "time": 18.2, "text": "迷えるまま", "sub_text": ""},
+      {"index": 10, "time": 20.5, "text": "君を探す", "sub_text": ""},
+      {"index": 11, "time": 22.8, "text": "その先へ", "sub_text": ""}
     ]
   }
 }
@@ -167,6 +167,7 @@
 - `play_time` - 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
 - `count` - 歌词行数
 - `lyrics` - 按 index 排序的歌词数组
+- `lyrics[].sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
 
 **无歌词时：**
 ```json
@@ -547,9 +548,9 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
     "play_time": 1.2,
     "count": 12,
     "lyrics": [
-      {"index": 0, "time": 0.5, "text": "いつもそばにいるのに"},
-      {"index": 1, "time": 2.1, "text": "ふと気付くと遠すぎて"},
-      {"index": 2, "time": 3.8, "text": "手を伸ばしても届かない"}
+      {"index": 0, "time": 0.5, "text": "いつもそばにいるのに", "sub_text": ""},
+      {"index": 1, "time": 2.1, "text": "ふと気付くと遠すぎて", "sub_text": ""},
+      {"index": 2, "time": 3.8, "text": "手を伸ばしても届かない", "sub_text": ""}
     ]
   }
 }
