@@ -16,6 +16,7 @@
 |--------|--------|----------|
 | 全民K歌 (WeSing) | `wesing` | 进程内存读取（PE 导出表 + vtable + AOB 扫描） |
 | 网易云音乐 | `cloudmusicv3` | CDP 远程调试（Chrome DevTools Protocol） |
+| QQ 音乐 | `qqmusic` | 进程内存读取 + AOB Hook 注入（双源融合插值） |
 
 ## 原理
 
@@ -60,6 +61,24 @@ PlayerCap (cloudmusicv3 模块)
 └─ play_time 停滞检测 → 暂停/恢复事件
 ```
 
+### QQMusic（进程内存读取 + AOB Hook）
+
+```
+QQMusic.exe 进程
+├─ QQMusic.dll + 0xC87C80 → 歌曲元数据（歌名/歌手/SongID/进度/时长）
+├─ QQMusic.dll + 0xC157D8 → 快速计时器指针（~1秒更新）
+├─ QQMusic_GFWrapper.dll → 伴奏滑块控件（AOB Hook 捕获 ESI/EDI）
+└─ QQMusic.dll + 0x488B75 → 精确进度写入点（AOB Hook + KUSER 时间戳）
+
+PlayerCap (qqmusic 模块)
+├─ 进程内存扫描定位 QQMusic.dll + QQMusic_GFWrapper.dll
+├─ AOB Hook 注入（伴奏滑块 + 精确进度 + KUSER_SHARED_DATA 时间戳）
+├─ 双源融合插值：快速计时器锚点 + Hook 精确时间戳实时线性插值
+├─ QQ 音乐 API 获取歌词（QRC 3DES 解密）+ 专辑封面
+├─ Hook 时间戳 delta 检测 seek/回跳
+└─ 快速计时器停滞检测 → 暂停/恢复事件
+```
+
 ### 多播放器路由
 
 ```
@@ -77,9 +96,9 @@ Router（事件合并主循环）
 
 ## 功能特性
 
-- ✅ **多播放器支持** — 同时监控全民K歌和网易云音乐，优先级路由自动切换
+- ✅ **多播放器支持** — 同时监控全民K歌、网易云音乐和 QQ 音乐，优先级路由自动切换
 - ✅ **三种接口** — WebSocket（双向实时）、SSE（单向推送）、HTTP（静态查询）
-- ✅ **Per-player 端点** — 每个播放器独立端点（`/wesing/ws`、`/cloudmusicv3/ws` 等）
+- ✅ **Per-player 端点** — 每个播放器独立端点（`/wesing/ws`、`/cloudmusicv3/ws`、`/qqmusic/ws` 等）
 - ✅ **播放器切换事件** — 活跃播放器变化时推送 `player_switch` + 新播放器完整状态
 - ✅ **自动等待进程** — 目标播放器未启动时持续等待，启动后自动开始
 - ✅ **暂停/恢复检测** — play_time 停滞自动判定暂停，恢复推进时广播恢复事件
@@ -99,7 +118,7 @@ Router（事件合并主循环）
 
 - Go 1.21+
 - Windows 10/11
-- 全民K歌桌面版 和/或 网易云音乐桌面版
+- 全民K歌桌面版 和/或 网易云音乐桌面版 和/或 QQ 音乐桌面版
 
 ### 编译运行
 
@@ -135,6 +154,8 @@ go build -ldflags "-X main.Version=3.0.0" -o Metabox-Nexus-PlayerCap.exe .
 | `-wesing-poll` | *(沿用全局)* | 全民K歌专属轮询间隔 |
 | `-cloudmusicv3-offset` | *(沿用全局)* | 网易云音乐专属时间偏移 |
 | `-cloudmusicv3-poll` | *(沿用全局)* | 网易云音乐专属轮询间隔 |
+| `-qqmusic-offset` | *(沿用全局)* | QQ 音乐专属时间偏移 |
+| `-qqmusic-poll` | *(沿用全局)* | QQ 音乐专属轮询间隔 |
 
 > 播放器专属参数由 `config.RegisterPlayer()` 动态生成，未设置时自动沿用全局值。
 
@@ -164,13 +185,17 @@ prior-player:
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
 
-# 全民K歌专属配置（可选，不设置则沿用全局值）
+# 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
 
-# 网易云音乐专属配置（可选）
+# 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 30
+
+# QQ音乐 配置
+qqmusic-offset: 400
+# qqmusic-poll: 50
 ```
 
 ### 预期输出
@@ -179,10 +204,11 @@ cloudmusicv3-offset: 500
 ===========================================================
    Metabox-Nexus-PlayerCap 多播放器歌词实时推送服务
 ===========================================================
-   版本: v3.0.0
+   版本: v0.0.0
    监听: 0.0.0.0:8765
    播放器: wesing (offset=200ms poll=30ms)
    播放器: cloudmusicv3 (offset=500ms poll=30ms)
+   播放器: qqmusic (offset=400ms poll=30ms)
    优先播放器: [wesing] (超时: 15s)
 ===========================================================
 ```
@@ -250,13 +276,13 @@ cloudmusicv3-offset: 500
 所有根端点（除 `/health-check` 和 `/service-status`）均有对应的播放器路径版本：
 
 ```
-/wesing/ws                /cloudmusicv3/ws
-/wesing/all_lyrics        /cloudmusicv3/all_lyrics
-/wesing/lyric_update      /cloudmusicv3/lyric_update
-/wesing/status_update     /cloudmusicv3/status_update
-/wesing/song_info         /cloudmusicv3/song_info
-/wesing/lyric_update-SSE  /cloudmusicv3/lyric_update-SSE
-/wesing/song_info-SSE     /cloudmusicv3/song_info-SSE
+/wesing/ws                /cloudmusicv3/ws               /qqmusic/ws
+/wesing/all_lyrics        /cloudmusicv3/all_lyrics       /qqmusic/all_lyrics
+/wesing/lyric_update      /cloudmusicv3/lyric_update     /qqmusic/lyric_update
+/wesing/status_update     /cloudmusicv3/status_update    /qqmusic/status_update
+/wesing/song_info         /cloudmusicv3/song_info        /qqmusic/song_info
+/wesing/lyric_update-SSE  /cloudmusicv3/lyric_update-SSE /qqmusic/lyric_update-SSE
+/wesing/song_info-SSE     /cloudmusicv3/song_info-SSE    /qqmusic/song_info-SSE
 ```
 
 ---
@@ -320,15 +346,20 @@ Metabox-Nexus-PlayerCap/
 │   │       ├── reader.go  # 歌词数据结构解码（UTF-16LE → []LyricLine）
 │   │       ├── timer.go   # 播放时间地址定位（结构体签名扫描）+ 歌曲时长提取
 │   │       └── songinfo.go# 歌曲元信息提取（歌名/歌手/MID/封面 URL 定位）
-│   └── cloudmusic/        # 网易云音乐 —— 基于 CDP
-│       ├── cloudmusic.go  # 主轮询循环、本地时钟同步、seek 检测
-│       ├── cdp/
-│       │   └── client.go  # WebSocket CDP 客户端：连接、JS 求值、React Fiber 遍历
-│       ├── lyric/
-│       │   └── fetch.go   # 网易云 API 调用（歌词/搜索/详情）、LRC 格式解析
-│       └── watchdog/
-│           ├── process.go # 确保 cloudmusic.exe 带 --remote-debugging-port=9222 启动
-│           └── registry.go# 注册表自启项注入调试端口参数
+│   ├── cloudmusic/        # 网易云音乐 —— 基于 CDP
+│   │   ├── cloudmusic.go  # 主轮询循环、本地时钟同步、seek 检测
+│   │   ├── cdp/
+│   │   │   └── client.go  # WebSocket CDP 客户端：连接、JS 求值、React Fiber 遍历
+│   │   ├── lyric/
+│   │   │   └── fetch.go   # 网易云 API 调用（歌词/搜索/详情）、LRC 格式解析
+│   │   └── watchdog/
+│   │       ├── process.go # 确保 cloudmusic.exe 带 --remote-debugging-port=9222 启动
+│   │       └── registry.go# 注册表自启项注入调试端口参数
+│   └── qqmusic/           # QQ 音乐 —— 基于内存读取 + AOB Hook
+│       ├── qqmusic.go     # 主轮询循环、双源融合插值、暂停/恢复/seek 检测
+│       ├── mem.go         # 进程连接、内存读写、AOB Hook 注入（滑块 + 进度 + KUSER）
+│       ├── api.go         # QQ 音乐 API 调用（歌词/封面）、QRC 解析
+│       └── qrc_decrypt.go # QRC 3DES 自定义解密算法
 ├── server/
 │   ├── server.go          # HTTP/WS/SSE 统一服务器：订阅者管理、状态缓存、广播
 │   ├── router.go          # 多播放器优先级路由 + 超时状态机
@@ -337,8 +368,8 @@ Metabox-Nexus-PlayerCap/
 ├── lyric_page.html        # 歌词显示内容页（Content，由 Loader 自动加载）
 ├── config.yml             # 默认配置文件（首次运行自动生成）
 ├── doc/
-│   └── API_RESPONSE_EXAMPLES.md  # API 响应示例（离线参考）
-│   └── openapi.yaml  # OpenAPI格式 响应示例
+│   ├── API_RESPONSE_EXAMPLES.md  # API 响应示例（离线参考）
+│   ├── openapi.yaml              # OpenAPI 格式响应示例
 └── build-assets/
     └── winicon/           # Windows .exe 图标资源 (.syso)
 ```

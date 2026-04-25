@@ -4,6 +4,7 @@ import (
 	"Metabox-Nexus-PlayerCap/config"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic"
+	"Metabox-Nexus-PlayerCap/player/qqmusic"
 	"Metabox-Nexus-PlayerCap/player/wesing"
 	"Metabox-Nexus-PlayerCap/server"
 	"crypto/sha256"
@@ -39,7 +40,7 @@ func main() {
 	cfg := config.Load()
 
 	// 播放器注册表（新增播放器只需在此追加）
-	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName}
+	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName}
 
 	fmt.Println("===========================================================")
 	fmt.Println("   Metabox-Nexus-PlayerCap 多播放器歌词实时推送服务          ")
@@ -133,15 +134,18 @@ func main() {
 	// 创建并启动播放器
 	wp := wesing.New(cfg.GetPlayerOffset("wesing"), cfg.GetPlayerPoll("wesing"))
 	cp := cloudmusic.New(cfg.GetPlayerOffset("cloudmusicv3"), cfg.GetPlayerPoll("cloudmusicv3"))
+	qp := qqmusic.New(cfg.GetPlayerOffset("qqmusic"), cfg.GetPlayerPoll("qqmusic"))
 
 	// 创建路由器
 	router := server.NewRouter(&cfg, srv, playerNames)
 	router.Register(wp)
 	router.Register(cp)
+	router.Register(qp)
 
 	// 启动播放器 goroutines
 	go wp.Start()
 	go cp.Start()
+	go qp.Start()
 
 	mainLog.Info("所有播放器已启动，事件路由中...")
 

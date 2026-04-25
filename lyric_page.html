@@ -1473,6 +1473,30 @@
         let songDuration = 0;
         let reconnectTimer = null;
         let isPlaying = false;
+        let _lastSongInfoKey = '';
+
+        function normalizeSongInfoValue(value) {
+            return typeof value === 'string' ? value.trim() : '';
+        }
+
+        function getSongInfoKey(info) {
+            if (!info) return '';
+            const title = normalizeSongInfoValue(info.title);
+            const name = normalizeSongInfoValue(info.name);
+            const singer = normalizeSongInfoValue(info.singer);
+            if (!title && !name && !singer) return '';
+            return [title, name, singer].join('\u0001');
+        }
+
+        function buildSongTitleDisplayText(info) {
+            if (!info) return '';
+            if (songTitleFormat === 'title') {
+                const name = normalizeSongInfoValue(info.name);
+                const singer = normalizeSongInfoValue(info.singer);
+                return (name && singer) ? name + songTitleSep + singer : (name || singer || normalizeSongInfoValue(info.title));
+            }
+            return normalizeSongInfoValue(info.name) || normalizeSongInfoValue(info.title);
+        }
 
         // === 封面样式应用 ===
         if (!isEditorMode) {
@@ -1702,14 +1726,13 @@
                         updateSongInfoRow(data.data);
                         // song_title 模式：在歌词区显示歌名
                         if (songTitleMode) {
-                            let displayText = '';
-                            if (songTitleFormat === 'title') {
-                                const n = data.data.name || '';
-                                const s = data.data.singer || '';
-                                displayText = (n && s) ? n + songTitleSep + s : (n || s || data.data.title);
-                            } else {
-                                displayText = data.data.name || data.data.title;
+                            const nextSongInfoKey = getSongInfoKey(data.data);
+                            if (nextSongInfoKey && nextSongInfoKey === _lastSongInfoKey) {
+                                return;
                             }
+                            _lastSongInfoKey = nextSongInfoKey;
+
+                            const displayText = buildSongTitleDisplayText(data.data);
                             const display = document.getElementById('lyricsDisplay');
                             cleanupScrollAnim();
                             transitionOut(display, () => {
@@ -1728,6 +1751,7 @@
                         }
                     } else {
                         // 歌曲信息清空
+                        _lastSongInfoKey = '';
                         hideSongInfoRow();
                         if (songTitleMode) {
                             cleanupScrollAnim();
@@ -1807,6 +1831,7 @@
                 if (data.type === 'player_switch') {
                     // 活跃播放器切换：仅重置歌词/进度状态
                     // 封面与旋转保留，由后续 song_info_update 自然触发切歌过渡动效
+                    _lastSongInfoKey = '';
                     currentIndex = -1;
                     allLyrics = [];
                     songDuration = 0;
@@ -1838,6 +1863,7 @@
 
                 if (data.type === 'player_clear') {
                     // 活跃播放器已清除：重置所有显示
+                    _lastSongInfoKey = '';
                     currentIndex = -1;
                     allLyrics = [];
                     songDuration = 0;
@@ -2308,6 +2334,7 @@
                                     <option value="">跟随活跃</option>
                                     <option value="wesing">全民K歌</option>
                                     <option value="cloudmusicv3">网易云音乐</option>
+                                        <option value="qqmusic">QQ音乐</option>
                                 </select>
                             </div>
                         </div>

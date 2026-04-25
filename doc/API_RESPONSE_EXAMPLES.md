@@ -1,8 +1,8 @@
 # Metabox-Nexus-PlayerCap API 响应示例
 
-> **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器（如 `"wesing"`、`"cloudmusicv3"`）。  
+> **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器（如 `"wesing"`、`"cloudmusicv3"`、`"qqmusic"`）。  
 > **空数据约定：** 所有事件在无数据时统一返回 `"data": {}`（空对象），而非 `null`。  
-> **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
+> **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`、`/qqmusic/ws`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
 
 ---
 
@@ -44,14 +44,17 @@
       "wesing-offset": 200,
       "wesing-poll": 30,
       "cloudmusicv3-offset": 500,
-      "cloudmusicv3-poll": 30
+      "cloudmusicv3-poll": 30,
+      "qqmusic-offset": 200,
+      "qqmusic-poll": 50
     },
     "config_overwritten": ["offset", "wesing-poll"],
-    "player_support": ["wesing", "cloudmusicv3"],
+    "player_support": ["wesing", "cloudmusicv3", "qqmusic"],
     "player_running": ["wesing"],
     "player_status": {
       "wesing": "playing",
-      "cloudmusicv3": "waiting_process"
+      "cloudmusicv3": "waiting_process",
+      "qqmusic": "waiting_process"
     },
     "endpoints": {
       "health-check": "http://0.0.0.0:8765/health-check",
@@ -80,6 +83,15 @@
         "song_info": "http://0.0.0.0:8765/cloudmusicv3/song_info",
         "lyric_update-SSE": "http://0.0.0.0:8765/cloudmusicv3/lyric_update-SSE",
         "song_info-SSE": "http://0.0.0.0:8765/cloudmusicv3/song_info-SSE"
+      },
+      "qqmusic": {
+        "ws": "ws://0.0.0.0:8765/qqmusic/ws",
+        "all_lyrics": "http://0.0.0.0:8765/qqmusic/all_lyrics",
+        "lyric_update": "http://0.0.0.0:8765/qqmusic/lyric_update",
+        "status_update": "http://0.0.0.0:8765/qqmusic/status_update",
+        "song_info": "http://0.0.0.0:8765/qqmusic/song_info",
+        "lyric_update-SSE": "http://0.0.0.0:8765/qqmusic/lyric_update-SSE",
+        "song_info-SSE": "http://0.0.0.0:8765/qqmusic/song_info-SSE"
       }
     },
     "client_count": 2,

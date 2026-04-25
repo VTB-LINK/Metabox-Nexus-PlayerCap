@@ -295,7 +295,7 @@ func printFlag(f *flag.Flag) {
 const defaultConfigContent = `# Metabox-Nexus-PlayerCap 配置文件
 # 优先级：命令行参数 > config.yml > 内置默认值
 
-# WebSocket 监听地址
+# HTTP/WebSocket/SSE 监听地址
 addr: "0.0.0.0:8765"
 
 # 歌词时间偏移（毫秒），正值=歌词提前，负值=延后
@@ -318,6 +318,10 @@ prior-player-expire: 15
 # 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 30
+
+# QQ 音乐 配置
+qqmusic-offset: 400
+# qqmusic-poll: 50
 `
 
 func generateDefaultConfig() {
