@@ -1428,6 +1428,7 @@ components:
         enum:
           - wesing
           - cloudmusicv3
+          - qqmusic
         example: wesing
 
   schemas:
@@ -1565,6 +1566,14 @@ components:
               type: integer
               description: cloudmusicv3 轮询间隔（毫秒）
               example: 30
+            qqmusic-offset:
+              type: integer
+              description: qqmusic 歌词偏移量（毫秒）
+              example: 200
+            qqmusic-poll:
+              type: integer
+              description: qqmusic 轮询间隔（毫秒）
+              example: 50
         config_overwritten:
           type: array
           description: 被更高优先级来源覆盖的配置键名列表
@@ -1576,12 +1585,20 @@ components:
           description: 系统编译时注册的所有播放器标识名列表
           items:
             type: string
-          example: ["wesing", "cloudmusicv3"]
+            enum:
+              - wesing
+              - cloudmusicv3
+              - qqmusic
+          example: ["wesing", "cloudmusicv3", "qqmusic"]
         player_running:
           type: array
           description: 当前正在运行（非 offline / standby / waiting_process）的播放器列表
           items:
             type: string
+            enum:
+              - wesing
+              - cloudmusicv3
+              - qqmusic
           example: ["wesing"]
         player_status:
           type: object
@@ -1594,6 +1611,7 @@ components:
           example:
             wesing: playing
             cloudmusicv3: waiting_process
+            qqmusic: waiting_process
         endpoints:
           type: object
           description: |
