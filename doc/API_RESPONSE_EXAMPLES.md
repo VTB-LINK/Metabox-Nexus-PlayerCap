@@ -29,7 +29,7 @@
   "msg": "success",
   "player": "internal",
   "data": {
-    "version": "3.0.0",
+    "version": "3.0.0-beta.1",
     "addr": "0.0.0.0:8765",
     "now_time": "2026-03-19T12:34:56+08:00",
     "config_sources": ["config.yml", "命令行参数"],
@@ -107,8 +107,9 @@
 ```
 
 **version 说明：**
-- 编译时通过 `-ldflags "-X main.Version=3.0.0"` 注入
+- 编译时通过 `-ldflags "-X main.Version=3.0.0-beta.1"` 注入
 - 默认值为 `0.0.0`
+- `tag_name` 使用完整 semver；若 release 标题以 `-force` 结尾，则客户端允许强制同步到更低版本
 
 **config_sources 说明：**
 - 显示配置来源的完整链路，按优先级顺序排列

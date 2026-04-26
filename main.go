@@ -17,9 +17,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 // 版本信息（编译时通过 -ldflags 注入）
@@ -45,7 +46,7 @@ func main() {
 	fmt.Println("===========================================================")
 	fmt.Println("   Metabox-Nexus-PlayerCap 多播放器歌词实时推送服务          ")
 	fmt.Println("===========================================================")
-	fmt.Printf("   版本: v%s\n", Version)
+	fmt.Printf("   版本: v%s\n", displayVersion(Version))
 	fmt.Printf("   监听: %s\n", cfg.Addr)
 	for _, pn := range playerNames {
 		fmt.Printf("   播放器: %s (offset=%dms poll=%dms)\n", pn, cfg.GetPlayerOffset(pn), cfg.GetPlayerPoll(pn))
@@ -112,7 +113,7 @@ func main() {
 	}
 
 	srv.SetServiceInfo(&server.ServiceInfo{
-		Version:           Version,
+		Version:           displayVersion(Version),
 		Addr:              cfg.Addr,
 		Sources:           cfg.Sources,
 		Endpoints:         endpointsOM,
@@ -154,13 +155,14 @@ func main() {
 }
 
 // ============================================================================
-// 版本检查与自动更新（保留原逻辑）
+// 版本检查与自动更新
 // ============================================================================
 
 const versionCheckURL = "https://gateway.vtb.link/vtb-tools/metabox/nexus/playercap/v2/client-version"
 
 type releaseInfo struct {
 	TagName   string `json:"tag_name"`
+	Name      string `json:"name"`
 	GlobalCDN string `json:"global_cdn_download_url_prefix"`
 	ChinaCDN  string `json:"china_cdn_download_url_prefix"`
 	Assets    []struct {
@@ -171,8 +173,8 @@ type releaseInfo struct {
 }
 
 func checkAndUpdate() {
-	if !isSemver(Version) {
-		mainLog.Info("非发布版本 (%s)，跳过更新检查", Version)
+	if !isReleaseVersion(Version) {
+		mainLog.Info("当前版本 (%s) 不是可自动更新的发布版本，跳过更新检查", displayVersion(Version))
 		return
 	}
 
@@ -198,17 +200,26 @@ func checkAndUpdate() {
 		return
 	}
 
-	latestVersion := strings.TrimPrefix(release.TagName, "v")
-	currentVersion := strings.TrimPrefix(Version, "v")
-
-	if latestVersion == currentVersion {
-		mainLog.Success("当前已是最新版本 v%s", Version)
+	shouldUpdate, reason, err := decideUpdate(Version, release.TagName, release.Name)
+	if err != nil {
+		mainLog.Warn("版本信息无效: %v，继续运行", err)
 		return
 	}
 
-	if !isNewerVersion(latestVersion, currentVersion) {
-		mainLog.Success("当前版本 v%s 已是最新", Version)
+	if !shouldUpdate {
+		switch reason {
+		case updateReasonSameVersion:
+			mainLog.Success("当前已是最新版本 v%s", displayVersion(Version))
+		case updateReasonOlderTargetBlocked:
+			mainLog.Info("检测到较低版本 v%s，release 标题未以 -force 结尾，跳过同步", displayVersion(release.TagName))
+		default:
+			mainLog.Success("当前版本 v%s 无需更新", displayVersion(Version))
+		}
 		return
+	}
+
+	if reason == updateReasonOlderTargetForced {
+		mainLog.Warn("检测到强制版本同步: v%s -> v%s", displayVersion(Version), displayVersion(release.TagName))
 	}
 
 	if len(release.Assets) == 0 {
@@ -218,7 +229,7 @@ func checkAndUpdate() {
 
 	fmt.Println()
 	fmt.Println("╔═════════════════════════════════════════════════════════╗")
-	fmt.Printf("║  🆕 发现新版本: v%s → %s\n", Version, release.TagName)
+	fmt.Printf("║  🆕 发现新版本: v%s → v%s\n", displayVersion(Version), displayVersion(release.TagName))
 	fmt.Printf("║  📦 共 %d 个文件需要更新\n", len(release.Assets))
 	fmt.Println("║  正在自动更新...")
 	fmt.Println("╚═════════════════════════════════════════════════════════╝")
@@ -495,47 +506,62 @@ func pickFastestCDNPrefix(globalPrefix, chinaPrefix, tagName, testFile string) s
 	return globalPrefix
 }
 
-func isNewerVersion(latest, current string) bool {
-	lParts := strings.Split(latest, ".")
-	cParts := strings.Split(current, ".")
+const (
+	updateReasonSameVersion        = "same-version"
+	updateReasonNewerTarget        = "newer-target"
+	updateReasonOlderTargetForced  = "older-target-forced"
+	updateReasonOlderTargetBlocked = "older-target-blocked"
+)
 
-	maxLen := len(lParts)
-	if len(cParts) > maxLen {
-		maxLen = len(cParts)
+func normalizeSemver(version string) string {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		return ""
 	}
-
-	for i := 0; i < maxLen; i++ {
-		var l, c int
-		if i < len(lParts) {
-			l, _ = strconv.Atoi(lParts[i])
-		}
-		if i < len(cParts) {
-			c, _ = strconv.Atoi(cParts[i])
-		}
-		if l > c {
-			return true
-		}
-		if l < c {
-			return false
-		}
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
 	}
-	return false
+	return v
 }
 
-func isSemver(version string) bool {
-	v := strings.TrimPrefix(version, "v")
-	if v == "" || v == "0.0.0" {
+func displayVersion(version string) string {
+	return strings.TrimPrefix(strings.TrimSpace(version), "v")
+}
+
+func isReleaseVersion(version string) bool {
+	normalized := normalizeSemver(version)
+	if normalized == "" || normalized == "v0.0.0" {
 		return false
 	}
-	hasDot := false
-	for _, c := range v {
-		if c == '.' {
-			hasDot = true
-		} else if c < '0' || c > '9' {
-			return false
-		}
+	return semver.IsValid(normalized)
+}
+
+func isForceReleaseName(name string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(name)), "-force")
+}
+
+func decideUpdate(currentVersion, targetVersion, releaseName string) (bool, string, error) {
+	current := normalizeSemver(currentVersion)
+	if !isReleaseVersion(currentVersion) {
+		return false, "", fmt.Errorf("当前版本不是有效 semver 发布版本: %s", currentVersion)
 	}
-	return hasDot
+
+	target := normalizeSemver(targetVersion)
+	if !isReleaseVersion(targetVersion) {
+		return false, "", fmt.Errorf("目标版本不是有效 semver 发布版本: %s", targetVersion)
+	}
+
+	cmp := semver.Compare(target, current)
+	switch {
+	case cmp == 0:
+		return false, updateReasonSameVersion, nil
+	case cmp > 0:
+		return true, updateReasonNewerTarget, nil
+	case isForceReleaseName(releaseName):
+		return true, updateReasonOlderTargetForced, nil
+	default:
+		return false, updateReasonOlderTargetBlocked, nil
+	}
 }
 
 const canonicalExeName = "Metabox-Nexus-PlayerCap.exe"

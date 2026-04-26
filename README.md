@@ -127,8 +127,17 @@ Router（事件合并主循环）
 go build -ldflags "-s -w" -o Metabox-Nexus-PlayerCap.exe .
 
 # 编译并注入版本号（可选）
-go build -ldflags "-X main.Version=3.0.0" -o Metabox-Nexus-PlayerCap.exe .
+go build -ldflags "-X main.Version=3.0.0-beta.1" -o Metabox-Nexus-PlayerCap.exe .
 ```
+
+### 自动更新版本规则
+
+- 真实版本号使用完整 semver，例如 `3.0.0-alpha.1`、`3.0.0-beta.32`、`3.0.0-rc.1.a`、`3.0.0`。
+- 预发布顺序遵循 `alpha < beta < rc < stable`，并允许按纯 semver 自动升级到更高 minor 的预发布版本，例如 `3.0.0-beta.32 -> 3.1.0-alpha.13`。
+- 发布版本由 release `tag_name` 决定；若 release 标题 `name` 以 `-force` 结尾，则允许客户端强制同步到更低版本。
+- 默认开发构建（如 `0.0.0` 或非 semver 版本号）不会参与自动更新检查。
+
+维护者的发布与回退 SOP 见 [instruction.md](instruction.md) 的“7.1 发布流程”和“7.2 回退流程”。
 
 > ⚠️ 需要**管理员权限**运行（读取其他进程内存需要 `PROCESS_VM_READ` 权限）
 
@@ -212,6 +221,8 @@ qqmusic-offset: 400
    优先播放器: [wesing] (超时: 15s)
 ===========================================================
 ```
+
+> `v0.0.0` 表示默认开发构建版本，用于本地调试时不会参与自动更新检查。
 
 ---
 

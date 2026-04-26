@@ -51,7 +51,7 @@ jobs:
           COMMIT_HASH=${{ steps.vars.outputs.COMMIT_HASH }}
           BUILD_TIME=${{ steps.vars.outputs.BUILD_TIME }}
           
-          # 版本号与文件名保持一致：<name>-<date-time>-<commit-hash>
+          # 开发构建使用非 semver 版本号，客户端会跳过自动更新检查
           VERSION="${OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
           
           # 构建可执行文件，文件名格式：<name>-<date-time>-<commit-hash>.exe

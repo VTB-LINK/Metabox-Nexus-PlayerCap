@@ -3,6 +3,7 @@ name: Release on Tag
 on:
   push:
     tags:
+      # 现有 glob 已覆盖 prerelease tag，例如 v3.0.0-beta.32、v3.0.0-rc.1.a
       - 'v*.*.*'
 
 permissions:
@@ -53,7 +54,7 @@ jobs:
       - name: Extract version from tag
         id: vars
         run: |
-          # 从 refs/tags/vX.Y.Z 中提取版本号
+          # 从 refs/tags/vX.Y.Z[-prerelease] 中提取版本号
           TAG_NAME="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG_NAME#v}"
           echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
@@ -116,6 +117,7 @@ jobs:
           fi
 
       - name: Create Release Draft (本仓库)
+        # release 标题默认与 tag_name 一致；需要强制回退时，在 GitHub Release 页面手动追加 -force
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.vars.outputs.TAG_NAME }}
@@ -129,6 +131,7 @@ jobs:
 
       - name: Create Release Draft (dotcom mirror)
         run: |
+          # 镜像仓库标题默认与 tag_name 一致；需要强制回退时，在 GitHub Release 页面手动追加 -force
           TAG_NAME=${{ steps.vars.outputs.TAG_NAME }}
           DOTCOM_REPO="${DOTCOM_OWNER}/${DOTCOM_REPO_NAME}"
           DOTCOM_REPO_BASE_URL="${DOTCOM_GITHUB_BASE}/${DOTCOM_REPO}"

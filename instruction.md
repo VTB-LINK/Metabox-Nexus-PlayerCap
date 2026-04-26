@@ -13,7 +13,7 @@
 | 目标平台 | Windows (amd64) |
 | 用途 | 多播放器歌词实时推送服务（HTTP / WebSocket / SSE） |
 | 依赖 | `gorilla/websocket`、`gopsutil/v3`、`golang.org/x/sys`、`gopkg.in/yaml.v3` |
-| 构建 | `go build -ldflags "-X main.Version=x.y.z" .` |
+| 构建 | `go build -ldflags "-X main.Version=x.y.z-beta.1" .` |
 
 ### 目录结构
 
@@ -481,11 +481,50 @@ type HTTPResponse struct {
 
 `main.go` 中的 `checkAndUpdate()` 在启动时运行：
 
-1. **版本检查**：GET 远程版本 JSON → `isNewerVersion()` semver 比较。
+1. **版本检查**：GET 远程版本 JSON，读取 `tag_name` 作为真实目标版本，按完整 semver 比较。
 2. **CDN 选择**：`pickFastestCDNPrefix()` 测速，< 10 KB/s 自动切换到中国镜像。
 3. **下载验证**：逐文件下载 → SHA256 校验 → `.exe` 优先处理（备份为 `.old`）。
 4. **重启**：`exec.Command(self).Start()` + `os.Exit(0)`。
-5. **跳过条件**：Version == `"0.0.0"` 或非 semver 格式视为开发版本，跳过更新。
+5. **跳过条件**：Version == `"0.0.0"` 或非 semver 格式的开发构建跳过更新检查。
+6. **预发布顺序**：`alpha < beta < rc < stable`，允许如 `v3.0.0-beta.32 -> v3.1.0-alpha.13` 这样的纯 semver 自动升级。
+7. **强制同步**：仅当 release `name` 以 `-force` 结尾时，客户端才允许同步到更低版本；`tag_name` 始终保持真实版本号，不携带 `-force`。
+
+### 7.1 发布流程
+
+本项目的更新接口实际镜像 GitHub 的 `/releases/latest` 内容，因此**是否会被客户端看到**，取决于该 Release 是否成为 GitHub 认定的 latest。
+
+正常发布步骤：
+
+1. 创建真实版本 tag，格式使用完整 semver，例如 `v3.0.0`、`v3.0.0-beta.32`、`v3.1.0-alpha.13`。
+2. 推送 tag，等待 [.github/workflows/release.yml](.github/workflows/release.yml) 生成 Release Draft。
+3. 检查 Draft 的 `tag_name`、标题 `name`、附件和发布说明。默认情况下，`tag_name` 与 `name` 应保持一致，不追加 `-force`。
+4. 如果希望该版本被网关推出并成为客户端更新目标，发布该 Release，并确保它不是 Draft，也**不要**勾选 GitHub 的 `pre-release` 选项。即使 `tag_name` 带有 `-alpha`、`-beta`、`-rc` 后缀，只要 GitHub Release 被标记为 `pre-release`，`/releases/latest` 也不会返回它。
+5. 将该 Release 设为 latest release。缓存清理工作流会在 latest 变化后自动刷新网关缓存。
+6. 发布完成后，客户端会按完整 semver 自动决定是否升级。
+
+### 7.2 回退流程
+
+回退依赖两个条件同时成立：
+
+1. 目标 Release 必须能被 GitHub `/releases/latest` 返回。
+2. 目标 Release 的标题 `name` 必须以 `-force` 结尾，忽略大小写。
+
+回退步骤：
+
+1. 选择要回退到的历史 Release。该 Release 必须已发布、不是 Draft，且不能勾选 GitHub 的 `pre-release` 选项。
+2. 编辑该 Release 的标题 `name`，在末尾追加 `-force`，例如把 `v3.0.0` 改成 `v3.0.0-force`。`tag_name` 保持原样，不能追加 `-force`。
+3. 将这个已追加 `-force` 的旧版 Release 设为 latest release。
+4. 等待网关缓存刷新完成。由于更新接口镜像的是 `/releases/latest`，一旦 latest 指向变化，客户端下一次检查更新时就会拿到这个目标版本。
+5. 客户端行为如下：
+    - 当前版本低于目标版本：按正常升级处理。
+    - 当前版本高于目标版本：因为 `name` 以 `-force` 结尾，允许强制同步到较低版本。
+    - 当前版本等于目标版本：不更新。
+
+### 7.3 操作约束
+
+1. `-force` 只允许出现在 Release 标题 `name` 的末尾，不进入 `tag_name`。
+2. 默认情况下，Release 标题应与 `tag_name` 一致；只有在需要强制回退时才手动追加 `-force`。
+3. 如果后续重新切换到更高版本，只需把新的目标 Release 设为 latest；旧 Release 上残留的 `-force` 不会影响新的 latest。
 
 ---
 
@@ -556,9 +595,9 @@ import (
 go build .
 
 # 发布构建（注入版本号）
-go build -ldflags "-X main.Version=1.2.3" .
+go build -ldflags "-X main.Version=1.2.3-beta.1" .
 
 # 发布构建（附带图标资源）
 copy build-assets\winicon\release\resource_windows_amd64.syso .
-go build -ldflags "-X main.Version=1.2.3 -H windowsgui" .
+go build -ldflags "-X main.Version=1.2.3-beta.1 -H windowsgui" .
 ```
