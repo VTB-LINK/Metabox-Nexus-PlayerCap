@@ -14,11 +14,6 @@ func init() { config.RegisterPlayer(PlayerName) }
 
 var log = logger.New("QQMusic")
 
-func getTickCount() uint32 {
-	ret, _, _ := procGetTickCount.Call()
-	return uint32(ret)
-}
-
 // QQMusicPlayer QQ 音乐播放器
 type QQMusicPlayer struct {
 	player.BaseEmitter
@@ -69,9 +64,6 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	if err := mem.InjectSliderAOB(); err != nil {
 		log.Warn("滑块 Hook 失败: %v", err)
 	}
-	if err := mem.InjectProgressAOB(); err != nil {
-		log.Warn("进度 Hook 失败: %v", err)
-	}
 
 	var lastName string
 	var currentLyrics []lyricLine
@@ -80,12 +72,10 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	var isPaused bool = false
 	var currentTitle string
 
-	// Hybrid clock state
+	// 快速计时器锚点 + 本地时钟插值
 	var anchorProgressMs uint32 = 0
 	var anchorTime time.Time
 	var lastMemProgress uint32 = 0
-	var lastHookedProgress uint32 = 0
-	var lastHookedTimestamp uint32 = 0
 	const pauseTimeoutSec = 1.0
 
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
@@ -111,15 +101,13 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			continue
 		}
 
-		// --- Song change detection ---
+		// --- 切歌检测 ---
 		if meta.Name != lastName && meta.Name != "" && meta.Name != "QQ音乐" {
 			lastName = meta.Name
 			lastLineIdx = -1
 			anchorProgressMs = meta.ProgressMs
 			anchorTime = time.Now()
 			lastMemProgress = meta.ProgressMs
-			lastHookedProgress = 0
-			lastHookedTimestamp = 0
 			isPaused = false
 
 			log.Info("♪ 歌曲: %s - %s", meta.Name, meta.Singer)
@@ -163,7 +151,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				})
 			}
 
-			// Async cover download
+			// 异步封面下载
 			go func(url, name, singer, t string) {
 				if url == "" {
 					return
@@ -176,35 +164,17 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			}(coverURL, meta.Name, meta.Singer, title)
 		}
 
-		// --- Hybrid interpolation ---
-		var hookedProgress, hookedTimestamp uint32
-		if mem.progressPtr != 0 {
-			hookedProgress = mem.ReadUint32(mem.progressPtr)
-			hookedTimestamp = mem.ReadUint32(mem.progressTsPtr)
-		}
-
-		// Hook-based seek detection
-		if hookedProgress > 0 && hookedProgress != lastHookedProgress {
-			if lastHookedProgress > 0 && lastHookedTimestamp > 0 {
-				progressDelta := int32(hookedProgress) - int32(lastHookedProgress)
-				timeDelta := int32(hookedTimestamp) - int32(lastHookedTimestamp)
-				drift := progressDelta - timeDelta
-				if drift < 0 {
-					drift = -drift
-				}
-				if drift > 3000 {
-					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
-						PlayTime: float32(hookedProgress) / 1000.0,
-					})
-					log.Info("检测到回跳: → %.2fs", float32(hookedProgress)/1000.0)
-				}
-			}
-			lastHookedProgress = hookedProgress
-			lastHookedTimestamp = hookedTimestamp
-		}
-
-		// Fast timer anchor updates
+		// --- 快速计时器锚点更新 + seek 检测 ---
 		if meta.ProgressMs != lastMemProgress {
+			// Seek 检测：进度大幅回退（> 2s）视为跳转
+			if lastMemProgress > 0 && meta.ProgressMs+2000 < lastMemProgress {
+				log.Info("检测到回跳: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
+				lastLineIdx = -1 // 重置歌词行号
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
+					PlayTime: float32(meta.ProgressMs) / 1000.0,
+				})
+			}
+
 			if isPaused {
 				isPaused = false
 				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
@@ -218,18 +188,11 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			lastMemProgress = meta.ProgressMs
 		}
 
-		// Interpolate
-		var interpolatedMs float32
-		if hookedProgress > 0 && hookedTimestamp > 0 {
-			localTick := getTickCount()
-			interpolatedMs = float32(hookedProgress) + float32(localTick-hookedTimestamp)
-		} else {
-			elapsed := time.Since(anchorTime)
-			interpolatedMs = float32(anchorProgressMs) + float32(elapsed.Milliseconds())
-		}
-
-		// Pause detection
+		// --- 本地时钟插值 ---
 		elapsed := time.Since(anchorTime)
+		interpolatedMs := float32(anchorProgressMs) + float32(elapsed.Milliseconds())
+
+		// 暂停检测：快速计时器停滞超过阈值
 		if elapsed.Seconds() > pauseTimeoutSec && !isPaused && lastName != "" {
 			isPaused = true
 			interpolatedMs = float32(anchorProgressMs)
@@ -244,7 +207,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			interpolatedMs = float32(anchorProgressMs)
 		}
 
-		// Clamp
+		// 钳位
 		durationMs := float32(meta.DurationMs)
 		if durationMs > 0 && interpolatedMs > durationMs {
 			interpolatedMs = durationMs
@@ -252,7 +215,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 
 		progressSec := interpolatedMs/1000.0 + offsetSec
 
-		// Match lyric line
+		// 歌词行匹配
 		trueIdx := -1
 		for i := len(currentLyrics) - 1; i >= 0; i-- {
 			if progressSec >= currentLyrics[i].Time {
