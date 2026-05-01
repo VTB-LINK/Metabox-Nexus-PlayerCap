@@ -49,7 +49,7 @@ func (p *QQMusicPlayer) Start() {
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		log.Info("已连接 QQMusic.exe (PID: %d)", mem.pid)
+		log.Info("已连接 QQMusic.exe (PID: %d, 版本: %s)", mem.pid, mem.Version())
 
 		p.runSession(mem, offsetSec)
 

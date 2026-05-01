@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +37,11 @@ var (
 	procGetTickCount         = modkernel32.NewProc("GetTickCount")
 	procGetProcAddress       = modkernel32.NewProc("GetProcAddress")
 	procGetModuleHandleW     = modkernel32.NewProc("GetModuleHandleW")
+
+	modversion                = syscall.NewLazyDLL("version.dll")
+	procGetFileVersionInfoSizeW = modversion.NewProc("GetFileVersionInfoSizeW")
+	procGetFileVersionInfoW    = modversion.NewProc("GetFileVersionInfoW")
+	procVerQueryValueW         = modversion.NewProc("VerQueryValueW")
 )
 
 const (
@@ -90,6 +97,51 @@ type MODULEENTRY32W struct {
 	ExePath      [260]uint16
 }
 
+// dllOffsets 存储版本相关的 DLL 内部偏移量
+type dllOffsets struct {
+	// DLL 级偏移（版本敏感，每次更新可能变化）
+	Struct1      uintptr // 元数据结构体 1 基址（QQMusic.dll 内偏移）
+	Struct2Ptr   uintptr // 元数据结构体 2 指针（QQMusic.dll 内偏移，0=不可用）
+	FastTimerPtr uintptr // 快速进度计时器指针（QQMusic.dll 内偏移）
+	FastTimerOff uintptr // 快速计时器进度字段偏移（相对于指针解引用后的对象）
+
+	// Struct1 内部偏移（结构体成员位置，版本间可能变化）
+	NameOff     uintptr // 歌名 SSO String 偏移
+	SingerOff   uintptr // 歌手 SSO String 偏移
+	AlbumOff    uintptr // 专辑名 SSO String 偏移
+	SongIDOff   uintptr // SongID DWORD 偏移
+	DurationOff uintptr // 总时长 DWORD 偏移
+	ProgressOff uintptr // 慢速进度 DWORD 偏移
+}
+
+// knownVersions 版本偏移表
+var knownVersions = map[string]dllOffsets{
+	"22.16": {
+		Struct1:      0xC87C80,
+		Struct2Ptr:   0xC86B00,
+		FastTimerPtr: 0xC157D8,
+		FastTimerOff: 0x618,
+		NameOff:      0x00,
+		SingerOff:    0x18,
+		AlbumOff:     0x30,
+		SongIDOff:    0x60,
+		DurationOff:  0x68,
+		ProgressOff:  0x6C,
+	},
+	"22.22": {
+		Struct1:      0xC95EA0,
+		Struct2Ptr:   0,        // v22.22 中 Struct2 不再可用
+		FastTimerPtr: 0xC23994,
+		FastTimerOff: 0x798,
+		NameOff:      0x80,
+		SingerOff:    0x98,
+		AlbumOff:     0xB0,
+		SongIDOff:    0xE0,
+		DurationOff:  0xE8,
+		ProgressOff:  0xEC,
+	},
+}
+
 type QQMusicMem struct {
 	pid            uint32
 	hProcess       uintptr
@@ -100,6 +152,8 @@ type QQMusicMem struct {
 	sliderPointer  uintptr // Dynamic memory cave address where EDI is stored
 	progressPtr    uintptr // Address where hooked progress (ms) is stored
 	progressTsPtr  uintptr // Address where GetTickCount timestamp is stored
+	version        string  // 检测到的 QQ 音乐版本号，如 "22.16"
+	offsets        dllOffsets // 当前版本的偏移量
 }
 
 func (m *QQMusicMem) CheckValid() bool {
@@ -172,11 +226,15 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 					mem.qqmusicDllBase = modules[i]
 					foundDll = true
 				}
-				if lowerName == "qqmusic_gfwrapper.dll" {
-					mem.gfWrapperBase = modules[i]
-					var minfo MODULEINFO
-					procGetModuleInformation.Call(hProcess, modules[i], uintptr(unsafe.Pointer(&minfo)), uintptr(unsafe.Sizeof(minfo)))
-					mem.gfWrapperSize = minfo.SizeOfImage
+				// v22.16: QQMusic_GFWrapper.dll, v22.22+: 仍存在但也新增 GF.dll
+				if lowerName == "qqmusic_gfwrapper.dll" || lowerName == "gf.dll" {
+					// 优先使用 GFWrapper（滑块 AOB 在其中），GF.dll 作为备选
+					if mem.gfWrapperBase == 0 || lowerName == "qqmusic_gfwrapper.dll" {
+						mem.gfWrapperBase = modules[i]
+						var minfo MODULEINFO
+						procGetModuleInformation.Call(hProcess, modules[i], uintptr(unsafe.Pointer(&minfo)), uintptr(unsafe.Sizeof(minfo)))
+						mem.gfWrapperSize = minfo.SizeOfImage
+					}
 				}
 				if lowerName == "kernel32.dll" {
 					mem.kernel32Base = modules[i]
@@ -187,12 +245,148 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 		if foundDll {
 			mem.pid = pid
 			mem.hProcess = hProcess
+
+			// 检测版本并加载偏移表
+			mem.detectVersion()
+
 			return mem, nil
 		}
 		procCloseHandle.Call(hProcess)
 	}
 
 	return nil, errors.New("QQMusic.dll not found in any QQMusic.exe process")
+}
+
+// detectVersion 从 QQMusic.exe 的 PE 版本资源中提取版本号并匹配偏移表
+func (m *QQMusicMem) detectVersion() {
+	exePath := findQQMusicExePath(m.pid)
+	if exePath == "" {
+		log.Warn("无法获取 QQMusic.exe 路径，使用默认偏移 (v22.16)")
+		m.version = "22.16"
+		m.offsets = knownVersions["22.16"]
+		return
+	}
+
+	major, minor := getFileVersion(exePath)
+	if major == 0 && minor == 0 {
+		log.Warn("版本检测失败，使用默认偏移 (v22.16)")
+		m.version = "22.16"
+		m.offsets = knownVersions["22.16"]
+		return
+	}
+
+	m.version = fmt.Sprintf("%d.%d", major, minor)
+
+	if offsets, ok := knownVersions[m.version]; ok {
+		m.offsets = offsets
+		log.Info("QQ 音乐版本: %s (偏移已匹配)", m.version)
+	} else {
+		log.Warn("QQ 音乐版本 %s 无已知偏移表，回退到 v22.16", m.version)
+		m.offsets = knownVersions["22.16"]
+	}
+}
+
+// findQQMusicExePath 通过 PID 获取 QQMusic.exe 的完整路径
+func findQQMusicExePath(pid uint32) string {
+	// 方法 1: 尝试已知安装路径
+	knownPaths := []string{
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Tencent", "QQMusic", "QQMusic.exe"),
+		filepath.Join(os.Getenv("ProgramFiles"), "Tencent", "QQMusic", "QQMusic.exe"),
+		filepath.Join(os.Getenv("LocalAppData"), "Tencent", "QQMusic", "QQMusic.exe"),
+	}
+	for _, p := range knownPaths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	// 方法 2: 通过模块快照获取 exe 路径
+	hSnap, _, _ := procCreateToolhelp32.Call(uintptr(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32), uintptr(pid))
+	if hSnap == uintptr(syscall.InvalidHandle) {
+		return ""
+	}
+	defer procCloseHandle.Call(hSnap)
+
+	var me32 MODULEENTRY32W
+	me32.Size = uint32(unsafe.Sizeof(me32))
+	ret, _, _ := procModule32First.Call(hSnap, uintptr(unsafe.Pointer(&me32)))
+	for ret != 0 {
+		modName := syscall.UTF16ToString(me32.Module[:])
+		if strings.EqualFold(modName, "QQMusic.exe") {
+			return syscall.UTF16ToString(me32.ExePath[:])
+		}
+		ret, _, _ = procModule32Next.Call(hSnap, uintptr(unsafe.Pointer(&me32)))
+	}
+	return ""
+}
+
+// VS_FIXEDFILEINFO Windows PE 版本信息结构体
+type vsFixedFileInfo struct {
+	Signature        uint32
+	StrucVersion     uint32
+	FileVersionMS    uint32
+	FileVersionLS    uint32
+	ProductVersionMS uint32
+	ProductVersionLS uint32
+	FileFlagsMask    uint32
+	FileFlags        uint32
+	FileOS           uint32
+	FileType         uint32
+	FileSubtype      uint32
+	FileDateMS       uint32
+	FileDateLS       uint32
+}
+
+// getFileVersion 从 PE 文件中提取 ProductVersion (major, minor)
+func getFileVersion(path string) (major, minor uint16) {
+	pathUTF16, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, 0
+	}
+
+	size, _, _ := procGetFileVersionInfoSizeW.Call(uintptr(unsafe.Pointer(pathUTF16)), 0)
+	if size == 0 {
+		return 0, 0
+	}
+
+	buf := make([]byte, size)
+	ret, _, _ := procGetFileVersionInfoW.Call(
+		uintptr(unsafe.Pointer(pathUTF16)),
+		0,
+		size,
+		uintptr(unsafe.Pointer(&buf[0])),
+	)
+	if ret == 0 {
+		return 0, 0
+	}
+
+	subBlock, _ := syscall.UTF16PtrFromString(`\`)
+	var infoPtr uintptr
+	var infoLen uint32
+	ret, _, _ = procVerQueryValueW.Call(
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(unsafe.Pointer(subBlock)),
+		uintptr(unsafe.Pointer(&infoPtr)),
+		uintptr(unsafe.Pointer(&infoLen)),
+	)
+	if ret == 0 || infoPtr == 0 {
+		return 0, 0
+	}
+
+	info := (*vsFixedFileInfo)(unsafe.Pointer(infoPtr))
+	if info.Signature != 0xFEEF04BD {
+		return 0, 0
+	}
+
+	// ProductVersionMS: HIWORD=major, LOWORD=minor
+	major = uint16(info.ProductVersionMS >> 16)
+	minor = uint16(info.ProductVersionMS & 0xFFFF)
+	return major, minor
+}
+
+// Version 返回检测到的 QQ 音乐版本号
+func (m *QQMusicMem) Version() string {
+	return m.version
 }
 
 func (m *QQMusicMem) ReadUint32(addr uintptr) uint32 {
@@ -748,11 +942,11 @@ func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 	var name1, singer1 string
 	var songId, duration, progress uint32
 
-	// CE verified: struct is directly embedded at QQMusic.dll+C87C80, NOT a pointer
-	struct1 := m.qqmusicDllBase + 0xC87C80
+	// CE verified: struct is directly embedded at QQMusic.dll+offsets.Struct1, NOT a pointer
+	struct1 := m.qqmusicDllBase + m.offsets.Struct1
 
-	name1 = extractSSO(struct1 + 0x00)
-	singer1 = extractSSO(struct1 + 0x18)
+	name1 = extractSSO(struct1 + m.offsets.NameOff)
+	singer1 = extractSSO(struct1 + m.offsets.SingerOff)
 
 	if len(name1) > 1 {
 		meta.Name = name1
@@ -761,18 +955,17 @@ func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 		meta.Singer = singer1
 	}
 
-	// CE verified offsets: +0x60=SongID, +0x68=DurationMs, +0x6C=ProgressMs
-	songId = m.ReadUint32(struct1 + 0x60)
-	duration = m.ReadUint32(struct1 + 0x68)
+	songId = m.ReadUint32(struct1 + m.offsets.SongIDOff)
+	duration = m.ReadUint32(struct1 + m.offsets.DurationOff)
 
-	// Fast progress timer: QQMusic.dll+0xC157D8 -> [ptr]+0x618
-	// Updates every ~1 second (vs struct1+0x6C which updates every ~3-5 seconds)
-	fastTimerPtr := uintptr(m.ReadUint32(m.qqmusicDllBase + 0xC157D8))
+	// Fast progress timer: QQMusic.dll+offsets.FastTimerPtr -> [ptr]+offsets.FastTimerOff
+	// Updates every ~1 second (vs slow timer which updates every ~3-5 seconds)
+	fastTimerPtr := uintptr(m.ReadUint32(m.qqmusicDllBase + m.offsets.FastTimerPtr))
 	if fastTimerPtr > 0x10000 {
-		progress = m.ReadUint32(fastTimerPtr + 0x618)
+		progress = m.ReadUint32(fastTimerPtr + m.offsets.FastTimerOff)
 	} else {
-		// Fallback to struct1+0x6C (slow timer)
-		progress = m.ReadUint32(struct1 + 0x6C)
+		// Fallback to slow timer in struct1
+		progress = m.ReadUint32(struct1 + m.offsets.ProgressOff)
 	}
 
 	if songId > 0 && songId < 0x3F000000 {
@@ -781,17 +974,19 @@ func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 	meta.DurationMs = duration
 	meta.ProgressMs = progress
 
-	// Read Struct 2 (C86B00)
-	struct2 := uintptr(m.ReadUint32(m.qqmusicDllBase + 0xC86B00))
+	// Read Struct 2 (backup source, not available in all versions)
 	var name2, singer2 string
-	if struct2 != 0 {
-		namePtr := m.ReadUint32(struct2 + 0x64)
-		if namePtr != 0 {
-			name2 = m.ReadWideString(uintptr(namePtr), 256)
-		}
-		singerPtr := m.ReadUint32(struct2 + 0x68)
-		if singerPtr != 0 {
-			singer2 = m.ReadWideString(uintptr(singerPtr), 256)
+	if m.offsets.Struct2Ptr != 0 {
+		struct2 := uintptr(m.ReadUint32(m.qqmusicDllBase + m.offsets.Struct2Ptr))
+		if struct2 != 0 {
+			namePtr := m.ReadUint32(struct2 + 0x64)
+			if namePtr != 0 {
+				name2 = m.ReadWideString(uintptr(namePtr), 256)
+			}
+			singerPtr := m.ReadUint32(struct2 + 0x68)
+			if singerPtr != 0 {
+				singer2 = m.ReadWideString(uintptr(singerPtr), 256)
+			}
 		}
 	}
 
