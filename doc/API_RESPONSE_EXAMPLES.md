@@ -119,6 +119,10 @@
   - `["config.yml"]` - 所有值来自 config.yml
   - `["config.yml", "命令行参数"]` - 从 config.yml 加载，部分被命令行参数覆盖
 
+**root WS 初始化说明：**
+- 若连入 `/ws` 时存在活跃播放器，服务端会先补发该播放器当前缓存的 `status_update` / `song_info_update` / `all_lyrics` / `lyric_update`
+- 若连入 `/ws` 时当前没有活跃播放器，服务端会立即发送一个 `player_clear` 事件，而不是静默不输出
+
 **config_overwritten 说明：**
 - 列出被更高优先级来源覆盖的配置键名
 - 仅在有覆盖时出现非空数组

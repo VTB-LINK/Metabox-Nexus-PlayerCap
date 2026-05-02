@@ -49,6 +49,31 @@ func (c *baseRealClock) GetCurrent() float32 {
 	return c.BaseRealTime + elapsed
 }
 
+func normalizeSongIdentity(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func snapshotMatchesCurrentSong(data *cdp.ExtractionData, songName, songArtist string) bool {
+	targetName := normalizeSongIdentity(songName)
+	if targetName == "" || data == nil || data.CurPlaying == nil {
+		return false
+	}
+	if normalizeSongIdentity(data.CurPlaying.Track.Name) != targetName {
+		return false
+	}
+
+	targetArtist := normalizeSongIdentity(songArtist)
+	if targetArtist == "" {
+		return true
+	}
+	currentArtist := normalizeSongIdentity(getArtists(data.CurPlaying.Track.Artists))
+	if currentArtist == "" {
+		return false
+	}
+	return currentArtist == targetArtist
+}
+
 // Start 启动轮询循环（阻塞）
 func (p *CloudMusicPlayer) Start() {
 	// 0. Patch Windows registry auto-start
@@ -90,6 +115,8 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 	var lastPlayingState int = -1
 	var lastLineIdx int = -1
 	var clock baseRealClock
+	var currentSongName string
+	var currentSongArtist string
 	var currentSongTitle string // 当前歌曲标题（用于 status detail）
 	offsetSec := float32(p.offsetMs) / 1000.0
 	var activeLyrics []cdp.ExtractedLyric
@@ -156,20 +183,52 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			songDuration = 0
 			clock = baseRealClock{LastKnownLyricIndex: -1}
 			lastSongChangeTime = time.Now()
+			currentSongName = songName
+			currentSongArtist = songArtist
 
 			log.Info("♪ 歌曲: %s - %s", songName, songArtist)
 
-			// Search correct ID
-			searchID, err := client.SearchSongViaCDP(songName, songArtist)
-			if err != nil {
-				log.Warn("搜索失败: %v，使用 Redux ID: %s", err, data.CurPlaying.ID)
-				searchID = data.CurPlaying.ID
+			// 先强制 Redux 获取当前歌词数据，确保 Redux Store 更新到最新歌曲
+			client.ForceFetchLyricsInRedux()
+			time.Sleep(300 * time.Millisecond)
+			matchedRedux := snapshotMatchesCurrentSong(data, songName, songArtist)
+			if matchedRedux {
+				activeSongID = data.CurPlaying.ID
 			}
-			activeSongID = searchID
 
-			// Fetch HD cover
-			if detailCover, err := client.FetchCoverViaCDP(activeSongID); err == nil && detailCover != "" {
-				songCover = detailCover
+			// 重新提取 Redux 状态，获取最新的 CurPlaying.ID
+			freshData, freshErr := client.Extract()
+			if freshErr == nil && snapshotMatchesCurrentSong(freshData, songName, songArtist) {
+				activeSongID = freshData.CurPlaying.ID
+				// 同步更新 data 以获取最新歌词/时长
+				data = freshData
+			}
+
+			// Redux ID 为空时再等 500ms 重试一次
+			if activeSongID == "" {
+				time.Sleep(500 * time.Millisecond)
+				retryData, retryErr := client.Extract()
+				if retryErr == nil && snapshotMatchesCurrentSong(retryData, songName, songArtist) && retryData.CurPlaying.ID != "" {
+					activeSongID = retryData.CurPlaying.ID
+					data = retryData
+					log.Info("重试获取 Redux ID 成功: %s", activeSongID)
+				} else {
+					log.Info("当前歌曲的 Redux 快照暂未对齐，等待后续补齐歌词和封面")
+				}
+			}
+			matchedRedux = snapshotMatchesCurrentSong(data, songName, songArtist)
+			if activeSongID != "" {
+				log.Info("使用 Redux ID: %s", activeSongID)
+			}
+
+			// 封面优先使用 Redux 中的专辑封面 URL（高清），否则使用 CDP 接口或 DOM 封面
+			if matchedRedux && data.CurPlaying != nil && data.CurPlaying.Track.Album.PicUrl != "" {
+				songCover = data.CurPlaying.Track.Album.PicUrl
+			}
+			if activeSongID != "" {
+				if detailCover, err := client.FetchCoverViaCDP(activeSongID); err == nil && detailCover != "" {
+					songCover = detailCover
+				}
 			}
 
 			songTitle := songName + " - " + songArtist
@@ -191,18 +250,16 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 			}(songName, songArtist, songTitle, songCover)
 
-			// Fetch lyrics via CDP
-			lrcText, err := client.FetchLyricsViaCDP(activeSongID)
-			if err != nil {
-				log.Warn("歌词获取失败: %v", err)
-				// 不使用 data.Lyrics 兜底（可能是旧歌词），等 ForceFetchLyricsInRedux 更新后由 Redux fallback 统一推送
-			} else if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
-				// CDP 返回纯音乐，用 Go HTTP API + Redux ID 二次确认（避免 CDP 上下文差异和 Redux 脏数据）
-				reduxID := data.CurPlaying.ID
-				log.Info("CDP 返回纯音乐(searchID=%s), Redux ID=%s", activeSongID, reduxID)
-				if reduxID != "" {
-					if apiLyrics, err2 := lyric.FetchLyrics(reduxID); err2 == nil && len(apiLyrics) > 0 {
-						log.Info("API 二次确认(ID=%s)有 %d 行歌词，使用 API 歌词", reduxID, len(apiLyrics))
+			// Fetch lyrics via CDP using Redux ID
+			if activeSongID != "" {
+				lrcText, err := client.FetchLyricsViaCDP(activeSongID)
+				if err != nil {
+					log.Warn("歌词获取失败: %v", err)
+				} else if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
+					// CDP 返回纯音乐，用 Go HTTP API 二次确认
+					log.Info("CDP 返回纯音乐(ID=%s)", activeSongID)
+					if apiLyrics, err2 := lyric.FetchLyrics(activeSongID); err2 == nil && len(apiLyrics) > 0 {
+						log.Info("API 二次确认(ID=%s)有 %d 行歌词，使用 API 歌词", activeSongID, len(apiLyrics))
 						for _, l := range apiLyrics {
 							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
 								Index: l.Index, Time: l.Time, Text: l.Text,
@@ -210,9 +267,9 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						}
 						cdpLyricsOK = true
 					} else {
-						log.Info("API 二次确认(ID=%s)也无歌词，标记纯音乐", reduxID)
+						log.Info("API 二次确认(ID=%s)也无歌词，标记纯音乐", activeSongID)
 						isPureMusic = true
-						if data.CurPlaying.Track.Duration > 0 {
+						if matchedRedux && data.CurPlaying.Track.Duration > 0 {
 							songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 						}
 						p.Emit(player.EventAllLyrics, &player.AllLyricsData{
@@ -223,17 +280,21 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						})
 					}
 				} else {
-					// Redux ID 为空（切歌瞬间未更新），不标记纯音乐，交给 Redux fallback 补救
-					log.Info("Redux ID 为空，等待 Redux fallback 补救")
+					cdpLyricsOK = true
+					parsed := lyric.ParseLRC(lrcText)
+					for _, l := range parsed {
+						activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
+							Index: l.Index, Time: l.Time, Text: l.Text,
+						})
+					}
 				}
-			} else {
+			}
+
+			// 若 Redux ID 为空且 ForceFetch 后 Redux 歌词已有数据，直接采纳
+			if activeSongID == "" && matchedRedux && len(data.Lyrics) > 0 {
+				activeLyrics = data.Lyrics
 				cdpLyricsOK = true
-				parsed := lyric.ParseLRC(lrcText)
-				for _, l := range parsed {
-					activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
-						Index: l.Index, Time: l.Time, Text: l.Text,
-					})
-				}
+				log.Info("Redux ID 为空，直接使用 Redux 歌词: %d 行", len(activeLyrics))
 			}
 
 			// Broadcast all lyrics（仅在有普通歌词时发送，避免空歌词 + Redux 补发导致双发）
@@ -243,7 +304,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
 				}
 
-				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
+				if songDuration == 0 && matchedRedux && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
 
@@ -256,15 +317,12 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if data.PlayingState == 2 {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
 			}
-
-			// 异步强制 NetEase PC 发起内部底层 API 获取歌词
-			go client.ForceFetchLyricsInRedux()
 		}
 
 		// Redux lyrics appeared later（切歌 tick 跳过，避免旧歌词回写覆盖新歌词）
 		// 等待 ForceFetchLyricsInRedux 完成后再接受 Redux 歌词（冷却 1.5 秒防止旧歌词被误采纳）
 		if !songChanged && !isPureMusic && !cdpLyricsOK && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) && time.Since(lastSongChangeTime) > 1*time.Second {
-			if activeSongID == "" || data.CurPlaying.ID == activeSongID || data.CurPlaying.ID == "" || data.CurPlaying.Track.Name == lastDomSongName {
+			if snapshotMatchesCurrentSong(data, currentSongName, currentSongArtist) && (activeSongID == "" || data.CurPlaying.ID == activeSongID || data.CurPlaying.ID == "") {
 				activeLyrics = data.Lyrics
 				log.Info("歌词加载完成(Redux): %d 行", len(activeLyrics))
 
@@ -286,7 +344,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		if !songChanged && !isPureMusic && !cdpLyricsOK && len(activeLyrics) == 0 && time.Since(lastSongChangeTime) > 3*time.Second {
 			log.Info("歌词获取超时，标记纯音乐并清空前端")
 			isPureMusic = true
-			if songDuration == 0 && data.CurPlaying != nil && data.CurPlaying.Track.Duration > 0 {
+			if songDuration == 0 && snapshotMatchesCurrentSong(data, currentSongName, currentSongArtist) && data.CurPlaying != nil && data.CurPlaying.Track.Duration > 0 {
 				songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 			}
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
@@ -320,11 +378,18 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		// Seek detection — 切歌后短暂抑制，等待 DOM 进度条刷新到新歌曲
 		seeked := false
 		if data.DomTimeSec >= 0 && clock.Playing && time.Since(lastSongChangeTime) > 500*time.Millisecond {
-			diff := float32(data.DomTimeSec) - clock.GetCurrent()
+			prevPlayTime := clock.GetCurrent()
+			diff := float32(data.DomTimeSec) - prevPlayTime
 			if diff < 0 {
 				diff = -diff
 			}
 			if diff > 1.5 {
+				targetPlayTime := float32(data.DomTimeSec)
+				if targetPlayTime+0.01 < prevPlayTime {
+					log.Info("检测到回跳: %.2fs → %.2fs", prevPlayTime, targetPlayTime)
+				} else if targetPlayTime > prevPlayTime+0.01 {
+					log.Info("检测到前跳: %.2fs → %.2fs", prevPlayTime, targetPlayTime)
+				}
 				clock.BaseRealTime = float32(data.DomTimeSec)
 				clock.AnchorTime = time.Now()
 				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
@@ -338,11 +403,13 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if data.PlayingState == 2 {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentSongTitle})
 				if !seeked {
+					log.Info("恢复 @ %.2fs", clock.GetCurrent())
 					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
 				}
 			} else {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentSongTitle})
 				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
+				log.Info("暂停 @ %.2fs", clock.GetCurrent())
 			}
 		}
 

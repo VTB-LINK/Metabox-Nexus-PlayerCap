@@ -11,6 +11,8 @@ info:
 
     **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`、`/qqmusic/ws`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
 
+    **Root WS 空闲态：** 当客户端连入根端点 `/ws` 且当前没有活跃播放器时，服务端会立即发送一个 `player_clear` 初始事件，而不是静默不输出。
+
 servers:
   - url: http://localhost:8765
     description: 本地开发服务器
@@ -537,6 +539,8 @@ paths:
         > 所有事件无数据时 `data` 均为 `{}`（空对象）。
         > 下游客户端统一按 `msg.type` 分发，`msg.player` 识别来源，`msg.data` 读取载荷即可。
 
+        > **初始化行为：** 若连入时存在活跃播放器，会先补发该播放器当前缓存的 `status_update` / `song_info_update` / `lyric_update` / `all_lyrics`；若连入时当前没有活跃播放器，会立即收到一个 `player_clear` 初始事件。
+
         **连接建立时立即接收以下 4 条消息（始终全部发送，无数据时 data 为 {}）：**
 
         ---
@@ -653,6 +657,7 @@ paths:
         {"type":"player_clear","player":"","data":{}}
         ```
         - 总是与 `player_switch`(to="") 一起发送（双重通知，向后兼容）
+        - 若客户端连入 `/ws` 时当前已经没有活跃播放器，也会立即收到这个初始事件
         - 前端应清空歌词、封面、进度等所有显示内容
         - Per-player 订阅者（如 `/wesing/ws`）**不会**收到此事件
 
@@ -690,6 +695,9 @@ paths:
         （播放器退出）
         ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"standby","detail":"播放器已退出"}}
         ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"waiting_process","detail":"播放器未启动"}}
+
+        （客户端连入根端点 /ws，当前没有活跃播放器）
+        ← {"type":"player_clear","player":"","data":{}}
         ```
 
         **客户端使用示例（JavaScript）：**
@@ -1387,6 +1395,7 @@ webhooks:
       description: |
         所有播放器都停止输出（全员 inert）时推送。仅根订阅者（`/ws`）收到此事件。
         总是与 `player_switch`(to="") 一起发送（双重通知，向后兼容）。
+        若客户端连入 `/ws` 时当前已经没有活跃播放器，也会立即收到这个初始事件。
         前端应清空歌词、封面、进度等所有显示内容。
       requestBody:
         required: true

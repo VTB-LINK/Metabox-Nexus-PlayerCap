@@ -210,6 +210,14 @@ func (s *Server) buildInitEvents(playerName string) []WSEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if playerName == "" && s.activePlayer == "" {
+		return []WSEvent{{
+			Type:   player.EventPlayerClear,
+			Player: "",
+			Data:   struct{}{},
+		}}
+	}
+
 	target := playerName
 	if target == "" {
 		target = s.activePlayer

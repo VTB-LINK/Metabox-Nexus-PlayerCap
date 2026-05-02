@@ -139,7 +139,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					SongTitle: title, Duration: currentDurationSec,
 					PlayTime: float32(meta.ProgressMs) / 1000.0,
-					Lyrics: []player.LyricLine{}, Count: 0,
+					Lyrics:   []player.LyricLine{}, Count: 0,
 				})
 			} else {
 				log.Info("歌词加载完成: %d 行", len(currentLyrics))
@@ -147,7 +147,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					SongTitle: title, Duration: currentDurationSec,
 					PlayTime: float32(meta.ProgressMs) / 1000.0,
-					Count: len(lyricItems), Lyrics: lyricItems,
+					Count:    len(lyricItems), Lyrics: lyricItems,
 				})
 			}
 
@@ -166,20 +166,40 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 
 		// --- 快速计时器锚点更新 + seek 检测 ---
 		if meta.ProgressMs != lastMemProgress {
-			// Seek 检测：进度大幅回退（> 2s）视为跳转
-			if lastMemProgress > 0 && meta.ProgressMs+2000 < lastMemProgress {
-				log.Info("检测到回跳: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
+			// Seek 检测：进度大幅跳变（> 2s 超出正常播放推进）视为跳转
+			seekDetected := false
+			resumeEmitted := false
+			if lastMemProgress > 0 {
+				// 回跳：进度回退超过 2s
+				if meta.ProgressMs+2000 < lastMemProgress {
+					log.Info("检测到回跳: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
+					seekDetected = true
+				}
+				// 前跳：进度前进量超出实际经过时间 2s 以上
+				if !seekDetected && meta.ProgressMs > lastMemProgress {
+					advance := meta.ProgressMs - lastMemProgress
+					elapsed := uint32(time.Since(anchorTime).Milliseconds())
+					if advance > elapsed+2000 {
+						log.Info("检测到前跳: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
+						seekDetected = true
+					}
+				}
+			}
+			if seekDetected {
 				lastLineIdx = -1 // 重置歌词行号
 				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
 					PlayTime: float32(meta.ProgressMs) / 1000.0,
 				})
+				resumeEmitted = true
 			}
 
 			if isPaused {
 				isPaused = false
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
-					PlayTime: float32(meta.ProgressMs) / 1000.0,
-				})
+				if !resumeEmitted {
+					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
+						PlayTime: float32(meta.ProgressMs) / 1000.0,
+					})
+				}
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
 				log.Info("恢复 @ %.2fs", float32(meta.ProgressMs)/1000.0)
 			}

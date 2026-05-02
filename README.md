@@ -49,14 +49,16 @@ PlayerCap (wesing 模块)
 ```
 cloudmusic.exe 进程（Electron）
 ├─ --remote-debugging-port=9222
-├─ React / Redux 状态 → 歌曲信息、播放时间
-└─ DOM → 歌词文本
+├─ React / Redux 状态 → 歌曲 ID、歌词、播放状态
+└─ DOM → 歌名、歌手、封面、进度文本
 
 PlayerCap (cloudmusicv3 模块)
 ├─ Watchdog 确保进程带调试端口启动（注册表注入自启参数）
 ├─ WebSocket CDP 客户端连接浏览器
-├─ JS 求值 → React Fiber 遍历 → 提取 Redux 状态
-├─ 网易云 API 获取歌词（LRC 解析）+ 封面
+├─ JS 求值 → React Fiber 遍历 → 提取 Redux + DOM 状态
+├─ 切歌时强制 Redux 刷新歌词，优先使用当前歌曲 Redux ID
+├─ DOM / Redux 双重校验，避免旧歌词、旧封面串到新歌
+├─ 网易云 API / CDP 获取歌词（LRC 解析）+ 封面
 ├─ 本地时钟锚定 + seek 检测
 └─ play_time 停滞检测 → 暂停/恢复事件
 ```
@@ -72,10 +74,10 @@ QQMusic.exe 进程
 
 PlayerCap (qqmusic 模块)
 ├─ 进程内存扫描定位 QQMusic.dll + QQMusic_GFWrapper.dll
-├─ AOB Hook 注入（伴奏滑块 + 精确进度 + KUSER_SHARED_DATA 时间戳）
-├─ 双源融合插值：快速计时器锚点 + Hook 精确时间戳实时线性插值
+├─ AOB Hook 注入（伴奏滑块）
+├─ 快速计时器锚点 + 本地时钟实时线性插值
 ├─ QQ 音乐 API 获取歌词（QRC 3DES 解密）+ 专辑封面
-├─ Hook 时间戳 delta 检测 seek/回跳
+├─ 快速计时器异常跳变检测 seek（支持前跳 / 回跳）
 └─ 快速计时器停滞检测 → 暂停/恢复事件
 ```
 
@@ -127,7 +129,7 @@ Router（事件合并主循环）
 go build -ldflags "-s -w" -o Metabox-Nexus-PlayerCap.exe .
 
 # 编译并注入版本号（可选）
-go build -ldflags "-X main.Version=3.0.0-beta.1" -o Metabox-Nexus-PlayerCap.exe .
+go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe .
 ```
 
 ### 自动更新版本规则
@@ -261,6 +263,9 @@ qqmusic-offset: 400
 
 // 活跃播放器清除（所有播放器都停止输出时，仅根订阅者收到）
 {"type": "player_switch", "player": "", "data": {"from": "wesing", "to": ""}}
+{"type": "player_clear", "player": "", "data": {}}
+
+// 若 root WS 连入时当前就没有活跃播放器，也会立即收到一个初始 player_clear
 {"type": "player_clear", "player": "", "data": {}}
 ```
 
