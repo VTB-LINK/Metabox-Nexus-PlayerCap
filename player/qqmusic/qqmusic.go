@@ -136,17 +136,27 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 
 			if err != nil {
 				log.Warn("歌词获取失败: %v", err)
+				progress := float32(0)
+				if currentDurationSec > 0 {
+					progress = player.ClampFloat32((float32(meta.ProgressMs)/1000.0)/currentDurationSec, 0, 1)
+				}
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-					SongTitle: title, Duration: currentDurationSec,
+					Title: title, Duration: currentDurationSec,
 					PlayTime: float32(meta.ProgressMs) / 1000.0,
+					Progress: progress,
 					Lyrics:   []player.LyricLine{}, Count: 0,
 				})
 			} else {
 				log.Info("歌词加载完成: %d 行", len(currentLyrics))
 				lyricItems := toLyricLines(currentLyrics)
+				progress := float32(0)
+				if currentDurationSec > 0 {
+					progress = player.ClampFloat32((float32(meta.ProgressMs)/1000.0)/currentDurationSec, 0, 1)
+				}
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-					SongTitle: title, Duration: currentDurationSec,
+					Title: title, Duration: currentDurationSec,
 					PlayTime: float32(meta.ProgressMs) / 1000.0,
+					Progress: progress,
 					Count:    len(lyricItems), Lyrics: lyricItems,
 				})
 			}
@@ -254,7 +264,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			}
 
 			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				LineIndex: trueIdx,
+				Index:     trueIdx,
 				Text:      line.Text,
 				SubText:   "",
 				Timestamp: line.Time,
@@ -269,7 +279,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 func toLyricLines(lines []lyricLine) []player.LyricLine {
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
-		out[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
+		out[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
 	}
 	return out
 }

@@ -49,6 +49,13 @@ func (c *baseRealClock) GetCurrent() float32 {
 	return c.BaseRealTime + elapsed
 }
 
+func clampProgress(playTime, duration float32) float32 {
+	if duration <= 0 {
+		return 0
+	}
+	return player.ClampFloat32(playTime/duration, 0, 1)
+}
+
 func normalizeSongIdentity(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	return strings.Join(strings.Fields(value), " ")
@@ -272,11 +279,14 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						if matchedRedux && data.CurPlaying.Track.Duration > 0 {
 							songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 						}
+						playTime := clock.GetCurrent() + offsetSec
+						progress := clampProgress(playTime, songDuration)
 						p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-							SongTitle: songTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: []player.LyricLine{}, Count: 0,
+							Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+							Lyrics: []player.LyricLine{}, Count: 0,
 						})
 						p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-							LineIndex: -1, Text: "", Timestamp: 0, PlayTime: clock.GetCurrent(),
+							Index: -1, Text: "", Timestamp: 0, PlayTime: playTime,
 						})
 					}
 				} else {
@@ -301,15 +311,18 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if len(activeLyrics) > 0 {
 				lyricItems := make([]player.LyricLine, len(activeLyrics))
 				for i, l := range activeLyrics {
-					lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
+					lyricItems[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
 				}
 
 				if songDuration == 0 && matchedRedux && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
+				playTime := clock.GetCurrent() + offsetSec
+				progress := clampProgress(playTime, songDuration)
 
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-					SongTitle: songTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: lyricItems, Count: len(lyricItems),
+					Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+					Lyrics: lyricItems, Count: len(lyricItems),
 				})
 			}
 
@@ -329,13 +342,16 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				// 补发全量歌词给前端
 				lyricItems := make([]player.LyricLine, len(activeLyrics))
 				for i, l := range activeLyrics {
-					lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
+					lyricItems[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
 				}
 				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
+				playTime := clock.GetCurrent() + offsetSec
+				progress := clampProgress(playTime, songDuration)
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-					SongTitle: currentSongTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: lyricItems, Count: len(lyricItems),
+					Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+					Lyrics: lyricItems, Count: len(lyricItems),
 				})
 			}
 		}
@@ -347,11 +363,14 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if songDuration == 0 && snapshotMatchesCurrentSong(data, currentSongName, currentSongArtist) && data.CurPlaying != nil && data.CurPlaying.Track.Duration > 0 {
 				songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 			}
+			playTime := clock.GetCurrent() + offsetSec
+			progress := clampProgress(playTime, songDuration)
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-				SongTitle: currentSongTitle, Duration: songDuration, PlayTime: clock.GetCurrent(), Lyrics: []player.LyricLine{}, Count: 0,
+				Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+				Lyrics: []player.LyricLine{}, Count: 0,
 			})
 			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				LineIndex: -1, Text: "", Timestamp: 0, PlayTime: clock.GetCurrent(),
+				Index: -1, Text: "", Timestamp: 0, PlayTime: playTime,
 			})
 		}
 
@@ -392,7 +411,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 				clock.BaseRealTime = float32(data.DomTimeSec)
 				clock.AnchorTime = time.Now()
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent() + offsetSec})
 				seeked = true
 			}
 		}
@@ -403,13 +422,15 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if data.PlayingState == 2 {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentSongTitle})
 				if !seeked {
-					log.Info("恢复 @ %.2fs", clock.GetCurrent())
-					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
+					playTime := clock.GetCurrent() + offsetSec
+					log.Info("恢复 @ %.2fs", playTime)
+					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
 				}
 			} else {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentSongTitle})
-				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
-				log.Info("暂停 @ %.2fs", clock.GetCurrent())
+				playTime := clock.GetCurrent() + offsetSec
+				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: playTime})
+				log.Info("暂停 @ %.2fs", playTime)
 			}
 		}
 
@@ -418,11 +439,11 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if trueLineIdx != lastLineIdx {
 				lastLineIdx = trueLineIdx
 				currentLine := activeLyrics[trueLineIdx]
-				playTime := clock.GetCurrent()
+				playTime := clock.GetCurrent() + offsetSec
 				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					LineIndex: trueLineIdx, Text: currentLine.Text,
+					Index: trueLineIdx, Text: currentLine.Text,
 					Timestamp: currentLine.Time, PlayTime: playTime,
-					Progress: player.ClampFloat32(playTime/songDuration, 0, 1),
+					Progress: clampProgress(playTime, songDuration),
 				})
 			}
 		}

@@ -19,7 +19,7 @@ func hashEventData(evtType string, data interface{}) uint64 {
 		}
 	case player.EventAllLyrics:
 		if msg, ok := data.(*player.AllLyricsData); ok {
-			fmt.Fprintf(h, "%s\x00%d\x00%.3f", msg.SongTitle, msg.Count, msg.Duration)
+			fmt.Fprintf(h, "%s\x00%d\x00%.3f", msg.Title, msg.Count, msg.Duration)
 			// 加入首尾歌词文本以区分同名不同内容
 			if len(msg.Lyrics) > 0 {
 				fmt.Fprintf(h, "\x00%s", msg.Lyrics[0].Text)
@@ -30,7 +30,7 @@ func hashEventData(evtType string, data interface{}) uint64 {
 		}
 	case player.EventLyricUpdate:
 		if msg, ok := data.(*player.LyricUpdate); ok {
-			fmt.Fprintf(h, "%d\x00%s\x00%.3f", msg.LineIndex, msg.Text, msg.Timestamp)
+			fmt.Fprintf(h, "%d\x00%s\x00%.3f", msg.Index, msg.Text, msg.Timestamp)
 		}
 	default:
 		// 未知类型使用 fmt 兜底（不应走到这里，status_update 不参与去重）

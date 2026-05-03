@@ -1298,9 +1298,9 @@
         // URL 参数解析
         const urlParams = new URLSearchParams(window.location.search);
         const pureMode = urlParams.has('pure');
-        const songTitleMode = urlParams.has('song_title');
-        const songTitleFormat = urlParams.get('song_title_format') || 'name';
-        const songTitleSep = urlParams.get('song_title_sep') || ' / ';
+        const titleMode = urlParams.has('title');
+        const titleFormat = urlParams.get('title_format') || 'name';
+        const titleSep = urlParams.get('title_sep') || ' / ';
 
         // 歌名溢出模式参数
         const stOverflow = urlParams.get('st_overflow') || 'wrap';
@@ -1359,8 +1359,8 @@
             document.body.style.fontFamily = `'${customFont.replace(/\+/g, ' ')}', 'Noto Sans SC', sans-serif`;
         }
 
-        // 根据 song_title 模式应用样式（复用 pure 逻辑）
-        if (songTitleMode) {
+        // 根据 title 模式应用样式（复用 pure 逻辑）
+        if (titleMode) {
             document.documentElement.style.backgroundColor = bgColor || 'transparent';
             document.body.style.background = bgColor || 'transparent';
             document.body.classList.add('song-title-mode');
@@ -1488,12 +1488,12 @@
             return [title, name, singer].join('\u0001');
         }
 
-        function buildSongTitleDisplayText(info) {
+        function buildTitleDisplayText(info) {
             if (!info) return '';
-            if (songTitleFormat === 'title') {
+            if (titleFormat === 'title') {
                 const name = normalizeSongInfoValue(info.name);
                 const singer = normalizeSongInfoValue(info.singer);
-                return (name && singer) ? name + songTitleSep + singer : (name || singer || normalizeSongInfoValue(info.title));
+                return (name && singer) ? name + titleSep + singer : (name || singer || normalizeSongInfoValue(info.title));
             }
             return normalizeSongInfoValue(info.name) || normalizeSongInfoValue(info.title);
         }
@@ -1724,15 +1724,15 @@
                         document.getElementById('songTitle').textContent = '♪ ' + data.data.title;
                         // 更新封面和歌曲信息行
                         updateSongInfoRow(data.data);
-                        // song_title 模式：在歌词区显示歌名
-                        if (songTitleMode) {
+                        // title 模式：在歌词区显示歌名
+                        if (titleMode) {
                             const nextSongInfoKey = getSongInfoKey(data.data);
                             if (nextSongInfoKey && nextSongInfoKey === _lastSongInfoKey) {
                                 return;
                             }
                             _lastSongInfoKey = nextSongInfoKey;
 
-                            const displayText = buildSongTitleDisplayText(data.data);
+                            const displayText = buildTitleDisplayText(data.data);
                             const display = document.getElementById('lyricsDisplay');
                             cleanupScrollAnim();
                             transitionOut(display, () => {
@@ -1753,7 +1753,7 @@
                         // 歌曲信息清空
                         _lastSongInfoKey = '';
                         hideSongInfoRow();
-                        if (songTitleMode) {
+                        if (titleMode) {
                             cleanupScrollAnim();
                             const display = document.getElementById('lyricsDisplay');
                             transitionOut(display, () => { display.innerHTML = ''; });
@@ -1762,16 +1762,16 @@
                 }
 
                 if (data.type === 'all_lyrics') {
-                    if (songTitleMode) {
-                        // song_title 模式忽略歌词事件，仅由 song_info_update 驱动
+                    if (titleMode) {
+                        // title 模式忽略歌词事件，仅由 song_info_update 驱动
                     } else if (data.data && data.data.lyrics) {
                         // 同播放器切歌：重置歌词状态
                         currentIndex = -1;
                         allLyrics = data.data.lyrics;
                         songDuration = data.data.duration || 0;
                         renderAllLyrics();
-                        if (data.data.song_title) {
-                            document.getElementById('songTitle').textContent = '♪ ' + data.data.song_title;
+                        if (data.data.title) {
+                            document.getElementById('songTitle').textContent = '♪ ' + data.data.title;
                         }
                         // 用 play_time 启动插值计时
                         startInterpolation(data.data.play_time || 0);
@@ -1794,15 +1794,15 @@
                 }
 
                 if (data.type === 'lyric_update') {
-                    if (songTitleMode) {
-                        // song_title 模式忽略歌词更新
+                    if (titleMode) {
+                        // title 模式忽略歌词更新
                     } else if (!data.data || !data.data.text) {
                         // 空消息：不做处理，保留当前封面/歌词状态
                     } else {
-                        currentIndex = data.data.line_index;
+                        currentIndex = data.data.index;
                         updateDisplay(data.data);
-                        updateAllLyricsHighlight(data.data.line_index);
-                        document.getElementById('lineInfo').textContent = `第 ${data.data.line_index + 1} / ${allLyrics.length} 行`;
+                        updateAllLyricsHighlight(data.data.index);
+                        document.getElementById('lineInfo').textContent = `第 ${data.data.index + 1} / ${allLyrics.length} 行`;
                         // 校正插值锚点
                         correctInterpolation(data.data.play_time);
                     }
@@ -2010,9 +2010,9 @@
 
             if (!oneLineMode) {
                 // 原模式：显示前一行、当前行、后一行
-                const prevIdx = findLyricByIndex(data.line_index - 1);
-                const currIdx = findLyricByIndex(data.line_index);
-                const nextIdx = findLyricByIndex(data.line_index + 1);
+                const prevIdx = findLyricByIndex(data.index - 1);
+                const currIdx = findLyricByIndex(data.index);
+                const nextIdx = findLyricByIndex(data.index + 1);
 
                 if (prevIdx !== null) {
                     html += `<div class="lyric-line prev">${allLyrics[prevIdx].text}</div>`;
@@ -2059,7 +2059,7 @@
             return null;
         }
 
-        function updateStatus(status, detail, songTitle) {
+        function updateStatus(status, detail, title) {
             const statusText = document.getElementById('statusText');
             const statusDot = document.getElementById('statusDot');
             const display = document.getElementById('lyricsDisplay');
@@ -2121,8 +2121,8 @@
                     if (coverRotate === 'playback') setCoverPlaying(false);
                 }
             }
-            if (songTitle) {
-                document.getElementById('songTitle').textContent = '♪ ' + songTitle;
+            if (title) {
+			document.getElementById('songTitle').textContent = '♪ ' + title;
             }
         }
 
@@ -2192,7 +2192,7 @@
         let _coverTransitionTimer = null;
 
         function updateSongInfoRow(info) {
-            if (pureMode || songTitleMode) return;
+            if (pureMode || titleMode) return;
             // 取消 player_clear/player_switch 的延迟清理，避免覆盖新封面
             clearTimeout(window._coverCleanupTimer);
             const row = document.getElementById('songInfoRow');
@@ -2297,7 +2297,7 @@
         }
 
         function hideSongInfoRow() {
-            if (pureMode || songTitleMode) return;
+            if (pureMode || titleMode) return;
             const row = document.getElementById('songInfoRow');
             const coverArt = document.getElementById('coverArt');
             row.style.display = 'none';
@@ -2326,7 +2326,7 @@
                             </div>
                             <button class="editor-mode-btn active" data-mode="default"><span class="mode-icon">🎵</span> 默认</button>
                             <button class="editor-mode-btn" data-mode="pure"><span class="mode-icon">📝</span> 歌词</button>
-                            <button class="editor-mode-btn" data-mode="song_title"><span class="mode-icon">🎤</span> 歌名</button>
+                            <button class="editor-mode-btn" data-mode="title"><span class="mode-icon">🎤</span> 歌名</button>
                             <button class="editor-mode-btn" data-mode="cover"><span class="mode-icon">💿</span> 封面</button>
                             <div class="editor-nav-bottom">
                                 <div class="editor-row"><label>播放器</label></div>
@@ -2402,7 +2402,7 @@
                         </div>
 
                         <!-- 显示（歌名模式） -->
-                        <div class="editor-group" data-modes="song_title">
+                        <div class="editor-group" data-modes="title">
                             <div class="editor-group-title">显示</div>
                             <div class="editor-row">
                                 <label>字号缩放</label>
@@ -2420,18 +2420,18 @@
                         </div>
 
                         <!-- 歌名设置 -->
-                        <div class="editor-group" data-modes="song_title">
+                        <div class="editor-group" data-modes="title">
                             <div class="editor-group-title">歌名设置</div>
                             <div class="editor-row">
                                 <label>显示格式</label>
-                                <select id="cfgSongTitleFormat">
+                                <select id="cfgTitleFormat">
                                     <option value="name">仅歌名</option>
                                     <option value="title">歌名 + 歌手</option>
                                 </select>
                             </div>
-                            <div class="editor-row editor-sub-row" id="rowSongTitleSep" style="display:none;">
+                            <div class="editor-row editor-sub-row" id="rowTitleSep" style="display:none;">
                                 <label>分隔符</label>
-                                <input type="text" id="cfgSongTitleSep" value=" / " style="width:80px;text-align:center;">
+                                <input type="text" id="cfgTitleSep" value=" / " style="width:80px;text-align:center;">
                             </div>
                             <div class="editor-row">
                                 <label>溢出模式</label>
@@ -2515,7 +2515,7 @@
                         </div>
 
                         <!-- 歌名样式（歌名模式） -->
-                        <div class="editor-group" data-modes="song_title">
+                        <div class="editor-group" data-modes="title">
                             <div class="editor-group-title">歌名样式</div>
                             <div class="editor-row">
                                 <label>歌名颜色</label>
@@ -2562,7 +2562,7 @@
                         </div>
 
                         <!-- 字体 -->
-                        <div class="editor-group" data-modes="default pure song_title">
+                        <div class="editor-group" data-modes="default pure title">
                             <div class="editor-group-title">字体</div>
                             <div class="editor-row" id="rowFontSource" style="display:none;">
                                 <label>字体来源</label>
@@ -2650,7 +2650,7 @@
                         </div>
 
                         <!-- 背景 -->
-                        <div class="editor-group" data-modes="pure song_title cover">
+                        <div class="editor-group" data-modes="pure title cover">
                             <div class="editor-group-title">背景</div>
                             <div class="editor-row">
                                 <label>背景透明</label>
@@ -2706,7 +2706,7 @@
                 // 更新复制按钮文字
                 const copyBtn = document.getElementById('btnCopyUrl');
                 if (copyBtn && !copyBtn.classList.contains('copied')) {
-                    const labels = { default: '📋 复制默认', pure: '📋 复制歌词', song_title: '📋 复制歌名', cover: '📋 复制封面' };
+                    const labels = { default: '📋 复制默认', pure: '📋 复制歌词', title: '📋 复制歌名', cover: '📋 复制封面' };
                     copyBtn.textContent = labels[mode] || labels.default;
                 }
                 toggleSubRows();
@@ -2729,13 +2729,13 @@
 
                 if (mode === 'pure') {
                     params.set('pure', '');
-                } else if (mode === 'song_title') {
-                    params.set('song_title', '');
-                    const stf = document.getElementById('cfgSongTitleFormat').value;
-                    if (stf && stf !== 'name') params.set('song_title_format', stf);
+                } else if (mode === 'title') {
+                    params.set('title', '');
+                    const stf = document.getElementById('cfgTitleFormat').value;
+                    if (stf && stf !== 'name') params.set('title_format', stf);
                     if (stf === 'title') {
-                        const sep = document.getElementById('cfgSongTitleSep').value;
-                        if (sep !== ' / ') params.set('song_title_sep', sep);
+                        const sep = document.getElementById('cfgTitleSep').value;
+                        if (sep !== ' / ') params.set('title_sep', sep);
                     }
                 } else if (mode === 'cover') {
                     params.set('cover_only', '');
@@ -2769,7 +2769,7 @@
                 if (player) params.set('player', player);
 
                 // 样式控件：根据模式读取不同 ID
-                const isSt = mode === 'song_title';
+                const isSt = mode === 'title';
                 const color = document.getElementById(isSt ? 'cfgStColor' : 'cfgColor').value;
                 if (color && color !== '#ffffff') params.set('color', color);
 
@@ -2787,7 +2787,7 @@
                     if (sc && sc !== '#000000') params.set('stroke_color', sc);
                 }
 
-                if (mode === 'pure' || mode === 'song_title' || mode === 'cover') {
+                if (mode === 'pure' || mode === 'title' || mode === 'cover') {
                     const bgTransparent = document.getElementById('cfgBgTransparent').checked;
                     if (!bgTransparent) {
                         params.set('bg', document.getElementById('cfgBg').value);
@@ -2816,7 +2816,7 @@
                 if (ta && ta !== 'center') params.set('text_align', ta);
 
                 // 歌名溢出参数
-                if (mode === 'song_title') {
+                if (mode === 'title') {
                     const ov = document.getElementById('cfgStOverflow').value;
                     if (ov && ov !== 'wrap') {
                         params.set('st_overflow', ov);
@@ -2897,9 +2897,9 @@
                 document.getElementById('rowCoverPauseScale').style.display = cpMode === 'shrink' ? 'flex' : 'none';
                 document.getElementById('rowCoverPauseDir').style.display = cpMode === 'shrink' ? 'flex' : 'none';
 
-                const stfEl = document.getElementById('cfgSongTitleFormat');
+                const stfEl = document.getElementById('cfgTitleFormat');
                 if (stfEl) {
-                    document.getElementById('rowSongTitleSep').style.display = stfEl.value === 'title' ? 'flex' : 'none';
+                    document.getElementById('rowTitleSep').style.display = stfEl.value === 'title' ? 'flex' : 'none';
                 }
 
                 // 歌名溢出子控件
@@ -2926,7 +2926,7 @@
                 'cfgBg', 'cfgBgTransparent',
                 'cfgCoverStyle', 'cfgCoverRotate', 'cfgSpinSpeed', 'cfgCoverSize',
                 'cfgCoverPause', 'cfgCoverPauseHold',
-                'cfgSongTitleFormat', 'cfgSongTitleSep',
+                'cfgTitleFormat', 'cfgTitleSep',
                 'cfgStColor', 'cfgStGlow', 'cfgStGlowColor', 'cfgStStroke', 'cfgStStrokeWidth', 'cfgStStrokeColor',
                 'cfgStOverflow', 'cfgStScrollSpeed', 'cfgStPpTime', 'cfgStPpPause', 'cfgStScrollEase',
                 'cfgStFontScale', 'cfgStTextAlign',

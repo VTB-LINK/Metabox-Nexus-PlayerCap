@@ -245,10 +245,10 @@ qqmusic-offset: 400
 {"type": "song_info_update", "player": "wesing", "data": {"name": "三生石下", "singer": "大欢", "title": "三生石下 - 大欢", "cover": "http://...", "cover_base64": "data:image/jpeg;base64,..."}}
 
 // 连接时收到完整歌词列表
-{"type": "all_lyrics", "player": "wesing", "data": {"song_title": "三生石下 - 大欢", "duration": 236.0, "play_time": 1.2, "lyrics": [...], "count": 36}}
+{"type": "all_lyrics", "player": "wesing", "data": {"title": "三生石下 - 大欢", "duration": 236.0, "play_time": 1.2, "progress": 0.005, "lyrics": [...], "count": 36}}
 
 // 歌词变化时收到更新
-{"type": "lyric_update", "player": "wesing", "data": {"line_index": 1, "text": "无情的岁月笑我痴", "sub_text": "", "timestamp": 6.9, "play_time": 7.2, "progress": 0.03}}
+{"type": "lyric_update", "player": "wesing", "data": {"index": 1, "text": "无情的岁月笑我痴", "sub_text": "", "timestamp": 6.9, "play_time": 7.2, "progress": 0.03}}
 
 // 暂停 / 恢复
 {"type": "playback_pause", "player": "wesing", "data": {"play_time": 45.2}}

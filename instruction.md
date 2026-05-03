@@ -262,7 +262,7 @@ func New(offsetMs, pollMs int) *MyPlayer {
 | `EventStatusUpdate` | `StatusInfo` | 播放器状态变化 |
 | `EventSongInfoUpdate` | `SongInfo` | 歌曲元信息（歌名、歌手、封面） |
 | `EventLyricUpdate` | `LyricUpdate` | 当前歌词行（含进度、`sub_text` 副歌词） |
-| `EventAllLyrics` | `AllLyricsData` | 完整歌词列表 + 时长（每行含 `sub_text`） |
+| `EventAllLyrics` | `AllLyricsData` | 完整歌词列表 + 时长 + 当前播放进度（每行含 `sub_text`） |
 | `EventPlaybackPause` | `PlaybackTimeInfo` | 播放暂停 |
 | `EventPlaybackResume` | `PlaybackTimeInfo` | 播放恢复（也用于 seek/时间跳转通知，见 §4.7） |
 | `EventLyricIdle` | `nil` | 歌词空闲 |

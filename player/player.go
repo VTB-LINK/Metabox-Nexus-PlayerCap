@@ -3,7 +3,7 @@ package player
 // LyricLine 歌词行
 type LyricLine struct {
 	Index   int     `json:"index"`
-	Time    float32 `json:"time"`
+	Timestamp float32 `json:"timestamp"`
 	Text    string  `json:"text"`
 	SubText string  `json:"sub_text"`
 }
@@ -25,7 +25,7 @@ type StatusInfo struct {
 
 // LyricUpdate 歌词更新
 type LyricUpdate struct {
-	LineIndex int     `json:"line_index"`
+	Index     int     `json:"index"`
 	Text      string  `json:"text"`
 	SubText   string  `json:"sub_text"`
 	Timestamp float32 `json:"timestamp"`
@@ -40,9 +40,10 @@ type PlaybackTimeInfo struct {
 
 // AllLyricsData 完整歌词
 type AllLyricsData struct {
-	SongTitle string      `json:"song_title,omitempty"`
+	Title     string      `json:"title,omitempty"`
 	Duration  float32     `json:"duration"`
 	PlayTime  float32     `json:"play_time"`
+	Progress  float32     `json:"progress"`
 	Lyrics    []LyricLine `json:"lyrics"`
 	Count     int         `json:"count"`
 }

@@ -198,6 +198,7 @@ paths:
         - `player` - 数据来源播放器（根端点时为当前活跃播放器）
         - `duration` - 歌曲总时长（秒）
         - `play_time` - 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
+        - `progress` - 当前播放进度（0-1），与 `lyric_update.progress` 同类型
         - `count` - 歌词行数
         - `lyrics` - 按 index 排序的歌词数组
         - `lyrics[].sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
@@ -223,23 +224,24 @@ paths:
                     msg: success
                     player: wesing
                     data:
-                      song_title: "告白 - 花澤香菜"
+                      title: "告白 - 花澤香菜"
                       duration: 236.0
                       play_time: 1.2
+                      progress: 0.0051
                       count: 12
                       lyrics:
-                        - { index: 0, time: 0.5, text: "いつもそばにいるのに", sub_text: "" }
-                        - { index: 1, time: 2.1, text: "ふと気付くと遠すぎて", sub_text: "" }
-                        - { index: 2, time: 3.8, text: "手を伸ばしても届かない", sub_text: "" }
-                        - { index: 3, time: 5.5, text: "深い森の奥へ迷い込む", sub_text: "" }
-                        - { index: 4, time: 7.2, text: "君に逢いたい", sub_text: "" }
-                        - { index: 5, time: 9.0, text: "君に嘘をついていた", sub_text: "" }
-                        - { index: 6, time: 11.2, text: "心は静かに落ち着かず", sub_text: "" }
-                        - { index: 7, time: 13.5, text: "何もかもが手から零れ落ちる", sub_text: "" }
-                        - { index: 8, time: 15.8, text: "ずっと歩いてくよ", sub_text: "" }
-                        - { index: 9, time: 18.2, text: "迷えるまま", sub_text: "" }
-                        - { index: 10, time: 20.5, text: "君を探す", sub_text: "" }
-                        - { index: 11, time: 22.8, text: "その先へ", sub_text: "" }
+                        - { index: 0, timestamp: 0.5, text: "いつもそばにいるのに", sub_text: "" }
+                        - { index: 1, timestamp: 2.1, text: "ふと気付くと遠すぎて", sub_text: "" }
+                        - { index: 2, timestamp: 3.8, text: "手を伸ばしても届かない", sub_text: "" }
+                        - { index: 3, timestamp: 5.5, text: "深い森の奥へ迷い込む", sub_text: "" }
+                        - { index: 4, timestamp: 7.2, text: "君に逢いたい", sub_text: "" }
+                        - { index: 5, timestamp: 9.0, text: "君に嘘をついていた", sub_text: "" }
+                        - { index: 6, timestamp: 11.2, text: "心は静かに落ち着かず", sub_text: "" }
+                        - { index: 7, timestamp: 13.5, text: "何もかもが手から零れ落ちる", sub_text: "" }
+                        - { index: 8, timestamp: 15.8, text: "ずっと歩いてくよ", sub_text: "" }
+                        - { index: 9, timestamp: 18.2, text: "迷えるまま", sub_text: "" }
+                        - { index: 10, timestamp: 20.5, text: "君を探す", sub_text: "" }
+                        - { index: 11, timestamp: 22.8, text: "その先へ", sub_text: "" }
                 无歌词时:
                   summary: 无歌词时
                   value:
@@ -256,7 +258,7 @@ paths:
       description: |
         返回当前活跃播放器正在播放的最新一行歌词。
 
-        - `line_index` - 歌词行号
+        - `index` - 歌词行号
         - `text` - 主歌词文本
         - `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
         - `timestamp` - 歌词时间戳（秒）
@@ -284,7 +286,7 @@ paths:
                     msg: success
                     player: wesing
                     data:
-                      line_index: 5
+                      index: 5
                       text: "君に嘘をついていた"
                       sub_text: ""
                       timestamp: 9.0
@@ -406,12 +408,12 @@ paths:
 
         **初始发送（有歌词时）：**
         ```
-        data: {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
         ```
 
         **播放过程中，每当歌词更新时接收：**
         ```
-        data: {"type":"lyric_update","player":"wesing","data":{"line_index":3,"text":"手を伸ばしても届かない","sub_text":"","timestamp":3.8,"play_time":3.85,"progress":0.25}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":3,"text":"手を伸ばしても届かない","sub_text":"","timestamp":3.8,"play_time":3.85,"progress":0.25}}
         ```
 
         **完整生命周期示例：**
@@ -420,11 +422,11 @@ paths:
         data: {"type":"lyric_update","player":"wesing","data":{}}
 
         （用户开始播放歌曲）
-        data: {"type":"lyric_update","player":"wesing","data":{"line_index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05}}
-        data: {"type":"lyric_update","player":"wesing","data":{"line_index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1}}
 
         （切歌 — 服务端不发送清空消息，前端自行根据新歌数据重置显示）
-        data: {"type":"lyric_update","player":"wesing","data":{"line_index":0,"text":"新歌第一行歌词","sub_text":"","timestamp":15.0,"play_time":15.1,"progress":0.04}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"新歌第一行歌词","sub_text":"","timestamp":15.0,"play_time":15.1,"progress":0.04}}
         ```
 
         **特性：**
@@ -454,7 +456,7 @@ paths:
                 有歌词时:
                   summary: 有歌词时
                   value: |
-                    data: {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+                    data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
                 无歌词时:
                   summary: 无歌词时
                   value: |
@@ -585,7 +587,7 @@ paths:
 
         播放中（有歌词时）：
         ```json
-        {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.4167}}
+        {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.4167}}
         ```
         无歌词时：
         ```json
@@ -598,7 +600,7 @@ paths:
 
         有歌词时：
         ```json
-        {"type":"all_lyrics","player":"wesing","data":{"song_title":"告白 - 花澤香菜","duration":236.0,"play_time":1.2,"count":12,"lyrics":[{"index":0,"time":0.5,"text":"いつもそばにいるのに","sub_text":""},{"index":1,"time":2.1,"text":"ふと気付くと遠すぎて","sub_text":""},{"index":2,"time":3.8,"text":"手を伸ばしても届かない","sub_text":""}]}}
+        {"type":"all_lyrics","player":"wesing","data":{"title":"告白 - 花澤香菜","duration":236.0,"play_time":1.2,"progress":0.0051,"count":12,"lyrics":[{"index":0,"timestamp":0.5,"text":"いつもそばにいるのに","sub_text":""},{"index":1,"timestamp":2.1,"text":"ふと気付くと遠すぎて","sub_text":""},{"index":2,"timestamp":3.8,"text":"手を伸ばしても届かない","sub_text":""}]}}
         ```
         无歌词时：
         ```json
@@ -675,8 +677,8 @@ paths:
         ← {"type":"status_update","player":"wesing","data":{"status":"loading","detail":"有点甜"}}
         ← {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"有点甜 - 汪苏泷/BY2"}}
         ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":""}}
-        ← {"type":"all_lyrics","player":"wesing","data":{"song_title":"有点甜 - 汪苏泷/BY2","duration":236.0,"play_time":0.5,"count":28,"lyrics":[...]}}
-        ← {"type":"lyric_update","player":"wesing","data":{"line_index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05}}
+        ← {"type":"all_lyrics","player":"wesing","data":{"title":"有点甜 - 汪苏泷/BY2","duration":236.0,"play_time":0.5,"progress":0.0021,"count":28,"lyrics":[...]}}
+        ← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05}}
         ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}
 
         （cloudmusicv3 开始播放 — 触发播放器切换）
@@ -723,7 +725,7 @@ paths:
               break;
             case 'lyric_update':
               if (msg.data && msg.data.text) {
-                console.log(`[${msg.player}] [${msg.data.line_index}] ${msg.data.text}`);
+                console.log(`[${msg.player}] [${msg.data.index}] ${msg.data.text}`);
               }
               break;
             case 'lyric_idle':
@@ -785,23 +787,24 @@ paths:
                     msg: success
                     player: wesing
                     data:
-                      song_title: "告白 - 花澤香菜"
+                      title: "告白 - 花澤香菜"
                       duration: 236.0
                       play_time: 1.2
+                      progress: 0.0051
                       count: 12
                       lyrics:
-                        - { index: 0, time: 0.5, text: "いつもそばにいるのに", sub_text: "" }
-                        - { index: 1, time: 2.1, text: "ふと気付くと遠すぎて", sub_text: "" }
-                        - { index: 2, time: 3.8, text: "手を伸ばしても届かない", sub_text: "" }
-                        - { index: 3, time: 5.5, text: "深い森の奥へ迷い込む", sub_text: "" }
-                        - { index: 4, time: 7.2, text: "君に逢いたい", sub_text: "" }
-                        - { index: 5, time: 9.0, text: "君に嘘をついていた", sub_text: "" }
-                        - { index: 6, time: 11.2, text: "心は静かに落ち着かず", sub_text: "" }
-                        - { index: 7, time: 13.5, text: "何もかもが手から零れ落ちる", sub_text: "" }
-                        - { index: 8, time: 15.8, text: "ずっと歩いてくよ", sub_text: "" }
-                        - { index: 9, time: 18.2, text: "迷えるまま", sub_text: "" }
-                        - { index: 10, time: 20.5, text: "君を探す", sub_text: "" }
-                        - { index: 11, time: 22.8, text: "その先へ", sub_text: "" }
+                        - { index: 0, timestamp: 0.5, text: "いつもそばにいるのに", sub_text: "" }
+                        - { index: 1, timestamp: 2.1, text: "ふと気付くと遠すぎて", sub_text: "" }
+                        - { index: 2, timestamp: 3.8, text: "手を伸ばしても届かない", sub_text: "" }
+                        - { index: 3, timestamp: 5.5, text: "深い森の奥へ迷い込む", sub_text: "" }
+                        - { index: 4, timestamp: 7.2, text: "君に逢いたい", sub_text: "" }
+                        - { index: 5, timestamp: 9.0, text: "君に嘘をついていた", sub_text: "" }
+                        - { index: 6, timestamp: 11.2, text: "心は静かに落ち着かず", sub_text: "" }
+                        - { index: 7, timestamp: 13.5, text: "何もかもが手から零れ落ちる", sub_text: "" }
+                        - { index: 8, timestamp: 15.8, text: "ずっと歩いてくよ", sub_text: "" }
+                        - { index: 9, timestamp: 18.2, text: "迷えるまま", sub_text: "" }
+                        - { index: 10, timestamp: 20.5, text: "君を探す", sub_text: "" }
+                        - { index: 11, timestamp: 22.8, text: "その先へ", sub_text: "" }
                 无歌词时:
                   summary: 无歌词时
                   value:
@@ -819,7 +822,7 @@ paths:
         返回指定播放器正在播放的最新一行歌词。
         Per-player 端点始终返回指定播放器的数据，不受路由切换影响。
 
-        - `line_index` - 歌词行号
+        - `index` - 歌词行号
         - `text` - 主歌词文本
         - `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
         - `timestamp` - 歌词时间戳（秒）
@@ -849,7 +852,7 @@ paths:
                     msg: success
                     player: wesing
                     data:
-                      line_index: 5
+                      index: 5
                       text: "君に嘘をついていた"
                       sub_text: ""
                       timestamp: 9.0
@@ -973,7 +976,7 @@ paths:
 
         **事件格式：**
         ```
-        data: {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
         ```
 
         **特性：**
@@ -994,7 +997,7 @@ paths:
                 有歌词时:
                   summary: 有歌词时
                   value: |
-                    data: {"type":"lyric_update","player":"wesing","data":{"line_index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+                    data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
                 无歌词时:
                   summary: 无歌词时
                   value: |
@@ -1193,7 +1196,7 @@ webhooks:
                   type: lyric_update
                   player: wesing
                   data:
-                    line_index: 5
+                    index: 5
                     text: "君に嘘をついていた"
                     sub_text: ""
                     timestamp: 9.0
@@ -1239,14 +1242,15 @@ webhooks:
                   type: all_lyrics
                   player: wesing
                   data:
-                    song_title: "告白 - 花澤香菜"
+                    title: "告白 - 花澤香菜"
                     duration: 236.0
                     play_time: 1.2
+                    progress: 0.0051
                     count: 3
                     lyrics:
-                      - { index: 0, time: 0.5, text: "いつもそばにいるのに", sub_text: "" }
-                      - { index: 1, time: 2.1, text: "ふと気付くと遠すぎて", sub_text: "" }
-                      - { index: 2, time: 3.8, text: "手を伸ばしても届かない", sub_text: "" }
+                      - { index: 0, timestamp: 0.5, text: "いつもそばにいるのに", sub_text: "" }
+                      - { index: 1, timestamp: 2.1, text: "ふと気付くと遠すぎて", sub_text: "" }
+                      - { index: 2, timestamp: 3.8, text: "手を伸ばしても届かない", sub_text: "" }
               无歌词时:
                 value:
                   type: all_lyrics
@@ -1704,9 +1708,9 @@ components:
 
     LyricUpdateData:
       type: object
-      required: [line_index, text, sub_text, timestamp, play_time, progress]
+      required: [index, text, sub_text, timestamp, play_time, progress]
       properties:
-        line_index:
+        index:
           type: integer
           description: 歌词行号
           example: 5
@@ -1736,13 +1740,13 @@ components:
 
     LyricLine:
       type: object
-      required: [index, time, text, sub_text]
+      required: [index, timestamp, text, sub_text]
       properties:
         index:
           type: integer
           description: 歌词行索引
           example: 0
-        time:
+        timestamp:
           type: number
           format: float
           description: 歌词时间戳（秒）
@@ -1758,9 +1762,9 @@ components:
 
     AllLyricsData:
       type: object
-      required: [song_title, duration, play_time, count, lyrics]
+      required: [title, duration, play_time, progress, count, lyrics]
       properties:
-        song_title:
+        title:
           type: string
           description: 歌曲标题（格式：歌曲名 - 歌手）
           example: "告白 - 花澤香菜"
@@ -1774,6 +1778,11 @@ components:
           format: float
           description: 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
           example: 1.2
+        progress:
+          type: number
+          format: float
+          description: 当前播放进度（0-1），与 lyric_update.progress 同类型
+          example: 0.0051
         count:
           type: integer
           description: 歌词行数

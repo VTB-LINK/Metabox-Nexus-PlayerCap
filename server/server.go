@@ -55,9 +55,10 @@ type PlayerState struct {
 	SongInfo    *SongInfoUpdate
 	LyricUpdate *LyricUpdate
 	AllLyrics   []LyricItem
-	SongTitle   string
+	Title       string
 	Duration    float32
 	PlayTime    float32
+	Progress    float32
 }
 
 // ServiceInfo 服务配置信息
@@ -239,10 +240,11 @@ func (s *Server) buildInitEvents(playerName string) []WSEvent {
 	}
 	if ps.AllLyrics != nil {
 		events = append(events, WSEvent{Type: "all_lyrics", Player: target, Data: &AllLyrics{
-			SongTitle: ps.SongTitle,
+			Title:     ps.Title,
 			Lyrics:    ps.AllLyrics,
 			Duration:  ps.Duration,
 			PlayTime:  ps.PlayTime,
+			Progress:  ps.Progress,
 			Count:     len(ps.AllLyrics),
 		}})
 	}
@@ -333,7 +335,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 	case player.EventLyricUpdate:
 		if msg, ok := evt.Data.(*player.LyricUpdate); ok {
 			ps.LyricUpdate = &LyricUpdate{
-				LineIndex: msg.LineIndex, Text: msg.Text, SubText: msg.SubText,
+				Index: msg.Index, Text: msg.Text, SubText: msg.SubText,
 				Timestamp: msg.Timestamp, PlayTime: msg.PlayTime,
 				Progress: msg.Progress,
 			}
@@ -343,18 +345,20 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 	case player.EventAllLyrics:
 		if msg, ok := evt.Data.(*player.AllLyricsData); ok {
 			ps.AllLyrics = msg.Lyrics
-			ps.SongTitle = msg.SongTitle
+			ps.Title = msg.Title
 			ps.Duration = msg.Duration
 			ps.PlayTime = msg.PlayTime
+			ps.Progress = msg.Progress
 			ps.LyricUpdate = nil // 新歌词到达，旧 lyric_update 已失效；避免中途连入的客户端收到上一首的歌词行
 		}
 	case player.EventClearSongData:
 		ps.SongInfo = nil
 		ps.LyricUpdate = nil
 		ps.AllLyrics = nil
-		ps.SongTitle = ""
+		ps.Title = ""
 		ps.Duration = 0
 		ps.PlayTime = 0
+		ps.Progress = 0
 	}
 	s.mu.Unlock()
 }
@@ -585,10 +589,11 @@ func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 		}
 
 		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: &AllLyrics{
-			SongTitle: ps.SongTitle,
+			Title:     ps.Title,
 			Lyrics:    ps.AllLyrics,
 			Duration:  ps.Duration,
 			PlayTime:  ps.PlayTime,
+			Progress:  ps.Progress,
 			Count:     len(ps.AllLyrics),
 		}})
 	}

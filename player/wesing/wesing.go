@@ -168,7 +168,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		// Broadcast lyrics
 		lyricItems := make([]player.LyricLine, len(lyrics))
 		for i, l := range lyrics {
-			lyricItems[i] = player.LyricLine{Index: l.Index, Time: l.Time, Text: l.Text}
+			lyricItems[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
 		}
 
 		// 歌曲总时长
@@ -188,9 +188,14 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			Name: songName, Singer: singer, Title: songTitle,
 			Cover: coverURL,
 		})
+		initialProgress := float32(0)
+		if songDuration > 0 {
+			initialProgress = player.ClampFloat32(initialPlayTime/songDuration, 0, 1)
+		}
 		p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-			SongTitle: songTitle, Duration: songDuration,
-			PlayTime: initialPlayTime, Lyrics: lyricItems, Count: len(lyricItems),
+			Title: songTitle, Duration: songDuration,
+			PlayTime: initialPlayTime, Progress: initialProgress,
+			Lyrics: lyricItems, Count: len(lyricItems),
 		})
 
 		// 异步获取封面 base64（带重试），完成后补发 song_info_update
@@ -434,7 +439,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			lastLineIdx = currentIdx
 			l := lyrics[currentIdx]
 			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				LineIndex: l.Index,
+				Index:     l.Index,
 				Text:      l.Text,
 				Timestamp: l.Time,
 				PlayTime:  playTime,
