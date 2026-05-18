@@ -222,7 +222,7 @@
 ```
 
 **说明：**
-- `index` - 歌词行号
+- `index` - 歌词行号（`-1` 表示当前歌曲为纯音乐，见下方说明）
 - `text` - 主歌词文本
 - `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
 - `timestamp` - 歌词时间戳（秒）
@@ -238,6 +238,29 @@
   "data": {}
 }
 ```
+
+**纯音乐：**
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "player": "cloudmusicv3",
+  "data": {
+    "index": -1,
+    "text": "",
+    "sub_text": "",
+    "timestamp": 0,
+    "play_time": 45.2,
+    "progress": 0
+  }
+}
+```
+
+**`index: -1` 说明：**
+- 当播放器确认当前歌曲为纯音乐（无歌词）时，返回 `index: -1` 而非空对象
+- 此时 `text`、`sub_text` 均为空字符串，`timestamp` 为 `0`，`progress` 为 `0`
+- 与此事件同时，服务端还会发送一条 `all_lyrics`，其 `count: 0`，`lyrics: []`
+- 客户端判断有无歌词请用 `msg.data.index !== -1`，而非 `msg.data.text`
 
 ---
 
@@ -556,6 +579,24 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 }
 ```
 
+**纯音乐：**
+```json
+{
+  "type": "lyric_update",
+  "player": "cloudmusicv3",
+  "data": {
+    "index": -1,
+    "text": "",
+    "sub_text": "",
+    "timestamp": 0,
+    "play_time": 45.2,
+    "progress": 0
+  }
+}
+```
+
+> `index: -1` 表示播放器确认当前歌曲为纯音乐（无歌词）。此情况下 `data` 不为 `{}`，客户端应使用 `msg.data.index !== undefined && msg.data.index === -1` 来识别纯音乐，而非依赖 `msg.data.text`。与此事件同时到达的 `all_lyrics` 中 `count: 0`，`lyrics: []`。
+
 #### 4. `all_lyrics` - 完整歌词列表
 
 **有歌词时：**
@@ -804,7 +845,7 @@ ws.onmessage = (event) => {
 | `status_update` | `{"status":"...","detail":"..."}` | `{}` | `msg.data && msg.data.status` |
 | `song_info_update` | `{"name":"...","singer":"...","title":"...","cover":"...","cover_base64":"..."}` | `{}` | `msg.data && msg.data.title` |
 | `all_lyrics` | `{"title":"...","duration":N,"play_time":N,"progress":N,"count":N,"lyrics":[...]}` | `{}` | `msg.data && msg.data.lyrics` |
-| `lyric_update` | `{"index":N,"text":"...","sub_text":"...","timestamp":N,...}` | `{}` | `msg.data && msg.data.text` |
+| `lyric_update` | `{"index":N,"text":"...","sub_text":"...","timestamp":N,...}` | `{}`（无缓存）或 `{"index":-1,"text":"",... }`（纯音乐） | `msg.data && msg.data.index !== undefined && msg.data.index !== -1` |
 | `lyric_idle` | — | `{}`（始终） | 收到即为空闲通知（前端自行决定是否响应） |
 | `playback_pause` | `{"play_time":N}` | — | 收到即为暂停 |
 | `playback_resume` | `{"play_time":N}` | — | 收到即为恢复 |

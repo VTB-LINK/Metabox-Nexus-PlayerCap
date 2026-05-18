@@ -89,9 +89,51 @@ func isHexString(s string) bool {
 	return len(s) > 0
 }
 
+// fetchLRCBySongMid 使用老版 fcg API 通过 songMid 获取歌词（无需认证）
+// 适用于 v20.05: fcg_query_lyric_new.fcg?songmid=<MID>&format=json&nobase64=1
+func fetchLRCBySongMid(songMid string, durationMs uint32) ([]lyricLine, string, string, error) {
+	url := "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=" + songMid + "&g_tk=5381&format=json&nobase64=1"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Referer", "https://y.qq.com/")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var fcgResp struct {
+		Retcode int    `json:"retcode"`
+		Lyric   string `json:"lyric"`
+		Trans   string `json:"trans"`
+	}
+	if err := json.Unmarshal(body, &fcgResp); err != nil {
+		return nil, "", "", fmt.Errorf("json parse: %w", err)
+	}
+	if fcgResp.Retcode != 0 {
+		return nil, "", "", fmt.Errorf("no lyric data for songMid=%s (retcode=%d)", songMid, fcgResp.Retcode)
+	}
+	if fcgResp.Lyric == "" {
+		// 纯音乐：API 成功但返回空歌词，不是错误
+		return nil, "", "", nil
+	}
+
+	rawLyric := html.UnescapeString(fcgResp.Lyric)
+	lines, name, singer := parseLRC(rawLyric, durationMs)
+	return lines, name, singer, nil
+}
+
 // fetchLRC fetches lyrics using QQ Music's native client API (musicu.fcg)
-// This uses songId directly from memory - no search API needed!
-func fetchLRC(songID uint32, cookie string, durationMs uint32) ([]lyricLine, string, string, error) {
+// When songMid is non-empty (v20.05), uses fcg_query_lyric_new.fcg instead.
+func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) ([]lyricLine, string, string, error) {
+	if songMid != "" {
+		return fetchLRCBySongMid(songMid, durationMs)
+	}
 	// Build the same request QQ Music client sends internally
 	payload := map[string]interface{}{
 		"comm": map[string]interface{}{
@@ -151,7 +193,8 @@ func fetchLRC(songID uint32, cookie string, durationMs uint32) ([]lyricLine, str
 	log.Detail("API 响应: songID=%d crypt=%d lyricLen=%d", data.SongID, data.Crypt, len(rawLyric))
 
 	if rawLyric == "" {
-		return nil, "", "", fmt.Errorf("no lyric data for songId=%d", songID)
+		// 纯音乐：API 成功但返回空歌词，不是错误
+		return nil, "", "", nil
 	}
 
 	// Try QRC decrypt if crypt flag is set OR if data looks like hex
@@ -281,9 +324,56 @@ type songDetailResponse struct {
 	} `json:"req_0"`
 }
 
+// fetchCoverURLBySongMid 通过 songMid 获取封面 URL（v20.05 使用）
+// 使用 fcg_play_single_song.fcg?songmid=<MID> 获取 album mid 后构建封面 URL
+func fetchCoverURLBySongMid(songMid string) string {
+	resp, err := http.Get("https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid=" + songMid + "&g_tk=5381&format=json")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int `json:"code"`
+		Data []struct {
+			Album struct {
+				Mid  string `json:"mid"`
+				Pmid string `json:"pmid"`
+				Name string `json:"name"`
+			} `json:"album"`
+			Singer []struct {
+				Mid  string `json:"mid"`
+				Name string `json:"name"`
+			} `json:"singer"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil || result.Code != 0 || len(result.Data) == 0 {
+		return ""
+	}
+	track := result.Data[0]
+	if mid := track.Album.Mid; mid != "" {
+		url := buildCoverURL("T002", mid, 800)
+		log.Detail("封面(MID专辑): %s → %s", track.Album.Name, url)
+		return url
+	}
+	for _, s := range track.Singer {
+		if mid := s.Mid; mid != "" {
+			url := buildCoverURL("T001", mid, 800)
+			log.Detail("封面(MID歌手): %s → %s", s.Name, url)
+			return url
+		}
+	}
+	return ""
+}
+
 // fetchCoverURL gets the album cover URL for a song using QQ Music's native API.
+// When songMid is non-empty (v20.05), uses fcg_play_single_song.fcg instead.
 // Returns the cover URL (800x800) or empty string on failure.
-func fetchCoverURL(songID uint32) string {
+func fetchCoverURL(songID uint32, songMid string) string {
+	if songMid != "" {
+		return fetchCoverURLBySongMid(songMid)
+	}
 	payload := map[string]interface{}{
 		"comm": map[string]interface{}{
 			"ct": 19,

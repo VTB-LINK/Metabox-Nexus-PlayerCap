@@ -1,6 +1,7 @@
 package qqmusic
 
 import (
+	"fmt"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
@@ -114,9 +115,17 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 
 			cookie := mem.FindCookie()
 			var lrcName, lrcSinger string
+			var coverURL string
 
-			currentLyrics, lrcName, lrcSinger, err = fetchLRC(meta.SongID, cookie, meta.DurationMs)
-			coverURL := fetchCoverURL(meta.SongID)
+			// v20.05: struct+0x40 不是标准 songId，musicu.fcg 会返回错误歌词/封面
+			// 必须等 SongMid 从 URL 参数中提取成功后才能请求
+			if mem.Offsets().SongMidParamsOff != 0 && meta.SongMid == "" {
+				log.Warn("v20.05 songMid 未就绪，跳过本次歌词/封面请求（等待下次轮询）")
+				err = fmt.Errorf("songMid not ready")
+			} else {
+				currentLyrics, lrcName, lrcSinger, err = fetchLRC(meta.SongID, meta.SongMid, cookie, meta.DurationMs)
+				coverURL = fetchCoverURL(meta.SongID, meta.SongMid)
+			}
 
 			if lrcName != "" {
 				meta.Name = lrcName
@@ -145,6 +154,24 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 					PlayTime: float32(meta.ProgressMs) / 1000.0,
 					Progress: progress,
 					Lyrics:   []player.LyricLine{}, Count: 0,
+				})
+			} else if len(currentLyrics) == 0 {
+				// 纯音乐：API 成功但无歌词行
+				log.Info("检测到纯音乐/无歌词，清空歌词")
+				progress := float32(0)
+				playTimeSec := float32(meta.ProgressMs) / 1000.0
+				if currentDurationSec > 0 {
+					progress = player.ClampFloat32(playTimeSec/currentDurationSec, 0, 1)
+				}
+				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+					Title: title, Duration: currentDurationSec,
+					PlayTime: playTimeSec,
+					Progress: progress,
+					Lyrics:   []player.LyricLine{}, Count: 0,
+				})
+				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+					Index: -1, Text: "", SubText: "", Timestamp: 0,
+					PlayTime: playTimeSec, Progress: progress,
 				})
 			} else {
 				log.Info("歌词加载完成: %d 行", len(currentLyrics))

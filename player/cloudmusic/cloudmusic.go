@@ -259,17 +259,17 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 
 			// Fetch lyrics via CDP using Redux ID
 			if activeSongID != "" {
-				lrcText, err := client.FetchLyricsViaCDP(activeSongID)
+				lrcResult, err := client.FetchLyricsViaCDP(activeSongID)
 				if err != nil {
 					log.Warn("歌词获取失败: %v", err)
-				} else if lrcText == "[PURE_MUSIC]" || lrcText == "[NO_LYRIC]" {
+				} else if lrcResult.PureMusic || lrcResult.NoLyric {
 					// CDP 返回纯音乐，用 Go HTTP API 二次确认
 					log.Info("CDP 返回纯音乐(ID=%s)", activeSongID)
 					if apiLyrics, err2 := lyric.FetchLyrics(activeSongID); err2 == nil && len(apiLyrics) > 0 {
 						log.Info("API 二次确认(ID=%s)有 %d 行歌词，使用 API 歌词", activeSongID, len(apiLyrics))
 						for _, l := range apiLyrics {
 							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
-								Index: l.Index, Time: l.Time, Text: l.Text,
+								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText,
 							})
 						}
 						cdpLyricsOK = true
@@ -291,10 +291,11 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					}
 				} else {
 					cdpLyricsOK = true
-					parsed := lyric.ParseLRC(lrcText)
+					parsed := lyric.ParseLRC(lrcResult.Lrc)
+					lyric.MergeTlyric(parsed, lrcResult.Tlyric)
 					for _, l := range parsed {
 						activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
-							Index: l.Index, Time: l.Time, Text: l.Text,
+							Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText,
 						})
 					}
 				}
@@ -305,13 +306,17 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				activeLyrics = data.Lyrics
 				cdpLyricsOK = true
 				log.Info("Redux ID 为空，直接使用 Redux 歌词: %d 行", len(activeLyrics))
+				// 通过独立 CDP 评估读取 Redux 中的翻译歌词
+				if tmap := client.ExtractTlyricLines(); tmap != nil {
+					applyTlyricMap(activeLyrics, tmap)
+				}
 			}
 
 			// Broadcast all lyrics（仅在有普通歌词时发送，避免空歌词 + Redux 补发导致双发）
 			if len(activeLyrics) > 0 {
 				lyricItems := make([]player.LyricLine, len(activeLyrics))
 				for i, l := range activeLyrics {
-					lyricItems[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
+					lyricItems[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text, SubText: l.SubText}
 				}
 
 				if songDuration == 0 && matchedRedux && data.CurPlaying.Track.Duration > 0 {
@@ -339,10 +344,15 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				activeLyrics = data.Lyrics
 				log.Info("歌词加载完成(Redux): %d 行", len(activeLyrics))
 
+				// 通过独立 CDP 评估读取 Redux 中的翻译歌词
+				if tmap := client.ExtractTlyricLines(); tmap != nil {
+					applyTlyricMap(activeLyrics, tmap)
+				}
+
 				// 补发全量歌词给前端
 				lyricItems := make([]player.LyricLine, len(activeLyrics))
 				for i, l := range activeLyrics {
-					lyricItems[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
+					lyricItems[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text, SubText: l.SubText}
 				}
 				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
@@ -441,7 +451,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				currentLine := activeLyrics[trueLineIdx]
 				playTime := clock.GetCurrent() + offsetSec
 				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index: trueLineIdx, Text: currentLine.Text,
+					Index: trueLineIdx, Text: currentLine.Text, SubText: currentLine.SubText,
 					Timestamp: currentLine.Time, PlayTime: playTime,
 					Progress: clampProgress(playTime, songDuration),
 				})
@@ -458,4 +468,13 @@ func getArtists(artists []struct {
 		names = append(names, a.Name)
 	}
 	return strings.Join(names, " / ")
+}
+
+// applyTlyricMap applies a tlyric timestamp map (ms -> text) to extracted lyrics.
+func applyTlyricMap(lyrics []cdp.ExtractedLyric, tmap map[int]string) {
+	for i := range lyrics {
+		if text, ok := tmap[int(lyrics[i].Time*1000+0.5)]; ok {
+			lyrics[i].SubText = text
+		}
+	}
 }

@@ -16,9 +16,10 @@ import (
 var log = logger.New("CloudMusic")
 
 type LyricLine struct {
-	Index int
-	Time  float32
-	Text  string
+	Index   int
+	Time    float32
+	Text    string
+	SubText string
 }
 
 type SongDetail struct {
@@ -128,6 +129,7 @@ func FetchLyrics(songID string) ([]LyricLine, error) {
 	}
 
 	lines := ParseLRC(apiResp.Lrc.Lyric)
+	MergeTlyric(lines, apiResp.Tlyric.Lyric)
 	log.Info("歌词加载完成(API): %d 行 (ID=%s)", len(lines), songID)
 	return lines, nil
 }
@@ -190,6 +192,26 @@ func SearchSongID(songName string, artist string) (string, error) {
 	id := fmt.Sprintf("%d", searchResp.Result.Songs[0].ID)
 	log.Detail("搜索: 使用首个结果 %s (ID: %s)", searchResp.Result.Songs[0].Name, id)
 	return id, nil
+}
+
+// MergeTlyric merges translated lyrics (tlyric LRC) into main lyrics as SubText.
+func MergeTlyric(lyrics []LyricLine, tlyricLRC string) {
+	if tlyricLRC == "" || len(lyrics) == 0 {
+		return
+	}
+	tLines := ParseLRC(tlyricLRC)
+	if len(tLines) == 0 {
+		return
+	}
+	tmap := make(map[int]string, len(tLines))
+	for _, tl := range tLines {
+		tmap[int(tl.Time*1000+0.5)] = tl.Text
+	}
+	for i := range lyrics {
+		if text, ok := tmap[int(lyrics[i].Time*1000+0.5)]; ok {
+			lyrics[i].SubText = text
+		}
+	}
 }
 
 func ParseLRC(lrc string) []LyricLine {

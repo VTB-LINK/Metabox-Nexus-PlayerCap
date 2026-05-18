@@ -116,9 +116,10 @@ type CurPlayingObj struct {
 }
 
 type ExtractedLyric struct {
-	Index int     `json:"index"`
-	Time  float32 `json:"time"`
-	Text  string  `json:"text"`
+	Index   int     `json:"index"`
+	Time    float32 `json:"time"`
+	Text    string  `json:"text"`
+	SubText string  `json:"subText"`
 }
 
 const jsPayload = `(() => {
@@ -207,7 +208,8 @@ const jsPayload = `(() => {
 								result.lyrics.push({
 									index: idx,
 									time: l.time,
-									text: l.lyric
+									text: l.lyric,
+									subText: ''
 								});
 							});
 						}
@@ -367,6 +369,48 @@ func (c *Client) IsClosed() bool {
 	return c.closed
 }
 
+// Evaluate runs a synchronous JS expression and returns the string result
+func (c *Client) Evaluate(expression string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	id := c.msgID
+	c.msgID++
+
+	req := map[string]interface{}{
+		"id":     id,
+		"method": "Runtime.evaluate",
+		"params": map[string]interface{}{
+			"expression":    expression,
+			"returnByValue": true,
+		},
+	}
+
+	if err := c.conn.WriteJSON(req); err != nil {
+		c.closed = true
+		return "", err
+	}
+
+	c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		var res Result
+		if err := c.conn.ReadJSON(&res); err != nil {
+			c.closed = true
+			return "", err
+		}
+		if res.ID == id {
+			if res.Result.ExceptionDetails != nil {
+				return "", fmt.Errorf("JS Exception: %v", res.Result.ExceptionDetails)
+			}
+			valStr, ok := res.Result.Result.Value.(string)
+			if !ok {
+				return "", fmt.Errorf("unexpected return type: %v", res.Result.Result.Value)
+			}
+			return valStr, nil
+		}
+	}
+}
+
 // EvaluateAsync runs async JS (e.g. fetch) and returns the string result
 func (c *Client) EvaluateAsync(expression string) (string, error) {
 	c.mu.Lock()
@@ -447,30 +491,51 @@ func (c *Client) SearchSongViaCDP(songName string, artist string) (string, error
 	return result, nil
 }
 
+// LyricFetchResult holds the result of a lyrics fetch via CDP
+type LyricFetchResult struct {
+	PureMusic bool
+	NoLyric   bool
+	Lrc       string
+	Tlyric    string
+}
+
 // FetchLyricsViaCDP uses the app's own fetch to get lyrics by song ID
-func (c *Client) FetchLyricsViaCDP(songID string) (string, error) {
+func (c *Client) FetchLyricsViaCDP(songID string) (*LyricFetchResult, error) {
 	js := fmt.Sprintf(`(async () => {
 		try {
 			const r = await fetch('https://music.163.com/api/song/lyric?id=%s&lv=1&tv=1');
 			const d = await r.json();
 			if (d.pureMusic) return '[PURE_MUSIC]';
 			if (d.nolyric) return '[NO_LYRIC]';
-			if (d.lrc && d.lrc.lyric) return d.lrc.lyric;
+			if (d.lrc && d.lrc.lyric) return JSON.stringify({lrc: d.lrc.lyric, tlyric: (d.tlyric && d.tlyric.lyric) || ''});
 			return '';
 		} catch(e) { return 'err:' + e.message; }
 	})()`, songID)
 
 	result, err := c.EvaluateAsync(js)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if strings.HasPrefix(result, "err:") {
-		return "", fmt.Errorf("lyrics fetch failed: %s", result)
+		return nil, fmt.Errorf("lyrics fetch failed: %s", result)
 	}
 	if result == "" {
-		return "", fmt.Errorf("lyrics fetch failed: empty result")
+		return nil, fmt.Errorf("lyrics fetch failed: empty result")
 	}
-	return result, nil
+	if result == "[PURE_MUSIC]" {
+		return &LyricFetchResult{PureMusic: true}, nil
+	}
+	if result == "[NO_LYRIC]" {
+		return &LyricFetchResult{NoLyric: true}, nil
+	}
+	var parsed struct {
+		Lrc    string `json:"lrc"`
+		Tlyric string `json:"tlyric"`
+	}
+	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
+		return nil, fmt.Errorf("lyrics JSON parse error: %v", err)
+	}
+	return &LyricFetchResult{Lrc: parsed.Lrc, Tlyric: parsed.Tlyric}, nil
 }
 
 // FetchCoverViaCDP uses the app's own fetch to get album cover URL by song ID
@@ -498,4 +563,54 @@ func (c *Client) FetchCoverViaCDP(songID string) (string, error) {
 		return "", fmt.Errorf("cover fetch failed: %s", result)
 	}
 	return result, nil
+}
+
+// ExtractTlyricLines reads tlyricLines from Redux store via a separate CDP evaluate.
+// Returns a map of millisecond timestamp -> translated lyric text.
+func (c *Client) ExtractTlyricLines() map[int]string {
+	js := `(() => {
+		try {
+			const root = document.querySelector('#root');
+			if (!root) return '';
+			let fiber = null;
+			for (let k of Object.getOwnPropertyNames(root)) {
+				if (k.startsWith('__reactContainer')) { fiber = root[k]; break; }
+			}
+			if (!fiber) return '';
+			let store = null;
+			function walk(node, depth) {
+				if (!node || depth > 80 || store) return;
+				if (node.memoizedProps && node.memoizedProps.store && typeof node.memoizedProps.store.getState === 'function') {
+					store = node.memoizedProps.store; return;
+				}
+				walk(node.child, depth + 1);
+				if (!store) walk(node.sibling, depth + 1);
+			}
+			walk(fiber, 0);
+			if (!store) return '';
+			const st = store.getState();
+			const li = st['async:lyric'];
+			if (!li || !li.tlyricLines || !Array.isArray(li.tlyricLines) || li.tlyricLines.length === 0) return '';
+			let r = [];
+			li.tlyricLines.forEach(tl => { if (tl.lyric) r.push({t: Math.round(tl.time * 1000), l: tl.lyric}); });
+			return r.length > 0 ? JSON.stringify(r) : '';
+		} catch(e) { return ''; }
+	})()`
+
+	result, err := c.Evaluate(js)
+	if err != nil || result == "" {
+		return nil
+	}
+	var items []struct {
+		T int    `json:"t"`
+		L string `json:"l"`
+	}
+	if err := json.Unmarshal([]byte(result), &items); err != nil {
+		return nil
+	}
+	tmap := make(map[int]string, len(items))
+	for _, item := range items {
+		tmap[item.T] = item.L
+	}
+	return tmap
 }

@@ -258,12 +258,17 @@ paths:
       description: |
         返回当前活跃播放器正在播放的最新一行歌词。
 
-        - `index` - 歌词行号
+        - `index` - 歌词行号（`-1` 表示纯音乐/无歌词，见下方说明）
         - `text` - 主歌词文本
         - `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
         - `timestamp` - 歌词时间戳（秒）
         - `play_time` - 实际播放时间（秒）；根据偏移量调整后的时间
         - `progress` - 播放进度（0-1）
+
+        **`index: -1` 纯音乐说明：**
+        当播放器确认当前歌曲无歌词时，返回 `index: -1` 而非空对象 `{}`，且 `text`、`sub_text` 均为空字符串，`timestamp` 和 `progress` 为 `0`。
+        与此同时会发送一条 `all_lyrics`（`count: 0`，`lyrics: []`）。
+        客户端利用 `msg.data.index === -1` 识别纯音乐，而非依赖 `msg.data.text`。
       responses:
         "200":
           description: 200 成功
@@ -299,6 +304,19 @@ paths:
                     msg: success
                     player: wesing
                     data: {}
+                纯音乐 (cloudmusicv3):
+                  summary: 纯音乐
+                  value:
+                    code: 0
+                    msg: success
+                    player: cloudmusicv3
+                    data:
+                      index: -1
+                      text: ""
+                      sub_text: ""
+                      timestamp: 0
+                      play_time: 45.2
+                      progress: 0
 
   /status_update:
     get:
@@ -822,12 +840,14 @@ paths:
         返回指定播放器正在播放的最新一行歌词。
         Per-player 端点始终返回指定播放器的数据，不受路由切换影响。
 
-        - `index` - 歌词行号
+        - `index` - 歌词行号（`-1` 表示 cloudmusicv3 纯音乐，见下方说明）
         - `text` - 主歌词文本
         - `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
         - `timestamp` - 歌词时间戳（秒）
         - `play_time` - 实际播放时间（秒）；根据偏移量调整后的时间
         - `progress` - 播放进度（0-1）
+
+        **`index: -1` 纯音乐说明：** 参见根端点 `/lyric_update` 的说明。
       parameters:
         - $ref: "#/components/parameters/PlayerParam"
       responses:
@@ -1172,6 +1192,11 @@ webhooks:
       operationId: onLyricUpdate
       description: |
         歌词行发生变化时推送。连接建立时立即发送一次当前歌词。
+
+        **`index: -1` 纯音乐说明：**
+        当播放器确认当前歌曲无歌词时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象（`text: ""`，`sub_text: ""`，`timestamp: 0`，`progress: 0`）。
+        与此同时会发送一条 `all_lyrics`（`count: 0`，`lyrics: []`）。
+        客户端利用 `msg.data.index === -1` 识别纯音乐。
       requestBody:
         required: true
         content:
@@ -1207,6 +1232,18 @@ webhooks:
                   type: lyric_update
                   player: wesing
                   data: {}
+              纯音乐:
+                summary: 纯音乐
+                value:
+                  type: lyric_update
+                  player: cloudmusicv3
+                  data:
+                    index: -1
+                    text: ""
+                    sub_text: ""
+                    timestamp: 0
+                    play_time: 45.2
+                    progress: 0
       responses:
         "200":
           description: 事件已接收
@@ -1712,7 +1749,16 @@ components:
       properties:
         index:
           type: integer
-          description: 歌词行号
+          description: |
+            歌词行号。
+            特殊値 `-1`：表示当前歌曲为纯音乐（无歌词）：
+            1. CDP 返回 PURE_MUSIC/NO_LYRIC 且 API 二次确认也无歌词
+            2. 换歌后 3 秒内歌词获取超时（兜底）
+
+            当 `index: -1` 时，`text` 和 `sub_text` 均为空字符串，`timestamp` 和 `progress` 为 `0`。
+            此时 `data` 不为 `{}`，卡片数据有实际字段。
+            同时还会配套发送一条 `all_lyrics` 事件，其中 `count: 0`，`lyrics: []`。
+            客户端利用 `msg.data.index !== undefined && msg.data.index === -1` 识别此情况。
           example: 5
         text:
           type: string
