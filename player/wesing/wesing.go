@@ -217,7 +217,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				log.Warn("封面 URL 获取失败，跳过 base64 编码")
 				return
 			}
-			if b64 := player.FetchCoverBase64(coverURL, 5*time.Second); b64 != "" {
+			if b64 := player.FetchCoverBase64("WeSing", coverURL, 5*time.Second); b64 != "" {
 				p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 					Name: name, Singer: singer, Title: title,
 					Cover: coverURL, CoverBase64: b64,

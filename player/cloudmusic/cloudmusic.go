@@ -250,7 +250,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 
 			// 异步获取封面 base64，完成后补发 song_info_update
 			go func(name, artist, title, cover string) {
-				if b64 := player.FetchCoverBase64(cover, 5*time.Second); b64 != "" {
+				if b64 := player.FetchCoverBase64("CloudMusic", cover, 5*time.Second); b64 != "" {
 					p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 						Name: name, Singer: artist, Title: title,
 						Cover: cover, CoverBase64: b64,

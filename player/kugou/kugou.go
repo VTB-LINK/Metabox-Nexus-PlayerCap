@@ -2,7 +2,11 @@ package kugou
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -56,8 +60,13 @@ func (p *KuGouPlayer) Start() {
 				return
 			default:
 			}
+			if errors.Is(err, watchdog.ErrInstallNotFound) {
+				log.Error("自动修复失败: %v（请手动运行酷狗启动工具或检查安装路径）", err)
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: "未找到酷狗安装，已停止"})
+				return
+			}
 			log.Warn("自动修复失败: %v（请手动运行酷狗启动工具或检查安装路径）", err)
-			// 即便失败也继续等待——用户可能手动启动酷狗
+			// 其他错误继续等待——用户可能手动启动酷狗
 		}
 
 		client, err := p.waitForCDP()
@@ -192,7 +201,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			currentName = name
 			currentSinger = singer
 			currentTitle = buildTitle(name, singer)
-currentCover = strings.Replace(info.Cover, "/stdmusic/120/", "/stdmusic/800/", 1)
+			currentCover = strings.Replace(info.Cover, "/stdmusic/120/", "/stdmusic/800/", 1)
 
 			log.Info("♪ 歌曲: %s - %s (hash: %s)", currentName, currentSinger, info.Hash)
 
@@ -209,18 +218,77 @@ currentCover = strings.Replace(info.Cover, "/stdmusic/120/", "/stdmusic/800/", 1
 			}
 			var ctx context.Context
 			ctx, coverCancel = context.WithCancel(context.Background())
-			// 封面 goroutine：等待封面 URL → 下载 base64 → 仅发送一次
-			go func(ctx context.Context, ch <-chan string, name, singer, title string) {
+			// 封面 goroutine：
+			//   阶段1: 等待 200ms 取封面 URL
+			//     - 200ms 内取到   → 等 b64（3s 预算内）→ 一次性发完整信息
+			//     - 200ms 超时     → 先发不含封面的信息 → 继续等（3s 总预算）
+			//       → 3s 内取到   → 等 b64 → 补发完整信息
+			//       → 3s 超时     → 调 API 兜底（歌手头像，5s）
+			//         → 取到 b64  → 补发完整信息
+			//         → 取不到    → 不再发
+			go func(ctx context.Context, ch <-chan string, name, singer, title, hash string) {
+				const earlyWait = 200 * time.Millisecond
+				const totalBudget = 800 * time.Millisecond
+				const apiFallbackTimeout = 5 * time.Second
+				start := time.Now()
+
 				var coverURL string
 				select {
 				case coverURL = <-ch:
-				case <-time.After(10 * time.Second):
+				case <-time.After(earlyWait):
 				case <-ctx.Done():
 					return
 				}
-				var b64 string
-				if coverURL != "" {
-					b64 = player.FetchCoverBase64(coverURL, 5*time.Second)
+
+				var fromAPI bool
+				if coverURL == "" {
+					// 200ms 内未取到封面，先发不含封面的歌曲信息
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
+						Name: name, Singer: singer, Title: title,
+					})
+					// 继续等待封面 URL（3s 总预算）
+					remaining := totalBudget - time.Since(start)
+					if remaining <= 0 {
+						remaining = 0
+					}
+					select {
+					case coverURL = <-ch:
+					case <-time.After(remaining):
+						// CDP 3s 内无封面，调 API 兜底（伴奏/歌手头像类曲目）
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+						log.Info("无法获取封面，回退到歌手艺术照")
+						coverURL = fetchCoverFromAPI(hash)
+						fromAPI = true
+					case <-ctx.Done():
+						return
+					}
+					if coverURL == "" {
+						return
+					}
+				}
+
+				// 已有封面 URL，下载 base64
+				var b64Timeout time.Duration
+				if fromAPI {
+					b64Timeout = apiFallbackTimeout
+				} else {
+					b64Timeout = totalBudget - time.Since(start)
+					if b64Timeout <= 0 {
+						return
+					}
+				}
+				b64 := player.FetchCoverBase64("Kugou", coverURL, b64Timeout)
+				if b64 == "" {
+					return
 				}
 				select {
 				case <-ctx.Done():
@@ -231,7 +299,7 @@ currentCover = strings.Replace(info.Cover, "/stdmusic/120/", "/stdmusic/800/", 1
 					Name: name, Singer: singer, Title: title,
 					Cover: coverURL, CoverBase64: b64,
 				})
-			}(ctx, coverCh, currentName, currentSinger, currentTitle)
+			}(ctx, coverCh, currentName, currentSinger, currentTitle, info.Hash)
 
 			// 获取歌词
 			lines, lyrErr := klyric.Fetch(info.Hash, int(durationMs))
@@ -433,4 +501,42 @@ func toLyricLines(lines []klyric.Line) []player.LyricLine {
 		out[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
 	}
 	return out
+}
+
+// ── 酷狗 API 封面兜底 ────────────────────────────────────────────────────────
+
+var kugouAPIClient = &http.Client{Timeout: 5 * time.Second}
+
+type kugouSongInfoResp struct {
+	ImgURL     string `json:"imgUrl"`
+	TransParam struct {
+		UnionCover string `json:"union_cover"`
+	} `json:"trans_param"`
+}
+
+// fetchCoverFromAPI 通过酷狗公开 API 获取歌曲封面 URL。
+// 对于 CDP 未提供封面的曲目（伴奏、无专辑封面等），
+// API 会返回歌手头像（imgUrl / trans_param.union_cover），
+// 其中 {size} 占位符替换为 400。
+func fetchCoverFromAPI(hash string) string {
+	url := "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=" + hash
+	resp, err := kugouAPIClient.Get(url)
+	if err != nil {
+		log.Warn("封面 API 请求失败: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var r kugouSongInfoResp
+	if err := json.Unmarshal(body, &r); err != nil {
+		return ""
+	}
+	cover := r.TransParam.UnionCover
+	if cover == "" {
+		cover = r.ImgURL
+	}
+	if cover == "" {
+		return ""
+	}
+	return strings.ReplaceAll(cover, "{size}", "800")
 }

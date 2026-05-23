@@ -14,8 +14,8 @@ import (
 var coverLog = logger.New("Cover")
 
 // FetchCoverBase64 下载封面图片并返回 base64 编码的 data URI。
-// timeout 控制 HTTP 下载超时，超时则返回空字符串（不阻塞主流程）。
-func FetchCoverBase64(coverURL string, timeout time.Duration) string {
+// playerName 用于日志前缀标识调用来源；timeout 控制 HTTP 下载超时，超时则返回空字符串（不阻塞主流程）。
+func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration) string {
 	if coverURL == "" {
 		return ""
 	}
@@ -56,6 +56,6 @@ func FetchCoverBase64(coverURL string, timeout time.Duration) string {
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(body)
-	coverLog.Detail("封面已获取 (%d bytes → base64)", len(body))
+	coverLog.Detail("[%s] 封面已获取 (%d bytes → base64)", playerName, len(body))
 	return "data:" + mimeType + ";base64," + encoded
 }

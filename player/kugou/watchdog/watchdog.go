@@ -2,6 +2,7 @@ package watchdog
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,9 @@ import (
 )
 
 var log = logger.New("KuGouWatchdog")
+
+// ErrInstallNotFound 表示未找到酷狗安装，属于不可恢复错误，不应重试。
+var ErrInstallNotFound = errors.New("未找到酷狗安装（KuGou.exe 或 libcef.dll 不存在）")
 
 const (
 	targetProcess = "KuGou.exe"
@@ -183,7 +187,7 @@ func FindKuGouInstall() (exePath, libcefPath string, err error) {
 	}
 
 	if exePath == "" || libcefPath == "" {
-		return "", "", fmt.Errorf("未找到酷狗安装（KuGou.exe 或 libcef.dll 不存在）")
+		return "", "", ErrInstallNotFound
 	}
 	return exePath, libcefPath, nil
 }

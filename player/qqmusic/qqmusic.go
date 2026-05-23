@@ -193,7 +193,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				if url == "" {
 					return
 				}
-				if b64 := player.FetchCoverBase64(url, 5*time.Second); b64 != "" {
+				if b64 := player.FetchCoverBase64("QQMusic", url, 5*time.Second); b64 != "" {
 					p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 						Name: name, Singer: singer, Title: t, Cover: url, CoverBase64: b64,
 					})
