@@ -122,7 +122,7 @@ Router（事件合并主循环）
 - Windows 10/11
 - 全民K歌桌面版 和/或 网易云音乐桌面版 和/或 QQ 音乐桌面版
 
-### 编译运行
+### 编译
 
 ```bash
 # 编译
@@ -140,6 +140,9 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 - 默认开发构建（如 `0.0.0` 或非 semver 版本号）不会参与自动更新检查。
 
 维护者的发布与回退 SOP 见 [instruction.md](instruction.md) 的“7.1 发布流程”和“7.2 回退流程”。
+
+
+### 运行
 
 > ⚠️ 需要**管理员权限**运行（读取其他进程内存需要 `PROCESS_VM_READ` 权限）
 
@@ -189,9 +192,12 @@ offset: 200
 # 轮询间隔（毫秒），范围 10~2000
 poll: 30
 
-# 优先播放器
+# 优先播放器；按需取消注释以分配
 prior-player:
 - wesing
+# - cloudmusicv3
+# - qqmusic
+# - kugou
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
@@ -207,6 +213,10 @@ cloudmusicv3-offset: 500
 # QQ音乐 配置
 qqmusic-offset: 400
 # qqmusic-poll: 50
+
+# 酷狗音乐 配置
+kugou-offset: 430
+# kugou-poll: 30
 ```
 
 ### 预期输出
@@ -220,6 +230,7 @@ qqmusic-offset: 400
    播放器: wesing (offset=200ms poll=30ms)
    播放器: cloudmusicv3 (offset=500ms poll=30ms)
    播放器: qqmusic (offset=400ms poll=30ms)
+   播放器: kugou (offset=430ms poll=30ms)
    优先播放器: [wesing] (超时: 15s)
 ===========================================================
 ```
@@ -228,50 +239,15 @@ qqmusic-offset: 400
 
 ---
 
-## 开发
+## 下游接入
 
-接口细节详见 [API 响应示例文档](./doc/API_RESPONSE_EXAMPLES.md)
+接口细节详见[在线API文档](https://playercap.nexus.metabox.apifox.vtb.link/)和[API 响应示例文档](./doc/API_RESPONSE_EXAMPLES.md)。
 
-### WebSocket 客户端
+### WebSocket
 
-连接 `ws://localhost:8765/ws`（根端点，跟随活跃播放器），接收 JSON 消息：
+> WS 事件类型、字段结构及完整消息示例请参阅 [在线 API 文档](https://playercap.nexus.metabox.apifox.vtb.link/)，README 不再同步维护此部分内容。
 
-```jsonc
-// 所有事件均包含 player 字段，标识来源播放器
-// 连接时收到当前状态
-{"type": "status_update", "player": "wesing", "data": {"status": "playing", "detail": "三生石下 - 大欢"}}
-
-// 连接时收到歌曲信息（无数据时 data 为 {}）
-{"type": "song_info_update", "player": "wesing", "data": {"name": "三生石下", "singer": "大欢", "title": "三生石下 - 大欢", "cover": "http://...", "cover_base64": "data:image/jpeg;base64,..."}}
-
-// 连接时收到完整歌词列表
-{"type": "all_lyrics", "player": "wesing", "data": {"title": "三生石下 - 大欢", "duration": 236.0, "play_time": 1.2, "progress": 0.005, "lyrics": [...], "count": 36}}
-
-// 歌词变化时收到更新
-{"type": "lyric_update", "player": "wesing", "data": {"index": 1, "text": "无情的岁月笑我痴", "sub_text": "", "timestamp": 6.9, "play_time": 7.2, "progress": 0.03}}
-
-// 暂停 / 恢复
-{"type": "playback_pause", "player": "wesing", "data": {"play_time": 45.2}}
-{"type": "playback_resume", "player": "wesing", "data": {"play_time": 45.2}}
-
-// 歌曲播放结束
-{"type": "lyric_idle", "player": "wesing", "data": {}}
-
-// 活跃播放器切换（仅根订阅者收到）
-{"type": "player_switch", "player": "cloudmusicv3", "data": {"from": "wesing", "to": "cloudmusicv3"}}
-// 紧随其后会收到新播放器的完整初始状态（status_update + song_info_update + all_lyrics + lyric_update）
-
-// 活跃播放器清除（所有播放器都停止输出时，仅根订阅者收到）
-{"type": "player_switch", "player": "", "data": {"from": "wesing", "to": ""}}
-{"type": "player_clear", "player": "", "data": {}}
-
-// 若 root WS 连入时当前就没有活跃播放器，也会立即收到一个初始 player_clear
-{"type": "player_clear", "player": "", "data": {}}
-```
-
-**status 可能的值：** `waiting_process` · `waiting_song` · `loading` · `playing` · `paused` · `standby`
-
-### HTTP/SSE 接口
+### 接口清单参考
 
 **根端点**（返回当前活跃播放器数据）：
 
@@ -317,27 +293,6 @@ qqmusic-offset: 400
 > 直接使用 `lyric_page.html` 虽然功能正常，但无法享受自动缓存刷新保护。
 
 > 📋 **从旧版升级？** 如果你是从 v2.x 之前的版本升级，请在 OBS 中右键浏览器源 → **刷新页面的缓存**（仅需操作一次，之后所有更新将自动生效）。
-
-#### HTML 页面 URL 参数
-
-| 参数 | 说明 | 示例 |
-|------|------|------|
-| `pure` | 纯净模式 - 仅显示歌词，隐藏头部/状态栏/进度条 | `?pure` |
-| `one_line` | 单行模式 - 仅显示当前歌词行 | `?one_line` |
-| `color` | 自定义歌词颜色（`pure` 模式下生效） | `?pure&color=%23ff6b6b` |
-| `font` | 自定义字体（Google Fonts 名称或系统字体） | `?font=Noto+Serif+SC` |
-| `glow` | 启用发光效果（默认关闭） | `?pure&glow` |
-| `glow_color` | 发光颜色 | `?pure&glow&glow_color=%23ff0000` |
-| `stroke` | 启用文字描边（默认关闭） | `?stroke` |
-| `stroke_width` | 描边厚度（px，默认 `1`） | `?stroke&stroke_width=2` |
-| `stroke_color` | 描边颜色（默认 `#000`） | `?stroke&stroke_color=%23ff0000` |
-| `bg` | 预览背景色（`pure` 模式下，默认透明） | `?pure&bg=%23333333` |
-
-**使用示例：**
-- 基础模式：`lyric_display.html`
-- OBS 纯净源：`lyric_display.html?pure&one_line`
-- 自定义样式：`lyric_display.html?pure&one_line&color=yellow&font=LXGW+WenKai&glow&glow_color=%23ff6b6b`
-- 描边 + 发光：`lyric_display.html?pure&one_line&stroke&stroke_width=2&stroke_color=%23000000&glow`
 
 ---
 

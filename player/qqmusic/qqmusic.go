@@ -270,12 +270,13 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			interpolatedMs = durationMs
 		}
 
-		progressSec := interpolatedMs/1000.0 + offsetSec
+		progressSec := interpolatedMs / 1000.0
+		matchTime := progressSec + offsetSec
 
 		// 歌词行匹配
 		trueIdx := -1
 		for i := len(currentLyrics) - 1; i >= 0; i-- {
-			if progressSec >= currentLyrics[i].Time {
+			if matchTime >= currentLyrics[i].Time {
 				trueIdx = i
 				break
 			}

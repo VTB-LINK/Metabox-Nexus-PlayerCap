@@ -2,6 +2,7 @@ package wesing
 
 import (
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
 
@@ -206,7 +207,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				for i := 0; i < 5; i++ {
 					time.Sleep(1 * time.Second)
 					if found := lyric.FindCoverURL(handle, mid); found != "" {
-						coverURL = found
+						coverURL = strings.Replace(found, "/mid_album_500/", "/mid_album_800/", 1)
 						log.Info("封面 URL 重试第 %d 次获取成功", i+1)
 						break
 					}
@@ -292,6 +293,7 @@ func (p *WesingPlayer) getSongMeta(handle syscall.Handle, pid uint32, windowTitl
 	if songMID != "" {
 		coverURL = lyric.FindCoverURL(handle, songMID)
 	}
+	coverURL = strings.Replace(coverURL, "/mid_album_500/", "/mid_album_800/", 1)
 
 	if err == nil {
 		if songInfo.Singer != "" {

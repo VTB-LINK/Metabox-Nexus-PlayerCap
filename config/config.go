@@ -304,9 +304,12 @@ offset: 200
 # 轮询间隔（毫秒），范围 10~2000
 poll: 30
 
-# 优先播放器
+# 优先播放器；按需取消注释以分配
 prior-player:
 - wesing
+# - cloudmusicv3
+# - qqmusic
+# - kugou
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
@@ -322,6 +325,10 @@ cloudmusicv3-offset: 500
 # QQ 音乐 配置
 qqmusic-offset: 400
 # qqmusic-poll: 50
+
+# 酷狗音乐 配置
+kugou-offset: 430
+# kugou-poll: 30
 `
 
 func generateDefaultConfig() {

@@ -110,8 +110,9 @@ func (p *CloudMusicPlayer) Start() {
 			continue
 		}
 
-		log.Info("CDP 已连接，开始轮询...")
+		log.Info("CDP 连接成功，开始监听播放状态")
 		p.runSession(client)
+		log.Info("会话结束，等待网易云音乐重新启动...")
 		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "网易云音乐已退出"})
 		p.Emit(player.EventClearSongData, nil)
 	}
@@ -279,7 +280,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						if matchedRedux && data.CurPlaying.Track.Duration > 0 {
 							songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 						}
-						playTime := clock.GetCurrent() + offsetSec
+						playTime := clock.GetCurrent()
 						progress := clampProgress(playTime, songDuration)
 						p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 							Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
@@ -322,7 +323,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				if songDuration == 0 && matchedRedux && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
-				playTime := clock.GetCurrent() + offsetSec
+				playTime := clock.GetCurrent()
 				progress := clampProgress(playTime, songDuration)
 
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
@@ -357,7 +358,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
-				playTime := clock.GetCurrent() + offsetSec
+				playTime := clock.GetCurrent()
 				progress := clampProgress(playTime, songDuration)
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
@@ -373,7 +374,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if songDuration == 0 && snapshotMatchesCurrentSong(data, currentSongName, currentSongArtist) && data.CurPlaying != nil && data.CurPlaying.Track.Duration > 0 {
 				songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 			}
-			playTime := clock.GetCurrent() + offsetSec
+			playTime := clock.GetCurrent()
 			progress := clampProgress(playTime, songDuration)
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 				Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
@@ -421,7 +422,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 				clock.BaseRealTime = float32(data.DomTimeSec)
 				clock.AnchorTime = time.Now()
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent() + offsetSec})
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
 				seeked = true
 			}
 		}
@@ -432,13 +433,13 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if data.PlayingState == 2 {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentSongTitle})
 				if !seeked {
-					playTime := clock.GetCurrent() + offsetSec
+					playTime := clock.GetCurrent()
 					log.Info("恢复 @ %.2fs", playTime)
 					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
 				}
 			} else {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentSongTitle})
-				playTime := clock.GetCurrent() + offsetSec
+				playTime := clock.GetCurrent()
 				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: playTime})
 				log.Info("暂停 @ %.2fs", playTime)
 			}
@@ -449,7 +450,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if trueLineIdx != lastLineIdx {
 				lastLineIdx = trueLineIdx
 				currentLine := activeLyrics[trueLineIdx]
-				playTime := clock.GetCurrent() + offsetSec
+				playTime := clock.GetCurrent()
 				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
 					Index: trueLineIdx, Text: currentLine.Text, SubText: currentLine.SubText,
 					Timestamp: currentLine.Time, PlayTime: playTime,

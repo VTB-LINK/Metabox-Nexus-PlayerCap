@@ -4,6 +4,8 @@ import (
 	"Metabox-Nexus-PlayerCap/config"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic"
+	"Metabox-Nexus-PlayerCap/player/kugou"
+	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
 	"Metabox-Nexus-PlayerCap/player/qqmusic"
 	"Metabox-Nexus-PlayerCap/player/wesing"
 	"Metabox-Nexus-PlayerCap/server"
@@ -29,6 +31,18 @@ var Version = "0.0.0"
 var mainLog = logger.New("Main")
 
 func main() {
+	// 提权副本模式：由 watchdog.applyPatchesElevated 通过 ShellExecuteExW 启动
+	// 在任何初始化之前检查，立即 patch DLL 并退出
+	if len(os.Args) >= 2 && os.Args[1] == "--kugou-patch" {
+		watchdog.RunPatch()
+		return // RunPatch 内部调用 os.Exit，此 return 仅作为安全保障
+	}
+	// 持久 elevated helper 模式：等待触发信号后立即 patch DLL
+	if len(os.Args) >= 2 && os.Args[1] == "--kugou-patch-helper" {
+		watchdog.RunPatchHelper()
+		return
+	}
+
 	// 设置日志格式
 	log.SetFlags(log.Ldate | log.Ltime)
 
@@ -41,7 +55,7 @@ func main() {
 	cfg := config.Load()
 
 	// 播放器注册表（新增播放器只需在此追加）
-	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName}
+	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName}
 
 	fmt.Println("===========================================================")
 	fmt.Println("   Metabox-Nexus-PlayerCap 多播放器歌词实时推送服务          ")
@@ -136,17 +150,20 @@ func main() {
 	wp := wesing.New(cfg.GetPlayerOffset("wesing"), cfg.GetPlayerPoll("wesing"))
 	cp := cloudmusic.New(cfg.GetPlayerOffset("cloudmusicv3"), cfg.GetPlayerPoll("cloudmusicv3"))
 	qp := qqmusic.New(cfg.GetPlayerOffset("qqmusic"), cfg.GetPlayerPoll("qqmusic"))
+	kp := kugou.New(cfg.GetPlayerOffset("kugou"), cfg.GetPlayerPoll("kugou"))
 
 	// 创建路由器
 	router := server.NewRouter(&cfg, srv, playerNames)
 	router.Register(wp)
 	router.Register(cp)
 	router.Register(qp)
+	router.Register(kp)
 
 	// 启动播放器 goroutines
 	go wp.Start()
 	go cp.Start()
 	go qp.Start()
+	go kp.Start()
 
 	mainLog.Info("所有播放器已启动，事件路由中...")
 

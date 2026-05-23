@@ -3,7 +3,7 @@ info:
   title: Metabox-Nexus-PlayerCap API
   version: 3.0.0-beta.1
   description: |
-    多播放器歌词捕获服务 API。
+    VTB-TOOLS Metabox-Nexus-PlayerCap 多播放器歌词捕获服务 API。
 
     **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器（如 `"wesing"`、`"cloudmusicv3"`、`"qqmusic"`）。
 
@@ -304,7 +304,7 @@ paths:
                     msg: success
                     player: wesing
                     data: {}
-                纯音乐 (cloudmusicv3):
+                纯音乐:
                   summary: 纯音乐
                   value:
                     code: 0
@@ -840,7 +840,7 @@ paths:
         返回指定播放器正在播放的最新一行歌词。
         Per-player 端点始终返回指定播放器的数据，不受路由切换影响。
 
-        - `index` - 歌词行号（`-1` 表示 cloudmusicv3 纯音乐，见下方说明）
+        - `index` - 歌词行号（`-1` 表示纯音乐，见下方说明）
         - `text` - 主歌词文本
         - `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
         - `timestamp` - 歌词时间戳（秒）

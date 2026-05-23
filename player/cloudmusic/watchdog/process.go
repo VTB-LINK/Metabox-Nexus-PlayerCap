@@ -11,7 +11,7 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
-var log = logger.New("Watchdog")
+var log = logger.New("CloudMusicWatchdog")
 
 const TargetProcessName = "cloudmusic.exe"
 const DebugFlag = "--remote-debugging-port=9222"
