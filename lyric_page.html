@@ -1316,6 +1316,7 @@
         const purePpPause = parseFloat(urlParams.get('pp_pause') || '1.5');
         const pureScrollEase = urlParams.get('scroll_ease') || 'ease-in-out';
         const oneLineMode = urlParams.has('one_line');
+        const showSubText = urlParams.has('sub_text');
         const fontColor = urlParams.get('color') || null;
         const customFont = urlParams.get('font') || null;
         const glowEnabled = urlParams.has('glow');
@@ -2019,7 +2020,7 @@
                 }
 
                 html += `<div class="lyric-line current appear">${data.text}</div>`;
-                if (data.sub_text) {
+                if (showSubText && data.sub_text) {
                     html += `<div class="lyric-sub-text">${data.sub_text}</div>`;
                 }
 
@@ -2033,7 +2034,7 @@
                 } else {
                     html += `<div class="lyric-line current appear">${data.text}</div>`;
                 }
-                if (data.sub_text) {
+                if (showSubText && data.sub_text) {
                     html += `<div class="lyric-sub-text">${data.sub_text}</div>`;
                 }
             }
@@ -2346,6 +2347,13 @@
                                 <label>单行模式</label>
                                 <label class="toggle-switch">
                                     <input type="checkbox" id="cfgOneLine">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="editor-row">
+                                <label>副歌词</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="cfgSubText">
                                     <span class="toggle-slider"></span>
                                 </label>
                             </div>
@@ -2746,6 +2754,9 @@
                 if (document.getElementById('cfgOneLine').checked) {
                     params.set('one_line', '');
                 }
+                if (document.getElementById('cfgSubText').checked) {
+                    params.set('sub_text', '');
+                }
 
                 // 歌词溢出设置（pure 模式 one_line 时生效）
                 const pOv = document.getElementById('cfgPureOverflow').value;
@@ -2921,7 +2932,7 @@
             }
 
             // 绑定所有控件事件
-            const controls = ['cfgOneLine', 'cfgFontScale', 'cfgTextAlign', 'cfgPlayer', 'cfgColor',
+            const controls = ['cfgOneLine', 'cfgSubText', 'cfgFontScale', 'cfgTextAlign', 'cfgPlayer', 'cfgColor',
                 'cfgGlow', 'cfgGlowColor', 'cfgStroke', 'cfgStrokeWidth', 'cfgStrokeColor',
                 'cfgBg', 'cfgBgTransparent',
                 'cfgCoverStyle', 'cfgCoverRotate', 'cfgSpinSpeed', 'cfgCoverSize',
