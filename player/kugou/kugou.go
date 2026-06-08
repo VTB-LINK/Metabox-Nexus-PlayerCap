@@ -198,6 +198,9 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			anchorTime = time.Now()
 
 			name, singer := splitFilename(info.Filename)
+			// 捕获上一首歌的标识，用于判断是否是"同名同歌手但 hash 变了"的场景
+			// （如开关伴唱模式，hash 变化但歌词应复用）
+			prevName, prevSinger := currentName, currentSinger
 			currentName = name
 			currentSinger = singer
 			currentTitle = buildTitle(name, singer)
@@ -302,17 +305,22 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			}(ctx, coverCh, currentName, currentSinger, currentTitle, info.Hash)
 
 			// 获取歌词
-			lines, lyrErr := klyric.Fetch(info.Hash, int(durationMs))
+			lines, lyrErr := klyric.Fetch(info.Hash, int(durationMs), name, singer)
+			sameSong := name == prevName && singer == prevSinger
 			if lyrErr != nil {
 				log.Warn("歌词获取失败: %v", lyrErr)
-				currentLyrics = nil
-			} else {
-				currentLyrics = lines
-				if len(lines) > 0 {
-					log.Info("歌词加载完成: %d 行", len(lines))
-				} else {
-					log.Info("纯音乐/无歌词")
+				if !sameSong {
+					currentLyrics = nil
 				}
+			} else if len(lines) > 0 {
+				currentLyrics = lines
+				log.Info("歌词加载完成: %d 行", len(lines))
+			} else if sameSong && len(currentLyrics) > 0 {
+				// 同名同歌手但本次取不到（伴唱模式 hash 变化）→ 复用上一次的歌词
+				log.Info("同曲目 hash 变化，复用上一次歌词（%d 行）", len(currentLyrics))
+			} else {
+				currentLyrics = nil
+				log.Info("纯音乐/无歌词")
 			}
 
 			lyricItems := toLyricLines(currentLyrics)
