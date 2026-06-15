@@ -240,12 +240,12 @@ func (s *Server) buildInitEvents(playerName string) []WSEvent {
 	}
 	if ps.AllLyrics != nil {
 		events = append(events, WSEvent{Type: "all_lyrics", Player: target, Data: &AllLyrics{
-			Title:     ps.Title,
-			Lyrics:    ps.AllLyrics,
-			Duration:  ps.Duration,
-			PlayTime:  ps.PlayTime,
-			Progress:  ps.Progress,
-			Count:     len(ps.AllLyrics),
+			Title:    ps.Title,
+			Lyrics:   ps.AllLyrics,
+			Duration: ps.Duration,
+			PlayTime: ps.PlayTime,
+			Progress: ps.Progress,
+			Count:    len(ps.AllLyrics),
 		}})
 	}
 	if ps.LyricUpdate != nil {
@@ -337,7 +337,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 			ps.LyricUpdate = &LyricUpdate{
 				Index: msg.Index, Text: msg.Text, SubText: msg.SubText,
 				Timestamp: msg.Timestamp, PlayTime: msg.PlayTime,
-				Progress: msg.Progress,
+				Progress: msg.Progress, TextDetailed: msg.TextDetailed,
 			}
 			// 同步更新 PlayTime 缓存，保持 FullState 时效性
 			ps.PlayTime = msg.PlayTime
@@ -589,12 +589,12 @@ func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 		}
 
 		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: &AllLyrics{
-			Title:     ps.Title,
-			Lyrics:    ps.AllLyrics,
-			Duration:  ps.Duration,
-			PlayTime:  ps.PlayTime,
-			Progress:  ps.Progress,
-			Count:     len(ps.AllLyrics),
+			Title:    ps.Title,
+			Lyrics:   ps.AllLyrics,
+			Duration: ps.Duration,
+			PlayTime: ps.PlayTime,
+			Progress: ps.Progress,
+			Count:    len(ps.AllLyrics),
 		}})
 	}
 }

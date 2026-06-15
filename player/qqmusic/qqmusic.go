@@ -157,7 +157,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				})
 			} else if len(currentLyrics) == 0 {
 				// 纯音乐：API 成功但无歌词行
-				log.Info("检测到纯音乐/无歌词，清空歌词")
+				log.Info("检测到纯音乐/无歌词，清空歌词；逐字：否")
 				progress := float32(0)
 				playTimeSec := float32(meta.ProgressMs) / 1000.0
 				if currentDurationSec > 0 {
@@ -174,8 +174,8 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 					PlayTime: playTimeSec, Progress: progress,
 				})
 			} else {
-				log.Info("歌词加载完成: %d 行", len(currentLyrics))
-				lyricItems := toLyricLines(currentLyrics)
+				log.Info("歌词加载完成: %d 行；逐字：否", len(currentLyrics))
+				lyricItems := toLyricLines(currentLyrics, offsetSec)
 				progress := float32(0)
 				if currentDurationSec > 0 {
 					progress = player.ClampFloat32((float32(meta.ProgressMs)/1000.0)/currentDurationSec, 0, 1)
@@ -292,22 +292,23 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			}
 
 			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				Index:     trueIdx,
-				Text:      line.Text,
-				SubText:   "",
-				Timestamp: line.Time,
-				PlayTime:  progressSec,
-				Progress:  progress,
+				Index:        trueIdx,
+				Text:         line.Text,
+				SubText:      "",
+				Timestamp:    line.Time,
+				PlayTime:     progressSec,
+				Progress:     progress,
+				TextDetailed: player.LyricTextDetailed{},
 			})
 		}
 	}
 }
 
 // toLyricLines converts internal lyricLine to player.LyricLine
-func toLyricLines(lines []lyricLine) []player.LyricLine {
+func toLyricLines(lines []lyricLine, offsetSec float32) []player.LyricLine {
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
-		out[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
+		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", player.LyricTextDetailed{}, offsetSec)
 	}
 	return out
 }

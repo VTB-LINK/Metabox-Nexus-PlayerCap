@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"Metabox-Nexus-PlayerCap/player"
 )
 
 // Line represents a single lyric line
@@ -146,7 +148,7 @@ func searchByKeyword(normName, normSinger string, targetDurationMs int) (*search
 	var matched []scored
 	for _, c := range sr.Candidates {
 		// Require exact normalized name match.
-		if !strings.EqualFold(strings.TrimSpace(c.Song), normName) {
+		if !player.SameSongName(c.Song, normName) {
 			continue
 		}
 		// Require singer match when we know it.
@@ -201,7 +203,7 @@ func singerMatches(candidateSinger, target string) bool {
 		cs = strings.ReplaceAll(cs, sep, "|")
 	}
 	for _, part := range strings.Split(cs, "|") {
-		if strings.TrimSpace(part) == t {
+		if player.NormalizeSongName(part) == player.NormalizeSongName(t) {
 			return true
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player"
 
 	"github.com/gorilla/websocket"
 )
@@ -116,10 +117,11 @@ type CurPlayingObj struct {
 }
 
 type ExtractedLyric struct {
-	Index   int     `json:"index"`
-	Time    float32 `json:"time"`
-	Text    string  `json:"text"`
-	SubText string  `json:"subText"`
+	Index        int                      `json:"index"`
+	Time         float32                  `json:"time"`
+	Text         string                   `json:"text"`
+	SubText      string                   `json:"subText"`
+	TextDetailed player.LyricTextDetailed `json:"textDetailed"`
 }
 
 const jsPayload = `(() => {
@@ -497,17 +499,18 @@ type LyricFetchResult struct {
 	NoLyric   bool
 	Lrc       string
 	Tlyric    string
+	Yrc       string
 }
 
 // FetchLyricsViaCDP uses the app's own fetch to get lyrics by song ID
 func (c *Client) FetchLyricsViaCDP(songID string) (*LyricFetchResult, error) {
 	js := fmt.Sprintf(`(async () => {
 		try {
-			const r = await fetch('https://music.163.com/api/song/lyric?id=%s&lv=1&tv=1');
+			const r = await fetch('https://music.163.com/api/song/lyric/v1?id=%s&cp=false&tv=0&lv=0&rv=0&kv=0&yv=0&ytv=0&yrv=0');
 			const d = await r.json();
 			if (d.pureMusic) return '[PURE_MUSIC]';
 			if (d.nolyric) return '[NO_LYRIC]';
-			if (d.lrc && d.lrc.lyric) return JSON.stringify({lrc: d.lrc.lyric, tlyric: (d.tlyric && d.tlyric.lyric) || ''});
+			if (d.lrc && d.lrc.lyric) return JSON.stringify({lrc: d.lrc.lyric, tlyric: (d.tlyric && d.tlyric.lyric) || '', yrc: (d.yrc && d.yrc.lyric) || ''});
 			return '';
 		} catch(e) { return 'err:' + e.message; }
 	})()`, songID)
@@ -531,11 +534,12 @@ func (c *Client) FetchLyricsViaCDP(songID string) (*LyricFetchResult, error) {
 	var parsed struct {
 		Lrc    string `json:"lrc"`
 		Tlyric string `json:"tlyric"`
+		Yrc    string `json:"yrc"`
 	}
 	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
 		return nil, fmt.Errorf("lyrics JSON parse error: %v", err)
 	}
-	return &LyricFetchResult{Lrc: parsed.Lrc, Tlyric: parsed.Tlyric}, nil
+	return &LyricFetchResult{Lrc: parsed.Lrc, Tlyric: parsed.Tlyric, Yrc: parsed.Yrc}, nil
 }
 
 // FetchCoverViaCDP uses the app's own fetch to get album cover URL by song ID

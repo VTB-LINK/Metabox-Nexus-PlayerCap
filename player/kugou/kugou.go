@@ -314,16 +314,16 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				}
 			} else if len(lines) > 0 {
 				currentLyrics = lines
-				log.Info("歌词加载完成: %d 行", len(lines))
+				log.Info("歌词加载完成: %d 行；逐字：否", len(lines))
 			} else if sameSong && len(currentLyrics) > 0 {
 				// 同名同歌手但本次取不到（伴唱模式 hash 变化）→ 复用上一次的歌词
-				log.Info("同曲目 hash 变化，复用上一次歌词（%d 行）", len(currentLyrics))
+				log.Info("同曲目 hash 变化，复用上一次歌词（%d 行）；逐字：否", len(currentLyrics))
 			} else {
 				currentLyrics = nil
-				log.Info("纯音乐/无歌词")
+				log.Info("纯音乐/无歌词；逐字：否")
 			}
 
-			lyricItems := toLyricLines(currentLyrics)
+			lyricItems := toLyricLines(currentLyrics, offsetSec)
 			initPlay := anchorProgressSec // 已经过合法性验证的初始进度
 			progress := clampProgress(initPlay, currentDurationSec)
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
@@ -439,12 +439,13 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				line := currentLyrics[trueIdx]
 				progress := clampProgress(interpSec, currentDurationSec)
 				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index:     trueIdx,
-					Text:      line.Text,
-					SubText:   "",
-					Timestamp: line.Time,
-					PlayTime:  interpSec,
-					Progress:  progress,
+					Index:        trueIdx,
+					Text:         line.Text,
+					SubText:      "",
+					Timestamp:    line.Time,
+					PlayTime:     interpSec,
+					Progress:     progress,
+					TextDetailed: player.LyricTextDetailed{},
 				})
 			}
 		}
@@ -500,13 +501,13 @@ func clampProgress(playTime, duration float32) float32 {
 	return player.ClampFloat32(playTime/duration, 0, 1)
 }
 
-func toLyricLines(lines []klyric.Line) []player.LyricLine {
+func toLyricLines(lines []klyric.Line, offsetSec float32) []player.LyricLine {
 	if len(lines) == 0 {
 		return []player.LyricLine{}
 	}
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
-		out[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
+		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", player.LyricTextDetailed{}, offsetSec)
 	}
 	return out
 }

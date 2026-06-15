@@ -20,17 +20,23 @@ func hashEventData(evtType string, data interface{}) uint64 {
 	case player.EventAllLyrics:
 		if msg, ok := data.(*player.AllLyricsData); ok {
 			fmt.Fprintf(h, "%s\x00%d\x00%.3f", msg.Title, msg.Count, msg.Duration)
-			// 加入首尾歌词文本以区分同名不同内容
-			if len(msg.Lyrics) > 0 {
-				fmt.Fprintf(h, "\x00%s", msg.Lyrics[0].Text)
-				if len(msg.Lyrics) > 1 {
-					fmt.Fprintf(h, "\x00%s", msg.Lyrics[len(msg.Lyrics)-1].Text)
+			for _, line := range msg.Lyrics {
+				fmt.Fprintf(h, "\x00%d\x00%.3f\x00%.3f\x00%s\x00%s\x00%.3f\x00%d",
+					line.Index, line.Timestamp, line.PlayTime, line.Text, line.SubText,
+					line.TextDetailed.Duration, len(line.TextDetailed.Words))
+				for _, word := range line.TextDetailed.Words {
+					fmt.Fprintf(h, "\x00%.3f\x00%.3f\x00%.3f\x00%s", word.Timestamp, word.PlayTime, word.Duration, word.Text)
 				}
 			}
 		}
 	case player.EventLyricUpdate:
 		if msg, ok := data.(*player.LyricUpdate); ok {
-			fmt.Fprintf(h, "%d\x00%s\x00%.3f", msg.Index, msg.Text, msg.Timestamp)
+			fmt.Fprintf(h, "%d\x00%s\x00%s\x00%.3f\x00%.3f\x00%.3f\x00%d",
+				msg.Index, msg.Text, msg.SubText, msg.Timestamp, msg.PlayTime,
+				msg.TextDetailed.Duration, len(msg.TextDetailed.Words))
+			for _, word := range msg.TextDetailed.Words {
+				fmt.Fprintf(h, "\x00%.3f\x00%.3f\x00%.3f\x00%s", word.Timestamp, word.PlayTime, word.Duration, word.Text)
+			}
 		}
 	default:
 		// 未知类型使用 fmt 兜底（不应走到这里，status_update 不参与去重）

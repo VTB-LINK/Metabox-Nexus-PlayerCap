@@ -162,19 +162,20 @@
     "progress": 0.0051,
     "count": 12,
     "lyrics": [
-      {"index": 0, "timestamp": 0.5, "text": "いつもそばにいるのに", "sub_text": ""},
-      {"index": 1, "timestamp": 2.1, "text": "ふと気付くと遠すぎて", "sub_text": ""},
-      {"index": 2, "timestamp": 3.8, "text": "手を伸ばしても届かない", "sub_text": ""},
-      {"index": 3, "timestamp": 5.5, "text": "深い森の奥へ迷い込む", "sub_text": ""},
-      {"index": 4, "timestamp": 7.2, "text": "君に逢いたい", "sub_text": ""},
-      {"index": 5, "timestamp": 9.0, "text": "君に嘘をついていた", "sub_text": ""},
-      {"index": 6, "timestamp": 11.2, "text": "心は静かに落ち着かず", "sub_text": ""},
-      {"index": 7, "timestamp": 13.5, "text": "何也もかもが手から零れ落ちる", "sub_text": ""},
-      {"index": 8, "timestamp": 15.8, "text": "ずっと歩いてくよ", "sub_text": ""},
-      {"index": 9, "timestamp": 18.2, "text": "迷えるまま", "sub_text": ""},
-      {"index": 10, "timestamp": 20.5, "text": "君を探す", "sub_text": ""},
-      {"index": 11, "timestamp": 22.8, "text": "その先へ", "sub_text": ""}
-    ]
+      {"index": 0, "timestamp": 0.5, "play_time": 0.3, "text": "いつもそばにいるのに", "sub_text": "", "text_detailed": {}},
+      {"index": 1, "timestamp": 2.1, "play_time": 1.9, "text": "ふと気付くと遠すぎて", "sub_text": "", "text_detailed": {}},
+      {"index": 2, "timestamp": 3.8, "play_time": 3.6, "text": "手を伸ばしても届かない", "sub_text": "", "text_detailed": {}},
+      {"index": 3, "timestamp": 5.5, "play_time": 5.3, "text": "深い森の奥へ迷い込む", "sub_text": "", "text_detailed": {}},
+      {"index": 4, "timestamp": 7.2, "play_time": 7.0, "text": "君に逢いたい", "sub_text": "", "text_detailed": {}},
+      {"index": 5, "timestamp": 9.0, "play_time": 8.8, "text": "君に嘘をついていた", "sub_text": "", "text_detailed": {}},
+      {"index": 6, "timestamp": 11.2, "play_time": 11.0, "text": "心は静かに落ち着かず", "sub_text": "", "text_detailed": {}},
+      {"index": 7, "timestamp": 13.5, "play_time": 13.3, "text": "何也もかもが手から零れ落ちる", "sub_text": "", "text_detailed": {}},
+      {"index": 8, "timestamp": 15.8, "play_time": 15.6, "text": "ずっと歩いてくよ", "sub_text": "", "text_detailed": {}},
+      {"index": 9, "timestamp": 18.2, "play_time": 18.0, "text": "迷えるまま", "sub_text": "", "text_detailed": {}},
+      {"index": 10, "timestamp": 20.5, "play_time": 20.3, "text": "君を探す", "sub_text": "", "text_detailed": {}},
+      {"index": 11, "timestamp": 22.8, "play_time": 22.6, "text": "その先へ", "sub_text": "", "text_detailed": {}}
+    ],
+    "lyrics_detailed": []
   }
 }
 ```
@@ -188,7 +189,63 @@
 - `title` - 歌曲标题（格式：歌曲名 - 歌手）
 - `lyrics` - 按 index 排序的歌词数组
 - `lyrics[].timestamp` - 该歌词行的起始时间戳（秒）
+- `lyrics[].play_time` - 该歌词行应用 offset 后的展示时间（秒）
 - `lyrics[].sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
+- `lyrics[].text_detailed` - 主歌词逐字/细粒度扩展；无逐字时为空对象 `{}`
+- `lyrics_detailed` - 完整逐字歌词集合；无逐字时为空数组 `[]`，其中 `text` 完全由 `words[].text` 拼接而来
+
+**`text_detailed` 字段结构（有逐字数据时）：**
+```json
+{
+  "timestamp": 25.23,
+  "play_time": 24.73,
+  "duration": 2.95,
+  "words": [
+    {"timestamp": 25.23, "play_time": 24.73, "duration": 0.54, "text": "Si "},
+    {"timestamp": 25.77, "play_time": 25.27, "duration": 0.24, "text": "nici "},
+    {"timestamp": 26.01, "play_time": 25.51, "duration": 0.59, "text": "macar "},
+    {"timestamp": 26.6,  "play_time": 26.1,  "duration": 0.33, "text": "eu "},
+    {"timestamp": 26.93, "play_time": 26.43, "duration": 0.25, "text": "nu "},
+    {"timestamp": 27.18, "play_time": 26.68, "duration": 0.34, "text": "ma "},
+    {"timestamp": 27.52, "play_time": 27.02, "duration": 0.66, "text": "cunosc"}
+  ]
+}
+```
+
+**`text_detailed` 字段说明：**
+- `timestamp` - 逐字行原始起始时间（秒），来自 YRC 源数据
+- `play_time` - 逐字行应用 offset 后的展示时间（秒），前端应使用此值做逐字动画驱动
+- `duration` - 逐字行总持续时间（秒）
+- `words[]` - 按时间顺序的逐字片段数组
+- `words[].timestamp` - 该字/词原始起始时间（秒）
+- `words[].play_time` - 该字/词应用 offset 后的展示时间（秒），前端高亮判定应使用此值
+- `words[].duration` - 该字/词持续时间（秒），用于 reveal 动画的进度计算
+- `words[].text` - 该字/词的文本内容（含尾部空格）
+
+**`lyrics_detailed` 数组项结构：**
+```json
+{
+  "lyric_index": 2,
+  "timestamp": 25.23,
+  "play_time": 24.73,
+  "duration": 2.95,
+  "text": "Si nici macar eu nu ma cunosc",
+  "words": [...]
+}
+```
+
+**`lyrics_detailed` 字段说明：**
+- `lyric_index` - 对应 `lyrics[]` 中的行索引，用于关联逐行与逐字数据
+- `timestamp` / `play_time` / `duration` - 同 `text_detailed`
+- `text` - 由 `words[].text` 拼接得到的逐字源文本（可能与 `lyrics[].text` 存在标点差异）
+- `words[]` - 同 `text_detailed.words`
+- 仅包含有逐字数据的行（无逐字的行不出现在此数组中）
+
+**逐字数据可用性：**
+- 目前仅网易云音乐（CloudMusic）播放器提供逐字数据（通过 YRC 格式解析）
+- 其他播放器的 `text_detailed` 始终为 `{}`，`lyrics_detailed` 始终为 `[]`
+- 并非所有网易云歌曲都有 YRC 数据，部分歌曲仅有 LRC（此时也为空）
+- YRC 与 LRC 的文本可能存在标点差异（如 `,` vs `'`），服务端通过模糊匹配自动关联
 
 **无歌词时：**
 ```json
@@ -216,7 +273,8 @@
     "sub_text": "",
     "timestamp": 9.0,
     "play_time": 9.15,
-    "progress": 0.4167
+    "progress": 0.4167,
+    "text_detailed": {}
   }
 }
 ```
@@ -228,6 +286,7 @@
 - `timestamp` - 歌词时间戳（秒）
 - `play_time` - 实际播放时间（秒）；根据偏移量调整后的时间
 - `progress` - 播放进度（0-1）
+- `text_detailed` - 主歌词逐字/细粒度扩展；无逐字时为空对象 `{}`
 
 **无歌词时：**
 ```json
@@ -251,7 +310,8 @@
     "sub_text": "",
     "timestamp": 0,
     "play_time": 45.2,
-    "progress": 0
+    "progress": 0,
+    "text_detailed": {}
   }
 }
 ```
@@ -360,14 +420,14 @@ data: {"type":"lyric_update","player":"wesing","data":{}}
 
 **初始发送（有歌词时）：**
 ```
-data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5,"text_detailed":{}}}
 ```
 
 **播放过程中，每当歌词更新时接收：**
 ```
-data: {"type":"lyric_update","player":"wesing","data":{"index":3,"text":"手を伸ばしても届かない","sub_text":"","timestamp":3.8,"play_time":3.85,"progress":0.25}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":3,"text":"手を伸ばしても届かない","sub_text":"","timestamp":3.8,"play_time":3.85,"progress":0.25,"text_detailed":{}}}
 
-data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い森の奥へ迷い込む","sub_text":"","timestamp":5.5,"play_time":5.6,"progress":0.3333}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い森の奥へ迷い込む","sub_text":"","timestamp":5.5,"play_time":5.6,"progress":0.3333,"text_detailed":{}}}
 ```
 
 **完整生命周期示例：**
@@ -376,11 +436,11 @@ data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い�
 data: {"type":"lyric_update","player":"wesing","data":{}}
 
 （用户开始播放歌曲）
-data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05}}
-data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1,"text_detailed":{}}}
 
 （切歌 — 服务端不发送清空消息，前端自行根据新歌数据重置显示）
-data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"新歌第一行歌词","sub_text":"","timestamp":15.0,"play_time":15.1,"progress":0.04}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"新歌第一行歌词","sub_text":"","timestamp":15.0,"play_time":15.1,"progress":0.04,"text_detailed":{}}}
 ```
 
 **特性：**
@@ -565,7 +625,8 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
     "sub_text": "",
     "timestamp": 9.0,
     "play_time": 9.15,
-    "progress": 0.4167
+    "progress": 0.4167,
+    "text_detailed": {}
   }
 }
 ```
@@ -590,7 +651,8 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
     "sub_text": "",
     "timestamp": 0,
     "play_time": 45.2,
-    "progress": 0
+    "progress": 0,
+    "text_detailed": {}
   }
 }
 ```
@@ -611,10 +673,11 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
     "progress": 0.0051,
     "count": 12,
     "lyrics": [
-      {"index": 0, "timestamp": 0.5, "text": "いつもそばにいるのに", "sub_text": ""},
-      {"index": 1, "timestamp": 2.1, "text": "ふと気付くと遠すぎて", "sub_text": ""},
-      {"index": 2, "timestamp": 3.8, "text": "手を伸ばしても届かない", "sub_text": ""}
-    ]
+      {"index": 0, "timestamp": 0.5, "play_time": 0.3, "text": "いつもそばにいるのに", "sub_text": "", "text_detailed": {}},
+      {"index": 1, "timestamp": 2.1, "play_time": 1.9, "text": "ふと気付くと遠すぎて", "sub_text": "", "text_detailed": {}},
+      {"index": 2, "timestamp": 3.8, "play_time": 3.6, "text": "手を伸ばしても届かない", "sub_text": "", "text_detailed": {}}
+    ],
+    "lyrics_detailed": []
   }
 }
 ```
@@ -737,9 +800,9 @@ play_time 重新推进时发送：
 ← {"type":"status_update","player":"wesing","data":{"status":"loading","detail":"有点甜"}}
 ← {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"有点甜 - 汪苏泷/BY2"}}
 ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":""}}
-← {"type":"all_lyrics","player":"wesing","data":{"title":"有点甜 - 汪苏泷/BY2","duration":236.0,"play_time":0.5,"progress":0.0021,"count":28,"lyrics":[...]}}
-← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05}}
-← {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1}}
+← {"type":"all_lyrics","player":"wesing","data":{"title":"有点甜 - 汪苏泷/BY2","duration":236.0,"play_time":0.5,"progress":0.0021,"count":28,"lyrics":[...],"lyrics_detailed":[...]}}
+← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05,"text_detailed":{}}}
+← {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1,"text_detailed":{}}}
 ...
 ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}  ← 异步封面下载完成后补发
 ...
@@ -748,8 +811,8 @@ play_time 重新推进时发送：
 ← {"type":"player_switch","player":"cloudmusicv3","data":{"from":"wesing","to":"cloudmusicv3"}}
 ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"playing","detail":"如愿 - 王菲"}}
 ← {"type":"song_info_update","player":"cloudmusicv3","data":{"name":"如愿","singer":"王菲","title":"如愿 - 王菲","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}
-← {"type":"all_lyrics","player":"cloudmusicv3","data":{"title":"如愿 - 王菲","duration":280.0,"play_time":0.3,"progress":0.0011,"count":35,"lyrics":[...]}}
-← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":0,"text":"我在时间尽头等你","sub_text":"","timestamp":25.5,"play_time":25.3,"progress":0.03}}
+← {"type":"all_lyrics","player":"cloudmusicv3","data":{"title":"如愿 - 王菲","duration":280.0,"play_time":0.3,"progress":0.0011,"count":35,"lyrics":[...],"lyrics_detailed":[...]}}
+← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":0,"text":"我在时间尽头等你","sub_text":"","timestamp":25.5,"play_time":25.3,"progress":0.03,"text_detailed":{}}}
 ...
 
 （用户暂停播放）
@@ -757,7 +820,7 @@ play_time 重新推进时发送：
 
 （用户恢复播放）
 ← {"type":"playback_resume","player":"cloudmusicv3","data":{"play_time":45.2}}
-← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":5,"text":"在时间里等你","sub_text":"","timestamp":46.0,"play_time":46.1,"progress":0.16}}
+← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":5,"text":"在时间里等你","sub_text":"","timestamp":46.0,"play_time":46.1,"progress":0.16,"text_detailed":{}}}
 ...
 
 （歌曲播放完毕）
@@ -844,7 +907,7 @@ ws.onmessage = (event) => {
 |---|---|---|---|
 | `status_update` | `{"status":"...","detail":"..."}` | `{}` | `msg.data && msg.data.status` |
 | `song_info_update` | `{"name":"...","singer":"...","title":"...","cover":"...","cover_base64":"..."}` | `{}` | `msg.data && msg.data.title` |
-| `all_lyrics` | `{"title":"...","duration":N,"play_time":N,"progress":N,"count":N,"lyrics":[...]}` | `{}` | `msg.data && msg.data.lyrics` |
+| `all_lyrics` | `{"title":"...","duration":N,"play_time":N,"progress":N,"count":N,"lyrics":[...],"lyrics_detailed":[...]}` | `{}` | `msg.data && msg.data.lyrics` |
 | `lyric_update` | `{"index":N,"text":"...","sub_text":"...","timestamp":N,...}` | `{}`（无缓存）或 `{"index":-1,"text":"",... }`（纯音乐） | `msg.data && msg.data.index !== undefined && msg.data.index !== -1` |
 | `lyric_idle` | — | `{}`（始终） | 收到即为空闲通知（前端自行决定是否响应） |
 | `playback_pause` | `{"play_time":N}` | — | 收到即为暂停 |

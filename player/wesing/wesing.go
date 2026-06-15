@@ -167,9 +167,10 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		cachedTimeAddr = timeAddr
 
 		// Broadcast lyrics
+		offsetSec := float32(p.offsetMs) / 1000.0
 		lyricItems := make([]player.LyricLine, len(lyrics))
 		for i, l := range lyrics {
-			lyricItems[i] = player.LyricLine{Index: l.Index, Timestamp: l.Time, Text: l.Text}
+			lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", player.LyricTextDetailed{}, offsetSec)
 		}
 
 		// 歌曲总时长
@@ -258,7 +259,7 @@ func (p *WesingPlayer) initSong(handle syscall.Handle, pid uint32, modules []pro
 	if err != nil || len(lyrics) == 0 {
 		return nil, 0, false
 	}
-	log.Info("歌词加载完成: %d 行", len(lyrics))
+	log.Info("歌词加载完成: %d 行；逐字：否", len(lyrics))
 
 	if cachedTimeAddr != 0 {
 		if t, err := lyric.ReadPlayTime(handle, cachedTimeAddr); err == nil && t >= 0 && t < 100000 {
@@ -441,11 +442,12 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			lastLineIdx = currentIdx
 			l := lyrics[currentIdx]
 			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				Index:     l.Index,
-				Text:      l.Text,
-				Timestamp: l.Time,
-				PlayTime:  playTime,
-				Progress:  player.ClampFloat32(playTime/songDuration, 0, 1),
+				Index:        l.Index,
+				Text:         l.Text,
+				Timestamp:    l.Time,
+				PlayTime:     playTime,
+				Progress:     player.ClampFloat32(playTime/songDuration, 0, 1),
+				TextDetailed: player.LyricTextDetailed{},
 			})
 		}
 

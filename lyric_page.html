@@ -338,6 +338,30 @@
             animation: lyric-exit-fade 0.35s cubic-bezier(0.64, 0, 0.78, 0) forwards;
         }
 
+        /* Word-level (逐字) effects */
+        .lyric-word {
+            display: inline;
+        }
+        /* Fade mode: opacity transition per word */
+        .lyric-word.word-fade {
+            opacity: 0.35;
+            transition: opacity 0.4s ease-in;
+        }
+        .lyric-word.word-fade.word-active {
+            opacity: 1;
+        }
+        /* Reveal mode: left-to-right mask wipe per word */
+        .lyric-word.word-reveal {
+            --reveal: 0;
+            text-shadow: none !important;
+            -webkit-mask-image: linear-gradient(to right,
+                #000 0%, #000 calc(var(--reveal) * 100%),
+                rgba(0,0,0,0.35) calc(var(--reveal) * 100%), rgba(0,0,0,0.35) 100%);
+            mask-image: linear-gradient(to right,
+                #000 0%, #000 calc(var(--reveal) * 100%),
+                rgba(0,0,0,0.35) calc(var(--reveal) * 100%), rgba(0,0,0,0.35) 100%);
+        }
+
         @keyframes lyric-appear {
             from {
                 opacity: 0;
@@ -1317,6 +1341,13 @@
         const pureScrollEase = urlParams.get('scroll_ease') || 'ease-in-out';
         const oneLineMode = urlParams.has('one_line');
         const showSubText = urlParams.has('sub_text');
+        const wordFxEnabled = urlParams.get('word_fx') !== '0' && urlParams.get('word_fx') !== 'off';
+        const wordFxMode = (function() {
+            const v = urlParams.get('word_fx');
+            if (v === '0' || v === 'off') return 'off';
+            if (v === 'reveal') return 'reveal';
+            return 'fade'; // default
+        })();
         const fontColor = urlParams.get('color') || null;
         const customFont = urlParams.get('font') || null;
         const glowEnabled = urlParams.has('glow');
@@ -1811,6 +1842,7 @@
 
                 if (data.type === 'playback_pause') {
                     stopInterpolation();
+                    stopWordFxTick();
                     isPlaying = false;
                     if (coverRotate === 'playback') setCoverPlaying(false);
                     coverPauseAction();
@@ -1821,6 +1853,7 @@
                         startInterpolation(data.data.play_time);
                     }
                     isPlaying = true;
+                    if (_wordFxWords.length > 0) startWordFxTick();
                     if (coverRotate === 'playback') setCoverPlaying(true);
                     coverResumeAction();
                 }
@@ -2004,10 +2037,88 @@
             }, 300); // 略短于 exit 动画时长(350ms)，让入场无缝衔接
         }
 
+        // === 逐字高亮状态 ===
+        let _wordFxActive = false;   // 当前行是否正在逐字模式
+        let _wordFxWords = [];       // 当前行的 words 数组（来自 text_detailed）
+        let _wordFxRafId = null;
+
+        function buildWordHtml(words) {
+            const cls = wordFxMode === 'reveal' ? 'lyric-word word-reveal' : 'lyric-word word-fade';
+            return words.map((w, i) =>
+                `<span class="${cls}" data-word-idx="${i}">${escapeHtml(w.text)}</span>`
+            ).join('');
+        }
+
+        function escapeHtml(text) {
+            return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function hasWordData(data) {
+            return wordFxEnabled && data.text_detailed && data.text_detailed.words && data.text_detailed.words.length > 0;
+        }
+
+        function startWordFxTick() {
+            if (_wordFxRafId) return;
+            _wordFxActive = true;
+            tickWordFx();
+        }
+
+        function stopWordFxTick() {
+            _wordFxActive = false;
+            if (_wordFxRafId) {
+                cancelAnimationFrame(_wordFxRafId);
+                _wordFxRafId = null;
+            }
+        }
+
+        function tickWordFx() {
+            if (!_wordFxActive) return;
+            const elapsed = (performance.now() - timeAnchorAt) / 1000;
+            const currentTime = timeAnchor + elapsed;
+
+            const display = document.getElementById('lyricsDisplay');
+            const wordEls = display.querySelectorAll('.lyric-word');
+            if (wordEls.length === 0 || _wordFxWords.length === 0) {
+                _wordFxRafId = requestAnimationFrame(tickWordFx);
+                return;
+            }
+
+            if (wordFxMode === 'reveal') {
+                for (let i = 0; i < _wordFxWords.length && i < wordEls.length; i++) {
+                    const w = _wordFxWords[i];
+                    const start = w.play_time;
+                    const dur = w.duration || 0.3;
+                    let reveal;
+                    if (currentTime >= start + dur) reveal = 1;
+                    else if (currentTime <= start) reveal = 0;
+                    else reveal = (currentTime - start) / dur;
+                    wordEls[i].style.setProperty('--reveal', reveal.toFixed(3));
+                }
+            } else {
+                // fade mode: toggle class based on word start time
+                for (let i = 0; i < _wordFxWords.length && i < wordEls.length; i++) {
+                    const w = _wordFxWords[i];
+                    if (currentTime >= w.play_time) {
+                        if (!wordEls[i].classList.contains('word-active')) {
+                            wordEls[i].classList.add('word-active');
+                        }
+                    } else {
+                        wordEls[i].classList.remove('word-active');
+                    }
+                }
+            }
+
+            _wordFxRafId = requestAnimationFrame(tickWordFx);
+        }
+
         function updateDisplay(data) {
             const display = document.getElementById('lyricsDisplay');
 
+            // 停止上一行的逐字 tick
+            stopWordFxTick();
+
             let html = '';
+            const useWordFx = hasWordData(data);
 
             if (!oneLineMode) {
                 // 原模式：显示前一行、当前行、后一行
@@ -2016,32 +2127,50 @@
                 const nextIdx = findLyricByIndex(data.index + 1);
 
                 if (prevIdx !== null) {
-                    html += `<div class="lyric-line prev">${allLyrics[prevIdx].text}</div>`;
+                    html += `<div class="lyric-line prev">${escapeHtml(allLyrics[prevIdx].text)}</div>`;
                 }
 
-                html += `<div class="lyric-line current appear">${data.text}</div>`;
+                if (useWordFx) {
+                    html += `<div class="lyric-line current appear">${buildWordHtml(data.text_detailed.words)}</div>`;
+                } else {
+                    html += `<div class="lyric-line current appear">${escapeHtml(data.text)}</div>`;
+                }
                 if (showSubText && data.sub_text) {
-                    html += `<div class="lyric-sub-text">${data.sub_text}</div>`;
+                    html += `<div class="lyric-sub-text">${escapeHtml(data.sub_text)}</div>`;
                 }
 
                 if (nextIdx !== null) {
-                    html += `<div class="lyric-line next">${allLyrics[nextIdx].text}</div>`;
+                    html += `<div class="lyric-line next">${escapeHtml(allLyrics[nextIdx].text)}</div>`;
                 }
             } else {
                 // one_line 模式：只显示当前行
-                if (pureOverflow !== 'wrap') {
-                    html += `<div class="lyric-line current appear" style="overflow:hidden;text-align:left;width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${data.text}</span></div>`;
+                if (useWordFx) {
+                    const wordContent = buildWordHtml(data.text_detailed.words);
+                    if (pureOverflow !== 'wrap') {
+                        html += `<div class="lyric-line current appear" style="overflow:hidden;text-align:left;width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${wordContent}</span></div>`;
+                    } else {
+                        html += `<div class="lyric-line current appear">${wordContent}</div>`;
+                    }
                 } else {
-                    html += `<div class="lyric-line current appear">${data.text}</div>`;
+                    if (pureOverflow !== 'wrap') {
+                        html += `<div class="lyric-line current appear" style="overflow:hidden;text-align:left;width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${escapeHtml(data.text)}</span></div>`;
+                    } else {
+                        html += `<div class="lyric-line current appear">${escapeHtml(data.text)}</div>`;
+                    }
                 }
                 if (showSubText && data.sub_text) {
-                    html += `<div class="lyric-sub-text">${data.sub_text}</div>`;
+                    html += `<div class="lyric-sub-text">${escapeHtml(data.sub_text)}</div>`;
                 }
             }
 
             cleanupScrollAnim();
             transitionOut(display, () => {
                 display.innerHTML = html;
+                // 启动逐字 tick
+                if (useWordFx) {
+                    _wordFxWords = data.text_detailed.words;
+                    startWordFxTick();
+                }
                 if (oneLineMode && pureOverflow !== 'wrap') {
                     requestAnimationFrame(() => {
                         requestAnimationFrame(() => {
@@ -2335,7 +2464,8 @@
                                     <option value="">跟随活跃</option>
                                     <option value="wesing">全民K歌</option>
                                     <option value="cloudmusicv3">网易云音乐</option>
-                                        <option value="qqmusic">QQ音乐</option>
+                                    <option value="qqmusic">QQ音乐</option>
+                                    <option value="kugou">酷狗音乐</option>
                                 </select>
                             </div>
                         </div>
@@ -2356,6 +2486,14 @@
                                     <input type="checkbox" id="cfgSubText">
                                     <span class="toggle-slider"></span>
                                 </label>
+                            </div>
+                            <div class="editor-row">
+                                <label>逐字特效</label>
+                                <select id="cfgWordFx">
+                                    <option value="fade">渐显（Fade）</option>
+                                    <option value="reveal">擦除（Reveal）</option>
+                                    <option value="off">关闭</option>
+                                </select>
                             </div>
                             <div class="editor-row">
                                 <label>字号缩放</label>
@@ -2757,6 +2895,11 @@
                 if (document.getElementById('cfgSubText').checked) {
                     params.set('sub_text', '');
                 }
+                if (document.getElementById('cfgWordFx').value !== 'fade') {
+                    const wfx = document.getElementById('cfgWordFx').value;
+                    if (wfx === 'off') params.set('word_fx', '0');
+                    else params.set('word_fx', wfx);
+                }
 
                 // 歌词溢出设置（pure 模式 one_line 时生效）
                 const pOv = document.getElementById('cfgPureOverflow').value;
@@ -2932,7 +3075,7 @@
             }
 
             // 绑定所有控件事件
-            const controls = ['cfgOneLine', 'cfgSubText', 'cfgFontScale', 'cfgTextAlign', 'cfgPlayer', 'cfgColor',
+            const controls = ['cfgOneLine', 'cfgSubText', 'cfgWordFx', 'cfgFontScale', 'cfgTextAlign', 'cfgPlayer', 'cfgColor',
                 'cfgGlow', 'cfgGlowColor', 'cfgStroke', 'cfgStrokeWidth', 'cfgStrokeColor',
                 'cfgBg', 'cfgBgTransparent',
                 'cfgCoverStyle', 'cfgCoverRotate', 'cfgSpinSpeed', 'cfgCoverSize',

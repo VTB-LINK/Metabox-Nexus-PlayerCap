@@ -60,6 +60,22 @@ func TestSnapshotMatchesCurrentSong(t *testing.T) {
 	}
 }
 
+func TestBuildSongIdentityKeyIncludesArtist(t *testing.T) {
+	first := buildSongIdentityKey("泪桥", "Dawn9")
+	second := buildSongIdentityKey("泪桥", "伍佰 & China Blue")
+	if first == second {
+		t.Fatalf("same title with different artists produced same identity key")
+	}
+
+	if got := buildSongIdentityKey("  Blue   Bird ", "IKIMONO   GAKARI"); got != buildSongIdentityKey("blue bird", "ikimono gakari") {
+		t.Fatalf("identity key was not normalized: %q", got)
+	}
+
+	if got := buildSongIdentityKey("", "Artist"); got != "" {
+		t.Fatalf("empty song name key = %q, want empty", got)
+	}
+}
+
 func newSnapshot(songName, artist string) *cdp.ExtractionData {
 	data := &cdp.ExtractionData{CurPlaying: &cdp.CurPlayingObj{}}
 	data.CurPlaying.Track.Name = songName

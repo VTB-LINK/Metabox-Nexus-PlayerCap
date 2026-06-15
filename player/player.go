@@ -1,11 +1,53 @@
 package player
 
+import (
+	"encoding/json"
+	"strings"
+	"unicode"
+)
+
+// LyricTextDetailedWord 逐字歌词片段
+type LyricTextDetailedWord struct {
+	Timestamp float32 `json:"timestamp"`
+	PlayTime  float32 `json:"play_time"`
+	Duration  float32 `json:"duration"`
+	Text      string  `json:"text"`
+}
+
+// LyricTextDetailed 是 text 的逐字/细粒度扩展，零值序列化为 {}。
+type LyricTextDetailed struct {
+	Timestamp float32                 `json:"timestamp"`
+	PlayTime  float32                 `json:"play_time"`
+	Duration  float32                 `json:"duration"`
+	Words     []LyricTextDetailedWord `json:"words"`
+}
+
+func (d LyricTextDetailed) MarshalJSON() ([]byte, error) {
+	if len(d.Words) == 0 {
+		return []byte("{}"), nil
+	}
+	type alias LyricTextDetailed
+	return json.Marshal(alias(d))
+}
+
+// LyricDetailedLine 是 all_lyrics 的完整逐字歌词集合项，仅从逐字源数据派生。
+type LyricDetailedLine struct {
+	LyricIndex int                     `json:"lyric_index"`
+	Timestamp  float32                 `json:"timestamp"`
+	PlayTime   float32                 `json:"play_time"`
+	Duration   float32                 `json:"duration"`
+	Text       string                  `json:"text"`
+	Words      []LyricTextDetailedWord `json:"words"`
+}
+
 // LyricLine 歌词行
 type LyricLine struct {
-	Index   int     `json:"index"`
-	Timestamp float32 `json:"timestamp"`
-	Text    string  `json:"text"`
-	SubText string  `json:"sub_text"`
+	Index        int               `json:"index"`
+	Timestamp    float32           `json:"timestamp"`
+	PlayTime     float32           `json:"play_time"`
+	Text         string            `json:"text"`
+	SubText      string            `json:"sub_text"`
+	TextDetailed LyricTextDetailed `json:"text_detailed"`
 }
 
 // SongInfo 歌曲信息
@@ -25,12 +67,13 @@ type StatusInfo struct {
 
 // LyricUpdate 歌词更新
 type LyricUpdate struct {
-	Index     int     `json:"index"`
-	Text      string  `json:"text"`
-	SubText   string  `json:"sub_text"`
-	Timestamp float32 `json:"timestamp"`
-	PlayTime  float32 `json:"play_time"`
-	Progress  float32 `json:"progress"`
+	Index        int               `json:"index"`
+	Text         string            `json:"text"`
+	SubText      string            `json:"sub_text"`
+	Timestamp    float32           `json:"timestamp"`
+	PlayTime     float32           `json:"play_time"`
+	Progress     float32           `json:"progress"`
+	TextDetailed LyricTextDetailed `json:"text_detailed"`
 }
 
 // PlaybackTimeInfo 播放暂停/恢复事件载荷（仅 play_time）
@@ -40,12 +83,50 @@ type PlaybackTimeInfo struct {
 
 // AllLyricsData 完整歌词
 type AllLyricsData struct {
-	Title     string      `json:"title,omitempty"`
-	Duration  float32     `json:"duration"`
-	PlayTime  float32     `json:"play_time"`
-	Progress  float32     `json:"progress"`
-	Lyrics    []LyricLine `json:"lyrics"`
-	Count     int         `json:"count"`
+	Title    string      `json:"title,omitempty"`
+	Duration float32     `json:"duration"`
+	PlayTime float32     `json:"play_time"`
+	Progress float32     `json:"progress"`
+	Count    int         `json:"count"`
+	Lyrics   []LyricLine `json:"lyrics"`
+}
+
+func (d AllLyricsData) MarshalJSON() ([]byte, error) {
+	type alias AllLyricsData
+	out := struct {
+		alias
+		LyricsDetailed []LyricDetailedLine `json:"lyrics_detailed"`
+	}{
+		alias:          alias(d),
+		LyricsDetailed: BuildLyricsDetailed(d.Lyrics),
+	}
+	return json.Marshal(out)
+}
+
+func BuildLyricsDetailed(lyrics []LyricLine) []LyricDetailedLine {
+	detailed := make([]LyricDetailedLine, 0)
+	for _, line := range lyrics {
+		if len(line.TextDetailed.Words) == 0 {
+			continue
+		}
+		detailed = append(detailed, LyricDetailedLine{
+			LyricIndex: line.Index,
+			Timestamp:  line.TextDetailed.Timestamp,
+			PlayTime:   line.TextDetailed.PlayTime,
+			Duration:   line.TextDetailed.Duration,
+			Text:       BuildDetailedText(line.TextDetailed.Words),
+			Words:      line.TextDetailed.Words,
+		})
+	}
+	return detailed
+}
+
+func BuildDetailedText(words []LyricTextDetailedWord) string {
+	var text string
+	for _, word := range words {
+		text += word.Text
+	}
+	return text
 }
 
 // Event 播放器事件
@@ -127,4 +208,79 @@ func ClampFloat32(v, min, max float32) float32 {
 		return max
 	}
 	return v
+}
+
+// AdjustLyricPlayTime returns the offset-adjusted lyric timestamp in seconds.
+func AdjustLyricPlayTime(timestamp, offsetSec float32) float32 {
+	adjusted := timestamp - offsetSec
+	if adjusted < 0 {
+		return 0
+	}
+	return adjusted
+}
+
+// LyricDisplayStart returns the earliest time a line should appear.
+// If the line has word-level timing that starts before the LRC line time, use that.
+func LyricDisplayStart(lineTime float32, detailed LyricTextDetailed) float32 {
+	if len(detailed.Words) > 0 && detailed.Timestamp < lineTime {
+		return detailed.Timestamp
+	}
+	return lineTime
+}
+
+// BuildLyricLine constructs a LyricLine with displayStart-aware PlayTime.
+// All players should use this to ensure consistent play_time semantics.
+func BuildLyricLine(index int, lineTime float32, text, subText string, detailed LyricTextDetailed, offsetSec float32) LyricLine {
+	ds := LyricDisplayStart(lineTime, detailed)
+	return LyricLine{
+		Index:        index,
+		Timestamp:    lineTime,
+		PlayTime:     AdjustLyricPlayTime(ds, offsetSec),
+		Text:         text,
+		SubText:      subText,
+		TextDetailed: detailed,
+	}
+}
+
+// ── 文本归一化工具（跨播放器共享） ──
+
+// NormalizeLyricText strips all non-letter/digit characters and lowercases,
+// producing a canonical form for comparing lyric texts across sources
+// (LRC vs YRC, different punctuation conventions like , vs ' vs !).
+func NormalizeLyricText(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return b.String()
+}
+
+// SameLyricText returns true if two lyric texts match after normalization.
+func SameLyricText(left, right string) bool {
+	return NormalizeLyricText(left) == NormalizeLyricText(right)
+}
+
+// NormalizeSongName strips punctuation and extra spaces for fuzzy song name matching.
+// Less aggressive than NormalizeLyricText: preserves spaces between words for readability,
+// but removes punctuation that varies across sources (', !, -, etc).
+func NormalizeSongName(value string) string {
+	var b strings.Builder
+	lastSpace := true // suppress leading space
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToLower(r))
+			lastSpace = false
+		} else if unicode.IsSpace(r) && !lastSpace {
+			b.WriteRune(' ')
+			lastSpace = true
+		}
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
+// SameSongName returns true if two song names match after normalization.
+func SameSongName(left, right string) bool {
+	return NormalizeSongName(left) == NormalizeSongName(right)
 }
