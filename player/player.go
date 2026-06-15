@@ -258,8 +258,145 @@ func NormalizeLyricText(value string) string {
 }
 
 // SameLyricText returns true if two lyric texts match after normalization.
+// It also tolerates small middle insertions/deletions when both normalized texts
+// share reliable beginning and ending boundaries, which helps align line-level
+// lyrics with word-level lyrics from different sources.
 func SameLyricText(left, right string) bool {
-	return NormalizeLyricText(left) == NormalizeLyricText(right)
+	left = NormalizeLyricText(left)
+	right = NormalizeLyricText(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if left == right {
+		return true
+	}
+	if lyricTextOneEditMatch(left, right) {
+		return true
+	}
+	return lyricTextBoundaryMatch(left, right)
+}
+
+func lyricTextOneEditMatch(left, right string) bool {
+	leftRunes := []rune(left)
+	rightRunes := []rune(right)
+	minLen := len(leftRunes)
+	if len(rightRunes) < minLen {
+		minLen = len(rightRunes)
+	}
+	if minLen < 8 {
+		return false
+	}
+
+	lengthDiff := len(leftRunes) - len(rightRunes)
+	if lengthDiff < 0 {
+		lengthDiff = -lengthDiff
+	}
+	if lengthDiff > 1 {
+		return false
+	}
+
+	leftIndex, rightIndex := 0, 0
+	edits := 0
+	for leftIndex < len(leftRunes) && rightIndex < len(rightRunes) {
+		if leftRunes[leftIndex] == rightRunes[rightIndex] {
+			leftIndex++
+			rightIndex++
+			continue
+		}
+		edits++
+		if edits > 1 {
+			return false
+		}
+		switch {
+		case len(leftRunes) > len(rightRunes):
+			leftIndex++
+		case len(rightRunes) > len(leftRunes):
+			rightIndex++
+		default:
+			leftIndex++
+			rightIndex++
+		}
+	}
+	if leftIndex < len(leftRunes) || rightIndex < len(rightRunes) {
+		edits++
+	}
+	return edits <= 1
+}
+
+func lyricTextBoundaryMatch(left, right string) bool {
+	leftRunes := []rune(left)
+	rightRunes := []rune(right)
+	minLen := len(leftRunes)
+	if len(rightRunes) < minLen {
+		minLen = len(rightRunes)
+	}
+	if minLen < 8 {
+		return false
+	}
+
+	prefixLen := commonPrefixLength(leftRunes, rightRunes)
+	suffixLen := commonSuffixLength(leftRunes[prefixLen:], rightRunes[prefixLen:])
+	minEdgeLen := minLyricBoundaryEdgeLength(minLen)
+	if prefixLen < minEdgeLen || suffixLen < minEdgeLen {
+		return false
+	}
+
+	leftGap := len(leftRunes) - prefixLen - suffixLen
+	rightGap := len(rightRunes) - prefixLen - suffixLen
+	if leftGap < 0 || rightGap < 0 {
+		return false
+	}
+	if leftGap == 0 && rightGap == 0 {
+		return true
+	}
+	maxGap := minLen / 5
+	if maxGap < 4 {
+		maxGap = 4
+	}
+	if leftGap == 0 {
+		return rightGap <= maxGap
+	}
+	if rightGap == 0 {
+		return leftGap <= maxGap
+	}
+	return leftGap <= 1 && rightGap <= 1
+}
+
+func minLyricBoundaryEdgeLength(length int) int {
+	edgeLen := length / 4
+	if edgeLen < 4 {
+		return 4
+	}
+	if edgeLen > 8 {
+		return 8
+	}
+	return edgeLen
+}
+
+func commonPrefixLength(left, right []rune) int {
+	limit := len(left)
+	if len(right) < limit {
+		limit = len(right)
+	}
+	for i := 0; i < limit; i++ {
+		if left[i] != right[i] {
+			return i
+		}
+	}
+	return limit
+}
+
+func commonSuffixLength(left, right []rune) int {
+	limit := len(left)
+	if len(right) < limit {
+		limit = len(right)
+	}
+	for i := 0; i < limit; i++ {
+		if left[len(left)-1-i] != right[len(right)-1-i] {
+			return i
+		}
+	}
+	return limit
 }
 
 // NormalizeSongName strips punctuation and extra spaces for fuzzy song name matching.

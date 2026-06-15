@@ -326,14 +326,14 @@ func MergeYRC(lyrics []LyricLine, yrc string, offsetSec float32) {
 }
 
 func findBestYRCDetail(lyricTimeMs int, lyricText string, details map[int]player.LyricTextDetailed, used map[int]bool) (player.LyricTextDetailed, bool) {
-	const toleranceMs = 1250
+	const toleranceMs = 3000
 	bestKey := 0
 	bestDiff := toleranceMs + 1
 	for yrcTimeMs, detail := range details {
 		if used[yrcTimeMs] {
 			continue
 		}
-		if !sameLyricText(lyricText, detailText(detail)) {
+		if !player.SameLyricText(lyricText, detailText(detail)) {
 			continue
 		}
 		diff := yrcTimeMs - lyricTimeMs
@@ -366,14 +366,6 @@ func detailText(detail player.LyricTextDetailed) string {
 		b.WriteString(word.Text)
 	}
 	return b.String()
-}
-
-func sameLyricText(left, right string) bool {
-	return player.SameLyricText(left, right)
-}
-
-func normalizeLyricText(value string) string {
-	return player.NormalizeLyricText(value)
 }
 
 func ParseYRC(yrc string, offsetSec float32) map[int]player.LyricTextDetailed {

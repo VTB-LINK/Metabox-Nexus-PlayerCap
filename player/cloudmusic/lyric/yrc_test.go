@@ -81,6 +81,71 @@ func TestMergeYRCToleratesLargeVerifiedDrift(t *testing.T) {
 	}
 }
 
+func TestMergeYRCToleratesGoodbyeLRCYRCDrift(t *testing.T) {
+	lyrics := []LyricLine{
+		{Index: 6, Time: 48.70, Text: "I don't want to lead you on"},
+		{Index: 28, Time: 182.21, Text: "You would never ask me why"},
+		{Index: 34, Time: 214.26, Text: "it's no other way than to say goodbye"},
+	}
+	yrc := `[47420,4140](47420,690,0)I (48110,270,0)don't (48380,360,0)want (48740,90,0)to (48830,510,0)lead (49340,330,0)you (49670,1890,0)on
+[180830,4860](180830,1320,0)You (182150,510,0)would (182660,870,0)never (183530,570,0)ask (184100,240,0)me (184340,1350,0)why
+[211790,10590](211790,240,0)it's (212030,570,0)no (212600,360,0)other (212960,1440,0)way (214400,270,0)than (214670,150,0)to (214820,1110,0)say (215930,6450,0)goodbye`
+
+	MergeYRC(lyrics, yrc, 0.5)
+	for _, line := range lyrics {
+		if len(line.TextDetailed.Words) == 0 {
+			t.Fatalf("line %d has empty text_detailed", line.Index)
+		}
+	}
+	if lyrics[2].TextDetailed.Timestamp != 211.79 {
+		t.Fatalf("last detail timestamp = %v, want 211.79", lyrics[2].TextDetailed.Timestamp)
+	}
+}
+
+func TestMergeYRCMatchesSmallTextGap(t *testing.T) {
+	lyrics := []LyricLine{{Index: 0, Time: 16.52, Text: "I can see the pain living in your eyes"}}
+	yrc := `[15830,3750](15830,240,0)I (16070,210,0)can (16280,270,0)see (16730,510,0)pain (17240,540,0)living (17780,420,0)in (18200,330,0)your (18530,1050,0)eyes`
+
+	MergeYRC(lyrics, yrc, 0.5)
+	if len(lyrics[0].TextDetailed.Words) == 0 {
+		t.Fatalf("text_detailed.words is empty, want boundary text match")
+	}
+}
+
+func TestMergeYRCDoesNotConfuseRepeatedNaNaLines(t *testing.T) {
+	lyrics := []LyricLine{
+		{Index: 0, Time: 127.86, Text: "Na na na na na na na na na na"},
+		{Index: 1, Time: 131.11, Text: "Na na na na na na na"},
+		{Index: 2, Time: 134.96, Text: "Na na na na na na na na na na"},
+		{Index: 3, Time: 138.74, Text: "Na na na na na na na"},
+	}
+	yrc := `[127520,3810](127520,180,0)Na (127700,270,0)na (127970,510,0)na (128480,240,0)na (128720,210,0)na (128930,600,0)na (129530,60,0)na (129590,390,0)na (129980,810,0)na (130790,540,0)na
+[131330,3840](131330,240,0)Na (131570,240,0)na (131810,510,0)na (132320,240,0)na (132560,750,0)na (133310,1260,0)na (134570,600,0)na
+[135170,3840](135170,240,0)Na (135410,240,0)na (135650,510,0)na (136160,270,0)na (136430,180,0)na (136610,600,0)na (137210,60,0)na (137270,390,0)na (137660,810,0)na (138470,540,0)na
+[139010,2310](139010,240,0)Na (139250,240,0)na (139490,510,0)na (140000,240,0)na (140240,750,0)na (140990,120,0)na (141110,210,0)na`
+
+	MergeYRC(lyrics, yrc, 0.5)
+	wantTimestamps := []float32{127.52, 131.33, 135.17, 139.01}
+	for i, want := range wantTimestamps {
+		if lyrics[i].TextDetailed.Timestamp != want {
+			t.Fatalf("line %d detail timestamp = %v, want %v", i, lyrics[i].TextDetailed.Timestamp, want)
+		}
+	}
+}
+
+func TestMergeYRCMatchesFirefliesEarlyTypo(t *testing.T) {
+	lyrics := []LyricLine{{Index: 36, Time: 152.61, Text: "I'd like To make myself believe"}}
+	yrc := `[152410,4110](152410,510,0)I'd (152920,180,0)lke (153100,180,0)To (153280,360,0)make (153640,870,0)myself (154510,2010,0)believe`
+
+	MergeYRC(lyrics, yrc, 0.5)
+	if len(lyrics[0].TextDetailed.Words) == 0 {
+		t.Fatalf("text_detailed.words is empty, want single-character typo match")
+	}
+	if lyrics[0].TextDetailed.Timestamp != 152.41 {
+		t.Fatalf("detail timestamp = %v, want 152.41", lyrics[0].TextDetailed.Timestamp)
+	}
+}
+
 func TestParseYRCFallbackDurationFromWords(t *testing.T) {
 	details := ParseYRC(`[1000,0](1000,200,0)你(1200,300,0)好`, 0)
 	detail, ok := details[1000]
