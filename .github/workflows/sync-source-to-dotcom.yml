@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Source tag to sync, for example v3.0.0-beta.5'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,7 +19,7 @@ jobs:
     runs-on: [self-hosted, Linux]
     environment: source-sync-production
     env:
-      TAG_NAME: ${{ github.ref_name }}
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
       TARGET_REPO_OWNER: VTB-LINK
       TARGET_REPO_NAME: Metabox-Nexus-PlayerCap
       TARGET_BRANCH: main
@@ -28,7 +34,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref }}
 
       - name: Sync tagged snapshot to github.com main
         run: |

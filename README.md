@@ -17,6 +17,7 @@
 | 全民K歌 (WeSing) | `wesing` | 进程内存读取（PE 导出表 + vtable + AOB 扫描） |
 | 网易云音乐 | `cloudmusicv3` | CDP 远程调试（Chrome DevTools Protocol） |
 | QQ 音乐 | `qqmusic` | 进程内存读取 + AOB Hook 注入（双源融合插值） |
+| 酷狗音乐 | `kugou` | CDP 远程调试（自动 patch libcef.dll 开启 DevTools 端口） |
 
 ## 原理
 
@@ -81,6 +82,28 @@ PlayerCap (qqmusic 模块)
 └─ 快速计时器停滞检测 → 暂停/恢复事件
 ```
 
+### KuGou（CDP 远程调试 + libcef patch）
+
+```
+KuGou.exe 进程
+├─ libcef.dll → CEF / Chromium 内核
+├─ DevTools 端口 12233（由 PlayerCap 自动 patch libcef.dll 打开）
+├─ desktop-popup 页面 → external.SuperCall(864) 播放信息接口
+└─ PlayInfo → hash、filename、cover、progress、duration、playStatus
+
+PlayerCap (kugou 模块)
+├─ Watchdog 自动定位酷狗安装目录（注册表 + Program Files 兜底）
+├─ 检测 libcef.dll patch 状态，必要时终止酷狗 → 提权 helper patch → 重启酷狗
+├─ WebSocket CDP 客户端连接 desktop-popup 页面（端口 12233）
+├─ JS 求值调用 SuperCall 获取播放信息
+├─ hash 变化检测切歌，filename 拆分歌名 + 歌手
+├─ 酷狗歌词 API 获取歌词（hash 优先，必要时按歌名/歌手/时长解析 canonical hash）
+├─ CDP 封面 URL + 酷狗公开 API 兜底获取封面，异步下载 Base64
+├─ 本地时钟锚定 + 100ns progress 单位换算 + seek 检测
+├─ 伴唱/伴奏等同曲 hash 变化时复用同名同歌手歌词
+└─ play_time 停滞检测 → 暂停/恢复事件，CDP 断开后自动回到等待状态
+```
+
 ### 多播放器路由
 
 ```
@@ -98,9 +121,9 @@ Router（事件合并主循环）
 
 ## 功能特性
 
-- ✅ **多播放器支持** — 同时监控全民K歌、网易云音乐和 QQ 音乐，优先级路由自动切换
+- ✅ **多播放器支持** — 同时监控全民K歌、网易云音乐、QQ 音乐和酷狗音乐，优先级路由自动切换
 - ✅ **三种接口** — WebSocket（双向实时）、SSE（单向推送）、HTTP（静态查询）
-- ✅ **Per-player 端点** — 每个播放器独立端点（`/wesing/ws`、`/cloudmusicv3/ws`、`/qqmusic/ws` 等）
+- ✅ **Per-player 端点** — 每个播放器独立端点（`/wesing/ws`、`/cloudmusicv3/ws`、`/qqmusic/ws`、`/kugou/ws` 等）
 - ✅ **播放器切换事件** — 活跃播放器变化时推送 `player_switch` + 新播放器完整状态
 - ✅ **自动等待进程** — 目标播放器未启动时持续等待，启动后自动开始
 - ✅ **暂停/恢复检测** — play_time 停滞自动判定暂停，恢复推进时广播恢复事件
@@ -114,7 +137,8 @@ Router（事件合并主循环）
 - ✅ **配置文件** — config.yml + CLI flag 三层合并（CLI > YAML > 默认值）
 - ✅ **自动更新** — 启动时检查新版本，自动下载 + SHA256 校验 + 热重启
 - ✅ **多语言歌词** — 支持所有 UTF-8 编码的语言（中文、日文、韩文、俄文、英文等）
-- ✅ **跨重启稳定** — AOB 特征搜索，地址动态定位（WeSing）；CDP 远程连接（CloudMusic）
+- ✅ **跨重启稳定** — AOB 特征搜索，地址动态定位（WeSing / QQMusic）；CDP 远程连接（CloudMusic / KuGou）
+- ✅ **酷狗自动接入** — 自动检测酷狗安装和 CDP patch 状态，支持自动提权修补 libcef.dll、重启酷狗并等待端口就绪
 
 ## 快速开始
 
@@ -122,7 +146,7 @@ Router（事件合并主循环）
 
 - Go 1.21+
 - Windows 10/11
-- 全民K歌桌面版 和/或 网易云音乐桌面版 和/或 QQ 音乐桌面版
+- 全民K歌桌面版 和/或 网易云音乐桌面版 和/或 QQ 音乐桌面版 和/或 酷狗音乐桌面版
 
 ### 编译
 
@@ -147,6 +171,7 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 ### 运行
 
 > ⚠️ 需要**管理员权限**运行（读取其他进程内存需要 `PROCESS_VM_READ` 权限）
+> 酷狗音乐首次接入时会检测并自动 patch `libcef.dll` 以开启 CDP 端口，过程中可能触发 UAC；若检测到未知 libcef 版本，将不会强行修改，需等待适配或手动处理。
 
 ```bash
 # 直接运行（使用 config.yml 或默认配置）
@@ -172,6 +197,8 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 | `-cloudmusicv3-poll` | *(沿用全局)* | 网易云音乐专属轮询间隔 |
 | `-qqmusic-offset` | *(沿用全局)* | QQ 音乐专属时间偏移 |
 | `-qqmusic-poll` | *(沿用全局)* | QQ 音乐专属轮询间隔 |
+| `-kugou-offset` | *(沿用全局)* | 酷狗音乐专属时间偏移 |
+| `-kugou-poll` | *(沿用全局)* | 酷狗音乐专属轮询间隔 |
 
 > 播放器专属参数由 `config.RegisterPlayer()` 动态生成，未设置时自动沿用全局值。
 
@@ -270,13 +297,13 @@ kugou-offset: 430
 所有根端点（除 `/health-check` 和 `/service-status`）均有对应的播放器路径版本：
 
 ```
-/wesing/ws                /cloudmusicv3/ws               /qqmusic/ws
-/wesing/all_lyrics        /cloudmusicv3/all_lyrics       /qqmusic/all_lyrics
-/wesing/lyric_update      /cloudmusicv3/lyric_update     /qqmusic/lyric_update
-/wesing/status_update     /cloudmusicv3/status_update    /qqmusic/status_update
-/wesing/song_info         /cloudmusicv3/song_info        /qqmusic/song_info
-/wesing/lyric_update-SSE  /cloudmusicv3/lyric_update-SSE /qqmusic/lyric_update-SSE
-/wesing/song_info-SSE     /cloudmusicv3/song_info-SSE    /qqmusic/song_info-SSE
+/wesing/ws                /cloudmusicv3/ws               /qqmusic/ws                /kugou/ws
+/wesing/all_lyrics        /cloudmusicv3/all_lyrics       /qqmusic/all_lyrics        /kugou/all_lyrics
+/wesing/lyric_update      /cloudmusicv3/lyric_update     /qqmusic/lyric_update      /kugou/lyric_update
+/wesing/status_update     /cloudmusicv3/status_update    /qqmusic/status_update     /kugou/status_update
+/wesing/song_info         /cloudmusicv3/song_info        /qqmusic/song_info         /kugou/song_info
+/wesing/lyric_update-SSE  /cloudmusicv3/lyric_update-SSE /qqmusic/lyric_update-SSE  /kugou/lyric_update-SSE
+/wesing/song_info-SSE     /cloudmusicv3/song_info-SSE    /qqmusic/song_info-SSE     /kugou/song_info-SSE
 ```
 
 ---
@@ -328,11 +355,19 @@ Metabox-Nexus-PlayerCap/
 │   │   └── watchdog/
 │   │       ├── process.go # 确保 cloudmusic.exe 带 --remote-debugging-port=9222 启动
 │   │       └── registry.go# 注册表自启项注入调试端口参数
-│   └── qqmusic/           # QQ 音乐 —— 基于内存读取 + AOB Hook
-│       ├── qqmusic.go     # 主轮询循环、双源融合插值、暂停/恢复/seek 检测
-│       ├── mem.go         # 进程连接、内存读写、AOB Hook 注入（滑块 + 进度 + KUSER）
-│       ├── api.go         # QQ 音乐 API 调用（歌词/封面）、QRC 解析
-│       └── qrc_decrypt.go # QRC 3DES 自定义解密算法
+│   ├── qqmusic/           # QQ 音乐 —— 基于内存读取 + AOB Hook
+│   │   ├── qqmusic.go     # 主轮询循环、双源融合插值、暂停/恢复/seek 检测
+│   │   ├── mem.go         # 进程连接、内存读写、AOB Hook 注入（滑块 + 进度 + KUSER）
+│   │   ├── api.go         # QQ 音乐 API 调用（歌词/封面）、QRC 解析
+│   │   └── qrc_decrypt.go # QRC 3DES 自定义解密算法
+│   └── kugou/             # 酷狗音乐 —— 基于 CDP + libcef patch
+│       ├── kugou.go       # 主轮询循环、本地时钟同步、歌词/封面获取、seek 检测
+│       ├── cdp/
+│       │   └── client.go  # WebSocket CDP 客户端：连接、JS 求值、SuperCall 播放信息
+│       ├── lyric/
+│       │   └── lyric.go   # 酷狗歌词 API 调用（hash/canonical hash）、LRC 解析
+│       └── watchdog/
+│           └── watchdog.go# 酷狗安装定位、libcef.dll patch、提权 helper、重启与端口检测
 ├── server/
 │   ├── server.go          # HTTP/WS/SSE 统一服务器：订阅者管理、状态缓存、广播
 │   ├── router.go          # 多播放器优先级路由 + 超时状态机
