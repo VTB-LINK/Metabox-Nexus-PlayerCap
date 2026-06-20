@@ -14,7 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var log = logger.New("KuGouCDP")
+var log = logger.New("KuGou] [CDP") // 渲染为 [KuGou] [CDP]
 
 const cdpPort = 12233
 

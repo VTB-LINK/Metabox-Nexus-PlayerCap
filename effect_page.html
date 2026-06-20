@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>网易云特效歌词镜像</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  #stage { position: fixed; inset: 0; overflow: hidden; }
+  /* offmode=pure 回退：底层叠一个纯净歌词页，特效淡出时露出它（在 #view/#freeze 之下） */
+  #fallback {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    border: 0; background: transparent; display: none;
+  }
+  #view {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    transform: translateY(0);
+    will-change: opacity, transform;
+  }
+  /* 冻结叠加层：恢复实时画面时把冻结帧画在上层并淡出，实现冻结→实时的交叉淡入 */
+  #freeze {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; pointer-events: none;
+    will-change: opacity;
+  }
+  #hint {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    font: 14px/1.6 "Noto Sans SC", system-ui, sans-serif; color: rgba(255,255,255,.5);
+    text-align: center; pointer-events: none; transition: opacity .4s;
+  }
+  #hint.hidden { opacity: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <iframe id="fallback"></iframe>
+  <canvas id="view"></canvas>
+  <canvas id="freeze"></canvas>
+</div>
+<div id="hint">等待网易云特效画面…<br><small id="hintsub">连接中</small></div>
+<script>
+(function () {
+  const qs = new URLSearchParams(location.search);
+
+  function clampNum(v, def, lo, hi) {
+    const n = parseFloat(v);
+    if (isNaN(n)) return def;
+    return Math.min(hi, Math.max(lo, n));
+  }
+
+  // 连接参数
+  const host = qs.get('host') || 'localhost';
+  const port = qs.get('port') || '8765';
+  const baseWS = qs.get('ws') || ('ws://' + host + ':' + port + '/cloudmusicv3/effect-ws');
+  // 截帧/注入参数（透传给后端；缺省=后端默认 quality=88 header_clickable=1 footer_clickable=0）
+  // 注：纯层捕获直读 canvas 原生分辨率，scale 已无意义（不再透传）；仅 quality 影响 JPEG 编码。
+  const capParams = new URLSearchParams();
+  if (qs.get('quality')) capParams.set('quality', qs.get('quality'));
+  if (qs.get('header_clickable') !== null) capParams.set('header_clickable', qs.get('header_clickable'));
+  if (qs.get('footer_clickable') !== null) capParams.set('footer_clickable', qs.get('footer_clickable'));
+  const capStr = capParams.toString();
+  const wsURL = baseWS + (capStr ? (baseWS.includes('?') ? '&' : '?') + capStr : '');
+
+  // 显示 / 过渡参数
+  const opacity = clampNum(qs.get('opacity'), 1, 0, 1);
+  const fit = (qs.get('fit') || 'cover').toLowerCase();          // contain | cover | fill（默认 cover 裁切填满）
+  const offmode = (qs.get('offmode') || 'fade').toLowerCase();   // fade 淡出 | hold 定格 | pure 回退纯净歌词
+  const transition = (qs.get('transition') || 'fade').toLowerCase(); // fade | slide | both
+  const doFade = transition === 'fade' || transition === 'both';
+  const doSlide = transition === 'slide' || transition === 'both';
+  const fadeInMs = clampNum(qs.get('fadein_ms'), 600, 0, 10000);
+  const fadeOutMs = clampNum(qs.get('fadeout_ms'), 600, 0, 10000);
+  // 进入详情页后延迟再淡入：等网易云重新渲染特效（进详情页时它会冷渲染一遍）
+  const fadeInDelayMs = clampNum(qs.get('fadein_delay_ms'), 1000, 0, 10000);
+  // 冻结→实时的交叉淡入时长（帧门控/park 过渡结束后接回实时）；未传则沿用 fadein_ms
+  const resumeMs = clampNum(qs.get('resume_ms'), fadeInMs, 0, 10000);
+  // 背景（特效消失时露出什么，三选一互斥）：
+  //   缺省       → 透明
+  //   bg=<hex>   → 纯色（黑/白用于亮度键，绿用于色度键）
+  //   bg=lyrics  → 纯净歌词（底层叠 lyric_display.html?pure，跟随活跃播放器）
+  const bgRaw = (qs.get('bg') || '').trim();
+  const bgLyrics = bgRaw.toLowerCase() === 'lyrics';
+  const bgColor = (!bgLyrics && /^#?[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$/.test(bgRaw))
+    ? (bgRaw[0] === '#' ? bgRaw : '#' + bgRaw) : '';
+
+  const stage = document.getElementById('stage');
+  if (bgColor) stage.style.background = bgColor; // 纯色背景层（在 #view/#freeze 之下）
+  if (bgLyrics) {
+    // 常驻底层歌词页：特效不透明时被 #view 盖住，特效淡出(opacity→0)时自然露出 → 天然交叉淡入。
+    // lyrics 参数携带「歌词」模式的完整 query（命名空间隔离，已解码一层）；缺省回退到 ?pure。
+    const fb = document.getElementById('fallback');
+    const lyricsCfg = (qs.get('lyrics') || '').trim();
+    fb.src = 'lyric_display.html?' + (lyricsCfg || 'pure');
+    fb.style.display = 'block';
+  }
+  const canvas = document.getElementById('view');
+  const ctx = canvas.getContext('2d');
+  const freeze = document.getElementById('freeze');
+  const freezeCtx = freeze.getContext('2d');
+  const hint = document.getElementById('hint');
+  // 帧恢复交叉淡入：冻结(帧门控)结束后实时画面到来时，把冻结帧叠在上层淡出，避免硬切
+  const RESUME_GAP_MS = 250;
+  let lastFrameAt = 0;
+  const hintSub = document.getElementById('hintsub');
+
+  // --- canvas 尺寸（含 DPR）---
+  let cw = 0, ch = 0;
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    cw = Math.round(window.innerWidth * dpr);
+    ch = Math.round(window.innerHeight * dpr);
+    canvas.width = cw; canvas.height = ch;
+    freeze.width = cw; freeze.height = ch;
+    draw();
+  }
+  window.addEventListener('resize', resize);
+
+  // --- 帧绘制 ---
+  let lastBitmap = null;
+  function drawBitmap(targetCtx, bmp) {
+    targetCtx.clearRect(0, 0, cw, ch);
+    if (!bmp) return;
+    const iw = bmp.width, ih = bmp.height;
+    let dw, dh, dx, dy;
+    if (fit === 'fill') {
+      dw = cw; dh = ch; dx = 0; dy = 0;
+    } else {
+      const s = (fit === 'cover') ? Math.max(cw / iw, ch / ih) : Math.min(cw / iw, ch / ih);
+      dw = iw * s; dh = ih * s;
+      dx = (cw - dw) / 2; dy = (ch - dh) / 2;
+    }
+    targetCtx.drawImage(bmp, dx, dy, dw, dh);
+  }
+  function draw() { drawBitmap(ctx, lastBitmap); }
+
+  // 同一时刻只解码一帧：保证顺序（避免乱序完成导致冻结时回跳到旧帧），解码期间到达的帧直接丢弃
+  let decoding = false;
+  function onFrame(buf) {
+    if (!live || decoding) return;   // 冻结时忽略新帧，保持定格（切走不漏底层主页）
+    decoding = true;
+    const t = (performance.now ? performance.now() : Date.now());
+    const gap = t - lastFrameAt;
+    lastFrameAt = t;
+    createImageBitmap(new Blob([buf], { type: 'image/jpeg' })).then(bmp => {
+      decoding = false;
+      if (!live) { bmp.close && bmp.close(); return; }
+      const prev = lastBitmap;
+      // 帧门控结束后第一帧（间隔较大）：冻结帧叠上层、实时画到下层，上层淡出 → 交叉淡入。
+      // 但若刚 fadeout 过（任务栏最小化等），恢复交给 #view 的延迟淡入，跳过交叉淡入，避免双重淡入/冷渲染闪烁。
+      if (gap > RESUME_GAP_MS && prev && !suppressCrossfade) {
+        drawBitmap(freezeCtx, prev);          // 上层 = 冻结帧
+        freeze.style.transitionDuration = '0ms';
+        freeze.style.opacity = String(opacity);
+        void freeze.offsetWidth;
+        lastBitmap = bmp;
+        draw();                               // 下层 = 实时
+        freeze.style.transitionDuration = resumeMs + 'ms';
+        freeze.style.opacity = '0';           // 冻结帧淡出，露出实时（时长 = resume_ms，缺省=fadein_ms）
+      } else {
+        lastBitmap = bmp;
+        draw();
+      }
+      if (gap > RESUME_GAP_MS) suppressCrossfade = false; // 本次恢复已处理，复位
+      if (prev) prev.close && prev.close();
+    }).catch(() => { decoding = false; });
+  }
+
+  // --- 显示状态机：active=网易云是否活跃输出 ---
+  let active = null;   // null=未知（首条状态前）
+  let live = true;     // 是否绘制新帧（冻结时 false）
+  let suppressCrossfade = false; // 刚 fadeout 过：恢复由 #view 延迟淡入处理，跳过 #freeze 交叉淡入（防双重淡入/冷渲染闪烁）
+
+  function setDur(ms) { canvas.style.transitionDuration = ms + 'ms'; }
+  function setTransitionProps() {
+    canvas.style.transitionProperty = 'opacity, transform';
+    canvas.style.transitionTimingFunction = 'ease';
+  }
+
+  let fadeInTimer = null;
+  function clearFadeIn() { if (fadeInTimer) { clearTimeout(fadeInTimer); fadeInTimer = null; } }
+
+  // 从退出态动画淡入（首次加载/切回网易云时）
+  function fadeInNow() {
+    live = true;
+    setDur(0);
+    canvas.style.opacity = doFade ? '0' : String(opacity);
+    canvas.style.transform = doSlide ? 'translateY(100%)' : 'translateY(0)';
+    void canvas.offsetWidth; // reflow
+    setDur(fadeInMs);
+    canvas.style.opacity = String(opacity);
+    canvas.style.transform = 'translateY(0)';
+  }
+
+  function showHidden() {
+    if (offmode === 'hold') {       // 定格：停止绘制、保持原样可见
+      live = false;
+      setDur(0);
+      canvas.style.opacity = String(opacity);
+      canvas.style.transform = 'translateY(0)';
+      return;
+    }
+    // fade / pure：冻结最后一帧后做退出动画
+    live = false;
+    suppressCrossfade = true; // 恢复时由 #view 延迟淡入，跳过交叉淡入
+    setDur(fadeOutMs);
+    if (doFade || (!doFade && !doSlide)) canvas.style.opacity = '0';
+    if (doSlide) canvas.style.transform = 'translateY(100%)';
+  }
+
+  function setActive(a) {
+    if (a === active) return;
+    active = a;
+    clearFadeIn();
+    if (a) {
+      // 立即开始绘制新帧（让画面就绪），延迟后再淡入（等网易云冷渲染完成）
+      live = true;
+      fadeInTimer = setTimeout(function () { fadeInTimer = null; fadeInNow(); }, fadeInDelayMs);
+    } else {
+      showHidden();
+    }
+  }
+
+  setTransitionProps();
+  canvas.style.opacity = '0';   // 初始隐藏，首条状态为活跃时再淡入
+  resize();
+
+  // --- WebSocket ---
+  let ws = null, reconnectTimer = null, gotFrame = false;
+  function setHint(text, sub) {
+    if (text === null) { hint.classList.add('hidden'); return; }
+    hint.classList.remove('hidden');
+    hint.firstChild.textContent = text;
+    hintSub.textContent = sub || '';
+  }
+  // 后端状态：cmActive=网易云是否活跃输出；showing=是否正打开详情页（特效在显示）
+  let cmActive = true, showing = true;
+  function handleStatus(obj) {
+    if (!obj || obj.type !== 'status') return;
+    if (typeof obj.cmActive === 'boolean') cmActive = obj.cmActive;
+    if (typeof obj.showing === 'boolean') showing = obj.showing;
+    setActive(cmActive && showing);   // 二者皆真才显示，否则冻结淡出
+  }
+  function connect() {
+    clearTimeout(reconnectTimer);
+    try { ws = new WebSocket(wsURL); } catch (e) { scheduleReconnect(); return; }
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { setHint('已连接，等待特效画面…', '若无画面请在网易云打开歌曲详情页'); };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {        // 文本=状态消息
+        try { handleStatus(JSON.parse(ev.data)); } catch (e) {}
+        return;
+      }
+      if (!gotFrame) { gotFrame = true; setHint(null); }
+      onFrame(ev.data);
+    };
+    ws.onclose = () => {
+      gotFrame = false;
+      setHint('连接断开，重连中…', wsURL);
+      scheduleReconnect();
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 1500);
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

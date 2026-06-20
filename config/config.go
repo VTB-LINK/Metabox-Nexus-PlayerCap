@@ -50,6 +50,7 @@ type Config struct {
 	Poll              int                      `yaml:"poll"`                // 全局轮询间隔（毫秒）
 	PriorPlayer       []string                 `yaml:"prior-player"`        // 优先播放器列表
 	PriorPlayerExpire int                      `yaml:"prior-player-expire"` // 优先播放器暂停超时（秒）
+	EffectStrategy    string                   `yaml:"-"`                   // 网易云特效最小化策略：park | fadeout（键 cloudmusicv3-effect-strategy）
 	Players           map[string]*PlayerConfig `yaml:"-"`                   // 各播放器专属配置
 	Sources           []string                 `yaml:"-"`                   // 配置来源列表（内部字段）
 	ExplicitKeys      map[string]bool          `yaml:"-"`                   // 被显式设置（非默认）的字段集合
@@ -63,6 +64,7 @@ func DefaultConfig() Config {
 		Poll:              30,
 		PriorPlayer:       []string{"wesing"},
 		PriorPlayerExpire: 15,
+		EffectStrategy:    "fadeout",
 		Players:           make(map[string]*PlayerConfig),
 		ExplicitKeys:      make(map[string]bool),
 	}
@@ -253,6 +255,12 @@ func mergeYAML(dst *Config, m map[string]interface{}) {
 			mark("prior-player-expire")
 		}
 	}
+	if v, ok := m["cloudmusicv3-effect-strategy"]; ok {
+		if s, ok := v.(string); ok && (s == "park" || s == "fadeout") {
+			dst.EffectStrategy = s
+			mark("cloudmusicv3-effect-strategy")
+		}
+	}
 
 	// 动态合并已注册播放器的专属配置
 	for _, name := range registeredPlayers {
@@ -321,6 +329,7 @@ prior-player-expire: 15
 # 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 30
+cloudmusicv3-effect-strategy: fadeout # 特效最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
 # QQ 音乐 配置
 qqmusic-offset: 400

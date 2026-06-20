@@ -41,6 +41,7 @@
         "wesing"
       ],
       "prior-player-expire": 15,
+      "cloudmusicv3-effect-strategy": "fadeout",
       "wesing-offset": 200,
       "wesing-poll": 30,
       "cloudmusicv3-offset": 500,
@@ -82,7 +83,9 @@
         "status_update": "http://0.0.0.0:8765/cloudmusicv3/status_update",
         "song_info": "http://0.0.0.0:8765/cloudmusicv3/song_info",
         "lyric_update-SSE": "http://0.0.0.0:8765/cloudmusicv3/lyric_update-SSE",
-        "song_info-SSE": "http://0.0.0.0:8765/cloudmusicv3/song_info-SSE"
+        "song_info-SSE": "http://0.0.0.0:8765/cloudmusicv3/song_info-SSE",
+        "effect-ws": "ws://0.0.0.0:8765/cloudmusicv3/effect-ws",
+        "effect-ingest": "ws://0.0.0.0:8765/cloudmusicv3/effect-ingest"
       },
       "qqmusic": {
         "ws": "ws://0.0.0.0:8765/qqmusic/ws",
@@ -897,6 +900,66 @@ ws.onmessage = (event) => {
       break;
   }
 };
+```
+
+---
+
+## 网易云特效歌词镜像
+
+把网易云「特效歌词」WebGL 画面镜像给前端/OBS。与 JSON 事件通道分离的专用二进制通道。
+
+### `/cloudmusicv3/effect-ws` — 特效画面订阅（WebSocket）
+
+OBS/前端连接此端点，收到两类消息：
+
+| 消息类型 | 内容 | 说明 |
+|---|---|---|
+| **二进制帧** | JPEG 字节 | 一帧特效画面（~30fps，满则丢最新优先）。`ws.binaryType='arraybuffer'` 后用 `createImageBitmap` 解码 |
+| **文本状态** | JSON | `{"type":"status","cmActive":bool,"showing":bool}` |
+
+文本状态字段：
+
+- `cmActive` — 网易云是否为当前活跃输出播放器（`activePlayer == cloudmusicv3`）。
+- `showing` — 网易云是否正打开**特效歌词**详情页（详情页可见、未最小化、且特效 canvas 存在；黑胶/标准模式或退出详情页时为 `false`）。
+
+前端据此决定显示/淡出：`cmActive && showing` 才显示实时帧，否则按 `offmode` 处理。
+
+> 连接 query 可携带截帧/注入参数（透传后端）：`quality`、`header_clickable`、`footer_clickable`。`effect_page.html` 会自动按需附加。
+
+### `/cloudmusicv3/effect-ingest` — 帧回传（WebSocket，内部）
+
+注入网易云页面的抓帧脚本把特效 canvas 的 JPEG 字节推到此端点，后端门控后再广播给 `effect-ws` 订阅者。**非用户接口**，仅供注入脚本使用。
+
+### 前端页面 URL 参数（`effect_display.html` / `effect_page.html`）
+
+`effect_display.html` 是防 OBS 缓存的引导页（透传全部参数 + 时间戳）。参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `host` / `port` | `localhost` / `8765` | 后端地址；或用 `ws=` 直接给完整 ws URL |
+| `quality` | `95` | JPEG 质量 1–100（纯层为原生分辨率，细线条建议 ≥90 以压色块） |
+| `opacity` | `1` | 整块画面不透明度 0–1（背景烤进 canvas，无法单独关背景） |
+| `fit` | `cover` | `contain` 留边 / `cover` 裁切填满 / `fill` 拉伸 |
+| `offmode` | `fade` | 非活跃输出时：`fade` 淡出 / `hold` 定格 |
+| `bg` | （无）透明 | `<hex>`（如 `00ff00`）淡出到纯色（黑白=亮度键、绿=色度键）；`lyrics`=回退到纯净歌词 |
+| `lyrics` | — | 当 `bg=lyrics` 时携带的「歌词」模式完整 query（命名空间隔离，由编辑器自动生成） |
+| `transition` | `fade` | `fade` / `slide` / `both` |
+| `fadein_ms` / `fadeout_ms` | `600` / `600` | 淡入/淡出时长 |
+| `fadein_delay_ms` | `1000` | 进详情页后延迟再淡入（等网易云冷渲染） |
+| `resume_ms` | =`fadein_ms` | 「冻结→实时」交叉淡入时长（park/帧门控恢复），独立于进场淡入 |
+| `header_clickable` | `1` | 双击隐藏顶栏后是否保留点击/拖动 |
+| `footer_clickable` | `0` | 双击隐藏底栏后是否保留点击 |
+
+> 最小化策略（`fadeout` / `park`）不是 URL 参数，由服务端 `config.yml` 的 `cloudmusicv3-effect-strategy` 决定，可在 `/service-status` 查看。
+
+### cURL / wscat 测试
+
+```bash
+# 订阅特效画面（二进制帧 + 文本状态）
+wscat -c "ws://localhost:8765/cloudmusicv3/effect-ws"
+
+# 查看当前策略与端点
+curl http://localhost:8765/service-status
 ```
 
 ---

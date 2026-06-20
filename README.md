@@ -139,6 +139,7 @@ Router（事件合并主循环）
 - ✅ **多语言歌词** — 支持所有 UTF-8 编码的语言（中文、日文、韩文、俄文、英文等）
 - ✅ **跨重启稳定** — AOB 特征搜索，地址动态定位（WeSing / QQMusic）；CDP 远程连接（CloudMusic / KuGou）
 - ✅ **酷狗自动接入** — 自动检测酷狗安装和 CDP patch 状态，支持自动提权修补 libcef.dll、重启酷狗并等待端口就绪
+- ✅ **网易云特效歌词镜像** — 直读网易云「特效歌词」WebGL 画面（极光/霓虹/液态流体…）镜像给 OBS；只读不动源画面，主播可常开工具栏；多播放器联动淡入/淡出，最小化可屏外保活，非特效时可回退纯净歌词（详见[网易云特效歌词镜像](#网易云特效歌词镜像)）
 
 ## 快速开始
 
@@ -238,6 +239,7 @@ prior-player-expire: 15
 # 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 30
+cloudmusicv3-effect-strategy: fadeout # 特效歌词镜像最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
 # QQ音乐 配置
 qqmusic-offset: 400
@@ -291,6 +293,8 @@ kugou-offset: 430
 | `/song_info` | HTTP | 歌曲信息 |
 | `/lyric_update-SSE` | SSE | 实时歌词推送流 |
 | `/song_info-SSE` | SSE | 实时歌曲信息推送流 |
+| `/cloudmusicv3/effect-ws` | WebSocket | 网易云特效画面镜像（二进制 JPEG 帧 + 文本状态），供 OBS/前端订阅 |
+| `/cloudmusicv3/effect-ingest` | WebSocket | 内部：注入网易云页面的抓帧脚本把特效 JPEG 回传到此（非用户接口） |
 
 **Per-player 端点**（始终返回指定播放器数据，不受路由切换影响）：
 
@@ -315,13 +319,41 @@ kugou-offset: 430
 | 文件 | 角色 | 说明 |
 |------|------|------|
 | `lyric_display.html` | **Loader（引导页）** | 极简引导页，每次加载时自动拉取最新的 `lyric_page.html` 并渲染。**OBS 浏览器源应添加此文件** |
-| `lyric_page.html` | **Content（内容页）** | 实际的歌词显示页面，包含所有样式、WS 连接、歌词渲染逻辑 |
+| `lyric_page.html` | **Content（内容页）** | 实际的歌词显示页面，包含所有样式、WS 连接、歌词渲染逻辑；**无参数打开即「配置编辑器」**（含「特效」模式，生成带参 URL） |
+| `effect_display.html` | **Loader（特效引导页）** | 网易云特效镜像的引导页，防 OBS 缓存。**OBS 浏览器源应添加此文件** |
+| `effect_page.html` | **Content（特效内容页）** | 实际的特效镜像渲染页，连 `/cloudmusicv3/effect-ws` 拿帧 |
 
 > ⚠️ **请始终使用 `lyric_display.html` 作为 OBS 浏览器源地址**，不要直接使用 `lyric_page.html`。
 > Loader 会在每次加载时附加时间戳参数绕过 OBS 缓存，确保你始终看到最新版本的歌词页面。
 > 直接使用 `lyric_page.html` 虽然功能正常，但无法享受自动缓存刷新保护。
 
 > 📋 **从旧版升级？** 如果你是从 v2.x 之前的版本升级，请在 OBS 中右键浏览器源 → **刷新页面的缓存**（仅需操作一次，之后所有更新将自动生效）。
+
+---
+
+## 网易云特效歌词镜像
+
+把网易云音乐「歌曲详情页」里的官方**特效歌词**（极光/霓虹/液态流体…，渲染在 WebGL canvas 上）镜像到独立 HTML 页，供 OBS 浏览器源捕获。
+
+**工作原理**：注入网易云页面的脚本**只读地** `drawImage` 复制特效 canvas 的像素，编码 JPEG 经 WS 回传给 exe，再广播给前端。抓的是 canvas 自身像素，浏览器合成在其上的工具栏/顶栏/进度条**永不入帧**——所以**主播可以正常开着工具栏用网易云，OBS 里依然是纯净的特效画面**。
+
+> ⚠️ 严格只读，绝不修改网易云的 canvas（改其尺寸会导致网易云崩溃）。分辨率 = 网易云窗口尺寸（网易云按 CSS 分辨率渲染特效，偏软；**想更清晰就把网易云窗口放大**）。
+
+### 使用步骤
+
+1. 运行 playercap（会自动以调试+保活参数拉起网易云）。
+2. **无参数**打开 `lyric_page.html`（配置编辑器）→ 左侧切到 **✨特效** 模式 → 调参数 → **复制特效**得到 `effect_display.html?...` 的 URL。
+3. 把该 URL 加为 **OBS 浏览器源**。
+4. 在网易云打开任意歌曲的**特效歌词**详情页即可看到镜像。
+
+### 行为与参数
+
+- **多播放器联动**：网易云为活跃输出时显示特效；切到别的播放器/退出特效模式时按 `offmode` 处理。
+- **背景三选一**（互斥）：`透明`（默认，OBS 叠加）/ `纯色`（黑白用于亮度键、绿用于色度键）/ `纯净歌词`（特效消失时回退到跟随活跃播放器的纯歌词）。
+- **最小化策略**（`config.yml` 的 `cloudmusicv3-effect-strategy`）：
+  - `fadeout`（默认）：最小化淡出，恢复淡入。
+  - `park`：按钮最小化时把网易云移到屏幕外**持续保活出帧**（OBS 画面不中断），点任务栏图标飞回。
+- 全部 URL 参数（quality / fit / opacity / offmode / fadein·fadeout·resume / bg / header·footer_clickable 等）详见 [API 响应示例文档](./doc/API_RESPONSE_EXAMPLES.md#网易云特效歌词镜像)。
 
 ---
 

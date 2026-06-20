@@ -15,7 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var log = logger.New("CloudMusicCDP")
+var log = logger.New("CloudMusic] [CDP") // 渲染为 [CloudMusic] [CDP]
 
 // DevToolsPage represents a page returned by the /json endpoint
 type DevToolsPage struct {

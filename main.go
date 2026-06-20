@@ -4,6 +4,8 @@ import (
 	"Metabox-Nexus-PlayerCap/config"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic"
+	"Metabox-Nexus-PlayerCap/player/cloudmusic/effect"
+	"Metabox-Nexus-PlayerCap/player/cloudmusic/park"
 	"Metabox-Nexus-PlayerCap/player/kugou"
 	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
 	"Metabox-Nexus-PlayerCap/player/qqmusic"
@@ -18,8 +20,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/mod/semver"
@@ -71,6 +75,7 @@ func main() {
 	// 强制版本检查与自动更新
 	checkAndUpdate()
 	srv := server.NewServer(playerNames)
+	srv.SetDefaultEffectStrategy(cfg.EffectStrategy) // 网易云特效最小化策略（config 静态读取）
 
 	// 构建接口地址
 	scheme := "http"
@@ -96,6 +101,11 @@ func main() {
 		pe.Set("song_info", scheme+"://"+cfg.Addr+"/"+pn+"/song_info")
 		pe.Set("lyric_update-SSE", scheme+"://"+cfg.Addr+"/"+pn+"/lyric_update-SSE")
 		pe.Set("song_info-SSE", scheme+"://"+cfg.Addr+"/"+pn+"/song_info-SSE")
+		// 网易云特效镜像通道（仅 cloudmusicv3，归于其命名空间）
+		if pn == cloudmusic.PlayerName {
+			pe.Set("effect-ws", wsScheme+"://"+cfg.Addr+"/"+pn+"/effect-ws")
+			pe.Set("effect-ingest", wsScheme+"://"+cfg.Addr+"/"+pn+"/effect-ingest")
+		}
 		endpointsOM.Set(pn, pe)
 	}
 
@@ -106,6 +116,7 @@ func main() {
 	configOM.Set("poll", cfg.Poll)
 	configOM.Set("prior-player", cfg.PriorPlayer)
 	configOM.Set("prior-player-expire", cfg.PriorPlayerExpire)
+	configOM.Set("cloudmusicv3-effect-strategy", cfg.EffectStrategy)
 	for _, name := range playerNames {
 		configOM.Set(name+"-offset", cfg.GetPlayerOffset(name))
 		configOM.Set(name+"-poll", cfg.GetPlayerPoll(name))
@@ -113,7 +124,7 @@ func main() {
 
 	// config_overwritten：按 config 的键顺序筛选出显式设置的条目
 	configOverwritten := []string{}
-	for _, k := range []string{"addr", "offset", "poll", "prior-player", "prior-player-expire"} {
+	for _, k := range []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "cloudmusicv3-effect-strategy"} {
 		if cfg.ExplicitKeys[k] {
 			configOverwritten = append(configOverwritten, k)
 		}
@@ -164,6 +175,25 @@ func main() {
 	go cp.Start()
 	go qp.Start()
 	go kp.Start()
+
+	// 启动时若发现上次崩溃遗留的「网易云屏外泊车」状态，立即还原窗口
+	park.RestoreOrphaned()
+
+	// 网易云特效镜像捕获器（按需截帧，有前端订阅 /cloudmusicv3/effect-ws 时才工作）
+	// 传 cp.IsConnected 门控生命周期：取词 player 没连上网易云时静默待命，不独立探 9222、不刷屏
+	effectCapturer := effect.New(srv, cp.IsConnected)
+	go effectCapturer.Run()
+
+	// 优雅退出：收到中断信号时，还原网易云被双击隐藏的菜单后再退出
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		mainLog.Info("收到退出信号，正在还原网易云窗口与菜单...")
+		park.Unpark() // 若处于屏外泊车，先飞回原位
+		effectCapturer.RestoreChrome()
+		os.Exit(0)
+	}()
 
 	mainLog.Info("所有播放器已启动，事件路由中...")
 

@@ -19,7 +19,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-var log = logger.New("KuGouWatchdog")
+var log = logger.New("KuGou] [Watchdog") // 渲染为 [KuGou] [Watchdog]
 
 // ErrInstallNotFound 表示未找到酷狗安装，属于不可恢复错误，不应重试。
 var ErrInstallNotFound = errors.New("未找到酷狗安装（KuGou.exe 或 libcef.dll 不存在）")

@@ -87,6 +87,9 @@ type Server struct {
 	// 统一订阅器系统（替代旧的 clients/broadcastCh/SSE channels）
 	subscribers map[*subscriber]struct{}
 	subMu       sync.Mutex
+
+	// 网易云特效镜像帧分发（独立于 JSON 事件通道）
+	effectHub *effectHub
 }
 
 // NewServer 创建统一服务器
@@ -103,6 +106,7 @@ func NewServer(playerNames []string) *Server {
 		playerStates: states,
 		subscribers:  make(map[*subscriber]struct{}),
 		serviceInfo:  &ServiceInfo{},
+		effectHub:    newEffectHub(),
 	}
 }
 
@@ -266,8 +270,13 @@ func (s *Server) SetServiceInfo(info *ServiceInfo) {
 // SetActivePlayer 由 Router 调用，更新当前活跃播放器
 func (s *Server) SetActivePlayer(name string) {
 	s.mu.Lock()
+	changed := s.activePlayer != name
 	s.activePlayer = name
 	s.mu.Unlock()
+	if changed {
+		// 通知特效订阅者：网易云是否仍是活跃输出（驱动前端淡入/淡出）
+		s.BroadcastEffectStatus()
+	}
 }
 
 // NotifySubscribersClear 向根订阅者推送活跃播放器清除通知
@@ -415,6 +424,21 @@ func (s *Server) Start(addr string, readyCh chan struct{}) error {
 	// 仅根路径的内部端点
 	mux.HandleFunc("/health-check", s.handleHealthCheck)
 	mux.HandleFunc("/service-status", s.handleServiceStatus)
+
+	// 网易云特效镜像帧通道（二进制 JPEG 帧）—— 归于 cloudmusicv3 播放器命名空间
+	mux.HandleFunc("/cloudmusicv3/effect-ws", s.handleEffectWS)
+	// 纯层捕获帧回传：网易云注入脚本把特效 canvas 的 JPEG 推到这里
+	mux.HandleFunc("/cloudmusicv3/effect-ingest", s.handleEffectIngest)
+	// 网易云特效运行时控制（策略切换 / 手动 park）—— 已关闭：策略改为 config.yml 静态读取
+	// （动态切换无法反映到静态的 /service-status）。保留 handleEffectControl 代码以便将来按需重新启用。
+	// mux.HandleFunc("/cloudmusicv3/effect-control", s.handleEffectControl)
+
+	// 记录监听端口，供注入脚本拼接 page→Go 回传地址
+	if _, port, perr := net.SplitHostPort(addr); perr == nil && port != "" {
+		s.effectHub.mu.Lock()
+		s.effectHub.ingestPort = port
+		s.effectHub.mu.Unlock()
+	}
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

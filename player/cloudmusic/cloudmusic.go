@@ -2,6 +2,7 @@ package cloudmusic
 
 import (
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
@@ -21,8 +22,15 @@ var log = logger.New("CloudMusic")
 // CloudMusicPlayer 网易云音乐播放器
 type CloudMusicPlayer struct {
 	player.BaseEmitter
-	offsetMs int
-	pollMs   int
+	offsetMs  int
+	pollMs    int
+	connected int32 // atomic：CDP 会话是否在进行（网易云已连上）。供特效捕获器门控生命周期。
+}
+
+// IsConnected 报告取词 CDP 会话是否在进行（网易云已连上并在监听）。
+// 特效捕获器据此门控：未连上时静默待命，不独立探测 9222、不刷屏。
+func (p *CloudMusicPlayer) IsConnected() bool {
+	return atomic.LoadInt32(&p.connected) == 1
 }
 
 // New 创建网易云播放器
@@ -119,7 +127,9 @@ func (p *CloudMusicPlayer) Start() {
 		}
 
 		log.Info("CDP 连接成功，开始监听播放状态")
+		atomic.StoreInt32(&p.connected, 1) // 供特效捕获器门控：网易云已连上才截帧
 		p.runSession(client)
+		atomic.StoreInt32(&p.connected, 0)
 		log.Info("会话结束，等待网易云音乐重新启动...")
 		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "网易云音乐已退出"})
 		p.Emit(player.EventClearSongData, nil)

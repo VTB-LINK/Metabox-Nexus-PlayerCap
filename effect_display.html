@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Metabox Nexus PlayerCap Effect Mirror - Loading</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        html, body { background: transparent; width: 100%; height: 100%; overflow: hidden; }
+        iframe { display: block; width: 100%; height: 100%; border: none; background: transparent; }
+    </style>
+</head>
+<body>
+<iframe id="frame" allowtransparency="true"></iframe>
+<script>
+(function () {
+    var search = location.search || '';
+    var sep = search ? '&' : '?';
+    document.getElementById('frame').src =
+        './effect_page.html' + search + sep + '_=' + Date.now();
+})();
+</script>
+</body>
+</html>

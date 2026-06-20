@@ -2458,6 +2458,7 @@
                             <button class="editor-mode-btn" data-mode="pure"><span class="mode-icon">📝</span> 歌词</button>
                             <button class="editor-mode-btn" data-mode="title"><span class="mode-icon">🎤</span> 歌名</button>
                             <button class="editor-mode-btn" data-mode="cover"><span class="mode-icon">💿</span> 封面</button>
+                            <button class="editor-mode-btn" data-mode="effect"><span class="mode-icon">✨</span> 特效</button>
                             <div class="editor-nav-bottom">
                                 <div class="editor-row"><label>播放器</label></div>
                                 <select id="cfgPlayer">
@@ -2814,12 +2815,89 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- 网易云特效镜像（effect_display.html）：分区配置 -->
+                        <div class="editor-group" data-modes="effect">
+                            <div class="editor-group-title">网易云特效 · 画质</div>
+                            <div class="editor-row">
+                                <label>画质</label>
+                                <input type="number" id="cfgFxQuality" min="1" max="100" value="95" style="width:64px;">
+                            </div>
+                            <div class="editor-row">
+                                <label>不透明度</label>
+                                <input type="number" id="cfgFxOpacity" min="0" max="1" step="0.05" value="1" style="width:64px;">
+                            </div>
+                            <div class="editor-row">
+                                <label>适配</label>
+                                <select id="cfgFxFit">
+                                    <option value="cover" selected>裁切填满</option>
+                                    <option value="contain">留边</option>
+                                    <option value="fill">拉伸</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="editor-group" data-modes="effect">
+                            <div class="editor-group-title">网易云特效 · 过渡</div>
+                            <div class="editor-row">
+                                <label>非活跃过渡</label>
+                                <select id="cfgFxOffmode">
+                                    <option value="fade">淡出</option>
+                                    <option value="hold">定格特效</option>
+                                </select>
+                            </div>
+                            <div class="editor-row">
+                                <label>淡入</label>
+                                <input type="number" id="cfgFxFadeIn" min="0" max="10000" step="50" value="600" style="width:72px;">
+                            </div>
+                            <div class="editor-row">
+                                <label>淡出</label>
+                                <input type="number" id="cfgFxFadeOut" min="0" max="10000" step="50" value="600" style="width:72px;">
+                            </div>
+                            <div class="editor-row">
+                                <label>进场延迟</label>
+                                <input type="number" id="cfgFxFadeInDelay" min="0" max="10000" step="50" value="1000" style="width:72px;">
+                            </div>
+                            <div class="editor-row">
+                                <label>恢复淡入</label>
+                                <input type="number" id="cfgFxResume" min="0" max="10000" step="50" value="600" style="width:72px;">
+                            </div>
+                        </div>
+                        <div class="editor-group" data-modes="effect">
+                            <div class="editor-group-title">网易云特效 · 背景</div>
+                            <div class="editor-row">
+                                <label>特效消失时</label>
+                                <select id="cfgFxBgMode">
+                                    <option value="transparent" selected>透明</option>
+                                    <option value="color">纯色</option>
+                                    <option value="lyrics">纯净歌词</option>
+                                </select>
+                            </div>
+                            <div class="editor-row" id="rowFxBgColor" style="display:none;">
+                                <label>背景颜色</label>
+                                <div class="color-input-group">
+                                    <input type="color" id="cfgFxBg" value="#00ff00">
+                                    <input type="text" class="color-hex" id="hexFxBg" value="#00ff00" maxlength="7">
+                                    <button class="color-reset" data-target="cfgFxBg" data-default="#00ff00" title="重置">↺</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="editor-group" data-modes="effect">
+                            <div class="editor-group-title">网易云特效 · 交互</div>
+                            <div class="editor-row">
+                                <label>顶栏可点</label>
+                                <label class="toggle-switch"><input type="checkbox" id="cfgFxHeaderClickable" checked><span class="toggle-slider"></span></label>
+                            </div>
+                            <div class="editor-row">
+                                <label>底栏可点</label>
+                                <label class="toggle-switch"><input type="checkbox" id="cfgFxFooterClickable"><span class="toggle-slider"></span></label>
+                            </div>
+                        </div>
                         </div>
                         </div>
                         <div class="editor-bottom-bar">
                             <button id="btnCopyUrl" class="editor-btn">📋 复制默认</button>
                             <code id="urlDisplay">?default</code>
-                            <label>
+                            <label id="copyBgTransparentLabel">
                                 <input type="checkbox" id="cfgCopyBgTransparent" checked style="width:12px;height:12px;">
                                 复制时背景透明
                             </label>
@@ -2852,9 +2930,13 @@
                 // 更新复制按钮文字
                 const copyBtn = document.getElementById('btnCopyUrl');
                 if (copyBtn && !copyBtn.classList.contains('copied')) {
-                    const labels = { default: '📋 复制默认', pure: '📋 复制歌词', title: '📋 复制歌名', cover: '📋 复制封面' };
+                    const labels = { default: '📋 复制默认', pure: '📋 复制歌词', title: '📋 复制歌名', cover: '📋 复制封面', effect: '📋 复制特效' };
                     copyBtn.textContent = labels[mode] || labels.default;
                 }
+                // 特效模式背景由三选显式决定，「复制时背景透明」对其无意义 → 隐藏
+                const copyBgLabel = document.getElementById('copyBgTransparentLabel');
+                if (copyBgLabel) copyBgLabel.style.display = (mode === 'effect') ? 'none' : '';
+                lastPreviewQs = ''; // 切模式可能换底层页面(特效↔歌词)，强制下次重载预览
                 toggleSubRows();
                 refreshPreview();
             }
@@ -2868,10 +2950,10 @@
                 });
             });
 
-            // 收集参数并更新 iframe
-            function refreshPreview(skipReload) {
+            // 收集某个歌词模式(default/pure/title/cover)的 URL 参数（不含 effect）。
+            // 供 refreshPreview 用，也供「特效·背景=纯净歌词」回退取「歌词(pure)」配置嵌入。
+            function collectLyricParams(mode) {
                 const params = new URLSearchParams();
-                const mode = getActiveMode();
 
                 if (mode === 'pure') {
                     params.set('pure', '');
@@ -3013,6 +3095,14 @@
                     if (dir && dir !== 'bl') params.set('cover_pause_dir', dir);
                 }
 
+                return params;
+            }
+
+            // 收集参数并更新 iframe（歌词模式走相对 URL = lyric_page.html?qs；特效模式走独立逻辑）
+            function refreshPreview(skipReload) {
+                const mode = getActiveMode();
+                if (mode === 'effect') { refreshEffectPreview(skipReload); return; }
+                const params = collectLyricParams(mode);
                 const qs = '?' + params.toString();
                 urlDisplay.textContent = qs;
                 urlDisplay.title = qs;
@@ -3020,6 +3110,43 @@
                 if (qs !== lastPreviewQs) {
                     lastPreviewQs = qs;
                     if (!skipReload) frame.src = qs;
+                }
+            }
+
+            // 特效镜像参数收集 + 预览（预览直接加载 effect_page.html，连同源 effect-ws 实时镜像）
+            function buildEffectQuery() {
+                const p = new URLSearchParams();
+                const g = id => document.getElementById(id);
+                if (g('cfgFxQuality').value && g('cfgFxQuality').value !== '95') p.set('quality', g('cfgFxQuality').value);
+                if (g('cfgFxOpacity').value && g('cfgFxOpacity').value !== '1') p.set('opacity', g('cfgFxOpacity').value);
+                if (g('cfgFxFit').value !== 'cover') p.set('fit', g('cfgFxFit').value);
+                if (g('cfgFxOffmode').value !== 'fade') p.set('offmode', g('cfgFxOffmode').value);
+                if (g('cfgFxFadeIn').value !== '600') p.set('fadein_ms', g('cfgFxFadeIn').value);
+                if (g('cfgFxFadeOut').value !== '600') p.set('fadeout_ms', g('cfgFxFadeOut').value);
+                if (g('cfgFxFadeInDelay').value !== '1000') p.set('fadein_delay_ms', g('cfgFxFadeInDelay').value);
+                // resume_ms 缺省=fadein；仅当与 fadein 不同才传
+                if (g('cfgFxResume').value !== g('cfgFxFadeIn').value) p.set('resume_ms', g('cfgFxResume').value);
+                if (!g('cfgFxHeaderClickable').checked) p.set('header_clickable', '0'); // 默认 1
+                if (g('cfgFxFooterClickable').checked) p.set('footer_clickable', '1');  // 默认 0
+                const bgMode = g('cfgFxBgMode').value;                                   // 透明/纯色/歌词（互斥）
+                if (bgMode === 'color') p.set('bg', g('cfgFxBg').value);
+                else if (bgMode === 'lyrics') {
+                    p.set('bg', 'lyrics');
+                    // 把「歌词(pure)」模式配置整段编码进单个 lyrics 参数（命名空间隔离，不与 effect 参数冲突）；
+                    // effect_page 回退时解码喂给 lyric_display，保留用户在「歌词」模式配的样式
+                    const lq = collectLyricParams('pure').toString();
+                    if (lq) p.set('lyrics', lq);
+                }
+                return '?' + p.toString();
+            }
+            function refreshEffectPreview(skipReload) {
+                const qs = buildEffectQuery();
+                urlDisplay.textContent = qs;
+                urlDisplay.title = qs;
+                const src = 'effect_page.html' + qs;
+                if (src !== lastPreviewQs) {
+                    lastPreviewQs = src;
+                    if (!skipReload) frame.src = src;
                 }
             }
 
@@ -3041,6 +3168,9 @@
 
                 const bgTransparent = document.getElementById('cfgBgTransparent').checked;
                 document.getElementById('rowBgColor').style.display = !bgTransparent ? 'flex' : 'none';
+
+                const fxBgMode = document.getElementById('cfgFxBgMode');
+                if (fxBgMode) document.getElementById('rowFxBgColor').style.display = fxBgMode.value === 'color' ? 'flex' : 'none';
 
                 const rotateMode = document.getElementById('cfgCoverRotate').value;
                 document.getElementById('rowSpinSpeed').style.display = rotateMode !== 'none' ? 'flex' : 'none';
@@ -3084,7 +3214,10 @@
                 'cfgStColor', 'cfgStGlow', 'cfgStGlowColor', 'cfgStStroke', 'cfgStStrokeWidth', 'cfgStStrokeColor',
                 'cfgStOverflow', 'cfgStScrollSpeed', 'cfgStPpTime', 'cfgStPpPause', 'cfgStScrollEase',
                 'cfgStFontScale', 'cfgStTextAlign',
-                'cfgPureOverflow', 'cfgPureScrollSpeed', 'cfgPurePpTime', 'cfgPurePpPause', 'cfgPureScrollEase'];
+                'cfgPureOverflow', 'cfgPureScrollSpeed', 'cfgPurePpTime', 'cfgPurePpPause', 'cfgPureScrollEase',
+                // 特效模式控件
+                'cfgFxQuality', 'cfgFxOpacity', 'cfgFxFit', 'cfgFxOffmode', 'cfgFxFadeIn', 'cfgFxFadeOut',
+                'cfgFxFadeInDelay', 'cfgFxResume', 'cfgFxBgMode', 'cfgFxBg', 'cfgFxHeaderClickable', 'cfgFxFooterClickable'];
             controls.forEach(id => {
                 const el = document.getElementById(id);
                 el.addEventListener('change', () => { toggleSubRows(); refreshPreview(); });
@@ -3160,7 +3293,8 @@
                 { color: 'cfgBg', hex: 'hexBg' },
                 { color: 'cfgStColor', hex: 'hexStColor' },
                 { color: 'cfgStGlowColor', hex: 'hexStGlowColor' },
-                { color: 'cfgStStrokeColor', hex: 'hexStStrokeColor' }
+                { color: 'cfgStStrokeColor', hex: 'hexStStrokeColor' },
+                { color: 'cfgFxBg', hex: 'hexFxBg' }
             ];
             colorPairs.forEach(({ color, hex }) => {
                 const colorEl = document.getElementById(color);
@@ -3421,6 +3555,12 @@
                 const mode = getActiveMode();
                 const btn = document.getElementById('btnCopyUrl');
                 let qs;
+                if (mode === 'effect') {
+                    // 特效背景由「特效消失时」三选(透明/纯色/歌词)决定，是显式选择，不受「复制时背景透明」影响 → 原样复制
+                    // 入口是 effect_display.html（非 lyric_display.html），防 OBS 缓存
+                    copyToClipboard(getBaseURL().replace(/lyric_display\.html$/i, 'effect_display.html') + urlDisplay.textContent, btn);
+                    return;
+                }
                 if (mode === 'cover') {
                     qs = buildCoverQueryString();
                     if (!document.getElementById('cfgCopyBgTransparent').checked) {
