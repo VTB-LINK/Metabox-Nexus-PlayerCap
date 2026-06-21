@@ -340,6 +340,10 @@ kugou-offset: 430
 # kugou-poll: 30
 `
 
+// DefaultConfigContent 返回内置默认配置模板（唯一权威来源）。
+// 供 tools/genconfig 在 CI 打包时生成一份 clean 的 config.yml，使发版不受本地 config.yml 影响。
+func DefaultConfigContent() string { return defaultConfigContent }
+
 func generateDefaultConfig() {
 	if err := os.WriteFile("config.yml", []byte(defaultConfigContent), 0644); err == nil {
 		log.Info("已自动生成 config.yml")

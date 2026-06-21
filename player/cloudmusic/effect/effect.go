@@ -57,6 +57,19 @@ const captureFPS = 30
 // 正常窗口尺寸下不缩放（直接原生编码）。注意：这是对「我们自己快照画布」的降采样，绝不改网易云 canvas。
 const captureOutMaxW = 1920
 
+// glShimJS 单独的 getContext shim：强制特效 canvas 的 WebGL context 用 preserveDrawingBuffer:true。
+// 在网易云冷启动阶段（取词刚连上、还没开歌）就 eval 一次注入到当前文档 → 之后开的歌 context 自带
+// preserveDrawingBuffer，订阅者连上时无需 reload（避免播放中断）。幂等（__mbxGLHook 守卫），与
+// captureInjectJS 里的同段互不冲突。两处须保持一致。
+const glShimJS = `(function(){
+  if(window.__mbxGLHook)return; window.__mbxGLHook=true;
+  var orig=HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext=function(type,attrs){
+    if(type&&/webgl/i.test(String(type))){var a=attrs||{};a.preserveDrawingBuffer=true;return orig.call(this,type,a);}
+    return orig.call(this,type,attrs);
+  };
+})()`
+
 // captureInjectJS 纯层捕获注入脚本（严格只读，绝不修改网易云 canvas —— 改其尺寸会导致网易云崩溃）：
 //  1. WebGL getContext shim 强制 preserveDrawingBuffer:true —— 使合成后绘制缓冲不被清空，drawImage 随时
 //     能读到当前帧（否则只有 ~50% 命中）。SPA 同文档 eval 一次即对「之后创建的 context」生效；仅当连上时
@@ -313,9 +326,56 @@ func (c *Capturer) windowStateLoop() {
 	}
 }
 
+// shimInjectLoop：尽早（9222 一可达，赶在网易云页面加载前）就持久注册 preserveDrawingBuffer shim
+// 的 document-start 脚本。这样自动恢复的歌、以及之后开的所有歌，其 WebGL context 创建时即带
+// preserveDrawingBuffer → purelayerSession 无需任何 reload（reload 在网易云启动期会把它卡死/中断播放）。
+//
+// 关键：**不门控在取词 player 的 IsConnected**。player 要等 watchdog 重启 + 5s 才连上，那时页面早加载完、
+// 甚至已恢复了上一首歌（context 已建、来不及注入 shim）。故这里独立、尽早地直连 9222 注册 addScript，
+// 恢复「生命周期合并之前」的早注入时机。安静重试（不打日志、不刷屏）；连接断（网易云重启）后自动重注。
+func (c *Capturer) shimInjectLoop() {
+	for {
+		wsURL, err := screencastWSURL()
+		if err != nil {
+			time.Sleep(400 * time.Millisecond) // 网易云未起 → 安静快重试，争取赶在页面加载前注册
+			continue
+		}
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			time.Sleep(400 * time.Millisecond)
+			continue
+		}
+		id := 0
+		send := func(method string, params map[string]any) error {
+			id++
+			req := map[string]any{"id": id, "method": method}
+			if params != nil {
+				req["params"] = params
+			}
+			conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+			return conn.WriteJSON(req)
+		}
+		// document-start 注册（addScript 跨页面加载/导航/SPA 路由存活）+ 对当前文档也 eval 一次兜底
+		send("Page.enable", nil)
+		send("Page.addScriptToEvaluateOnNewDocument", map[string]any{"source": glShimJS})
+		send("Runtime.evaluate", map[string]any{"expression": glShimJS})
+		log.Detail("已尽早注册 preserveDrawingBuffer shim（document-start，免后续 reload）")
+		// 保持连接存活以维持 addScript 注册；阻塞读到连接断（网易云退出/重启）→ 重连后重注
+		conn.SetReadDeadline(time.Time{})
+		for {
+			if _, _, e := conn.ReadMessage(); e != nil {
+				break
+			}
+		}
+		conn.Close()
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
 // Run 阻塞运行：有订阅者时连接并截帧，无订阅者时释放并轮询等待。
 func (c *Capturer) Run() {
 	c.sink.SetEffectIngestHandler(c.ingestFrame) // 纯层帧回传 → 门控 → 广播
+	go c.shimInjectLoop()                         // 尽早 document-start 注册 shim（早于页面加载，免后续 reload）
 	go c.pollShowingLoop()                        // 独立轮询「特效是否在显示」，与帧流互不干扰
 	go c.windowStateLoop()                        // 最小化检测 + park 策略
 	log.Info("特效捕获模式: %s", c.mode)
@@ -538,19 +598,9 @@ func (c *Capturer) purelayerSession() error {
 	eval(capSrc)
 	eval("window.__mbxCapPaused=false;")
 
-	// 仅在「当前已有歌、其 WebGL context 未启用 preserveDrawingBuffer」时 reload 一次让 shim 生效。
-	// 主页/未开歌时无需 reload：shim 已对「之后创建的 context」生效（同文档 SPA）。
-	if res, err := eval(`(function(){var c=document.querySelector('#lyric-effect-canvas-id');if(!c)return false;try{var gl=c.getContext('webgl2')||c.getContext('webgl')||c.getContext('experimental-webgl');return !!(gl&&gl.getContextAttributes&&!gl.getContextAttributes().preserveDrawingBuffer);}catch(e){return false;}})()`); err == nil {
-		var r struct {
-			Result struct {
-				Value bool `json:"value"`
-			} `json:"result"`
-		}
-		if json.Unmarshal(res, &r) == nil && r.Result.Value {
-			log.Info("当前歌曲 context 未启用 preserveDrawingBuffer，reload 一次令纯层 shim 生效")
-			call("Page.reload", map[string]any{})
-		}
-	}
+	// 不再在此 reload：shim 由 shimInjectLoop 在页面加载前就 document-start 注册，所有歌的 context 自带
+	// preserveDrawingBuffer。此前「连上时已有歌则 reload」会在网易云启动期触发 Page.reload → 卡死/中断播放，
+	// 已移除。极少数 shim 注册晚于自动恢复歌的边角情况：该歌可能略闪，切歌/切模式重建 canvas 即恢复，绝不卡死。
 
 	log.Success("纯层捕获已启动（注入抓帧 q%d 原生分辨率 fps%d）", quality, captureFPS)
 

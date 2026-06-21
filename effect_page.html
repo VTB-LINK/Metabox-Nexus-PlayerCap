@@ -166,10 +166,17 @@
     }).catch(() => { decoding = false; });
   }
 
-  // --- 显示状态机：active=网易云是否活跃输出 ---
-  let active = null;   // null=未知（首条状态前）
-  let live = true;     // 是否绘制新帧（冻结时 false）
+  // --- 显示状态机 ---
+  // desired = 网易云是否活跃输出（cmActive && showing）的最新目标。
+  // 关键约束：可见的淡入/淡出一旦开始就不可被打断，必须各自走完再处理下一目标，
+  // 杜绝「开/关详情页时冒头又消失」的互相打断闪烁。
+  // fadein = 不可见 warmup 延迟（可取消）+ 可见淡入（不可打断）。
+  let phase = 'hidden';   // hidden | warmup | in | shown | out
+  let desired = null;     // 最新请求目标（null=首条状态前）
+  let live = true;        // 是否绘制新帧（冻结时 false）
   let suppressCrossfade = false; // 刚 fadeout 过：恢复由 #view 延迟淡入处理，跳过 #freeze 交叉淡入（防双重淡入/冷渲染闪烁）
+  let fadeInTimer = null; // warmup 延迟计时器（可取消）
+  let animTimer = null;   // 可见动画结束计时器（不可打断）
 
   function setDur(ms) { canvas.style.transitionDuration = ms + 'ms'; }
   function setTransitionProps() {
@@ -177,8 +184,8 @@
     canvas.style.transitionTimingFunction = 'ease';
   }
 
-  let fadeInTimer = null;
-  function clearFadeIn() { if (fadeInTimer) { clearTimeout(fadeInTimer); fadeInTimer = null; } }
+  // hold 定格无可见淡出动画（保持原样可见）→ 其「淡出」即时完成
+  function fadeOutAnimMs() { return offmode === 'hold' ? 0 : fadeOutMs; }
 
   // 从退出态动画淡入（首次加载/切回网易云时）
   function fadeInNow() {
@@ -208,17 +215,61 @@
     if (doSlide) canvas.style.transform = 'translateY(100%)';
   }
 
-  function setActive(a) {
-    if (a === active) return;
-    active = a;
-    clearFadeIn();
-    if (a) {
-      // 立即开始绘制新帧（让画面就绪），延迟后再淡入（等网易云冷渲染完成）
-      live = true;
-      fadeInTimer = setTimeout(function () { fadeInTimer = null; fadeInNow(); }, fadeInDelayMs);
-    } else {
-      showHidden();
+  // 朝最新 desired 驱动；仅在空闲(hidden/shown)或可取消的 warmup 期改变方向。
+  // 可见动画(in/out)进行中一律不打断 —— 等其结束后由 animTimer 回调重新驱动。
+  function driveToward() {
+    if (phase === 'in' || phase === 'out') return; // 不可打断
+    if (desired === true) {
+      if (phase === 'hidden') startWarmup();        // warmup/shown：已朝显示，无需动作
+    } else if (desired === false) {
+      if (phase === 'warmup') cancelWarmup();        // 不可见态，直接取消，无闪
+      else if (phase === 'shown') startFadeOut();    // hidden：已隐藏，无需动作
     }
+  }
+
+  function startWarmup() {
+    phase = 'warmup';
+    // 强制隐藏到 0：warmup（含网易云冷渲染中途残帧）只发生在不可见态，绝不半透明露帧
+    setDur(0);
+    canvas.style.opacity = doFade ? '0' : String(opacity);
+    canvas.style.transform = doSlide ? 'translateY(100%)' : 'translateY(0)';
+    void canvas.offsetWidth; // reflow，让隐藏即时生效
+    live = true;             // 隐藏态绘制新帧 warm-up
+    fadeInTimer = setTimeout(function () { fadeInTimer = null; startFadeIn(); }, fadeInDelayMs);
+  }
+
+  function cancelWarmup() {
+    if (fadeInTimer) { clearTimeout(fadeInTimer); fadeInTimer = null; }
+    live = false;
+    phase = 'hidden';        // 仍是 opacity 0，保持隐藏，无可见变化
+  }
+
+  function startFadeIn() {
+    phase = 'in';
+    fadeInNow();             // opacity 0→full，时长 fadeInMs（不可打断）
+    if (animTimer) clearTimeout(animTimer);
+    animTimer = setTimeout(function () {
+      animTimer = null;
+      phase = 'shown';
+      driveToward();         // 淡入走完，再处理期间到来的新目标（如关详情页 → 淡出）
+    }, fadeInMs);
+  }
+
+  function startFadeOut() {
+    phase = 'out';
+    showHidden();            // opacity→0，时长 fadeOutMs（hold 为即时定格）（不可打断）
+    if (animTimer) clearTimeout(animTimer);
+    animTimer = setTimeout(function () {
+      animTimer = null;
+      phase = 'hidden';
+      driveToward();         // 淡出走完，再处理期间到来的新目标（如重开详情页 → warmup+淡入）
+    }, fadeOutAnimMs());
+  }
+
+  function setActive(a) {
+    if (a === desired) return;
+    desired = a;
+    driveToward();
   }
 
   setTransitionProps();

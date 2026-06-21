@@ -80,7 +80,8 @@ jobs:
           
           # 复制需要的文件
           cp "${EXE_NAME}" "${PACKAGE_DIR}/"
-          cp config.yml "${PACKAGE_DIR}/"
+          # 用内置默认生成 clean config.yml（不受开发者本地 config.yml 影响）；CI 在 linux 跑需原生 GOOS
+          GOOS= GOARCH= go run ./tools/genconfig "${PACKAGE_DIR}/config.yml"
           cp "${HTML_FILE_NAME}" "${PACKAGE_DIR}/"
           cp lyric_page.html "${PACKAGE_DIR}/"
           cp effect_display.html "${PACKAGE_DIR}/"

@@ -75,7 +75,14 @@ func main() {
 	// 强制版本检查与自动更新
 	checkAndUpdate()
 	srv := server.NewServer(playerNames)
-	srv.SetDefaultEffectStrategy(cfg.EffectStrategy) // 网易云特效最小化策略（config 静态读取）
+	// 网易云特效最小化策略（config 静态读取）。Win11 下 park 屏外保活失效（DWM 停止合成不可见窗口），
+	// 故无论 config 配什么，Win11 一律强制 fadeout。
+	effectStrategy := cfg.EffectStrategy
+	if effectStrategy == "park" && park.IsWindows11() {
+		mainLog.Warn("检测到 Windows 11：park 屏外保活在 Win11 上失效，特效策略强制改为 fadeout")
+		effectStrategy = "fadeout"
+	}
+	srv.SetDefaultEffectStrategy(effectStrategy)
 
 	// 构建接口地址
 	scheme := "http"

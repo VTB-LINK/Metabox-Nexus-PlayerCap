@@ -231,6 +231,17 @@ func ForegroundIsOtherApp() bool {
 	return ln != targetProcessName && ln != "explorer.exe"
 }
 
+// IsWindows11 报告当前系统是否为 Windows 11（major 10 且 build ≥ 22000，或 major > 10）。
+// 用于禁用 park 策略：Win11(尤其 24H2) 的 DWM 会停止合成「完全不可见/被遮挡」的 Chromium 窗口，
+// 屏外泊车窗口随即停止渲染 → 保活失效（实测一泊车就冻结、永不出新帧）。Win11 下应改走 fadeout。
+func IsWindows11() bool {
+	v := windows.RtlGetVersion()
+	if v == nil {
+		return false
+	}
+	return v.MajorVersion > 10 || (v.MajorVersion == 10 && v.BuildNumber >= 22000)
+}
+
 // IsMainForeground 主窗是否为前台窗口（用户点任务栏/Alt-Tab 切到网易云时为真，用于自动 unpark）。
 func IsMainForeground() bool {
 	h := mainWindow()
