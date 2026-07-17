@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"Metabox-Nexus-PlayerCap/logger"
@@ -42,10 +43,29 @@ var (
 
 // cachedHwnd 缓存主窗句柄，避免每次轮询都做进程枚举（IsWindow 校验，失效才重找）。
 // 用独立的 cacheMu 保护：mainWindow 会在持有 mu 的 Park/Unpark 内被调用，故不能复用 mu（非可重入）。
+//
+// missUntil 缓存**负结果**（没找到主窗）的有效期。只缓存正结果是不够的：findMainAny 返回 0
+// 时 cachedHwnd 被写成 0，而下一轮 `cachedHwnd != 0` 为假，于是又枚举一遍——「查无此进程」
+// 这个结果从不被缓存。而 findMainAny 的代价是 gopsutil 的 process.Processes()（枚举全进程 +
+// 逐个 OpenProcess 取 Name），IsMainMinimized/IsMainForeground 各调一次即**一轮两次**，
+// windowStateLoop 又是 80ms 一轮且**无任何门控**（注释明写「始终运行，不随订阅者启停」）。
+// 净效果：网易云没启动时全速空烧 CPU，而这段时间恰恰什么都不需要做。
 var (
 	cachedHwnd uintptr
+	missUntil  time.Time
 	cacheMu    sync.Mutex
 )
+
+// missTTL 负结果的缓存时长。取 1s：远大于 80ms 的轮询间隔（把枚举频率压到 1/s 以内），
+// 又远小于人从启动网易云到需要 park 的时间尺度，故对响应性无实感影响。
+//
+// 是 var 而非 const，只为让测试能设成极短值、等它**自然过期**来验证「负结果不是永久缓存」
+// ——测试若靠手动改写 missUntil 来模拟过期，就绕过了 TTL 本身，改坏 TTL 也抓不住（实测过）。
+var missTTL = time.Second
+
+// findMainAnyFn 是 findMainAny 的可注入引用，只为让 mainWindow 的缓存行为能被测试
+// （真实实现要枚举全进程 + 真实窗口，测不了）。生产路径始终是 findMainAny 本身。
+var findMainAnyFn = findMainAny
 
 func isWindowValid(h uintptr) bool {
 	if h == 0 {
@@ -55,14 +75,21 @@ func isWindowValid(h uintptr) bool {
 	return r != 0
 }
 
-// mainWindow 返回主窗句柄（缓存优先，失效则重新枚举查找）。
+// mainWindow 返回主窗句柄（缓存优先，失效则重新枚举查找）。正负结果都缓存。
 func mainWindow() uintptr {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	if cachedHwnd != 0 && isWindowValid(cachedHwnd) {
 		return cachedHwnd
 	}
-	cachedHwnd = findMainAny()
+	// 上次没找到且还在 missTTL 内：直接返回 0，不再枚举全进程。
+	if time.Now().Before(missUntil) {
+		return 0
+	}
+	cachedHwnd = findMainAnyFn()
+	if cachedHwnd == 0 {
+		missUntil = time.Now().Add(missTTL)
+	}
 	return cachedHwnd
 }
 
@@ -168,6 +195,43 @@ func windowPID(hwnd uintptr) uint32 {
 	return pid
 }
 
+// --- 包级回调：findMainAny（绝不在函数内 NewCallback）---
+//
+// windows.NewCallback 有全局数量上限（2000）且**永不回收**——这条约束对整个仓库有效，
+// player/wesing/proc/memory.go:120 与 :209 就是遵守它的样板。
+//
+// 这里曾经每次调用都新建回调，实际可达且会打死进程：findMainAny 经 mainWindow 被
+// IsMainMinimized/IsMainForeground 调用，而它们在 effect 的 windowStateLoop 里每 80ms
+// 各跑一次（该循环无门控、进程在就一直跑）。网易云进程已存在但主窗尚未建好时——每次
+// watchdog 拉起网易云都会出现这几秒——cachedHwnd 命不中，于是每 tick 泄漏 2 个回调
+// （25 个/秒）。回调不回收，故跨网易云重启累积，约 8~20 次重启后 "too many callbacks"
+// panic 直接杀死 PlayerCap。直播开得越久越容易撞上。
+//
+// 注意 len(pids)==0 的早退必须留在 NewCallback 之前：网易云没运行时连回调都不该建。
+var (
+	enumFindMu      sync.Mutex
+	enumFindPIDs    map[uint32]bool
+	enumFindFound   uintptr
+	enumFindMaxArea int64
+)
+
+var findMainCallback = windows.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
+	if !enumFindPIDs[windowPID(hwnd)] {
+		return 1
+	}
+	wp, ok := getPlacement(hwnd)
+	if !ok {
+		return 1
+	}
+	r := wp.RcNormalPosition
+	area := int64(r.Right-r.Left) * int64(r.Bottom-r.Top)
+	if area > enumFindMaxArea {
+		enumFindMaxArea = area
+		enumFindFound = hwnd
+	}
+	return 1
+})
+
 // findMainAny 按 WINDOWPLACEMENT.rcNormalPosition（还原态尺寸，最小化/隐藏时仍有效）找面积最大的
 // cloudmusic 窗口 = 主窗。用还原态尺寸而非当前 rect：最小化时当前 rect 是 (-32000)，只有还原态尺寸
 // 才能正确识别主窗（~1058×752 最大），并避免误选迷你播放器/桌面歌词/窗口边框等小窗口。
@@ -176,25 +240,17 @@ func findMainAny() uintptr {
 	if len(pids) == 0 {
 		return 0
 	}
-	var found uintptr
-	var maxArea int64
-	cb := windows.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
-		if !pids[windowPID(hwnd)] {
-			return 1
-		}
-		wp, ok := getPlacement(hwnd)
-		if !ok {
-			return 1
-		}
-		r := wp.RcNormalPosition
-		area := int64(r.Right-r.Left) * int64(r.Bottom-r.Top)
-		if area > maxArea {
-			maxArea = area
-			found = hwnd
-		}
-		return 1
-	})
-	procEnumWindows.Call(cb, 0)
+	enumFindMu.Lock()
+	defer enumFindMu.Unlock()
+
+	enumFindPIDs = pids
+	enumFindFound = 0
+	enumFindMaxArea = 0
+
+	procEnumWindows.Call(findMainCallback, 0)
+
+	found := enumFindFound
+	enumFindPIDs = nil
 	return found
 }
 
@@ -258,20 +314,38 @@ func getRect(hwnd uintptr) rect {
 	return r
 }
 
+// --- 包级回调：DebugList（同 findMainCallback，绝不在函数内 NewCallback）---
+// tools/parktest 是循环调用它的，同样会耗尽回调配额。
+var (
+	enumDebugMu   sync.Mutex
+	enumDebugPIDs map[uint32]bool
+	enumDebugOut  []string
+)
+
+var debugListCallback = windows.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
+	if enumDebugPIDs[windowPID(hwnd)] {
+		r := getRect(hwnd)
+		vis := isVisible(hwnd)
+		enumDebugOut = append(enumDebugOut, fmt.Sprintf("hwnd=%d vis=%v title=%q rect=(%d,%d,%d,%d) w=%d h=%d",
+			hwnd, vis, windowTitle(hwnd), r.Left, r.Top, r.Right, r.Bottom, r.Right-r.Left, r.Bottom-r.Top))
+	}
+	return 1
+})
+
 // DebugList 返回所有属于 cloudmusic 进程的顶层窗口信息（调试用）。
 func DebugList() []string {
 	pids := cloudmusicPIDs()
-	var out []string
-	cb := windows.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
-		if pids[windowPID(hwnd)] {
-			r := getRect(hwnd)
-			vis := isVisible(hwnd)
-			out = append(out, fmt.Sprintf("hwnd=%d vis=%v title=%q rect=(%d,%d,%d,%d) w=%d h=%d",
-				hwnd, vis, windowTitle(hwnd), r.Left, r.Top, r.Right, r.Bottom, r.Right-r.Left, r.Bottom-r.Top))
-		}
-		return 1
-	})
-	procEnumWindows.Call(cb, 0)
+	enumDebugMu.Lock()
+	defer enumDebugMu.Unlock()
+
+	enumDebugPIDs = pids
+	enumDebugOut = nil
+
+	procEnumWindows.Call(debugListCallback, 0)
+
+	out := enumDebugOut
+	enumDebugOut = nil
+	enumDebugPIDs = nil
 	return out
 }
 

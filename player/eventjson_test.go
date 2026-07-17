@@ -1,5 +1,8 @@
 package player
 
+// 本文件只测**推给前端的事件类型的 JSON 形状**：字段是否出现、空值序列化成对象还是数组、
+// 字段顺序、lyrics_detailed 取词的来源。这些是与 overlay 的契约，改了会静默破坏前端。
+
 import (
 	"encoding/json"
 	"strings"
@@ -140,71 +143,5 @@ func TestAllLyricsDataLyricsDetailedUsesWordText(t *testing.T) {
 	}
 	if got.LyricsDetailed[0].LyricIndex != 3 || got.LyricsDetailed[0].Text != "word text" {
 		t.Fatalf("lyrics_detailed[0] = %#v", got.LyricsDetailed[0])
-	}
-}
-
-func TestSameLyricTextMatchesSmallMiddleGapsByBoundary(t *testing.T) {
-	tests := []struct {
-		name  string
-		left  string
-		right string
-		want  bool
-	}{
-		{
-			name:  "exact after punctuation normalization",
-			left:  "You don't know Oh oh",
-			right: "You dont know, oh-oh",
-			want:  true,
-		},
-		{
-			name:  "missing article",
-			left:  "I can see the pain living in your eyes",
-			right: "I can see pain living in your eyes",
-			want:  true,
-		},
-		{
-			name:  "missing middle word",
-			left:  "There's nothing left to try now it's gonna hurt us both",
-			right: "There's nothing left to try it's gonna hurt us both",
-			want:  true,
-		},
-		{
-			name:  "single character spelling variant",
-			left:  "I'll never criticise all you've ever meant to my life",
-			right: "I'll never criticize all you've ever meant to my life",
-			want:  true,
-		},
-		{
-			name:  "early single character deletion",
-			left:  "I'd like To make myself believe",
-			right: "I'd lke To make myself believe",
-			want:  true,
-		},
-		{
-			name:  "different middle keyword",
-			left:  "I don't want to let you down",
-			right: "I don't want to hold you down",
-			want:  false,
-		},
-		{
-			name:  "different verb",
-			left:  "You would never ask me why",
-			right: "You would never tell me why",
-			want:  false,
-		},
-		{
-			name:  "different repeated na counts",
-			left:  "Na na na na na na na na na na",
-			right: "Na na na na na na na",
-			want:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := SameLyricText(tt.left, tt.right); got != tt.want {
-				t.Fatalf("SameLyricText() = %v, want %v", got, tt.want)
-			}
-		})
 	}
 }

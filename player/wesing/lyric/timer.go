@@ -116,9 +116,28 @@ func isDigit(b byte) bool {
 	return b >= '0' && b <= '9'
 }
 
+// IsPlausiblePlayTime 判定一个 float 是否可能是合法的播放时间（秒）。
+//
+// **必须写成「接受式」（v >= 0 && v < 100000），绝不能写成德摩根转换后的
+// 「拒绝式」（v < 0 || v >= 100000）。** 两者对实数完全等价，但 IEEE 754 规定
+// NaN 的所有比较都返回 false，于是：
+//
+//	接受式: NaN >= 0 && NaN < 100000  →  false && false = false  → 拒绝 ✓
+//	拒绝式: NaN < 0 || NaN >= 100000  →  false || false = false  → 放行 ✗
+//
+// validateTimeAddr 曾用拒绝式，NaN 因此通过校验成为「播放时间地址」，此后每次
+// 读出的都是 NaN，一路污染到 WS 写协程——而 encoding/json 编码不了 NaN，会让
+// WriteJSON 报错。
+//
+// 抽成共享函数是为了消灭拷贝漂移：调用方 wesing.go 在校验缓存地址时本来就写的是
+// 接受式（正确），而这里写成了拒绝式（错误）——同一个判定两份拷贝、一对一错。
+func IsPlausiblePlayTime(v float32) bool {
+	return v >= 0 && v < 100000
+}
+
 func validateTimeAddr(handle syscall.Handle, hitAddr uint32) (uint32, bool) {
 	timeVal, err := proc.ReadFloat32(handle, hitAddr)
-	if err != nil || timeVal < 0 || timeVal >= 100000 {
+	if err != nil || !IsPlausiblePlayTime(timeVal) {
 		return 0, false
 	}
 	ptr10, err := proc.ReadUint32(handle, hitAddr+0x10)

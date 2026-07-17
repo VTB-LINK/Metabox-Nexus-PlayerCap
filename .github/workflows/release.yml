@@ -26,9 +26,35 @@ jobs:
       GH_HOST: github.com
       GH_TOKEN: ${{ secrets.GH_DOTCOM_TOKEN }}
 
+      # Sentry（遥测上报，issue #33）。org/project 是字面量，放这里方便改；
+      # token 与 DSN 都走 secret，不进仓库。
+      # 不需要 SENTRY_URL —— 那是自托管实例才要的，本项目用 sentry.io 官方。
+      SENTRY_ORG: kzmtech
+      SENTRY_PROJECT: vtb-tools-metabox-nexus-playercap
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # 默认是 fetch-depth: 1（浅克隆，只有一个 commit）。set-commits --auto 要在本地
+          # git 历史里找出「上个 release 到这次之间的 commits」，浅克隆下它什么也找不到 ——
+          # **这是 set-commits 唯一真正的阻塞项**（实测：加上它 set-commits 当场就通了）。
+          # 代价实测：353 个 commit / .git 57M，多花几秒。
+          #
+          # 顺带治好一个显示问题（实测已证实）：浅克隆让 Go 看不到任何 tag 祖先，于是
+          # debug.ReadBuildInfo() 里的主模块版本退化成 v0.0.0-<时间>-<hash>，而 Sentry 的
+          # 「软件包」列表读的正是它。三组对照：
+          #
+          #   本地（完整历史）      v1.1.1-0.20260716204836-adf0a532583b
+          #   CI（depth=1）        v0.0.0-20260716202135-22e3d0c9c0e1     ← 找不到 base
+          #   CI（depth=0）        v1.1.1-0.20260716205530-b00ba6b4e159   ← 修好了
+          #
+          # 注意 base 是 v1.1.0 而不是 HEAD 上的 v3.0.0-beta.24 —— **Go 挑 base version 时
+          # 跳过 prerelease tag**，会一路回溯到最近的正式版。
+          #
+          # 这一项**不影响 release 归属**：release 名走的是 ldflags 注入的 main.Version，
+          # 与 build info 是两套独立的东西。
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -62,6 +88,8 @@ jobs:
           echo "Release version: ${VERSION} (tag: ${TAG_NAME})"
 
       - name: Build Windows executable
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           VERSION=${{ steps.vars.outputs.VERSION }}
           TAG_NAME=${{ steps.vars.outputs.TAG_NAME }}
@@ -71,7 +99,13 @@ jobs:
           EXE_NAME="${OUTPUT_NAME}.exe"
           echo "EXE_NAME=${EXE_NAME}" >> $GITHUB_ENV
 
-          go build -ldflags "-X 'main.Version=${VERSION}'" -o "${EXE_NAME}"
+          # Sentry DSN 从 secret 注入。secret 没配 → 空串 → 客户端自动禁用遥测，构建照常成功
+          # （telemetry.Enabled 只看这个变量）。启动日志第一行会说「未注入 DSN，遥测已禁用」，
+          # 那就是 secret 没生效的信号。
+          #
+          # 这里的 VERSION 是剥掉 v 前缀的 semver，会把遥测送进 production 环境，且直接用作
+          # Sentry 的 release 名 —— 要在 CI 里建 Sentry release，用的就是这个 ${VERSION}。
+          go build -ldflags "-X 'main.Version=${VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${SENTRY_DSN}'" -o "${EXE_NAME}"
 
           if [ -f "${EXE_NAME}" ]; then
             ls -lh "${EXE_NAME}"
@@ -194,3 +228,108 @@ jobs:
             --title "${TAG_NAME}" \
             --draft \
             --notes-file combined-release-notes.md
+
+      # 放在全部 release draft 之后：artifact 都发出去了，这个 Sentry release 才对应得上真实
+      # 可下载的版本。
+      #
+      # continue-on-error 是刻意的：发版是主线，Sentry 是辅助。secret 没配、runner 连不上
+      # sentry.io、token 过期 —— 任何一条都不许把已经打包好的发版拖成失败。
+      #
+      # ## 为什么用 sentry-cli 而不是 getsentry/action-release
+      #
+      # **action-release 在 GHES 上起不来**（实测 run #85，整个 job 挂在 "Set up job"）：
+      # 它是 composite action，内部 `uses: actions/setup-node@53b83947...`（v3.7.0 钉的是
+      # setup-node v6.3.0 的 SHA）。而 GHES 里 `actions/*` 是**本地镜像的专用 namespace**，
+      # 强制走本地解析（错误 URL 就是 vlink.dev/api/v3/repos/actions/setup-node/...），
+      # 本地镜像只同步 tag/branch、**没有任意 SHA** → 404。
+      #
+      # 两个反直觉的地方，记下来免得有人再踩：
+      #   - 那个 setup-node 步骤带着 `if: runner.os == 'macOS' || runner.os == 'Windows'`，
+      #     我们的 Linux runner 根本不会执行它 —— 但 **"Set up job" 的预下载不看 if**。
+      #   - `getsentry/action-release` 本身下载成功了：非 `actions/*` 的仓库走 GitHub Connect
+      #     去 github.com 拉，不受本地镜像限制。所以「能拉这个却拉不到那个」并不矛盾。
+      #
+      # action-release@v1 用的是 `actions/setup-node@v4`（tag），所以 vtb-rank 一直没撞上。
+      # 但与其赌某个 tag 在 GHES 镜像里存在且够新，不如彻底不依赖 action —— sentry-cli 正是
+      # Sentry 后台给出的原始做法，零 action 依赖。
+      # ## 为什么拆成四步
+      #
+      # 这四步的**失败语义不同**，挤在一起会互相拖累：
+      #   install / new / finalize+deploy —— 失败只意味着「Sentry 里没这个 release」，发版不受影响
+      #   set-commits                     —— 依赖 Sentry 侧的 SCM 集成（那是 CI 之外的配置，
+      #                                      随时可能变），绝不能拖累上面三步
+      #
+      # 曾经是一个 step + `set -euo pipefail`：那样 set-commits 一挂，finalize 与 deploy 就被
+      # 跳过，release 停在半成品 —— 能认领 event，但没有 dateReleased、没有 deploy。
+      # 那比干脆不做 set-commits **更糟**。
+      - name: Install sentry-cli
+        continue-on-error: true
+        env:
+          # 装到 runner 的临时目录。get-cli 默认装 /usr/local/bin —— 那会污染整台共享 runner。
+          # 脚本自己会先试无 sudo 的 mv、失败才回落 `sudo -k`，所以指到可写目录就完全不碰 sudo。
+          INSTALL_DIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl -sL https://sentry.io/get-cli/ | bash
+          # 放进 PATH，后面三步直接 `sentry-cli xxx`，不用各自拼路径。
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+
+      - name: Create Sentry release
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ env.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ env.SENTRY_PROJECT }}
+        run: |
+          # release 名必须与客户端 ldflags 注入的 main.Version **逐字一致**，否则上报的 event
+          # 认领不到这个 release。两边用的是同一个 steps.vars.outputs.VERSION（tag 剥掉 v 前缀），
+          # 见上面的 "Build Windows executable"。
+          sentry-cli releases new "${{ steps.vars.outputs.VERSION }}"
+
+      # **实测可用**（v3.0.0-beta.24，run #22271）：
+      #
+      #   +---------------------------------+--------------+
+      #   | Repository                      | Revision     |
+      #   +---------------------------------+--------------+
+      #   | KZMTECH/Metabox-Nexus-PlayerCap | b00ba6b4e159 |
+      #   +---------------------------------+--------------+
+      #
+      # 这推翻了先前写在多处 commit message 里的判断「Sentry 尚未配置本组织的 GHES 集成」。
+      # 那个判断的依据是 `/api/0/organizations/kzmtech/repos/` 返回空数组 —— 但那多半只是
+      # free plan 的 token 读不到该接口，不代表没有 repo。**唯一真正挡路的是浅克隆**，
+      # 上面的 checkout 加了 fetch-depth: 0 之后就通了。
+      #
+      # 仍然保留 continue-on-error 与独立 step：SCM 集成是 Sentry 侧的配置，随时可能被改动
+      # 或失效，而它失效时不该拖累 release 本身（new/finalize/deploy 各自独立完成）。
+      #
+      # 实测 beta.24 关联到 **20 个 commit / 47 个文件**。别被 cli 输出的那张表骗了 ——
+      # 它只打 repo 与 HEAD 的 revision，**真正的区间是服务端算的**：从上一个有 commit 关联的
+      # release 到本次。找不到上一个时（beta.23 就没有）它退回默认条数，而不是只关联一条。
+      #
+      # 有了这层关联，issue 页就能出 Suspect Commits —— Sentry 会指出崩溃最可能由哪个 commit
+      # 引入。这是 telemetry 从「知道崩了」到「知道谁弄崩的」的那一步。
+      - name: Associate commits to Sentry release
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ env.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ env.SENTRY_PROJECT }}
+        run: |
+          sentry-cli releases set-commits "${{ steps.vars.outputs.VERSION }}" --auto
+
+      - name: Finalize Sentry release
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ env.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ env.SENTRY_PROJECT }}
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.vars.outputs.VERSION }}
+          sentry-cli releases finalize "$VERSION"
+
+          # deploy 的 environment 与 event 的 environment 是**两回事**：
+          #   - 这里的 deploy：让 Sentry UI 知道「这个 release 部署到了 production」
+          #   - event 的：由客户端 SDK 设（telemetry.environmentFor），semver tag → production
+          # 两边都用 production 保持一致；对不上的话 UI 里会出现「部署到 X 但事件来自 Y」。
+          sentry-cli deploys new -r "$VERSION" -e production

@@ -64,7 +64,10 @@ func (c *Client) ForceFetchLyricsInRedux() error {
 		return err
 	}
 	if strings.HasPrefix(res, "err:") {
-		return fmt.Errorf(res)
+		// 必须走 %s：res 是页面 evaluate 回来的字符串，内容我们控制不了。
+		// 直接 fmt.Errorf(res) 会把它当格式串解析 —— 里面有个 % 就吐 %!d(MISSING) 之类的垃圾，
+		// 把真正的错误原因盖掉。go 1.24+ 的 vet 会报 non-constant format string。
+		return fmt.Errorf("%s", res)
 	}
 	return nil
 }

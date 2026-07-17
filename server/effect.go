@@ -44,8 +44,8 @@ type effectHub struct {
 	gen             uint64  // 参数变更代号，捕获器据此判断是否需要重启
 	showing         bool    // 网易云是否正打开歌曲详情页（特效在显示），由捕获器轮询写入
 
-	strategy     string // 最小化/迷你时策略："fadeout"(默认) | "park"
-	manualParkCmd int   // 一次性手动命令：-1=无，1=park，0=unpark（捕获器取走后复位）
+	strategy      string // 最小化/迷你时策略："fadeout"(默认) | "park"
+	manualParkCmd int    // 一次性手动命令：-1=无，1=park，0=unpark（捕获器取走后复位）
 
 	// 纯层捕获（page→Go 帧回传）：
 	// 注入网易云页面的抓帧脚本经 /cloudmusicv3/effect-ingest 把特效 canvas 的 JPEG 字节推进来，
@@ -57,7 +57,7 @@ type effectHub struct {
 func newEffectHub() *effectHub {
 	return &effectHub{
 		subs:            make(map[*effectSub]struct{}),
-		quality:         95, // 纯层直读 canvas 原生分辨率，细线条易出 JPEG 色度色块；q95 基本消除（本机带宽无忧）
+		quality:         95,  // 纯层直读 canvas 原生分辨率，细线条易出 JPEG 色度色块；q95 基本消除（本机带宽无忧）
 		scale:           0.7, // 仅 screencast 兜底用；纯层不缩放（直读原生分辨率）
 		headerClickable: true,
 		footerClickable: false,
@@ -97,9 +97,10 @@ func (s *Server) TakeManualParkCmd() int {
 }
 
 // handleEffectControl 运行时控制：切换策略 / 手动 park / unpark。
-//   GET /cloudmusicv3/effect-control?strategy=park|fadeout
-//   GET /cloudmusicv3/effect-control?park=1   手动泊车
-//   GET /cloudmusicv3/effect-control?park=0   手动还原
+//
+//	GET /cloudmusicv3/effect-control?strategy=park|fadeout
+//	GET /cloudmusicv3/effect-control?park=1   手动泊车
+//	GET /cloudmusicv3/effect-control?park=0   手动还原
 func (s *Server) handleEffectControl(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	h := s.effectHub
@@ -292,7 +293,28 @@ func parseBoolParam(v string, def bool) bool {
 }
 
 func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
-	// 读取本次连接的截帧/注入偏好（缺省则沿用当前值）
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		serverLog.Warn("网易云特效WS Upgrade 失败: %v", err)
+		return
+	}
+
+	// 读取本次连接的截帧/注入偏好（缺省则沿用当前值）。
+	//
+	// **必须在 Upgrade 成功之后**：这些参数是 effectHub 级的全局单例，无 per-connection
+	// 状态可回滚，而 Upgrade 失败是直接 return 的。放在它之前 → 任何一个连不上的请求
+	// （主播在地址栏敲 URL 探活、curl 试端口）都会把直播画质当场改掉，只能重启服务恢复。
+	//
+	// **但必须仍排在下面 h.subs[sub] 登记之前**，别挪到那之后：捕获器唯一的感知入口是
+	// HasEffectSubscribers()，session 开头才读 EffectCaptureParams 并锁定 startGen。排在
+	// 登记之前 → gen++ 严格 happens-before 订阅者可见，零窗口；排在之后 → 捕获器可能以
+	// 旧参数启动 session，而 effect.go 的 400ms 热更只重写 quality/fps，header/footer 的
+	// 注入只在会话启动时做一次 —— 本次连接请求的 header/footer 会静默失效。
+	//
+	// **也别为「原子」把它并进那个临界区**：setEffectParams 内部自取 h.mu（:135），
+	// Go 的 sync.Mutex 不可重入 → 持锁自死锁，handler 会抱着 h.mu 永久卡住，连带冻死
+	// BroadcastEffectFrame / HasEffectSubscribers / EffectCaptureParams / handleEffectIngest
+	// 整个特效子系统。上面的顺序已提供同等保证，原子性无收益。
 	q := r.URL.Query()
 	curQ, curS, curHC, curFC, _ := s.EffectCaptureParams()
 	quality, scale, headerClickable, footerClickable := curQ, curS, curHC, curFC
@@ -314,12 +336,6 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setEffectParams(quality, scale, headerClickable, footerClickable)
 
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		serverLog.Warn("网易云特效WS Upgrade 失败: %v", err)
-		return
-	}
-
 	sub := &effectSub{ch: make(chan effectMsg, 8)}
 	h := s.effectHub
 	h.mu.Lock()
@@ -331,12 +347,17 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 	// 连接即发一次当前状态（网易云是否活跃输出）
 	sub.ch <- effectMsg{mt: websocket.TextMessage, data: s.effectStatusJSON()}
 
+	// 写失败必须显式关连接，理由同 server.go 的 handleWS：写失败不蕴含连接已断，
+	// 只 return 会让读循环永远阻塞、sub 永远留在 h.subs 里（截帧管线因此继续为
+	// 一个收不到帧的僵尸供帧）。
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for msg := range sub.ch {
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteMessage(msg.mt, msg.data); err != nil {
+				serverLog.Warn("网易云特效WS 写入失败，关闭连接: %s: %v", conn.RemoteAddr(), err)
+				conn.Close() // 解阻塞读循环，交由下面既有的清理路径注销
 				return
 			}
 		}

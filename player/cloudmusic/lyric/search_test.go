@@ -1,5 +1,8 @@
 package lyric
 
+// 本文件只测搜歌候选的匹配判据：时长容差与歌手匹配。它们决定 SearchSongID 从候选里挑
+// 哪一首——判松了会挑错歌、把别的歌歌词推上去。
+
 import "testing"
 
 func TestDurationWithinTolerance(t *testing.T) {

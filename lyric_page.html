@@ -1835,8 +1835,21 @@
                         updateDisplay(data.data);
                         updateAllLyricsHighlight(data.data.index);
                         document.getElementById('lineInfo').textContent = `第 ${data.data.index + 1} / ${allLyrics.length} 行`;
-                        // 校正插值锚点
-                        correctInterpolation(data.data.play_time);
+                        // 校正插值锚点：用 progress 反推当前播放位置。
+                        //
+                        // **绝不能用 data.data.play_time**：它是「本行何时该播出」
+                        // （= timestamp - offset，歌词时间轴上的量），不是「现在播到哪」。
+                        // 二者在常规行上只差一个轮询滞后（毫秒级）——正因如此这里长期用错也
+                        // 看不出症状——但当某行的逐字时间轴早于行时间戳时（网易云 YRC 的长引子
+                        // 行，如 "A-A-All"：YRC 首字 10.92s 而 LRC 行标 14.58s），play_time 会
+                        // 提前数秒，把时钟往回拨 → 进度条倒退、逐字高亮重跑。
+                        //
+                        // progress 才是「整首播到哪」（实时位置/总时长，服务端契约），
+                        // 乘回 songDuration 即得播放位置，与 tickTime 和逐字高亮同一坐标系。
+                        // songDuration 未知（纯音乐/尚未拿到）时不校正，保留原锚点继续插值。
+                        if (songDuration > 0 && typeof data.data.progress === 'number') {
+                            correctInterpolation(data.data.progress * songDuration);
+                        }
                     }
                 }
 

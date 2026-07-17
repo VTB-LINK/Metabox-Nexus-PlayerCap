@@ -2,9 +2,10 @@
 // 链路（不启动其他播放器，避免 watchdog/提权等副作用）。仅供本地开发测试。
 //
 // 测试控制口（:8766）：
-//   GET /active?p=cloudmusicv3   将活跃播放器设为网易云（特效淡入）
-//   GET /active?p=wesing         切到别的播放器（特效淡出）
-//   GET /active?p=               清空活跃播放器（淡出）
+//
+//	GET /active?p=cloudmusicv3   将活跃播放器设为网易云（特效淡入）
+//	GET /active?p=wesing         切到别的播放器（特效淡出）
+//	GET /active?p=               清空活跃播放器（淡出）
 package main
 
 import (

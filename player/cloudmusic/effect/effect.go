@@ -79,6 +79,7 @@ const glShimJS = `(function(){
 //     画布池 + 并发 toBlob 提帧率（toBlob 异步不阻塞主线程）。抓的是 canvas backing store，永不含工具栏/
 //     顶栏/进度条（DOM 合成层）→ 主播可常开 chrome，OBS 仍得纯特效层。无订阅者时 __mbxCapPaused 暂停省 CPU。
 //     分辨率 = 网易云窗口尺寸（用户放大窗口即更清晰，我们不强制改渲染分辨率以免崩溃/变形）。
+//
 // %q=ingest WS 地址；%f=初始 q(0-1)；%d=初始 fps；%d=输出最大宽。
 const captureInjectJS = `(function(){
   if(!window.__mbxGLHook){
@@ -151,6 +152,7 @@ const showingExprJS = `(function(){
 // 顶/底栏按 headerClickable/footerClickable 决定隐藏后是否保留点击（拖动/最大化/控件）：
 //   - 保留点击：仅 opacity:0，元素仍可命中，Electron 的 -webkit-app-region:drag 照常生效；
 //   - 不保留：附加 pointer-events:none，点击穿透到特效区（双击该区即切换）。
+//
 // 暴露 window.__mbxSetChromeHidden(bool) 供 off-screen 泊车强制隐藏复用。
 // 通过 Page.addScriptToEvaluateOnNewDocument 注册（每次页面加载/重载自动运行），故需 document-start 安全：
 // 立即挂 window 级监听，样式注入延到 DOMContentLoaded。两个 %q 替换为顶/底栏附加样式。
@@ -183,14 +185,14 @@ const chromeInjectJS = `(function(){
 
 // Capturer 网易云特效画面捕获器。
 type Capturer struct {
-	sink         FrameSink
-	netEaseUp    func() bool // 取词 player 是否已连上网易云；未连上则静默待命，不独立探 9222
-	mode         string // "purelayer"(默认，注入读 canvas) | "screencast"(兜底，Page.startScreencast)
-	showing      int32 // atomic：网易云是否正显示详情页特效（用于帧门控，不在详情页时停发帧）
-	minimized     int32 // atomic：仅 fadeout 策略下的最小化（并入 showing 触发淡出）
-	rawMinimized  int32 // atomic：真实最小化状态（任何策略下都门控帧 → 冻结最后一帧，不漏最小化动画）
-	gateUntilNano int64 // atomic：在此时间前门控帧（park 过渡期冻结，盖住最小化动画 + park 后冷渲染）
-	parkedAtNano  int64 // atomic：上次 park 的时刻，用于 post-park 冷却（避免 park 反激活立即触发 unpark 弹回）
+	sink          FrameSink
+	netEaseUp     func() bool // 取词 player 是否已连上网易云；未连上则静默待命，不独立探 9222
+	mode          string      // "purelayer"(默认，注入读 canvas) | "screencast"(兜底，Page.startScreencast)
+	showing       int32       // atomic：网易云是否正显示详情页特效（用于帧门控，不在详情页时停发帧）
+	minimized     int32       // atomic：仅 fadeout 策略下的最小化（并入 showing 触发淡出）
+	rawMinimized  int32       // atomic：真实最小化状态（任何策略下都门控帧 → 冻结最后一帧，不漏最小化动画）
+	gateUntilNano int64       // atomic：在此时间前门控帧（park 过渡期冻结，盖住最小化动画 + park 后冷渲染）
+	parkedAtNano  int64       // atomic：上次 park 的时刻，用于 post-park 冷却（避免 park 反激活立即触发 unpark 弹回）
 }
 
 func (c *Capturer) setShowing(v bool) {
@@ -265,9 +267,15 @@ func (c *Capturer) doUnpark() {
 }
 
 // windowStateLoop（~80ms）：检测主窗最小化（并入 showing 触发淡出），并执行 park 策略：
-//   策略=park：最小化且非前台 → 自动 Park 屏外保活；网易云变前台(点任务栏) → 自动 Unpark 飞回
-//   手动命令：控制端点 ?park=1/0 一次性 park/unpark（任意策略下都生效）
-//   无订阅者兜底：若已无人收看但窗口仍泊车屏外 → 自动 Unpark，避免 OBS 停后网易云卡在屏外。
+//
+//	策略=park：最小化、非前台、且有人在看 → 自动 Park 屏外保活；网易云变前台(点任务栏) → 自动 Unpark 飞回
+//	手动命令：控制端点 ?park=1/0 一次性 park/unpark（任意策略下都生效）——
+//	         **该端点当前是关闭的**（796cd75 注释掉了 server.go 的路由注册，理由是策略改
+//	         静态 config 后，运行时动态切换无法反映到静态的 /service-status），故
+//	         TakeManualParkCmd 恒返回 -1、下面那个 switch 当前不可达。代码是那个 commit
+//	         有意保留的（body 明写「保留 handleEffectControl 代码」），别当死代码清掉。
+//	无订阅者兜底：若已无人收看但窗口仍泊车屏外 → 自动 Unpark，避免 OBS 停后网易云卡在屏外。
+//
 // 始终运行（不随订阅者启停），以便任何时候都能把遗留泊车的窗口救回。
 func (c *Capturer) windowStateLoop() {
 	wasForeground := false
@@ -312,8 +320,18 @@ func (c *Capturer) windowStateLoop() {
 			c.doUnpark()
 		}
 
-		// 按钮最小化 → park（仅 parkAllowed）
-		if parkAllowed && minimized && !fg && !park.IsParked() {
+		// 按钮最小化 → park（仅 parkAllowed，且必须真有人在看）
+		//
+		// 订阅者检查不能省：park 的唯一目的就是让屏外窗口继续供帧，没人收看时 park 纯属
+		// 白干，而且会被本循环顶部的「无订阅者兜底」（!HasEffectSubscribers() && IsParked() → doUnpark）
+		// 在下一 tick（80ms）无条件撤销 —— 而 Unpark 会把 savedPlacement 的
+		// swShowMinimized 改写成 swShowNormal（park.go），于是窗口不是回到最小化，是**弹回
+		// 屏幕上**。净效果：无订阅者时主播每次点最小化，网易云都在 ~160ms 内自己蹦回来。
+		//
+		// 加了这个条件后，那条兜底与本行的谓词互斥，同一 tick 不可能都成立，震荡不可达。
+		// 不丢任何 park 能力：parkAllowed 只在 minimized 边沿 latch，「先最小化、后接入
+		// 订阅者」时它仍为 true，订阅者一接入下一 tick 即 park。
+		if parkAllowed && c.sink.HasEffectSubscribers() && minimized && !fg && !park.IsParked() {
 			c.doPark()
 		}
 		// 自动 unpark：网易云从非前台变为前台那一刻（点任务栏/Alt-Tab 切回）；post-park 冷却 1.2s 防弹回
@@ -375,9 +393,9 @@ func (c *Capturer) shimInjectLoop() {
 // Run 阻塞运行：有订阅者时连接并截帧，无订阅者时释放并轮询等待。
 func (c *Capturer) Run() {
 	c.sink.SetEffectIngestHandler(c.ingestFrame) // 纯层帧回传 → 门控 → 广播
-	go c.shimInjectLoop()                         // 尽早 document-start 注册 shim（早于页面加载，免后续 reload）
-	go c.pollShowingLoop()                        // 独立轮询「特效是否在显示」，与帧流互不干扰
-	go c.windowStateLoop()                        // 最小化检测 + park 策略
+	go c.shimInjectLoop()                        // 尽早 document-start 注册 shim（早于页面加载，免后续 reload）
+	go c.pollShowingLoop()                       // 独立轮询「特效是否在显示」，与帧流互不干扰
+	go c.windowStateLoop()                       // 最小化检测 + park 策略
 	log.Info("特效捕获模式: %s", c.mode)
 	loggedSessionErr := false // 本轮故障是否已记录（避免网易云重启/不可用时每 2s 刷屏）
 	for {

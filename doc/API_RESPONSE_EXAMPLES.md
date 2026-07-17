@@ -126,6 +126,13 @@
 - 若连入 `/ws` 时存在活跃播放器，服务端会先补发该播放器当前缓存的 `status_update` / `song_info_update` / `all_lyrics` / `lyric_update`
 - 若连入 `/ws` 时当前没有活跃播放器，服务端会立即发送一个 `player_clear` 事件，而不是静默不输出
 
+**root HTTP 端点说明**（与上面的 WS 规定对称，两者对同一状态给出等价答案）：
+- 四个根端点（`/all_lyrics` `/lyric_update` `/status_update` `/song_info`）跟随活跃播放器
+- **没有活跃播放器时，根端点返回 `"player": ""` + `"data": {}`**，等价于 WS 侧的 `player_clear`。
+  服务端**不会**改为挑一个「有状态的播放器」顶上——待机中（`waiting_process` / `standby`）
+  的播放器不是活跃播放器，其残留数据不得从根端点漏出
+- 「没有活跃播放器」是常态而非异常：开机后没放歌时即处于该状态
+
 **config_overwritten 说明：**
 - 列出被更高优先级来源覆盖的配置键名
 - 仅在有覆盖时出现非空数组

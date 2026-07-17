@@ -41,8 +41,145 @@ func New(offsetMs, pollMs int) *KuGouPlayer {
 	}
 }
 
+// 封面获取的时间预算。
+const (
+	coverEarlyWait = 200 * time.Millisecond
+
+	// coverTotalBudget 是「换歌 → 发出 song_info_update」的上界：等封面 URL 与下载 b64
+	// 都算在这里面。song_info 的发出被 b64 下载挡着，所以预算越长、标题在 OBS 上出现越晚
+	// ——d448816 把它从 3s 实测调优到 800ms 正是为此（perf，非疏忽；周围注释里残留的「3s」
+	// 是更早的 33e6ce1 写的，已随本次重写清掉）。
+	//
+	// 缩短它的前提是 runCoverFetch 末尾那条不变量：拿不到 b64 也照发。否则预算越短，
+	// 「b64 超时 → 整首歌不发 song_info」的触发概率越高。
+	coverTotalBudget = 800 * time.Millisecond
+
+	// coverAPIFallbackTimeout 走 API 兜底（歌手艺术照）时另给的下载预算。该路径下不含
+	// 封面的信息已先发过，故可以慢一点。
+	coverAPIFallbackTimeout = 5 * time.Second
+)
+
+// runCoverFetch 取封面并发出 song_info_update；每首歌一个，换歌时由 ctx 取消。
+//
+//	阶段1: 等 coverEarlyWait 取封面 URL（**常见情况下 URL 已预置在缓冲 channel 里，立即命中**）
+//	  - 取到   → 等 b64（coverTotalBudget 内）→ 一次性发完整信息
+//	  - 超时   → 先发不含封面的信息 → 继续等到 coverTotalBudget
+//	    → 取到 → 等 b64 → 补发完整信息
+//	    → 超时 → 调 API 兜底（歌手艺术照，coverAPIFallbackTimeout）
+//	      → 仍无 URL → 不再发（不含封面的信息上面已发过）
+//
+// **不变量：只要拿到了封面 URL，就必须发出 song_info_update，无论 b64 成功与否。**
+// 常见路径上封面 URL 立即命中，走的是「跳过上面整个分支」——此前一次 song_info_update
+// 都没发过。此时为 b64 失败而 return，OBS 上整首歌都会停在上一首的标题和封面，而轮询
+// 循环只在换歌时发、不会自愈。b64 只是加速手段（省掉前端自己取图），拿不到就带 URL 发，
+// 前端自行加载——FetchCoverBase64 在图片超限时本来就是这个约定。
+func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name, singer, title, hash string) {
+	start := time.Now()
+
+	var coverURL string
+	select {
+	case coverURL = <-ch:
+	case <-time.After(coverEarlyWait):
+	case <-ctx.Done():
+		return
+	}
+
+	var fromAPI bool
+	if coverURL == "" {
+		// 未能及时取到封面 URL，先把歌曲信息发出去，不让它被封面拖住
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
+			Name: name, Singer: singer, Title: title,
+		})
+		remaining := coverTotalBudget - time.Since(start)
+		if remaining < 0 {
+			remaining = 0
+		}
+		select {
+		case coverURL = <-ch:
+		case <-time.After(remaining):
+			// 预算内 CDP 仍无封面，调 API 兜底（伴奏/歌手头像类曲目）
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			log.Info("无法获取封面，回退到歌手艺术照")
+			coverURL = fetchCoverFromAPI(hash)
+			fromAPI = true
+		case <-ctx.Done():
+			return
+		}
+		if coverURL == "" {
+			return // 不含封面的歌曲信息已在上面发过，这里没有新东西可补
+		}
+	}
+
+	// 已有封面 URL，下载 base64
+	b64Timeout := coverTotalBudget - time.Since(start)
+	if fromAPI {
+		b64Timeout = coverAPIFallbackTimeout
+	}
+	var b64 string
+	if b64Timeout > 0 {
+		b64 = player.FetchCoverBase64("Kugou", coverURL, b64Timeout)
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+	// 不变量落点：b64 为空（超时/过大/失败）也照发，带着 URL。绝不为封面吞掉歌曲信息。
+	p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
+		Name: name, Singer: singer, Title: title,
+		Cover: coverURL, CoverBase64: b64,
+	})
+}
+
+// elevationBackoffs 第 n 次提权失败后等多久再试；用尽即终态放弃。
+// 30s → 2min：长到不至于打断直播，又给误点「否」的用户留了重试机会。
+var elevationBackoffs = []time.Duration{30 * time.Second, 2 * time.Minute}
+
+// elevationGate 管理「UAC 被拒之后怎么重试」。
+//
+// 不设退避与上限的后果：EnsurePatched 在 launchElevatedHelper 处弹 UAC，被拒即返回；
+// 主循环随后 waitForCDP —— 酷狗没在跑时它立即失败（不走 90s 兜底）—— 再 sleep 2s 就又
+// 进 EnsurePatched 弹下一次。即 UAC 安全桌面每约 2 秒全屏夺焦一次，直播时是事故。
+type elevationGate struct {
+	fails int
+}
+
+// record 记一次提权失败，返回本次该等多久、以及是否该终态放弃。
+func (g *elevationGate) record() (time.Duration, bool) {
+	g.fails++
+	if g.fails > len(elevationBackoffs) {
+		return 0, true
+	}
+	return elevationBackoffs[g.fails-1], false
+}
+
+// reset 在提权成功后清零，使下一次失败重新从最短退避算起。
+func (g *elevationGate) reset() { g.fails = 0 }
+
+// sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
+// 退避最长 2min，不可打断的话会让退出卡住这么久。
+func (p *KuGouPlayer) sleepOrStop(d time.Duration) bool {
+	select {
+	case <-p.StopCh:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
 // Start 启动酷狗音乐轮询循环（阻塞）
 func (p *KuGouPlayer) Start() {
+	var elevation elevationGate
 	for {
 		select {
 		case <-p.StopCh:
@@ -65,8 +202,33 @@ func (p *KuGouPlayer) Start() {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: "未找到酷狗安装，已停止"})
 				return
 			}
+			if errors.Is(err, watchdog.ErrVersionUnsupported) {
+				// 版本指纹不认识：重试也只会反复弹 UAC 打错版本，终态停止。
+				log.Error("自动修复失败: %v（请降级到受支持的酷狗版本，或等待适配后重试）", err)
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: "酷狗 libcef.dll 版本不受支持，已停止"})
+				return
+			}
+			if errors.Is(err, watchdog.ErrElevationFailed) {
+				// 退避后重试；用尽即终态。直接 continue，不去 waitForCDP——没提权就没 patch，
+				// CDP 不可能起来，而 waitForCDP 在酷狗没跑时会立即返回，等于 2s 后又弹 UAC。
+				backoff, giveUp := elevation.record()
+				if giveUp {
+					log.Error("连续 %d 次未取得管理员权限，停止自动修复（再试只会让 UAC 安全桌面反复夺焦）。"+
+						"如需启用酷狗，请重启本程序并在 UAC 弹窗点「是」", len(elevationBackoffs)+1)
+					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: "未取得管理员权限，已停止自动修复"})
+					return
+				}
+				log.Warn("未取得管理员权限（第 %d/%d 次）: %v —— %v 后重试",
+					elevation.fails, len(elevationBackoffs)+1, err, backoff)
+				if p.sleepOrStop(backoff) {
+					return
+				}
+				continue
+			}
 			log.Warn("自动修复失败: %v（请手动运行酷狗启动工具或检查安装路径）", err)
 			// 其他错误继续等待——用户可能手动启动酷狗
+		} else {
+			elevation.reset() // 提权成功（或本就无需提权）：下次失败重新从最短退避算起
 		}
 
 		client, err := p.waitForCDP()
@@ -146,6 +308,20 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 	// coverCancel aborts the previous goroutine on song change.
 	var coverCh chan string
 	var coverCancel context.CancelFunc
+	// 下面每条早退路径都必须显式 coverCancel()，否则最后一首歌的封面 goroutine 不会被取消
+	// ——它会在 Start() 已 Emit EventClearSongData **之后**（最长约 5.8s）再 Emit
+	// EventSongInfoUpdate，把已清空的歌曲信息重新贴回 OBS。（注：父 context 是
+	// Background，不 cancel 几乎不泄漏资源，goroutine 退出即可 GC；真正的收益是上面
+	// 这个「迟到的 Emit 覆盖已清空状态」，不是「防泄漏」。）
+	//
+	// 别改成 defer 闭包、也别包成 helper 函数：go vet 的 lostcancel 只认对该变量的直接调用，
+	// 任何间接层都会让它从此对这里失明（实测 defer func(){ if c!=nil {c()} }() 仍被报为泄漏）。
+	// 保持显式调用，vet 才能在将来有人新增 return 却忘了取消时当场抓住。
+	//
+	// **别把 vet 绿当成这类问题已经清了。** cloudmusic/qqmusic/wesing 三家的封面
+	// goroutine 是裸 go func，连 context 都没有（全仓 WithCancel 只此一处），因此
+	// lostcancel **结构性看不见它们**——没有 CancelFunc 可丢，分析器就无从下手。
+	// 那三处同样会出现「迟到的封面回写覆盖当前歌曲」，而且比这里更糟：连换歌取消都没有。
 
 	// Local clock interpolation for smooth progress between polls
 	var anchorProgressSec float32
@@ -155,11 +331,17 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 	for {
 		select {
 		case <-p.StopCh:
+			if coverCancel != nil {
+				coverCancel()
+			}
 			return
 		default:
 		}
 
 		if client.IsClosed() {
+			if coverCancel != nil {
+				coverCancel()
+			}
 			return
 		}
 
@@ -167,6 +349,9 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 		if err != nil {
 			log.Warn("GetPlayInfo 失败: %v", err)
 			// Connection likely broken
+			if coverCancel != nil {
+				coverCancel()
+			}
 			return
 		}
 
@@ -221,88 +406,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			}
 			var ctx context.Context
 			ctx, coverCancel = context.WithCancel(context.Background())
-			// 封面 goroutine：
-			//   阶段1: 等待 200ms 取封面 URL
-			//     - 200ms 内取到   → 等 b64（3s 预算内）→ 一次性发完整信息
-			//     - 200ms 超时     → 先发不含封面的信息 → 继续等（3s 总预算）
-			//       → 3s 内取到   → 等 b64 → 补发完整信息
-			//       → 3s 超时     → 调 API 兜底（歌手头像，5s）
-			//         → 取到 b64  → 补发完整信息
-			//         → 取不到    → 不再发
-			go func(ctx context.Context, ch <-chan string, name, singer, title, hash string) {
-				const earlyWait = 200 * time.Millisecond
-				const totalBudget = 800 * time.Millisecond
-				const apiFallbackTimeout = 5 * time.Second
-				start := time.Now()
-
-				var coverURL string
-				select {
-				case coverURL = <-ch:
-				case <-time.After(earlyWait):
-				case <-ctx.Done():
-					return
-				}
-
-				var fromAPI bool
-				if coverURL == "" {
-					// 200ms 内未取到封面，先发不含封面的歌曲信息
-					select {
-					case <-ctx.Done():
-						return
-					default:
-					}
-					p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
-						Name: name, Singer: singer, Title: title,
-					})
-					// 继续等待封面 URL（3s 总预算）
-					remaining := totalBudget - time.Since(start)
-					if remaining <= 0 {
-						remaining = 0
-					}
-					select {
-					case coverURL = <-ch:
-					case <-time.After(remaining):
-						// CDP 3s 内无封面，调 API 兜底（伴奏/歌手头像类曲目）
-						select {
-						case <-ctx.Done():
-							return
-						default:
-						}
-						log.Info("无法获取封面，回退到歌手艺术照")
-						coverURL = fetchCoverFromAPI(hash)
-						fromAPI = true
-					case <-ctx.Done():
-						return
-					}
-					if coverURL == "" {
-						return
-					}
-				}
-
-				// 已有封面 URL，下载 base64
-				var b64Timeout time.Duration
-				if fromAPI {
-					b64Timeout = apiFallbackTimeout
-				} else {
-					b64Timeout = totalBudget - time.Since(start)
-					if b64Timeout <= 0 {
-						return
-					}
-				}
-				b64 := player.FetchCoverBase64("Kugou", coverURL, b64Timeout)
-				if b64 == "" {
-					return
-				}
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
-					Name: name, Singer: singer, Title: title,
-					Cover: coverURL, CoverBase64: b64,
-				})
-			}(ctx, coverCh, currentName, currentSinger, currentTitle, info.Hash)
+			go p.runCoverFetch(ctx, coverCh, currentName, currentSinger, currentTitle, info.Hash)
 
 			// 获取歌词
 			lines, lyrErr := klyric.Fetch(info.Hash, int(durationMs), name, singer)
@@ -325,7 +429,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 
 			lyricItems := toLyricLines(currentLyrics, offsetSec)
 			initPlay := anchorProgressSec // 已经过合法性验证的初始进度
-			progress := clampProgress(initPlay, currentDurationSec)
+			progress := player.ClampProgress(initPlay, currentDurationSec)
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 				Title:    currentTitle,
 				Duration: currentDurationSec,
@@ -437,16 +541,12 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			if trueIdx >= 0 && trueIdx != lastLineIdx {
 				lastLineIdx = trueIdx
 				line := currentLyrics[trueIdx]
-				progress := clampProgress(interpSec, currentDurationSec)
-				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index:        trueIdx,
-					Text:         line.Text,
-					SubText:      "",
-					Timestamp:    line.Time,
-					PlayTime:     interpSec,
-					Progress:     progress,
-					TextDetailed: player.LyricTextDetailed{},
-				})
+				// interpSec 是插值出的实时位置，只喂 Progress；play_time 由 BuildLyricUpdate
+				// 按歌词时间轴算。kugou 无逐字，故 detailed 传零值。
+				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
+					trueIdx, line.Time, line.Text, "", player.LyricTextDetailed{},
+					offsetSec, interpSec, currentDurationSec,
+				))
 			}
 		}
 
@@ -492,13 +592,6 @@ func isProgressValid(progressSec, durationSec float32) bool {
 		return false
 	}
 	return true
-}
-
-func clampProgress(playTime, duration float32) float32 {
-	if duration <= 0 {
-		return 0
-	}
-	return player.ClampFloat32(playTime/duration, 0, 1)
 }
 
 func toLyricLines(lines []klyric.Line, offsetSec float32) []player.LyricLine {

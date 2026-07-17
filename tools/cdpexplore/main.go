@@ -1,8 +1,9 @@
 // Command cdpexplore is a throwaway CDP probe for the NetEase lyric-effect canvas.
 // Usage:
-//   go run ./tools/cdpexplore eval <jsfile>          - run JS from file, print result
-//   go run ./tools/cdpexplore evals "<expr>"         - run inline JS expr
-//   go run ./tools/cdpexplore screencast <n> [ms]    - capture n frames, report sizes
+//
+//	go run ./tools/cdpexplore eval <jsfile>          - run JS from file, print result
+//	go run ./tools/cdpexplore evals "<expr>"         - run inline JS expr
+//	go run ./tools/cdpexplore screencast <n> [ms]    - capture n frames, report sizes
 package main
 
 import (

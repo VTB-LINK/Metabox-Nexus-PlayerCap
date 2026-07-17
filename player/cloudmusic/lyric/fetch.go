@@ -7,14 +7,23 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 )
 
 var log = logger.New("CloudMusic")
+
+// httpClient 用于所有网易云公开 HTTP API 调用。**必须有超时**：http.DefaultClient 的
+// Timeout 为 0（无限），网络挂起（TCP 连上但服务端不再响应）会永久阻塞——而这些调用
+// 都在轮询循环的同步取词路径上（FetchLyrics / SearchSongID 由 runSession 直接调用），
+// 卡死后取词 goroutine 再也不返回，歌词永远停住，不崩不报错。10s 足够覆盖慢网络，
+// 超时后失败会在下次轮询重试。
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 type LyricLine struct {
 	Index        int
@@ -44,7 +53,14 @@ type apiResponse struct {
 	} `json:"yrc"`
 }
 
-var lrcTimeRegex = regexp.MustCompile(`\[(\d+):(\d+)\.(\d+)\](.*)`)
+// lrcLineRegex 把一行拆成「行首连续时间戳串」+「正文」。用 `+` 匹配连续多个时间戳，是为了
+// 支持**压缩型 LRC**（一句配多个时间戳，如 `[02:04.45][00:47.19]文字`，语义是「这句在这几个
+// 时刻各出现一次」——网易云客户端确实在每个时刻各显示一次）。
+// 不匹配的行（`[ti:]` 等元数据、网易云混在 lrc 里的 `{"t":0,...}` JSON 行）自然被跳过。
+var lrcLineRegex = regexp.MustCompile(`^((?:\[\d+:\d+\.\d+\])+)(.*)$`)
+
+// lrcTimeRegex 从上面的时间戳串里逐个取出 mm/ss/ms。
+var lrcTimeRegex = regexp.MustCompile(`\[(\d+):(\d+)\.(\d+)\]`)
 var yrcLineRegex = regexp.MustCompile(`^\[(\d+),(\d+)\](.*)$`)
 var yrcWordRegex = regexp.MustCompile(`\((\d+),(\d+),(\d+)\)`)
 
@@ -59,7 +75,7 @@ func FetchSongDetail(songID string) (*SongDetail, error) {
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Referer", "https://music.163.com/")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +131,7 @@ func FetchLyrics(songID string, offsetSec float32) ([]LyricLine, error) {
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Referer", "https://music.163.com/")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +182,7 @@ func SearchSongID(songName string, artist string, targetDurationMs int) (string,
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Referer", "https://music.163.com/")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -340,7 +356,14 @@ func findBestYRCDetail(lyricTimeMs int, lyricText string, details map[int]player
 		if diff < 0 {
 			diff = -diff
 		}
-		if diff < bestDiff {
+		// 平局取时间戳小的那个：`details` 是 map，遍历序随机，只用 `diff < bestDiff` 的话
+		// 同一份输入每次跑可能选中不同条目（实测 200 次得 10:183 / 14:17 这种分布）——
+		// 逐字高亮层因此随机错位，且 bug 不可复现。tie-break 让它变成确定的。
+		//
+		// 无初值缺陷：bestDiff 初值为 toleranceMs+1，首个候选要么走 `diff < bestDiff`
+		// 更新 bestKey，要么其 diff 已 > toleranceMs、最终被下面的 `bestDiff > toleranceMs`
+		// 拦掉 —— bestKey 不会停在 0 被误用。
+		if diff < bestDiff || (diff == bestDiff && yrcTimeMs < bestKey) {
 			bestKey = yrcTimeMs
 			bestDiff = diff
 		}
@@ -443,43 +466,62 @@ func ParseYRC(yrc string, offsetSec float32) map[int]player.LyricTextDetailed {
 	return result
 }
 
+// ParseLRC 解析 LRC 歌词。
+//
+// **支持压缩型**：一行可以有多个行首时间戳（`[02:04.45][00:47.19]文字`），语义是「这句在
+// 这几个时刻各出现一次」——网易云客户端确实在每个时刻各显示一次，故每个时间戳各生成一条。
+// 同一句叠句在整首里出现几次，行首就有几个时间戳，不限于两个。
+//
+// **结果按时间升序，Index 按时间顺序重排**。不能沿用「lrc 里的出现顺序」：网易云把压缩型的
+// 时间戳按**降序**排（`[02:04.45][00:47.19]`），照原顺序输出会让 Index 与时间对不上。普通
+// LRC 本就升序，排序对它们是 no-op。
 func ParseLRC(lrc string) []LyricLine {
 	var result []LyricLine
-	idx := 0
 
-	for _, line := range strings.Split(lrc, "\n") {
-		line = strings.TrimSpace(line)
+	for _, raw := range strings.Split(lrc, "\n") {
+		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
 
-		matches := lrcTimeRegex.FindStringSubmatch(line)
-		if matches == nil {
+		// 拆成「行首连续时间戳串」+「正文」。无行首时间戳的行（[ti:] 等元数据、
+		// 网易云混在 lrc 里的 {"t":0,...} JSON 行）不匹配，跳过。
+		m := lrcLineRegex.FindStringSubmatch(line)
+		if m == nil {
 			continue
 		}
 
-		minutes, _ := strconv.Atoi(matches[1])
-		seconds, _ := strconv.Atoi(matches[2])
-		msStr := matches[3]
-		// Normalize milliseconds: "123" -> 123, "12" -> 120, "1" -> 100
-		for len(msStr) < 3 {
-			msStr += "0"
+		// **正文为空也保留** —— 这是 intentional blank，不是垃圾。作词者用它表示「此刻把
+		// 歌词清掉」（间奏 / 句与句之间的停顿）。真实数据实证（网易云 id=5277704）：有一条
+		// blank 自己就是压缩型（两个时刻各清一次），且下一句在它之后 0.18s 就来——即精确
+		// 要求「上句显示 1.97s → 空 0.18s → 下句」。吞掉它，前端在该空的地方会一直糊着上
+		// 一句。原实现（含本函数改造前）跳过空正文，是既有缺陷。
+		//
+		// 注意：blank 只是 Text 为空，**不是**「没有歌词」。判断一首歌有没有歌词要看有没有
+		// 实词行，别用 len(结果) —— 见 cloudmusic.go 的 resolveCDPLyrics。
+		text := strings.TrimSpace(m[2])
+
+		for _, tm := range lrcTimeRegex.FindAllStringSubmatch(m[1], -1) {
+			minutes, _ := strconv.Atoi(tm[1])
+			seconds, _ := strconv.Atoi(tm[2])
+			msStr := tm[3]
+			// Normalize milliseconds: "123" -> 123, "12" -> 120, "1" -> 100
+			for len(msStr) < 3 {
+				msStr += "0"
+			}
+			ms, _ := strconv.Atoi(msStr[:3])
+
+			result = append(result, LyricLine{
+				Time: float32(minutes)*60 + float32(seconds) + float32(ms)/1000.0,
+				Text: text,
+			})
 		}
-		ms, _ := strconv.Atoi(msStr[:3])
+	}
 
-		text := strings.TrimSpace(matches[4])
-		if text == "" {
-			continue
-		}
-
-		timeSec := float32(minutes)*60 + float32(seconds) + float32(ms)/1000.0
-
-		result = append(result, LyricLine{
-			Index: idx,
-			Time:  timeSec,
-			Text:  text,
-		})
-		idx++
+	// 按时间升序 + 重排 Index。SliceStable 让同一时刻的多条保持原有先后。
+	sort.SliceStable(result, func(i, j int) bool { return result[i].Time < result[j].Time })
+	for i := range result {
+		result[i].Index = i
 	}
 
 	return result

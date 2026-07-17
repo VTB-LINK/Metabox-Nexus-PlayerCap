@@ -46,19 +46,28 @@ jobs:
           echo "Build Info: Commit=$COMMIT_HASH, Time=$BUILD_TIME"
       
       - name: Build Windows executable
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           # 获取commit hash和build time
           COMMIT_HASH=${{ steps.vars.outputs.COMMIT_HASH }}
           BUILD_TIME=${{ steps.vars.outputs.BUILD_TIME }}
-          
+
           # 开发构建使用非 semver 版本号，客户端会跳过自动更新检查
           VERSION="${OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
-          
+
           # 构建可执行文件，文件名格式：<name>-<date-time>-<commit-hash>.exe
           EXE_NAME="${VERSION}.exe"
           echo "EXE_NAME=${EXE_NAME}" >> $GITHUB_ENV
-          
-          go build -ldflags "-X 'main.Version=${VERSION}'" -o "${EXE_NAME}"
+
+          # Sentry DSN 从 secret 注入。secret 没配 → 空串 → 客户端自动禁用遥测，构建照常成功
+          # （telemetry.Enabled 只看这个变量）。启动日志第一行会说「未注入 DSN，遥测已禁用」，
+          # 那就是 secret 没生效的信号。
+          #
+          # 这里的 VERSION 是非 semver 的，会把遥测送进 Sentry 的 development 环境 ——
+          # 与它让客户端跳过自动更新是同一个判据（main.isReleaseVersion）。改这个格式会同时
+          # 挪动两件事。
+          go build -ldflags "-X 'main.Version=${VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${SENTRY_DSN}'" -o "${EXE_NAME}"
           
           if [ -f "${EXE_NAME}" ]; then
             ls -lh "${EXE_NAME}"

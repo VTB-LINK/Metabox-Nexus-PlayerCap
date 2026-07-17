@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ type playerState struct {
 	activated bool      // 自上次 idle 以来是否进入过 playing/loading
 	loadingAt time.Time // loading 开始时间（per-player 超时）
 	pausedAt  time.Time // paused 开始时间（per-player activated 清除）
+	activeAt  time.Time // 本轮**进入**活跃态（playing/loading）的时刻，用于「最后播放者优先」
 }
 
 // normalizeStatus 将播放器上报的 status 归一化为路由决策的 4 种状态
@@ -169,10 +171,18 @@ func (r *Router) switchTo(newPlayer string) bool {
 // updatePlayerState 更新播放器组状态（prior 或 normal 通用）
 // 调用前必须持有 r.mu 写锁
 func (r *Router) updatePlayerState(ps *playerState, normalized, playerName, groupLabel string, lastPlaying *string) {
+	// 上一状态是否已经算「活跃」（= 已在 evaluateGroup 的 activeNames 里）。
+	// activeAt 只在**从非活跃进入活跃**那一刻打，loading→playing 属同一轮活跃内的转换，
+	// 不重打 —— 否则它就退化成「谁最后发的事件」而不是「谁最近开始播放」。
+	wasActive := ps.status == "playing" || ps.status == "loading"
+
 	switch normalized {
 	case "playing":
 		if ps.status != "playing" {
 			routerLog.Info("%s播放器 [%s] → playing", groupLabel, playerName)
+		}
+		if !wasActive {
+			ps.activeAt = time.Now()
 		}
 		ps.status = "playing"
 		ps.activated = true
@@ -182,6 +192,9 @@ func (r *Router) updatePlayerState(ps *playerState, normalized, playerName, grou
 		if ps.status != "loading" {
 			ps.loadingAt = time.Now()
 			routerLog.Info("%s播放器 [%s] → loading", groupLabel, playerName)
+		}
+		if !wasActive {
+			ps.activeAt = time.Now()
 		}
 		ps.status = "loading"
 		ps.activated = true
@@ -242,7 +255,28 @@ func (r *Router) updateRouting(evt player.Event) bool {
 }
 
 // evaluateGroup 评估播放器组整体状态（prior/normal 通用）
-// 返回 activeNames, hasHolding
+// 返回 activeNames（**按 activeAt 降序：最近开始播放的在前**）, hasHolding
+//
+// 排序是承重的，别去掉：两个调用方都写 `target := activeNames[0]` 再让 lastPlaying
+// 循环去覆盖它。lastPlaying 失配时（它已不在 activeNames 里 —— 最后播放的那个进程退出了，
+// 而另外两个还在放）activeNames[0] 就是最终答案，而 `range map` 的迭代序是**随机**的
+// —— 同一份状态每次评估可能给出不同的 target。放大器：进程不在的播放器每 ~2s 重发一次
+// waiting_process（qqmusic.go:49 / kugou.go:190 在外层 for 体内），每条 status_update 都会
+// 重新评估 → 硬币每 2s 重掷一次 → 结果一变就 switchTo → NotifySubscribersFullState
+// 全量重放 → **OBS 根 overlay 硬切**。实测重掷结果改变的概率 0.37，期望硬切间隔 ~5.4s。
+//
+// 判据用 activeAt（最近开始播放者优先）而不是「配置顺序」：
+//   - 这是作者本来就声明的语义 —— 796d69c 的 body 原话「切到 priorLastPlaying（焦点竞争，
+//     **最后播放者优先**）」，README 与 config 模板也都写「切换到最后一个普通播放器」。
+//     lastPlaying 就是这个判据的标量版，activeAt 是它的自然全序推广 —— 于是
+//     「lastPlaying 永不清除会变陈旧」这个失效前提从根上消失：陈旧者不在 activeNames 里，
+//     压根不参与比较。
+//   - 「配置顺序」则是另一条相竞争的新判据，且 normal 组的那个顺序硬编码在 main.go，
+//     用户根本改不了；prior 组的顺序是 config 模板「取消注释」的产物，不是用户的表达。
+//
+// 遍历本身保持 `range map` 不动：改成「按 order 遍历」会让 order 里漏掉的名字整个从
+// activeNames 消失 —— 漏掉唯一活跃者即 len==0 → clearActivePlayer → OBS 空屏，比它要修的
+// 问题严重一级。排序只重排已经收集到的名字，不可能丢成员。
 func evaluateGroup(states map[string]*playerState) (activeNames []string, hasHolding bool) {
 	for name, ps := range states {
 		switch ps.status {
@@ -254,6 +288,14 @@ func evaluateGroup(states map[string]*playerState) (activeNames []string, hasHol
 			}
 		}
 	}
+	sort.SliceStable(activeNames, func(i, j int) bool {
+		ai, aj := states[activeNames[i]].activeAt, states[activeNames[j]].activeAt
+		if !ai.Equal(aj) {
+			return ai.After(aj)
+		}
+		// 同刻进入活跃（几乎只可能出现在测试里）：按名字定序，保证结果仍是确定的
+		return activeNames[i] < activeNames[j]
+	})
 	return
 }
 
@@ -262,7 +304,8 @@ func evaluateGroup(states map[string]*playerState) (activeNames []string, hasHol
 func (r *Router) evaluatePriorGroup() bool {
 	activeNames, hasHolding := evaluateGroup(r.priorStates)
 
-	// 1. 有 active 的优先播放器 → 切到组内 priorLastPlaying（若仍 active），否则取第一个
+	// 1. 有 active 的优先播放器 → 切到组内 priorLastPlaying（若仍 active），否则取最近开始播放的那个
+	//    （evaluateGroup 已按 activeAt 降序，故 activeNames[0] 即最近活跃者）
 	if len(activeNames) > 0 {
 		target := activeNames[0]
 		for _, n := range activeNames {
@@ -303,7 +346,8 @@ func (r *Router) evaluatePriorGroup() bool {
 func (r *Router) evaluateNormalGroup() bool {
 	activeNames, hasHolding := evaluateGroup(r.normalStates)
 
-	// 1. 有 active 的普通播放器 → 切到组内 normalLastPlaying（若仍 active），否则取第一个
+	// 1. 有 active 的普通播放器 → 切到组内 normalLastPlaying（若仍 active），否则取最近开始播放的那个
+	//    （evaluateGroup 已按 activeAt 降序，故 activeNames[0] 即最近活跃者）
 	if len(activeNames) > 0 {
 		target := activeNames[0]
 		for _, n := range activeNames {

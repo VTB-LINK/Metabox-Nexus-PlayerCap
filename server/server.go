@@ -481,13 +481,21 @@ func (s *Server) handleWS(playerName string) http.HandlerFunc {
 			conn.WriteJSON(evt)
 		}
 
-		// 写入 goroutine：从订阅通道读取并发送到 WebSocket
+		// 写入 goroutine：从订阅通道读取并发送到 WebSocket。
+		//
+		// 写失败必须显式关连接：**写失败不蕴含连接已断**。写超时（客户端不读）与 JSON
+		// 编码失败（WriteJSON 先 NextWriter 再 Encode，NaN/Inf 在编码阶段就失败，连接完好）
+		// 都会让这里出错而 TCP 仍然活着。此时只 return 的话，下面的读循环会永远阻塞在
+		// ReadMessage —— overlay 客户端从不发消息 —— sub 便永远留在 s.subscribers 里，
+		// wsCount() 仍把它算作在线，而它再也收不到任何事件。
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			for evt := range sub.ch {
 				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteJSON(evt); err != nil {
+					serverLog.Warn("WS 写入失败，关闭连接: %s player=%q: %v", conn.RemoteAddr(), playerName, err)
+					conn.Close() // 解阻塞读循环，交由下面既有的清理路径注销
 					return
 				}
 			}
@@ -575,96 +583,144 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: "internal", Data: data})
 }
 
-// resolvePlayer 根据路径或 active player 确定用哪个播放器
+// resolvePlayer 根据路径或 active player 确定用哪个播放器。
+//
+// 根路径（playerName==""）完全跟随 Router 设定的 activePlayer，**包括 activePlayer==""
+// 这个信号本身**：router.go clearActivePlayer 主动置空并推 player_switch(to="") +
+// player_clear，语义是「当前没有播放器在放」，不是「还没初始化」。而 normalizeStatus 把
+// standby/waiting_process/waiting_song 全归为 idle，router 永不为它们设 activePlayer ——
+// 所以「开机没放歌 → activePlayer 为空」是长期稳态，不是启动瞬态。
+//
+// 此时返回 ""，四个 handler 的 `ps != nil` 守卫落入既有 nil 分支，返回 Data:{}，与
+// buildInitEvents 给 WS 的 player_clear 语义一致。
+//
+// **不要再加「取任意有状态的播放器」的兜底。** 这里曾有两个 `range map` 循环（先找
+// Status=="playing"，再找任意 Status != nil），已删，理由：
+//   - 它的孪生体 findAnyNonPriorPlayer() 已被 9090f0b 从 router 删除，commit 原话是
+//     「歌词冻结 bug 的根本原因」「不检查播放状态」；这两个循环是同型残株。
+//   - 它诞生于 Server 还没有 activePlayer 字段的年代（65d9e80，当时它是唯一选址逻辑）；
+//     6087be4 叠加 activePlayer 优先分支时没清旧路径，「兜底」是事后追认的标签而非设计。
+//   - `range map` 顺序随机：实测同一待机态 400 次调用分布 wesing:260 / qqmusic:53 /
+//     cloudmusicv3:49 / kugou:38，连续两次答案不一致 214/400。且四个 handler 各自独立
+//     调用本函数，同一秒内 /song_info 与 /status_update 可解析到不同播放器，拼出
+//     「A 的状态 + B 的歌名」。
 func (s *Server) resolvePlayer(playerName string) string {
 	if playerName != "" {
 		return playerName
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// 根路径优先使用 Router 设定的 activePlayer，与 WS/SSE 行为一致
-	if s.activePlayer != "" {
-		return s.activePlayer
-	}
-	// 兜底：无 activePlayer 时取任意有状态的播放器
-	for name, ps := range s.playerStates {
-		if ps.Status != nil && ps.Status.Status == "playing" {
-			return name
-		}
-	}
-	for name, ps := range s.playerStates {
-		if ps.Status != nil {
-			return name
-		}
-	}
-	return ""
+	return s.activePlayer
 }
 
+// --- HTTP 读取端点：锁内取快照，锁外序列化 ---
+//
+// 这四个 handler 的既有写法是「RLock → 取 *PlayerState → RUnlock → 读它的字段」，
+// 锁只保护了 map 查找，字段读全在锁外，而 UpdatePlayerState(:329) 是在 s.mu.Lock()
+// 内写这些字段的 —— 写侧持锁、读侧不持锁，是真实数据竞争，已复现两种后果：
+//  1. slice header 撕裂：ps.AllLyrics 拿到「新 ptr + 旧 len」→ BuildLyricsDetailed
+//     把分配区外的垃圾当 LyricLine 迭代 → BuildDetailedText 解引用垃圾指针 panic。
+//     net/http 的 conn.serve 会 recover handler panic，故**进程不死**；但它只
+//     recover + 打日志 + 关连接，**不写任何响应**，且 json 是先整体 marshal 再写、
+//     panic 发生在 marshal 阶段，一个字节都没发出去 —— 所以客户端拿到的是**裸 EOF /
+//     connection reset，不是 500**（实测：`Get "http://…": EOF`；服务端只有
+//     `http: panic serving`）。排障时该找的是连接层错误，不是 5xx 日志。
+//  2. 非原子快照：跨过写者的两次赋值即拿到「A 的标题 + B 的歌词」，不需要任何撕裂。
+//
+// 关于两者的相对频率：实测回退旧写法跑 6 次，**6/6 全死于 (1) 撕裂 panic**，
+// race_test.go 里那个「非原子快照」检测器一次都没触发过 —— (1) 先发生，检测器
+// 根本没机会看到 (2)。(2) 的存在是从 panic 栈帧（Title len=4 + Count=0x28）推得的，
+// 属推断而非直接复现。此前注释把两者的频率写反了。
+//
+// 两条纪律，别改：
+//   - **快照必须在锁内取完**：AllLyrics 的 slice header 与 Title 等字段必须在同一次
+//     持锁内一起读出，否则仍是非原子快照。
+//   - **绝不在持锁期间 writeJSON**：json.Marshal + 网络写会被慢客户端拖住，持 RLock
+//     写网络等于让一个慢下游阻塞 UpdatePlayerState，进而阻塞整个路由器。
+//
+// 只拷 slice header / 指针而不做深拷贝是安全的：发布出去的数据事实上不可变——
+// ps.AllLyrics 只被整体替换（:356 / :366），全仓无 AllLyrics[i] 下标写入；
+// ps.Status / ps.SongInfo / ps.LyricUpdate 每次更新都是新分配的结构体。
 func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
+
 		s.mu.RLock()
-		ps := s.playerStates[pn]
+		var data *AllLyrics
+		if ps := s.playerStates[pn]; ps != nil && ps.AllLyrics != nil {
+			data = &AllLyrics{
+				Title:    ps.Title,
+				Lyrics:   ps.AllLyrics,
+				Duration: ps.Duration,
+				PlayTime: ps.PlayTime,
+				Progress: ps.Progress,
+				Count:    len(ps.AllLyrics),
+			}
+		}
 		s.mu.RUnlock()
 
-		if ps == nil || ps.AllLyrics == nil {
+		if data == nil {
 			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
 			return
 		}
-
-		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: &AllLyrics{
-			Title:    ps.Title,
-			Lyrics:   ps.AllLyrics,
-			Duration: ps.Duration,
-			PlayTime: ps.PlayTime,
-			Progress: ps.Progress,
-			Count:    len(ps.AllLyrics),
-		}})
+		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: data})
 	}
 }
 
 func (s *Server) handleLyricUpdate(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
+
 		s.mu.RLock()
-		ps := s.playerStates[pn]
+		var data *LyricUpdate
+		if ps := s.playerStates[pn]; ps != nil {
+			data = ps.LyricUpdate
+		}
 		s.mu.RUnlock()
 
-		if ps == nil || ps.LyricUpdate == nil {
+		if data == nil {
 			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
 			return
 		}
-		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: ps.LyricUpdate})
+		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: data})
 	}
 }
 
 func (s *Server) handleStatusUpdate(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
+
 		s.mu.RLock()
-		ps := s.playerStates[pn]
+		var data *StatusMessage
+		if ps := s.playerStates[pn]; ps != nil {
+			data = ps.Status
+		}
 		s.mu.RUnlock()
 
-		if ps == nil || ps.Status == nil {
+		if data == nil {
 			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
 			return
 		}
-		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: ps.Status})
+		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: data})
 	}
 }
 
 func (s *Server) handleSongInfo(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
+
 		s.mu.RLock()
-		ps := s.playerStates[pn]
+		var data *SongInfoUpdate
+		if ps := s.playerStates[pn]; ps != nil {
+			data = ps.SongInfo
+		}
 		s.mu.RUnlock()
 
-		if ps == nil || ps.SongInfo == nil {
+		if data == nil {
 			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
 			return
 		}
-		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: ps.SongInfo})
+		writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: data})
 	}
 }
 

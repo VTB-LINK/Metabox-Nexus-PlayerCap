@@ -82,6 +82,20 @@ func EnsureDebugMode() (bool, error) {
 		return false, nil
 	}
 
+	// v2 检查必须在这里 —— 在 taskkill 之前、在上面 hasFlags 早退之后。
+	//
+	// 放晚了（比如放到 Connect 失败处）就来不及：下面会把用户正在用的网易云 taskkill 掉、
+	// 带调试参数重启 —— 而 v2 的 CEF 根本不开 remote debugging，重启完照样连不上。
+	// 净效果是「杀了用户的播放器，换来一个永远连不上的端口」。issue #40 记录的正是这个。
+	//
+	// 放在 hasFlags 之后是为了省一次文件版本读取：已经带着我们的参数在跑的，必然是被我们
+	// 重启过的 v3（v2 不会走到那一步）。
+	if exePath != "" {
+		if v := ReadExeVersion(exePath); IsUnsupportedVersion(v) {
+			return false, &UnsupportedVersionError{Version: v, ExePath: exePath}
+		}
+	}
+
 	log.Warn("发现 %s 未启用调试/保活参数，正在重启...", TargetProcessName)
 
 	if exePath == "" {

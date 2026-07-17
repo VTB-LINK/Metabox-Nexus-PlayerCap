@@ -12,6 +12,8 @@ import (
 	"time"
 	"unicode/utf16"
 	"unsafe"
+
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 var (
@@ -123,6 +125,12 @@ type dllOffsets struct {
 	// 文件名去扩展名即 songMid，比 URL params 更可靠
 	ProgressDllOff uintptr // v20.05: DLL 基址直接偏移，DWORD 即播放毫秒数（0=不可用）
 	// CE 手动确认: 0xB61E78 = 准确ms进度（备选 0xAF3600）
+
+	SongMidFromHeap bool // true=songMid 不在结构体里，由 FindSongMid 从堆 JSON 按时长扫出（v22.41 兜底）
+
+	// SongIDDurCheckOff：稳定 songID 所在「播放会话」结构自带的时长字段偏移（相对 Struct1，
+	// 0=不校验）。与 DurationOff 的显示时长交叉核对，确认该 songID 已同步到当前歌（v22.41）。
+	SongIDDurCheckOff uintptr
 }
 
 // knownVersions 版本偏移表
@@ -188,6 +196,29 @@ var knownVersions = map[string]dllOffsets{
 		SongIDOff:    0xE0,
 		DurationOff:  0xE8,
 		ProgressOff:  0xEC,
+	},
+	"22.41": {
+		// CE 实测（32-bit x86）：结构体由窄 SSO 改为 UTF-16 WCHAR* 指针。
+		// now-playing 显示对象在 QQMusic.dll 静态 .data（Struct1），跨歌验证字段原地更新：
+		//   +0x00 Name*、+0x04 Singer*、+0x08 Album*、+0x0C 进度ms（亚秒高分辨率 →
+		//   无需 FastTimer）、+0x10 时长ms。
+		// 客户端上报 JSON 的 songid 恒 0，但真数字 songID 存在另一处固定「播放会话」结构里
+		// （volume/speed 浮点 + songID + 时长），距 Struct1 0x722E8（绝对 QQMusic.dll+0xCB2830）。
+		// 跨歌验证：上一首 2480434、当前 351669598 均落此偏移且与服务器一致。用它走现成的
+		// songID 取词路径（musicu.fcg），无需堆扫描、无时序竞态。
+		// 该结构与显示对象在换歌瞬间可能短暂不同步 → 用它自带时长（+0x722F0=DLL+0xCB2838）
+		// 与显示时长交叉核对（SongIDDurCheckOff），不一致则弃用该 songID。
+		// SongMidFromHeap 保留作兜底：songID 未就绪（读到 0）时回退 FindSongMid 堆扫描。
+		Struct1:           0xC40548,
+		NameOff:           0x00,
+		SingerOff:         0x04,
+		AlbumOff:          0x08,
+		ProgressOff:       0x0C,
+		DurationOff:       0x10,
+		SongIDOff:         0x722E8, // → QQMusic.dll+0xCB2830，稳定 songID 字段
+		SongIDDurCheckOff: 0x722F0, // → QQMusic.dll+0xCB2838，同结构自带时长，用于同步性核对
+		UseWideStrings:    true,
+		SongMidFromHeap:   true,
 	},
 }
 
@@ -264,7 +295,19 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 
 		foundDll := false
 		if retEnum != 0 {
+			// cbNeeded 是「**所需**字节数」不是「已写入字节数」：EnumProcessModulesEx 在缓冲区
+			// 不足时仍返回 TRUE，只把实际需要的大小写进 cbNeeded（MSDN 明确如此）。不截断的话，
+			// 进程模块数 > 1024 时 numModules > len(modules) → modules[i] 越界 panic。
+			// 而全仓 recover() 零命中 → 任一 goroutine panic = **整个进程死亡**，不只是取词停摆。
+			//
+			// 截断而非按 MSDN 的两遍模式重新分配：漏找几个 DLL 的降级后果是 ConnectQQMusic 返错
+			// → qqmusic 的重试循环继续转，已经够用；两遍模式要多一次动态分配 + 一次 syscall。
 			numModules := cbNeeded / uint32(unsafe.Sizeof(modules[0]))
+			if numModules > uint32(len(modules)) {
+				log.Warn("QQMusic.exe 模块数 %d 超出缓冲区 %d，只扫前 %d 个（找不到 DLL 会走重试）",
+					numModules, len(modules), len(modules))
+				numModules = uint32(len(modules))
+			}
 			for i := uint32(0); i < numModules; i++ {
 				var name [256]uint16
 				procGetModuleBaseNameW.Call(hProcess, modules[i], uintptr(unsafe.Pointer(&name[0])), uintptr(len(name)))
@@ -351,6 +394,16 @@ func (m *QQMusicMem) detectVersion() {
 	} else {
 		log.Warn("QQ 音乐版本 %s 无已知偏移表，回退到 v22.16", m.version)
 		m.offsets = knownVersions["22.16"]
+
+		// 「预期之外」：这台机器上的 QQ 音乐是我们没见过的版本。回退偏移读出来的多半是垃圾
+		// （见 AGENTS.md §5.1），所以这条不是「降级运行」，是「正在读错内存」。
+		// 上报是为了知道野外有哪些版本 —— 那正是补偏移表的输入。
+		telemetry.ReportOnce("qqmusic.unknown_version",
+			"QQ 音乐版本无已知偏移表，已回退到 v22.16（读到的可能是垃圾）",
+			map[string]any{
+				"version":  m.version,
+				"fallback": "22.16",
+			})
 	}
 }
 
@@ -440,7 +493,18 @@ func getFileVersion(path string) (major, minor uint16) {
 		return 0, 0
 	}
 
-	info := (*vsFixedFileInfo)(unsafe.Pointer(infoPtr))
+	// infoPtr 指向 buf 内部，但它是 uintptr——不持有对 buf 的引用。直接
+	// (*vsFixedFileInfo)(unsafe.Pointer(infoPtr)) 会让 GC 有机会在下面解引用之前回收 buf。
+	// 改为算偏移再回 buf 取地址：buf 因此保持存活，同时顺带做了越界校验。
+	base := uintptr(unsafe.Pointer(&buf[0]))
+	if infoPtr < base {
+		return 0, 0
+	}
+	off := infoPtr - base
+	if off+unsafe.Sizeof(vsFixedFileInfo{}) > uintptr(len(buf)) {
+		return 0, 0
+	}
+	info := (*vsFixedFileInfo)(unsafe.Pointer(&buf[off]))
 	if info.Signature != 0xFEEF04BD {
 		return 0, 0
 	}
@@ -759,6 +823,58 @@ type SongMetadata struct {
 	SliderVal  uint32
 }
 
+// ssoFromBuf 从 24 字节的 MSVC 32-bit std::string 快照里解出字符串。
+// 布局：+0x00 是内联缓冲区**或**堆指针，+0x10 是 length，+0x14 是 capacity；
+// capacity > 15 = 堆分配，<= 15 = 内联。readHeap 用于把堆上的 n 字节读回来。
+//
+// 抽成纯函数是为了可测：调用方 extractSSO 是 ReadAllMetadata 里的闭包，
+// 而这段判定是「一错就往 overlay 推乱码标题」的路径，必须有门禁。
+//
+// **堆/内联的判定必须独立于 length 的合法性检查，别把它们挤回同一个 `&&`。**
+// 挤在一起时（原写法 `capacity > 15 && length > 0 && length < 1000`），
+// 「已确诊是堆字符串、但 length 不合法」会掉进内联分支 —— 而那里 buf[0:4] 装的是
+// **堆指针不是文本**，指针的原始字节被当歌名返回；sanitizeString 只按 rune 过滤
+// （0xB1 解成 RuneError、>= 32 被保留），于是 overlay 闪一个乱码标题。
+//
+// 触发主力是 clear()：capacity 保留（仍 > 15）而 length 归 0 —— 实测原写法这条 96.9%
+// 出乱码。版本偏移错位（detectVersion 对未知版本回退 22.16）也能进来，实测原写法 8.5%
+// 出乱码、其余靠内联分支「找不到 NUL 就返回空」侥幸兜住。两条现在都收敛为返回空。
+//
+// 上界保持 1000：同文件的 ReadSSOString 用的是 2048，别顺手抄过来，那是放宽两倍上界。
+func ssoFromBuf(buf []byte, readHeap func(ptr, n uint32) []byte) string {
+	if len(buf) < 24 {
+		return ""
+	}
+	length := binary.LittleEndian.Uint32(buf[0x10:0x14])
+	capacity := binary.LittleEndian.Uint32(buf[0x14:0x18])
+
+	if capacity > 15 {
+		if length > 0 && length < 1000 {
+			if ptr := binary.LittleEndian.Uint32(buf[0x00:0x04]); ptr > 0x10000 {
+				return string(bytes.Trim(readHeap(ptr, length), "\x00"))
+			}
+		}
+		// 堆模式下读不出来就到此为止，绝不 fallthrough 到内联分支
+		return ""
+	}
+
+	// 内联分支（capacity <= 15）：逻辑原样保留。
+	//
+	// 注意 idx 算完即弃、真正用的是未 clamp 的 inlineIdx —— 看着像 bug，但**别顺手改**：
+	// 它对短名是已验证正确的路径（21.81 条目的注释记着验证用例「无地自容」= 12 字节 →
+	// cap==15 → 走这里），动它没有收益、只有回归风险。上面的堆分支拦住之后，进到这里的
+	// 就只剩真·内联字符串了。
+	idx := bytes.IndexByte(buf[:16], 0)
+	if idx == -1 {
+		idx = 16
+	}
+	inlineIdx := bytes.IndexByte(buf, 0)
+	if inlineIdx > 0 {
+		return string(buf[:inlineIdx])
+	}
+	return ""
+}
+
 func (m *QQMusicMem) ReadSSOString(addr uintptr) string {
 	// SSO String is 24 bytes (0x18)
 	// +0x10 : uint32 len
@@ -903,12 +1019,15 @@ func (m *QQMusicMem) FindSongMid(durationMs uint32) string {
 		return ""
 	}
 
+	// 播放上报 JSON 有两种编码（见 extractSongMid），两种都要能匹配。用两个 playTime
+	// needle 做区域快速排除：命中任一才对该区细扫，其余区直接跳过。
+	needles := [][]byte{
+		[]byte(fmt.Sprintf(`"songPlayTime":%d`, durationMs)),
+		[]byte(fmt.Sprintf(`"songPlayTime" : %d`, durationMs)),
+	}
+
 	var mbi MEMORY_BASIC_INFORMATION
 	addr := uintptr(0)
-	pattern := []byte(`"songmid" : "`)
-	// We also search for songPlayTime near the songmid to validate
-	playTimePattern := []byte(fmt.Sprintf(`"songPlayTime" : %d`, durationMs))
-
 	for {
 		ret, _, _ := procVirtualQueryEx.Call(m.hProcess, addr, uintptr(unsafe.Pointer(&mbi)), uintptr(unsafe.Sizeof(mbi)))
 		if ret == 0 {
@@ -921,43 +1040,18 @@ func (m *QQMusicMem) FindSongMid(durationMs uint32) string {
 			procReadProcessMemory.Call(m.hProcess, addr, uintptr(unsafe.Pointer(&buf[0])), mbi.RegionSize, uintptr(unsafe.Pointer(&bytesRead)))
 			if bytesRead > 0 {
 				data := buf[:bytesRead]
-				// First check if this region even has our songPlayTime
-				if !bytes.Contains(data, playTimePattern) {
-					addr = mbi.BaseAddress + mbi.RegionSize
-					if addr > 0x7FFFFFFF {
+				hit := false
+				for _, n := range needles {
+					if bytes.Contains(data, n) {
+						hit = true
 						break
 					}
-					continue
 				}
-				// Now search for songmid patterns near the playTime match
-				searchBuf := data
-				for {
-					idx := bytes.Index(searchBuf, pattern)
-					if idx == -1 {
-						break
+				if hit {
+					if mid := extractSongMid(data, durationMs); mid != "" {
+						log.Detail("找到 songmid '%s' (songPlayTime=%d)", mid, durationMs)
+						return mid
 					}
-					midStart := idx + len(pattern)
-					endQuote := bytes.IndexByte(searchBuf[midStart:], '"')
-					if endQuote > 0 && endQuote < 30 {
-						mid := string(searchBuf[midStart : midStart+endQuote])
-						if len(mid) >= 10 && len(mid) <= 20 {
-							// Check that songPlayTime is nearby (within 500 bytes)
-							contextStart := idx - 500
-							if contextStart < 0 {
-								contextStart = 0
-							}
-							contextEnd := midStart + endQuote + 500
-							if contextEnd > len(searchBuf) {
-								contextEnd = len(searchBuf)
-							}
-							context := searchBuf[contextStart:contextEnd]
-							if bytes.Contains(context, playTimePattern) {
-								log.Detail("找到 songmid '%s' (songPlayTime=%d)", mid, durationMs)
-								return mid
-							}
-						}
-					}
-					searchBuf = searchBuf[idx+len(pattern):]
 				}
 			}
 		}
@@ -968,7 +1062,54 @@ func (m *QQMusicMem) FindSongMid(durationMs uint32) string {
 		}
 	}
 	return ""
+}
 
+// extractSongMid 从一块内存里按时长定位当前歌的 songMid。QQ 播放上报 JSON 两种编码：
+//
+//	紧凑（v22.41）："songPlayTime":189623,"songid":0,"songmid":"000S48Kb1DJdkJ"
+//	带空格（旧）  ："songPlayTime" : 189623 ... "songmid" : "000S48Kb1DJdkJ"
+//
+// 以 songPlayTime==durationMs 锚定，取邻近（±500B）的 songmid——避免把别的歌的 mid
+// 安到当前歌上。抽成纯函数是为了可测：这是「一错就整首放错歌词」的路径。
+// playTime 命中后校验其后一字节非数字，挡掉「137223 命中 1372230 前缀」的误匹配。
+func extractSongMid(data []byte, durationMs uint32) string {
+	formats := []struct{ playTime, mid string }{
+		{fmt.Sprintf(`"songPlayTime":%d`, durationMs), `"songmid":"`},
+		{fmt.Sprintf(`"songPlayTime" : %d`, durationMs), `"songmid" : "`},
+	}
+	for _, f := range formats {
+		needle := []byte(f.playTime)
+		pt := bytes.Index(data, needle)
+		if pt < 0 {
+			continue
+		}
+		if after := pt + len(needle); after < len(data) && data[after] >= '0' && data[after] <= '9' {
+			continue // playTime 是更长数字的前缀（如 137223 命中 1372230），非精确匹配
+		}
+		lo := pt - 500
+		if lo < 0 {
+			lo = 0
+		}
+		hi := pt + 500
+		if hi > len(data) {
+			hi = len(data)
+		}
+		window := data[lo:hi]
+		mi := bytes.Index(window, []byte(f.mid))
+		if mi < 0 {
+			continue
+		}
+		start := mi + len(f.mid)
+		end := bytes.IndexByte(window[start:], '"')
+		if end <= 0 {
+			continue
+		}
+		mid := string(window[start : start+end])
+		if len(mid) >= 10 && len(mid) <= 20 {
+			return mid
+		}
+	}
+	return ""
 }
 
 func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
@@ -984,34 +1125,9 @@ func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 		if len(buf) < 24 {
 			return ""
 		}
-		// Based on libc++ / MSVC string representation heuristics:
-		// If capacity is large, the first 4 bytes are a pointer.
-		// However, it's safer to just check if it's a valid pointer vs inline string.
-		// In MSVC 32-bit: +0 is buffer or pointer, +16 is length, +20 is capacity.
-		length := m.ReadUint32(addr + 16)
-		capacity := m.ReadUint32(addr + 20)
-
-		if capacity > 15 && length > 0 && length < 1000 {
-			ptr := m.ReadUint32(addr)
-			if ptr > 0x10000 {
-				strBuf := m.ReadBytes(uintptr(ptr), length)
-				return string(bytes.Trim(strBuf, "\x00"))
-			}
-		} else {
-			// Inline reading up to the length usually
-			// or just find the first null byte in the union buffer
-			idx := bytes.IndexByte(buf[:16], 0)
-			if idx == -1 {
-				idx = 16
-			}
-			// wait, if capacity logic isn't MSVC, maybe libc++ 23-byte inline?
-			// Just universally read inline string till null
-			inlineIdx := bytes.IndexByte(buf, 0)
-			if inlineIdx > 0 {
-				return string(buf[:inlineIdx])
-			}
-		}
-		return ""
+		return ssoFromBuf(buf, func(ptr, n uint32) []byte {
+			return m.ReadBytes(uintptr(ptr), n)
+		})
 	}
 
 	var name1, singer1 string
@@ -1042,10 +1158,20 @@ func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 		meta.Singer = singer1
 	}
 
-	songId = m.ReadUint32(struct1 + m.offsets.SongIDOff)
 	duration = m.ReadUint32(struct1 + m.offsets.DurationOff)
 	if m.offsets.DurationInSeconds {
 		duration *= 1000 // 秒转毫秒（v20.05 时长单位为秒）
+	}
+
+	songId = m.ReadUint32(struct1 + m.offsets.SongIDOff)
+	if m.offsets.SongIDDurCheckOff != 0 {
+		// v22.41：稳定 songID 在独立的「播放会话」结构里（见 knownVersions 注释），换歌瞬间
+		// 可能短暂滞后于显示结构体。用它自带的时长与显示时长交叉核对：不一致=该 songID 尚未
+		// 落位到当前歌 → 作废（songId=0），让上层回退到 songMid 堆扫描。绝不拿上一首的 songID
+		// 去请求——那会整首推错歌词，比空白更糟。稳态下两处时长精确相等（CE 实测）。
+		if m.ReadUint32(struct1+m.offsets.SongIDDurCheckOff) != duration {
+			songId = 0
+		}
 	}
 
 	// Fast progress timer: QQMusic.dll+offsets.FastTimerPtr -> [ptr]+offsets.FastTimerOff

@@ -11,6 +11,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/qqmusic"
 	"Metabox-Nexus-PlayerCap/player/wesing"
 	"Metabox-Nexus-PlayerCap/server"
+	"Metabox-Nexus-PlayerCap/telemetry"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,19 +33,24 @@ import (
 // 版本信息（编译时通过 -ldflags 注入）
 var Version = "0.0.0"
 
+// privacyNoticeWait 是隐私提示的停留时间。够读完那 20 行、又不至于让人觉得程序卡住。
+// 只在遥测启用时才会真的等（未注入 DSN 时 PrintPrivacyNotice 立即返回）。
+const privacyNoticeWait = 10 * time.Second
+
 var mainLog = logger.New("Main")
 
 func main() {
-	// 提权副本模式：由 watchdog.applyPatchesElevated 通过 ShellExecuteExW 启动
-	// 在任何初始化之前检查，立即 patch DLL 并退出
-	if len(os.Args) >= 2 && os.Args[1] == "--kugou-patch" {
-		watchdog.RunPatch()
-		return // RunPatch 内部调用 os.Exit，此 return 仅作为安全保障
-	}
-	// 持久 elevated helper 模式：等待触发信号后立即 patch DLL
-	if len(os.Args) >= 2 && os.Args[1] == "--kugou-patch-helper" {
-		watchdog.RunPatchHelper()
-		return
+	// 主 goroutine 的 panic 上报。放在最开头以覆盖尽可能多的路径 —— 它执行在 main 返回时，
+	// 那时 telemetry.Init 早已跑过。（Init 之前就 panic 的话不会上报，但语义照旧：进程死。）
+	// os.Exit 不跑 defer，所以正常退出路径不受影响。
+	defer telemetry.Guard()
+
+	// 提权 helper 模式：由 watchdog.launchElevatedHelper 通过 ShellExecuteExW("runas")
+	// 拉起，命令行形如 --kugou-patch-helper <libcefPath>。libcefPath 走命令行参数而非
+	// %TEMP% 文件（防 UAC 窗口内被篡改重定向）。在任何初始化之前处理并退出。
+	if len(os.Args) >= 3 && os.Args[1] == "--kugou-patch-helper" {
+		watchdog.RunPatchHelper(os.Args[2])
+		return // RunPatchHelper 内部调用 os.Exit，此 return 仅作为安全保障
 	}
 
 	// 设置日志格式
@@ -71,6 +77,28 @@ func main() {
 	}
 	fmt.Printf("   优先播放器: %v (超时: %ds)\n", cfg.PriorPlayer, cfg.PriorPlayerExpire)
 	fmt.Println("===========================================================")
+
+	// 遥测（Sentry）。放在 Banner 之后、checkAndUpdate 之前：自动更新本身就是个故障点
+	// （下载/校验失败会 os.Exit(1) 结束进程），它也该在上报范围内。
+	//
+	// DSN 由 ldflags 注入，空 DSN 自动禁用 —— 本地 go build 与未配 secret 的构建天然不上报，
+	// 没有开关配置项。IsRelease 复用自动更新的 semver 判据，dev 构建的非 semver 版本号
+	// 会把它送进 development 环境，见 telemetry 包注释。
+	telemetry.Init(telemetry.Options{
+		Version:     Version,
+		IsRelease:   isReleaseVersion(Version),
+		Config:      cfg,
+		PlayerNames: playerNames,
+	})
+
+	// 隐私提示：告诉主播我们上报什么、干什么用，给他 10 秒读完。
+	//
+	// 位置是刻意的 —— **在 checkAndUpdate 之前**：那一步会联网、可能替换 exe 并重启进程。
+	// 提示必须出现在任何联网动作之前，否则「先斩后奏」。
+	//
+	// 未注入 DSN 时它立即返回（不打印也不等待）：那种构建一个字节都不外发，摆告示是撒谎，
+	// 而且本地每次调试都白等 10 秒。见 telemetry/privacy.go。
+	telemetry.PrintPrivacyNotice(privacyNoticeWait)
 
 	// 强制版本检查与自动更新
 	checkAndUpdate()
@@ -157,6 +185,7 @@ func main() {
 	// 启动统一服务（等待端口就绪后再启动播放器）
 	readyCh := make(chan struct{})
 	go func() {
+		defer telemetry.Guard()
 		if err := srv.Start(cfg.Addr, readyCh); err != nil {
 			mainLog.Error("服务启动失败: %v", err)
 			os.Exit(1)
@@ -178,10 +207,14 @@ func main() {
 	router.Register(kp)
 
 	// 启动播放器 goroutines
-	go wp.Start()
-	go cp.Start()
-	go qp.Start()
-	go kp.Start()
+	//
+	// 每个都包一层闭包只为挂 defer telemetry.Guard()：`go wp.Start()` 这种形式没有地方挂。
+	// Guard 捕获 panic → 上报 → Flush → **原样 re-panic**，进程照常死 —— 采集 goroutine
+	// 带着未知的损坏状态继续跑，会把错位歌词一直推上 OBS，比崩掉更坏。
+	go func() { defer telemetry.Guard(); wp.Start() }()
+	go func() { defer telemetry.Guard(); cp.Start() }()
+	go func() { defer telemetry.Guard(); qp.Start() }()
+	go func() { defer telemetry.Guard(); kp.Start() }()
 
 	// 启动时若发现上次崩溃遗留的「网易云屏外泊车」状态，立即还原窗口
 	park.RestoreOrphaned()
@@ -189,12 +222,13 @@ func main() {
 	// 网易云特效镜像捕获器（按需截帧，有前端订阅 /cloudmusicv3/effect-ws 时才工作）
 	// 传 cp.IsConnected 门控生命周期：取词 player 没连上网易云时静默待命，不独立探 9222、不刷屏
 	effectCapturer := effect.New(srv, cp.IsConnected)
-	go effectCapturer.Run()
+	go func() { defer telemetry.Guard(); effectCapturer.Run() }()
 
 	// 优雅退出：收到中断信号时，还原网易云被双击隐藏的菜单后再退出
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
+		defer telemetry.Guard()
 		<-sigCh
 		mainLog.Info("收到退出信号，正在还原网易云窗口与菜单...")
 		park.Unpark() // 若处于屏外泊车，先飞回原位
@@ -491,6 +525,7 @@ func cleanupLegacyExe() {
 
 	// 后台重试删除：父进程（旧 exe）退出可能有短暂延迟，文件仍被锁定
 	go func() {
+		defer telemetry.Guard()
 		for attempt := 0; attempt < 10; attempt++ {
 			var remaining []string
 			for _, p := range targets {

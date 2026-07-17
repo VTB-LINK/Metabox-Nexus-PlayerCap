@@ -1,5 +1,9 @@
 package cloudmusic
 
+// 本文件只测歌曲身份判定：buildSongIdentityKey 生成换歌检测用的键，
+// snapshotMatchesCurrentSong 判断 Redux 快照是否已对齐到当前歌。判错会导致换歌漏检，
+// 或拿上一首的 Redux 数据当这一首用。
+
 import (
 	"testing"
 

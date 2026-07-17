@@ -79,15 +79,15 @@ var (
 	psapi    = syscall.NewLazyDLL("psapi.dll")
 	user32   = syscall.NewLazyDLL("user32.dll")
 
-	procOpenProcess            = kernel32.NewProc("OpenProcess")
-	procCloseHandle            = kernel32.NewProc("CloseHandle")
-	procReadProcessMemory      = kernel32.NewProc("ReadProcessMemory")
+	procOpenProcess              = kernel32.NewProc("OpenProcess")
+	procCloseHandle              = kernel32.NewProc("CloseHandle")
+	procReadProcessMemory        = kernel32.NewProc("ReadProcessMemory")
 	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
-	procProcess32FirstW        = kernel32.NewProc("Process32FirstW")
-	procProcess32NextW         = kernel32.NewProc("Process32NextW")
-	procModule32FirstW         = kernel32.NewProc("Module32FirstW")
-	procModule32NextW          = kernel32.NewProc("Module32NextW")
-	procVirtualQueryEx         = kernel32.NewProc("VirtualQueryEx")
+	procProcess32FirstW          = kernel32.NewProc("Process32FirstW")
+	procProcess32NextW           = kernel32.NewProc("Process32NextW")
+	procModule32FirstW           = kernel32.NewProc("Module32FirstW")
+	procModule32NextW            = kernel32.NewProc("Module32NextW")
+	procVirtualQueryEx           = kernel32.NewProc("VirtualQueryEx")
 
 	procEnumWindows              = user32.NewProc("EnumWindows")
 	procGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
@@ -96,7 +96,7 @@ var (
 	procIsIconic                 = user32.NewProc("IsIconic")
 	procGetGUIThreadInfo         = user32.NewProc("GetGUIThreadInfo")
 
-	TH32CS_SNAPMODULE  uint32 = 0x00000008
+	TH32CS_SNAPMODULE   uint32 = 0x00000008
 	TH32CS_SNAPMODULE32 uint32 = 0x00000010
 )
 

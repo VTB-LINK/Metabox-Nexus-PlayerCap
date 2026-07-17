@@ -1,6 +1,7 @@
 package cloudmusic
 
 import (
+	"errors"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/cdp"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/lyric"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/watchdog"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 const PlayerName = "cloudmusicv3"
@@ -57,13 +59,6 @@ func (c *baseRealClock) GetCurrent() float32 {
 	return c.BaseRealTime + elapsed
 }
 
-func clampProgress(playTime, duration float32) float32 {
-	if duration <= 0 {
-		return 0
-	}
-	return player.ClampFloat32(playTime/duration, 0, 1)
-}
-
 func normalizeSongIdentity(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	return strings.Join(strings.Fields(value), " ")
@@ -97,12 +92,19 @@ func snapshotMatchesCurrentSong(data *cdp.ExtractionData, songName, songArtist s
 	return currentArtist == targetArtist
 }
 
+// unsupportedRecheck 检测到不支持的网易云版本后，多久重新探一次。
+// 取大值是因为「装的是 v2」是个近乎永久的状态：既不该占 CPU 空转，也得给用户升级后
+// 自动恢复的机会（不必重启 PlayerCap）。
+const unsupportedRecheck = 30 * time.Second
+
 // Start 启动轮询循环（阻塞）
 func (p *CloudMusicPlayer) Start() {
 	// 0. Patch Windows registry auto-start
 	watchdog.PatchRegistryAutoStart()
 
 	p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "网易云音乐未启动"})
+
+	warnedUnsupported := false // v2 警告只打一次（它是永久状态，每轮打就是新的刷屏）
 
 	for {
 		select {
@@ -112,6 +114,46 @@ func (p *CloudMusicPlayer) Start() {
 		}
 
 		restarted, err := watchdog.EnsureDebugMode()
+		var unsupported *watchdog.UnsupportedVersionError
+		if errors.As(err, &unsupported) {
+			// v2：什么都不做。watchdog 已在 taskkill 之前挡住，这里只负责「别再往下走」。
+			//
+			// **本条真正治的是什么，别搞错**（issue #40 的现象描述实测有误）：
+			//   - 治的是 **taskkill**：v2 用户的网易云会被杀一次并强制重启，换来一个永远连不上
+			//     的端口。实测确认只杀「一次」——`hasFlags` 看的是 `Cmdline()` 里有没有我们传的
+			//     marker，而 Windows 记录的是**我们传了什么**，与 v2 认不认识那些参数无关，
+			//     所以第二轮起就早退了。杀一次也是杀，直播中尤其。
+			//   - 治的是 **status 说谎**：这里原先发 waiting_process「网易云音乐未启动」——
+			//     **假的**，他的网易云明明开着。这才是最误导的一条，issue 反而没提。
+			//   - **不治「刷屏」**：issue 说「连不上会打印一大堆垃圾」，但实测 9222 不通时
+			//     整条路径 **10 秒 0 行日志**（Connect 失败只 sleep+continue，不打日志）。
+			//     真正的 55.8 行/秒需要「9222 开着且会话立刻死」，那是与 v2/v3 无关的另一条缺陷。
+			//
+			// 只打一次（用户选的 A 方案）：v2 是**永久状态**，每轮打就是新的刷屏。
+			if !warnedUnsupported {
+				log.Warn("%s（%s）—— 已跳过网易云取词与特效镜像；如需使用请升级到 v%d 及以上",
+					unsupported.Error(), unsupported.ExePath, 3)
+
+				// 这是个「预期之外」的事件：我们只支持 v3+，而这台机器上装的是 v2。
+				// 上报是为了回答「有多少主播还在用 v2」——那个数字决定要不要为 v2 做点什么。
+				// ReportOnce 自己去重，与上面 warnedUnsupported 的重置逻辑无关（那条是给主播的
+				// 提醒，状态变了该再提醒；这条是给我们的情报，一台机器一次就够）。
+				telemetry.ReportOnce("cloudmusic.unsupported_version",
+					"网易云音乐版本不支持 CDP（需 v3+）",
+					map[string]any{
+						"version":  unsupported.Version,
+						"exe_path": unsupported.ExePath,
+					})
+
+				warnedUnsupported = true
+			}
+			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
+				Status: "standby", Detail: "网易云音乐 v" + unsupported.Version + " 不支持（需 v3+）",
+			})
+			time.Sleep(unsupportedRecheck)
+			continue
+		}
+		warnedUnsupported = false // 版本变了（升级/换装）→ 下次再是 v2 可以再警告一次
 		if err != nil {
 			log.Error("Watchdog 错误: %v", err)
 		}
@@ -131,6 +173,7 @@ func (p *CloudMusicPlayer) Start() {
 		p.runSession(client)
 		atomic.StoreInt32(&p.connected, 0)
 		log.Info("会话结束，等待网易云音乐重新启动...")
+		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo
 		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "网易云音乐已退出"})
 		p.Emit(player.EventClearSongData, nil)
 	}
@@ -159,6 +202,8 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
+	var errLog extractErrLog // 会话级：Extract 错误的降噪状态
+
 	for {
 		select {
 		case <-p.StopCh:
@@ -168,14 +213,25 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 
 		data, err := client.Extract()
 		if err != nil {
+			// "no root" 是启动期 #root 未就绪的预期噪声，原样静默（别扩大这条过滤面：
+			// 'null: no root' / 'null: no react container' / 'null: store not found' 三串同生于
+			// fa59084，作者知道另两串存在却只过滤了这一个 —— 那是选择，不是遗漏）。
+			// 其余错误交给降噪：既不刷屏，也不彻底静默。
 			if !strings.Contains(err.Error(), "no root") {
-				log.Warn("提取错误: %v", err)
+				if should, repeat, dur := errLog.next(err.Error(), time.Now()); should {
+					if repeat {
+						log.Warn("提取错误持续 %s（仍在重试）: %v", dur.Round(time.Second), err)
+					} else {
+						log.Warn("提取错误: %v", err)
+					}
+				}
 			}
 			if client.IsClosed() {
 				return
 			}
 			continue
 		}
+		errLog.reset() // 取词成功 → 下次故障可再记一次
 
 		if data == nil || data.CurPlaying == nil {
 			continue
@@ -279,15 +335,18 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				Cover: songCover,
 			})
 
-			// 异步获取封面 base64，完成后补发 song_info_update
-			go func(name, artist, title, cover string) {
+			// 异步获取封面 base64，完成后补发 song_info_update。
+			// 带代次守卫：下载最长 5s，其间可能已换歌；迟到的回写若无守卫会把这首歌的
+			// 标题+封面盖在下一首上，且 song_info_update 只在换歌分支发一次，整首歌不自愈。
+			coverGen := p.NewSongGen()
+			go func(gen uint64, name, artist, title, cover string) {
 				if b64 := player.FetchCoverBase64("CloudMusic", cover, 5*time.Second); b64 != "" {
-					p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
+					p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
 						Name: name, Singer: artist, Title: title,
 						Cover: cover, CoverBase64: b64,
 					})
 				}
-			}(songName, songArtist, songTitle, songCover)
+			}(coverGen, songName, songArtist, songTitle, songCover)
 
 			// Fetch lyrics via CDP using Redux ID
 			if activeSongID != "" {
@@ -297,7 +356,12 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				} else if lrcResult.PureMusic || lrcResult.NoLyric {
 					// CDP 返回纯音乐，用 Go HTTP API 二次确认
 					log.Info("CDP 返回纯音乐(ID=%s)", activeSongID)
-					if apiLyrics, err2 := lyric.FetchLyrics(activeSongID, offsetSec); err2 == nil && len(apiLyrics) > 0 {
+					// 判据必须是 hasRealText 而不是 len()：ParseLRC 会保留 intentional blank
+					// （正文为空、表示此刻清空歌词的行），一首只有 blank 的 lrc 行数 > 0 却
+					// 一个字都没有 —— 按行数判就会误判成「有歌词」、置 cdpLyricsOK 关掉 Redux
+					// fallback，OBS 整首空白且不走下面的「标记纯音乐」清屏路径。
+					// 与 resolveCDPLyrics 同一判据，别让这两条分支再分叉。
+					if apiLyrics, err2 := lyric.FetchLyrics(activeSongID, offsetSec); err2 == nil && hasRealText(apiLyrics) {
 						log.Info("API 二次确认(ID=%s)有 %d 行歌词，使用 API 歌词；逐字：%s", activeSongID, len(apiLyrics), lyricDetailedFlag(apiLyrics))
 						for _, l := range apiLyrics {
 							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
@@ -312,7 +376,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 							songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 						}
 						playTime := clock.GetCurrent()
-						progress := clampProgress(playTime, songDuration)
+						progress := player.ClampProgress(playTime, songDuration)
 						p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 							Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
 							Lyrics: []player.LyricLine{}, Count: 0,
@@ -322,15 +386,21 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						})
 					}
 				} else {
-					cdpLyricsOK = true
-					parsed := lyric.ParseLRC(lrcResult.Lrc)
-					lyric.MergeTlyric(parsed, lrcResult.Tlyric)
-					lyric.MergeYRC(parsed, lrcResult.Yrc, offsetSec)
-					log.Info("歌词加载完成(CDP): %d 行 (ID=%s)；逐字：%s", len(parsed), activeSongID, lyricDetailedFlag(parsed))
-					for _, l := range parsed {
-						activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
-							Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, TextDetailed: l.TextDetailed,
-						})
+					parsed, ok := resolveCDPLyrics(lrcResult.Lrc, lrcResult.Tlyric, lrcResult.Yrc, offsetSec)
+					if ok {
+						cdpLyricsOK = true
+						log.Info("歌词加载完成(CDP): %d 行 (ID=%s)；逐字：%s", len(parsed), activeSongID, lyricDetailedFlag(parsed))
+						for _, l := range parsed {
+							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
+								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, TextDetailed: l.TextDetailed,
+							})
+						}
+					} else {
+						// CDP 声称有歌词（非 PureMusic/NoLyric），但解析出 0 行——lrc 只含元数据
+						// 标签（[ti:]/[ar:]）而无时间戳行。**不置 cdpLyricsOK**，交给下面的 Redux
+						// fallback（:379 用 Redux 歌词，:407 兜底标记纯音乐清屏）；置了会挡住 fallback，
+						// activeLyrics 保持空、前端整首歌停在上一首。
+						log.Warn("CDP 歌词解析出 0 行 (ID=%s)，交给 Redux fallback", activeSongID)
 					}
 				}
 			}
@@ -357,7 +427,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
 				playTime := clock.GetCurrent()
-				progress := clampProgress(playTime, songDuration)
+				progress := player.ClampProgress(playTime, songDuration)
 
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
@@ -392,7 +462,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
 				playTime := clock.GetCurrent()
-				progress := clampProgress(playTime, songDuration)
+				progress := player.ClampProgress(playTime, songDuration)
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
 					Lyrics: lyricItems, Count: len(lyricItems),
@@ -408,7 +478,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 			}
 			playTime := clock.GetCurrent()
-			progress := clampProgress(playTime, songDuration)
+			progress := player.ClampProgress(playTime, songDuration)
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 				Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
 				Lyrics: []player.LyricLine{}, Count: 0,
@@ -490,13 +560,12 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if trueLineIdx != lastLineIdx {
 				lastLineIdx = trueLineIdx
 				currentLine := activeLyrics[trueLineIdx]
-				built := player.BuildLyricLine(trueLineIdx, currentLine.Time, currentLine.Text, currentLine.SubText, currentLine.TextDetailed, offsetSec)
-				playTime := clock.GetCurrent()
-				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index: trueLineIdx, Text: currentLine.Text, SubText: currentLine.SubText,
-					Timestamp: currentLine.Time, PlayTime: built.PlayTime,
-					Progress: clampProgress(playTime, songDuration), TextDetailed: currentLine.TextDetailed,
-				})
+				// clock.GetCurrent() 是插值出的实时位置，只喂 Progress；play_time 由
+				// BuildLyricUpdate 按歌词时间轴算（原先为取它而构造了整个 LyricLine）。
+				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
+					trueLineIdx, currentLine.Time, currentLine.Text, currentLine.SubText,
+					currentLine.TextDetailed, offsetSec, clock.GetCurrent(), songDuration,
+				))
 			}
 		}
 	}
@@ -510,6 +579,88 @@ func getArtists(artists []struct {
 		names = append(names, a.Name)
 	}
 	return strings.Join(names, " / ")
+}
+
+// resolveCDPLyrics 解析 CDP 返回的歌词并判定是否算「拿到了可用歌词」。
+//
+// ok 为真会让调用方置 cdpLyricsOK，从而关掉 Redux fallback——所以它**必须在解析出真正
+// 有字的歌词行之后**才为真。ParseLRC 对只含元数据标签（[ti:]/[ar:]，无 [mm:ss.xx] 时间戳
+// 行）的非空 lrc 会返回 0 行；此时若仍标记成功，activeLyrics 保持空、fallback 被挡，前端
+// 整首歌停在上一首。
+//
+// PureMusic 分支里 API 二次确认那条（cloudmusic.go:304）**必须用同一个判据**（hasRealText），
+// 两条都是「置 cdpLyricsOK → 关掉 Redux fallback」的入口，判据分叉就会漏掉一条。
+// 注：这里原先写着「与那条『len(apiLyrics)>0 才置真』保持一致」——那句话是反的，
+// d63a67d 把 ParseLRC 的契约从「行数即歌词数」改成「行数含 blank」之后，len() 判据就失效了，
+// 而当时只改了本函数、漏了 :304。别再把 len() 当参照系。
+func resolveCDPLyrics(lrc, tlyric, yrc string, offsetSec float32) (parsed []lyric.LyricLine, ok bool) {
+	parsed = lyric.ParseLRC(lrc)
+	// 判据是「有没有**实词**行」，不是「有没有行」：ParseLRC 会保留 intentional blank
+	// （正文为空、表示此刻清空歌词的行），一首只有 blank 的 lrc 解析出的行数 > 0 却一个字
+	// 都没有——按行数判就会误判成「有歌词」，关掉 Redux fallback，OBS 整首空白。
+	if !hasRealText(parsed) {
+		return nil, false
+	}
+	lyric.MergeTlyric(parsed, tlyric)
+	lyric.MergeYRC(parsed, yrc, offsetSec)
+	return parsed, true
+}
+
+// hasRealText 判断解析结果里有没有**实词**行。intentional blank（Text 为空、表示此刻清空
+// 歌词的行）不算——只有 blank 的结果等于「这首歌没有歌词」。
+// extractErrRepeat 同一条持续中的 Extract 错误多久复读一次。
+const extractErrRepeat = 60 * time.Second
+
+// extractErrLog 给 Extract 的错误做降噪：同一错误首次打一次，之后每 extractErrRepeat
+// 复读一次「仍在重试」，Extract 成功后重置（下次故障可再记一次）。
+//
+// **为什么不能每 tick 打**：poll 默认 30，被上面的 `<50ms→100ms` 抬到 100ms → **10 行/秒**。
+// 日志走 stderr 且不落盘（AGENTS §0），几分钟就把控制台回滚缓冲冲干净，**连带冲掉另外
+// 三个播放器的全部日志** —— 而那是直播出问题时唯一的现场证据。这是本条真正的危害。
+//
+// **为什么也不能彻底静默**：同上，它是唯一的现场证据。「一次都不打」和「10 行/秒」一样坏。
+//
+// **为什么不在这里加「连续失败 N 次就退出会话」**（原始审计发现的隐含修法，已核实为错）：
+//   - Extract 出错时 `runSession` 只有 socket 死亡（`client.IsClosed()`）一条退出路径，看着像漏，
+//     但它事实上挡住了一个更大的雷：退出会话 → 外层 for 重跑 `watchdog.EnsureDebugMode()`，
+//     而那个函数在「Cmdline() 读失败」与「进程无保活 marker」之间**不可区分**，会
+//     `taskkill /F /IM cloudmusic.exe`。今天「永不退出」让这个雷最多踩一次；加失败计数
+//     等于提高频率 —— **直播中反复杀主播的网易云**。
+//   - 而退出会话的收益近乎零：headline 场景（网易云更新后 fiber 形态变）下 EnsureDebugMode
+//     因 `hasFlags==true` 直接早退、**本来就是 no-op**；真的是网易云更新，那 = 进程重启 =
+//     socket 断 = `IsClosed()` 为真 = 已经会正常退出，压根不走这条路。
+//   - `store not found` 是**冷启动必经串**（要求 Redux 的 playing 分片已 hydrate），纯次数
+//     阈值会误杀启动期；而 poll 可被 per-player 覆盖，同一个 N 对应的真实时长能差 20 倍。
+type extractErrLog struct {
+	msg     string    // 当前持续中的错误串（空 = 无故障）
+	since   time.Time // 本轮故障首次出现的时刻
+	lastLog time.Time // 上次打日志的时刻
+}
+
+// next 决定这条错误该不该打：shouldLog=false 即压制；repeat=true 表示这是「仍在重试」的
+// 复读，dur 为已持续时长。
+func (e *extractErrLog) next(msg string, now time.Time) (shouldLog, repeat bool, dur time.Duration) {
+	if msg != e.msg {
+		e.msg, e.since, e.lastLog = msg, now, now
+		return true, false, 0
+	}
+	if now.Sub(e.lastLog) >= extractErrRepeat {
+		e.lastLog = now
+		return true, true, now.Sub(e.since)
+	}
+	return false, false, 0
+}
+
+// reset 在 Extract 成功后调用。
+func (e *extractErrLog) reset() { e.msg = "" }
+
+func hasRealText(lines []lyric.LyricLine) bool {
+	for _, l := range lines {
+		if l.Text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func lyricDetailedFlag(lines []lyric.LyricLine) string {

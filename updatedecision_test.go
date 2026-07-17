@@ -1,5 +1,9 @@
 package main
 
+// 本文件只测版本比较与自动更新决策：semver 归一化、是否为可更新的发布版、release 标题的
+// -force 后缀、以及 decideUpdate 的四种取向（同版/更新/降级被拦/降级被 force 放行）。
+// 不测下载与替换流程。
+
 import "testing"
 
 func TestNormalizeSemver(t *testing.T) {

@@ -1,5 +1,9 @@
 package lyric
 
+// 本文件只测 YRC（网易云逐字歌词）的解析与合并：ParseYRC 拆逐字时间轴，MergeYRC 把它对
+// 到已有的 LRC 行上。用例大多是真实歌曲里发现的时间戳漂移/文本差异样本——合并对不上就
+// 退化成整句，对错了则逐字高亮串行。
+
 import "testing"
 
 func TestParseYRCWithNetEaseSample(t *testing.T) {

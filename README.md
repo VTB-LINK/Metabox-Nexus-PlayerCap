@@ -166,7 +166,7 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 - 发布版本由 release `tag_name` 决定；若 release 标题 `name` 以 `-force` 结尾，则允许客户端强制同步到更低版本。
 - 默认开发构建（如 `0.0.0` 或非 semver 版本号）不会参与自动更新检查。
 
-维护者的发布与回退 SOP 见 [instruction.md](instruction.md) 的“7.1 发布流程”和“7.2 回退流程”。
+维护者的发布与回退 SOP 见 [AGENTS.md](AGENTS.md) 的“12. 发版”。
 
 
 ### 运行

@@ -183,25 +183,30 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 
 		// 歌曲信息（封面 base64 异步获取，避免阻塞管线）
 		songTitle, songName, singer, coverURL, songMID := p.getSongMeta(handle, pid, lastTitle)
-		initialPlayTime, _ := lyric.ReadPlayTime(handle, timeAddr)
+		// 读失败或值不合法（NaN/越界）时退回 0，绝不让未校验的值进 Emit——
+		// 同 pollLyrics 热路径的理由：NaN 会让 WS 的 json.Marshal 报错并僵死订阅者。
+		initialPlayTime, err := lyric.ReadPlayTime(handle, timeAddr)
+		if err != nil || !lyric.IsPlausiblePlayTime(initialPlayTime) {
+			initialPlayTime = 0
+		}
 
 		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
 		p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 			Name: songName, Singer: singer, Title: songTitle,
 			Cover: coverURL,
 		})
-		initialProgress := float32(0)
-		if songDuration > 0 {
-			initialProgress = player.ClampFloat32(initialPlayTime/songDuration, 0, 1)
-		}
+		initialProgress := player.ClampProgress(initialPlayTime, songDuration)
 		p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 			Title: songTitle, Duration: songDuration,
 			PlayTime: initialPlayTime, Progress: initialProgress,
 			Lyrics: lyricItems, Count: len(lyricItems),
 		})
 
-		// 异步获取封面 base64（带重试），完成后补发 song_info_update
-		go func(handle syscall.Handle, mid, name, singer, title, url string) {
+		// 异步获取封面 base64（带重试），完成后补发 song_info_update。
+		// 带代次守卫：这里的窗口最长约 10s（5×1s 内存重试 + 5s 下载），是三家里最宽的；
+		// 无守卫时迟到的回写会把这首歌的标题+封面盖在下一首上，且整首歌不自愈。
+		coverGen := p.NewSongGen()
+		go func(gen uint64, handle syscall.Handle, mid, name, singer, title, url string) {
 			coverURL := url
 			// 如果初始未获取到封面 URL，重试从内存中搜索（K歌客户端可能延迟加载封面数据）
 			if coverURL == "" && mid != "" {
@@ -219,14 +224,14 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				return
 			}
 			if b64 := player.FetchCoverBase64("WeSing", coverURL, 5*time.Second); b64 != "" {
-				p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
+				p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
 					Name: name, Singer: singer, Title: title,
 					Cover: coverURL, CoverBase64: b64,
 				})
 			} else {
 				log.Warn("封面下载失败: %s", coverURL)
 			}
-		}(handle, songMID, songName, singer, songTitle, coverURL)
+		}(coverGen, handle, songMID, songName, singer, songTitle, coverURL)
 
 		lastPhase = proc.PhasePlaying
 
@@ -262,7 +267,9 @@ func (p *WesingPlayer) initSong(handle syscall.Handle, pid uint32, modules []pro
 	log.Info("歌词加载完成: %d 行；逐字：否", len(lyrics))
 
 	if cachedTimeAddr != 0 {
-		if t, err := lyric.ReadPlayTime(handle, cachedTimeAddr); err == nil && t >= 0 && t < 100000 {
+		// 与 validateTimeAddr 共用同一个判定，别再各写一份——这两处曾经是一对拷贝，
+		// 这里写对了（接受式），timer.go 里写成了德摩根拒绝式，导致 NaN 通过校验。
+		if t, err := lyric.ReadPlayTime(handle, cachedTimeAddr); err == nil && lyric.IsPlausiblePlayTime(t) {
 			return lyrics, cachedTimeAddr, true
 		}
 	}
@@ -367,7 +374,12 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 		}
 
 		playTime, err := lyric.ReadPlayTime(handle, timeAddr)
-		if err != nil {
+		// 值校验与读失败同等对待，别只判 err：地址是靠 AOB 选出来的，选中之后内存
+		// 内容仍可能变成 NaN/越界（结构体重初始化、切歌、堆复用）。未校验的 NaN 会
+		// 直接进 PlayTime 与 Progress，而 encoding/json 编码不了 NaN → WS 的
+		// WriteJSON 报错 → 写 goroutine 退出但不关连接 → 订阅者僵死却仍在册。
+		// validateTimeAddr 只在「发现地址」那一刻校验过一次，管不到这条 30ms 的热路径。
+		if err != nil || !lyric.IsPlausiblePlayTime(playTime) {
 			failCount++
 			if failCount > int(3000/pollMs) {
 				return exitSongChanged
@@ -441,14 +453,12 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 		if currentIdx != lastLineIdx && currentIdx >= 0 {
 			lastLineIdx = currentIdx
 			l := lyrics[currentIdx]
-			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				Index:        l.Index,
-				Text:         l.Text,
-				Timestamp:    l.Time,
-				PlayTime:     playTime,
-				Progress:     player.ClampFloat32(playTime/songDuration, 0, 1),
-				TextDetailed: player.LyricTextDetailed{},
-			})
+			// playTime 是内存直读的实时位置，只喂 Progress；play_time 由 BuildLyricUpdate
+			// 按歌词时间轴算。wesing 无逐字，故 detailed 传零值。
+			p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
+				l.Index, l.Time, l.Text, "", player.LyricTextDetailed{},
+				offsetSec, playTime, songDuration,
+			))
 		}
 
 		time.Sleep(pollInterval)
