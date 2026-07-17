@@ -308,6 +308,30 @@ func LyricPlayTime(lineTime float32, detailed LyricTextDetailed, offsetSec float
 	return AdjustLyricPlayTime(LyricDisplayStart(lineTime, detailed), offsetSec)
 }
 
+// pureMusicHints 各平台对「这首歌没有歌词」返回的提示语。
+//
+// 网易云与酷狗**不返回空歌词**，而是返回一行「纯音乐，请欣赏」——两家一字不差。
+// QQ 音乐的 API 则直接返回零行。同一个语义、三种表达，若原样透传给下游，
+// `index: -1` 这个「无歌词」信号就只有 QQ 音乐会发，下游必须逐平台特判。
+//
+// 认定后仍**原样保留 text**：那七个字是平台的数据，我们只是搬运工；下游想显示、
+// 想换成 "Instrumental"、想直接忽略，都由它自己决定（lyric_page.html 选择忽略）。
+var pureMusicHints = map[string]bool{
+	"纯音乐，请欣赏": true,
+}
+
+// IsPureMusicOnly 判断这份歌词是不是「平台其实没有歌词，只给了一句提示语」。
+//
+// **len(lyrics) == 1 那道闸是承重的**：没有它，这就成了纯关键词匹配——某首歌真的唱
+// 「纯音乐，请欣赏」时会被整首吞掉。加上它之后，误判需要「整首歌只有一行**且**那行
+// 恰好是这七个字」，可以忽略。
+//
+// 平台若改文案，这里会失配 → 退回「按普通歌词处理」，即本函数引入前的行为。
+// 那是降级不是故障：下游看到的是一行歌词而非 index:-1，与今天的现状相同。
+func IsPureMusicOnly(lyrics []LyricLine) bool {
+	return len(lyrics) == 1 && pureMusicHints[lyrics[0].Text]
+}
+
 // BuildLyricUpdate 构造 lyric_update 载荷。**四个播放器都必须经由它**。
 //
 // 它存在的唯一理由是把这一对易错的语义锁在一处：

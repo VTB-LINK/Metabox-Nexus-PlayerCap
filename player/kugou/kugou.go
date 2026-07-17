@@ -417,19 +417,35 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 					currentLyrics = nil
 				}
 			} else if len(lines) > 0 {
+				applyDetailedOffset(lines, offsetSec)
 				currentLyrics = lines
-				log.Info("歌词加载完成: %d 行；逐字：否", len(lines))
+				log.Info("歌词加载完成: %d 行；逐字：%s", len(lines), detailedFlag(lines))
 			} else if sameSong && len(currentLyrics) > 0 {
 				// 同名同歌手但本次取不到（伴唱模式 hash 变化）→ 复用上一次的歌词
-				log.Info("同曲目 hash 变化，复用上一次歌词（%d 行）；逐字：否", len(currentLyrics))
+				// 复用的是已套过 offset 的 currentLyrics，不要再套一次。
+				log.Info("同曲目 hash 变化，复用上一次歌词（%d 行）；逐字：%s", len(currentLyrics), detailedFlag(currentLyrics))
 			} else {
 				currentLyrics = nil
-				log.Info("纯音乐/无歌词；逐字：否")
+				log.Info("纯音乐/无歌词；逐字：%s", detailedFlag(currentLyrics))
 			}
 
 			lyricItems := toLyricLines(currentLyrics, offsetSec)
 			initPlay := anchorProgressSec // 已经过合法性验证的初始进度
 			progress := player.ClampProgress(initPlay, currentDurationSec)
+
+			// 酷狗对没有歌词的歌返回一行「纯音乐，请欣赏」，而非空歌词。归一成
+			// index:-1，让下游只认一个判据；提示语原样留在 text 里，用不用由它决定。
+			//
+			// **currentLyrics 必须一起清**：它是下面 pollLyrics 的输入，不清的话
+			// all_lyrics 说 count:0、轮询却仍按那一行发 index:0 的 lyric_update。
+			pureHint := ""
+			if player.IsPureMusicOnly(lyricItems) {
+				log.Info("平台只返回提示语「%s」，按无歌词处理", lyricItems[0].Text)
+				pureHint = lyricItems[0].Text
+				currentLyrics = nil
+				lyricItems = []player.LyricLine{} // 显式空 slice——nil 会序列化成 null，破坏「空数据一律 {} / []」
+			}
+
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 				Title:    currentTitle,
 				Duration: currentDurationSec,
@@ -439,8 +455,10 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				Count:    len(lyricItems),
 			})
 			if len(currentLyrics) == 0 {
+				// Progress 必须带上：它的契约是「整首播到哪」，纯音乐时歌照样在走。
+				// 漏掉它会让 Go 零值兜出一个 0，与同一事件里的 all_lyrics.progress 自相矛盾。
 				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index: -1, Text: "", Timestamp: 0, PlayTime: initPlay,
+					Index: -1, Text: pureHint, Timestamp: 0, PlayTime: initPlay, Progress: progress,
 				})
 			}
 
@@ -542,9 +560,10 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				lastLineIdx = trueIdx
 				line := currentLyrics[trueIdx]
 				// interpSec 是插值出的实时位置，只喂 Progress；play_time 由 BuildLyricUpdate
-				// 按歌词时间轴算。kugou 无逐字，故 detailed 传零值。
+				// 按歌词时间轴算。KRC 源有逐字（line.Detailed），LRC 回落为零值 → 序列化成 {}。
+				// words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传。
 				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-					trueIdx, line.Time, line.Text, "", player.LyricTextDetailed{},
+					trueIdx, line.Time, line.Text, "", line.Detailed,
 					offsetSec, interpSec, currentDurationSec,
 				))
 			}
@@ -600,9 +619,44 @@ func toLyricLines(lines []klyric.Line, offsetSec float32) []player.LyricLine {
 	}
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
-		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", player.LyricTextDetailed{}, offsetSec)
+		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", l.Detailed, offsetSec)
 	}
 	return out
+}
+
+// applyDetailedOffset 把 offset 同时作用到行级与逐字的 play_time。
+//
+// **必须在 Fetch 之后、存进 currentLyrics 之前套一次**：BuildLyricLine 只调行级 play_time，
+// TextDetailed 是原样透传的（对照 cloudmusic 的 applyTextDetailedOffset、qqmusic 的同名函数）。
+// 漏了这步，逐字高亮会整体偏一个 offset 而行级却是对的，症状极像"前端没对齐"；且
+// lyric_update 直接用 currentLyrics 里的 TextDetailed，不在这儿套就没有第二次机会。
+//
+// 只对新取回的歌词调用一次：伴唱模式复用 currentLyrics 那条路上的歌词已经套过了，重复套会翻倍。
+func applyDetailedOffset(lines []klyric.Line, offsetSec float32) {
+	for i := range lines {
+		d := &lines[i].Detailed
+		if len(d.Words) == 0 {
+			continue
+		}
+		d.PlayTime = player.AdjustLyricPlayTime(d.Timestamp, offsetSec)
+		for j := range d.Words {
+			d.Words[j].PlayTime = player.AdjustLyricPlayTime(d.Words[j].Timestamp, offsetSec)
+		}
+	}
+}
+
+// detailedFlag 报告这批歌词**实际**有没有逐字。
+//
+// 绝不写死——AGENTS.md §6.1：写死的「逐字：否」是断言不是报告，接通逐字的人会据此以为
+// 自己没做成、回去改一个本来就对的实现。酷狗的逐字只在 KRC 源上有；download 回落到
+// fmt=lrc 时只有行级，那时这里如实报「否」。
+func detailedFlag(lines []klyric.Line) string {
+	for _, l := range lines {
+		if len(l.Detailed.Words) > 0 {
+			return "是"
+		}
+	}
+	return "否"
 }
 
 // ── 酷狗 API 封面兜底 ────────────────────────────────────────────────────────

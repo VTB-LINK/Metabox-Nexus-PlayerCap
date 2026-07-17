@@ -1828,8 +1828,13 @@
                 if (data.type === 'lyric_update') {
                     if (titleMode) {
                         // title 模式忽略歌词更新
-                    } else if (!data.data || !data.data.text) {
-                        // 空消息：不做处理，保留当前封面/歌词状态
+                    } else if (!data.data || data.data.index === -1 || !data.data.text) {
+                        // 不做处理，保留当前封面/歌词状态。三种情况：
+                        //   · 空消息
+                        //   · index === -1：平台没有歌词。此时 text 可能非空（网易云/酷狗会给
+                        //     一句「纯音乐，请欣赏」），但那是平台的提示语不是歌词——本页忽略它，
+                        //     别的下游可自行决定显示与否。判据只认 index，不看 text。
+                        //   · 空行：text 为空但 index >= 0，歌词间奏。保留上一行，不清屏。
                     } else {
                         currentIndex = data.data.index;
                         updateDisplay(data.data);

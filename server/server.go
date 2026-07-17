@@ -132,10 +132,46 @@ func (s *Server) unsubscribe(sub *subscriber) {
 	s.subMu.Unlock()
 }
 
+// internalEvents 只驱动服务端内部状态、不属于对外 API 的事件类型。
+//
+// clear_song_data 的唯一职责是清空 playerState 缓存（UpdatePlayerState 的
+// EventClearSongData 分支），好让后续连入的客户端不会从 buildInitEvents 拿到上一首的残留。
+// 它从不是给客户端看的——载荷恒为 nil（而非本项目「空数据一律 {}」的约定）、两份对外文档
+// 零记载、lyric_page.html 不处理、接口项目里也没有它。
+//
+// 它此前会被推给 per-player 订阅者，是 router.Run 对每个事件无差别调用本函数的副作用；
+// 根订阅者则恰好被 evt.PlayerName != active 挡掉——因为它只在「本播放器已不活跃」时发出，
+// 那正是根过滤成立的条件。即根订阅者从来收不到它，纯属巧合而非设计。
+//
+// 溯源：65d9e80 把 WesingCap 时代的 Server.ClearSongData() **方法**（清缓存 + 广播空数据）
+// 重构成**事件**，职责未变但从此要过 NotifySubscribers——内部信号于是泄漏到了公开 API 表面。
+// 同期的文档原话「服务端不会主动发送清空歌词的消息」在重构前为真，之后成假且无人订正。
+var internalEvents = map[string]bool{
+	player.EventClearSongData: true,
+}
+
 // NotifySubscribers 向匹配的订阅者推送事件
 // skipRoot=true 时跳过根订阅者（播放器切换后避免与 FullState 重复）
 func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
+	// 内部事件不外发。调用方（router.Run）在此之前已调过 UpdatePlayerState，
+	// 缓存清空照常发生——这里拦掉的只是「广播」这一步。
+	if internalEvents[evt.Type] {
+		return
+	}
+
 	wsEvt := WSEvent{Type: evt.Type, Player: evt.PlayerName, Data: evt.Data}
+
+	// 「空数据一律 {}，绝不 null」（openapi.yaml:10 的全局约定）在**唯一出口**执行。
+	//
+	// nil 的 interface{} 会被 encoding/json 编码成 null。指望每个 Emit 调用点各自记得
+	// 传 struct{}{} 是靠不住的——lyric_idle 就是这么破的（wesing 两处传 nil，实测发出
+	// data:null，而文档三处声称「始终为 {}」），而且**没有任何症状**：前端只看 type，
+	// 没人发现。这类分叉只能在出口收口。
+	//
+	// 播放器侧同样传 struct{}{}（wesing.go:146/:263），双保险：源头对了，这里也兜着。
+	if wsEvt.Data == nil {
+		wsEvt.Data = struct{}{}
+	}
 
 	s.mu.RLock()
 	active := s.activePlayer
@@ -348,8 +384,15 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 				Timestamp: msg.Timestamp, PlayTime: msg.PlayTime,
 				Progress: msg.Progress, TextDetailed: msg.TextDetailed,
 			}
-			// 同步更新 PlayTime 缓存，保持 FullState 时效性
+			// 同步更新 PlayTime 与 Progress 缓存，保持 FullState 时效性。
+			//
+			// **两个必须一起更新**：它们是同一时刻的两个投影（play_time 是绝对秒数、
+			// progress 是它除以时长），漏掉任何一个都会让 buildInitEvents / FullState /
+			// HTTP 拼出一个自相矛盾的 all_lyrics——此前只更新 PlayTime，于是 Progress
+			// 从切歌那一刻起永远停在 0（实测 280 次 HTTP 采样零例外：play_time=134.86 而
+			// progress=0，而它该是 0.5756）。症状：切播放器时进度条归零，而时间在走。
 			ps.PlayTime = msg.PlayTime
+			ps.Progress = msg.Progress
 		}
 	case player.EventAllLyrics:
 		if msg, ok := evt.Data.(*player.AllLyricsData); ok {

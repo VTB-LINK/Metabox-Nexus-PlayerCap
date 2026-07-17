@@ -9,16 +9,21 @@
 ## HTTP 接口（静态数据）
 
 ### 1. `/health-check` - 健康检查
+
+真实响应原文：
+
 ```json
 {
   "code": 0,
   "msg": "success",
   "player": "internal",
   "data": {
-    "now_time": "2026-03-19T12:34:56+08:00"
+    "now_time": "2026-07-17T05:53:58+08:00"
   }
 }
 ```
+
+`now_time` 是 RFC3339 带时区。这个端点不依赖任何播放器，服务活着就返回 200。
 
 ---
 
@@ -29,10 +34,12 @@
   "msg": "success",
   "player": "internal",
   "data": {
-    "version": "3.0.0-beta.1",
+    "version": "0.0.0",
     "addr": "0.0.0.0:8765",
-    "now_time": "2026-03-19T12:34:56+08:00",
-    "config_sources": ["config.yml", "命令行参数"],
+    "now_time": "2026-07-17T05:53:58+08:00",
+    "config_sources": [
+      "config.yml"
+    ],
     "config": {
       "addr": "0.0.0.0:8765",
       "offset": 200,
@@ -46,16 +53,34 @@
       "wesing-poll": 30,
       "cloudmusicv3-offset": 500,
       "cloudmusicv3-poll": 30,
-      "qqmusic-offset": 200,
-      "qqmusic-poll": 50
+      "qqmusic-offset": 400,
+      "qqmusic-poll": 30,
+      "kugou-offset": 430,
+      "kugou-poll": 30
     },
-    "config_overwritten": ["offset", "wesing-poll"],
-    "player_support": ["wesing", "cloudmusicv3", "qqmusic"],
-    "player_running": ["wesing"],
+    "config_overwritten": [
+      "addr",
+      "offset",
+      "poll",
+      "prior-player",
+      "prior-player-expire",
+      "cloudmusicv3-effect-strategy",
+      "cloudmusicv3-offset",
+      "qqmusic-offset",
+      "kugou-offset"
+    ],
+    "player_support": [
+      "wesing",
+      "cloudmusicv3",
+      "qqmusic",
+      "kugou"
+    ],
+    "player_running": [],
     "player_status": {
-      "wesing": "playing",
+      "wesing": "waiting_process",
       "cloudmusicv3": "waiting_process",
-      "qqmusic": "waiting_process"
+      "qqmusic": "waiting_process",
+      "kugou": "waiting_process"
     },
     "endpoints": {
       "health-check": "http://0.0.0.0:8765/health-check",
@@ -95,23 +120,38 @@
         "song_info": "http://0.0.0.0:8765/qqmusic/song_info",
         "lyric_update-SSE": "http://0.0.0.0:8765/qqmusic/lyric_update-SSE",
         "song_info-SSE": "http://0.0.0.0:8765/qqmusic/song_info-SSE"
+      },
+      "kugou": {
+        "ws": "ws://0.0.0.0:8765/kugou/ws",
+        "all_lyrics": "http://0.0.0.0:8765/kugou/all_lyrics",
+        "lyric_update": "http://0.0.0.0:8765/kugou/lyric_update",
+        "status_update": "http://0.0.0.0:8765/kugou/status_update",
+        "song_info": "http://0.0.0.0:8765/kugou/song_info",
+        "lyric_update-SSE": "http://0.0.0.0:8765/kugou/lyric_update-SSE",
+        "song_info-SSE": "http://0.0.0.0:8765/kugou/song_info-SSE"
       }
     },
-    "client_count": 2,
+    "client_count": 1,
     "ws_connected": {
-      "connected": true,
       "clients": [
-        "192.168.1.100:54321",
-        "192.168.1.200:54322"
-      ]
+        "[::1]:62354"
+      ],
+      "connected": true
     }
   }
 }
 ```
 
+> **以上为真实响应原文**（2026-07-17 录制，本机开发构建、四个播放器均未启动）。所以你会看到
+> `version: "0.0.0"`（未注入版本号）、`player_running: []`、`player_status` 全是 `waiting_process`
+> ——那是「服务起了但没人放歌」的**常态**，不是残缺。
+>
+> **这个端点是端点全表的运行时真源。** 它比本文档更新得快：新增播放器时 `player_support`
+> 与 `endpoints` 自动跟着变，而文档要靠人改。**拿不准有哪些端点时，直接问它。**
+
 **version 说明：**
 - 编译时通过 `-ldflags "-X main.Version=3.0.0-beta.1"` 注入
-- 默认值为 `0.0.0`
+- 默认值为 `0.0.0`（如上例——本机 `go build` 不注入版本）
 - `tag_name` 使用完整 semver；若 release 标题以 `-force` 结尾，则客户端允许强制同步到更低版本
 
 **config_sources 说明：**
@@ -152,75 +192,146 @@
 - `clients` - 字符串数组，已连接的客户端 IP 地址列表（RemoteAddr 格式）
 
 **endpoints 说明：**
-- 返回所有可用接口的完整地址（含 Per-player 端点）
 - WebSocket 使用 `ws://`，HTTP/SSE 使用 `http://`
 
 ---
 
 ### 3. `/all_lyrics` - 完整歌词列表
 
-**正常响应（有歌词时）：**
+**正常响应（有歌词时）** — 以下为真实响应原文（cloudmusicv3，2026-07-17 录制）：
+
 ```json
 {
   "code": 0,
   "msg": "success",
-  "player": "wesing",
+  "player": "cloudmusicv3",
   "data": {
-    "title": "告白 - 花澤香菜",
-    "duration": 236.0,
-    "play_time": 1.2,
-    "progress": 0.0051,
-    "count": 12,
+    "title": "Cold - Maroon 5 / Future",
+    "duration": 234.308,
+    "play_time": 7.07,
+    "progress": 0.030527605,
+    "count": 88,
     "lyrics": [
-      {"index": 0, "timestamp": 0.5, "play_time": 0.3, "text": "いつもそばにいるのに", "sub_text": "", "text_detailed": {}},
-      {"index": 1, "timestamp": 2.1, "play_time": 1.9, "text": "ふと気付くと遠すぎて", "sub_text": "", "text_detailed": {}},
-      {"index": 2, "timestamp": 3.8, "play_time": 3.6, "text": "手を伸ばしても届かない", "sub_text": "", "text_detailed": {}},
-      {"index": 3, "timestamp": 5.5, "play_time": 5.3, "text": "深い森の奥へ迷い込む", "sub_text": "", "text_detailed": {}},
-      {"index": 4, "timestamp": 7.2, "play_time": 7.0, "text": "君に逢いたい", "sub_text": "", "text_detailed": {}},
-      {"index": 5, "timestamp": 9.0, "play_time": 8.8, "text": "君に嘘をついていた", "sub_text": "", "text_detailed": {}},
-      {"index": 6, "timestamp": 11.2, "play_time": 11.0, "text": "心は静かに落ち着かず", "sub_text": "", "text_detailed": {}},
-      {"index": 7, "timestamp": 13.5, "play_time": 13.3, "text": "何也もかもが手から零れ落ちる", "sub_text": "", "text_detailed": {}},
-      {"index": 8, "timestamp": 15.8, "play_time": 15.6, "text": "ずっと歩いてくよ", "sub_text": "", "text_detailed": {}},
-      {"index": 9, "timestamp": 18.2, "play_time": 18.0, "text": "迷えるまま", "sub_text": "", "text_detailed": {}},
-      {"index": 10, "timestamp": 20.5, "play_time": 20.3, "text": "君を探す", "sub_text": "", "text_detailed": {}},
-      {"index": 11, "timestamp": 22.8, "play_time": 22.6, "text": "その先へ", "sub_text": "", "text_detailed": {}}
+      {
+        "index": 0,
+        "timestamp": 3.6100001,
+        "play_time": 3.1100001,
+        "text": "Cold enough to chill my bones",
+        "sub_text": "冷得足以冻到我的骨头",
+        "text_detailed": {
+          "timestamp": 4.44,
+          "play_time": 3.94,
+          "duration": 3.48,
+          "words": [
+            {"timestamp": 4.44, "play_time": 3.94, "duration": 1.08, "text": "Cold "},
+            {"timestamp": 5.52, "play_time": 5.02, "duration": 0.36, "text": "enough "}
+          ]
+        }
+      },
+      {
+        "index": 1,
+        "timestamp": 7.57,
+        "play_time": 7.07,
+        "text": "It feels like I don't know you anymore",
+        "sub_text": "感觉就像我已经不再认识你了",
+        "text_detailed": {
+          "timestamp": 7.92,
+          "play_time": 7.42,
+          "duration": 3.48,
+          "words": [
+            {"timestamp": 7.92, "play_time": 7.42, "duration": 0.06, "text": "It "},
+            {"timestamp": 7.98, "play_time": 7.48, "duration": 0.3, "text": "feels "}
+          ]
+        }
+      }
     ],
-    "lyrics_detailed": []
+    "lyrics_detailed": [
+      {
+        "lyric_index": 0,
+        "timestamp": 4.44,
+        "play_time": 3.94,
+        "duration": 3.48,
+        "text": "Cold enough to chill my bones",
+        "words": [
+          {"timestamp": 4.44, "play_time": 3.94, "duration": 1.08, "text": "Cold "},
+          {"timestamp": 5.52, "play_time": 5.02, "duration": 0.36, "text": "enough "}
+        ]
+      }
+    ]
   }
 }
 ```
 
+> **示例已裁剪，只删元素不改值**：`lyrics` 实际 **88** 行（此处留 2）、`lyrics_detailed` 实际 **88** 项（留 1）、每行 `words` 实际 6 个（留 2）。
+> 所以 `count: 88` 与上面 `lyrics` 的长度对不上——**那是裁剪造成的，真实响应中两者一致**。数值一律是录制原文，未经修改。
+
 **说明：**
-- `player` - 数据来源播放器（根端点时为当前活跃播放器，Per-player 端点时为指定播放器）
 - `duration` - 歌曲总时长（秒）
-- `play_time` - 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
-- `progress` - 当前播放进度（0-1），与 `lyric_update.progress` 同类型
-- `count` - 歌词行数
+- `play_time` - **最近一行歌词的播出时间**（秒），不是「现在播到哪」，详见下方
+- `progress` - **整首播到哪**（0–1，实时播放位置 / 总时长）
+- `count` - 歌词行数（`lyrics` 的真实长度）
 - `title` - 歌曲标题（格式：歌曲名 - 歌手）
 - `lyrics` - 按 index 排序的歌词数组
 - `lyrics[].timestamp` - 该歌词行的起始时间戳（秒）
 - `lyrics[].play_time` - 该歌词行应用 offset 后的展示时间（秒）
-- `lyrics[].sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
-- `lyrics[].text_detailed` - 主歌词逐字/细粒度扩展；无逐字时为空对象 `{}`
-- `lyrics_detailed` - 完整逐字歌词集合；无逐字时为空数组 `[]`，其中 `text` 完全由 `words[].text` 拼接而来
+- `lyrics[].sub_text` - 副歌词文本（翻译，无时为空字符串）——**并非所有平台都有**，见下方能力矩阵
+- `lyrics[].text_detailed` - 该行的逐字扩展；无逐字时为空对象 `{}`。**同一首歌里可以逐行不同**（空行、纯人声段落常常没有）
+- `lyrics_detailed` - 逐字歌词集合，**仅含有逐字数据的行**；无逐字时为空数组 `[]`
+  - `lyric_index` - **对应 `lyrics[].index`**，用它关联回歌词行
+  - `text` - 完全由 `words[].text` 拼接而来
 
-**`text_detailed` 字段结构（有逐字数据时）：**
+#### `play_time` 与 `progress` 是两个不同的量
+
+别把它们当同一个数的两种写法（示例里 `play_time=7.07`、`progress=0.0305`，而 `7.07/234.308 = 0.0302`——**差值不是误差**）：
+
+| | 来源 | 含义 |
+|---|---|---|
+| `play_time` | 歌词时间轴 | 最近一行歌词**何时该播出**（= 该行 displayStart − offset） |
+| `progress` | 实时时钟 | **整首播到哪**（实时位置 / 总时长） |
+
+二者在常规行上只差一个轮询滞后（毫秒级），所以**写反了长期看不出症状**——直到某行的逐字时间轴早于行时间戳时才会突然错开数秒。**画进度条请用 `progress`，做插值锚点请用 `progress × duration`，不要用 `play_time`。**
+
+#### 平台能力矩阵（实测）
+
+| | `sub_text`（翻译） | `text_detailed`（逐字） |
+|---|---|---|
+| **cloudmusicv3** | 有 | 有（YRC） |
+| **qqmusic** | 有 | 有（QRC） |
+| **wesing** | 恒 `""` | 恒 `{}` |
+| **kugou** | 恒 `""` | 有（KRC）\* |
+
+**翻译**两家有（cloudmusicv3 / qqmusic）、两家无（wesing / kugou 恒 `""`）；**逐字**三家有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC）、wesing 无。字段一律存在（值可能为空），下游不必按平台分支取值。
+
+\* kugou 的逐字取决于 KRC 源当次是否可得：拿不到 KRC、回落到行级 LRC 时，`text_detailed` 为 `{}`、`lyrics_detailed` 为 `[]`。
+
+#### 歌词数组前几行可能是元数据
+
+```text
+lyrics[0]  {"index": 0, "text": "Taylor Swift - Cruel Summer"}          ← 标题行
+lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} ← 作词行
+```
+
+平台返回的歌词文件常把标题/词/曲塞在最前面（QQ 音乐是 `詞：` / `曲：`，酷狗是 `Written by：` / `作词：`）。**但不是每首都有**——实测同一平台有的歌 `lyrics[0]` 直接就是第一句歌词。**下游既不能假设前几行是元数据，也不能假设不是**，这是平台数据的原样透传。
+
+**`text_detailed` 字段结构（有逐字数据时）** — 真实原文（cloudmusicv3 `Cold` 第一行，未裁剪）：
 ```json
 {
-  "timestamp": 25.23,
-  "play_time": 24.73,
-  "duration": 2.95,
+  "timestamp": 4.44,
+  "play_time": 3.94,
+  "duration": 3.48,
   "words": [
-    {"timestamp": 25.23, "play_time": 24.73, "duration": 0.54, "text": "Si "},
-    {"timestamp": 25.77, "play_time": 25.27, "duration": 0.24, "text": "nici "},
-    {"timestamp": 26.01, "play_time": 25.51, "duration": 0.59, "text": "macar "},
-    {"timestamp": 26.6,  "play_time": 26.1,  "duration": 0.33, "text": "eu "},
-    {"timestamp": 26.93, "play_time": 26.43, "duration": 0.25, "text": "nu "},
-    {"timestamp": 27.18, "play_time": 26.68, "duration": 0.34, "text": "ma "},
-    {"timestamp": 27.52, "play_time": 27.02, "duration": 0.66, "text": "cunosc"}
+    {"timestamp": 4.44, "play_time": 3.94, "duration": 1.08, "text": "Cold "},
+    {"timestamp": 5.52, "play_time": 5.02, "duration": 0.36, "text": "enough "},
+    {"timestamp": 5.88, "play_time": 5.38, "duration": 0.39, "text": "to "},
+    {"timestamp": 6.27, "play_time": 5.77, "duration": 0.27, "text": "chill "},
+    {"timestamp": 6.54, "play_time": 6.04, "duration": 0.33, "text": "my "},
+    {"timestamp": 6.87, "play_time": 6.37, "duration": 1.05, "text": "bones"}
   ]
 }
 ```
+
+> **注意 `words[].text` 的尾随空格**：英文按词切分，空格已经含在 `text` 里（`"Cold "`、`"enough "`），最后一个词没有。
+> 拼接时用 `words.map(w => w.text).join('')`——**用 `join(' ')` 会出双空格**。中文/日文按字切分，无空格（`"薄"`、`"紅"`）。
 
 **`text_detailed` 字段说明：**
 - `timestamp` - 逐字行原始起始时间（秒），来自 YRC 源数据
@@ -232,15 +343,18 @@
 - `words[].duration` - 该字/词持续时间（秒），用于 reveal 动画的进度计算
 - `words[].text` - 该字/词的文本内容（含尾部空格）
 
-**`lyrics_detailed` 数组项结构：**
+**`lyrics_detailed` 数组项结构** — 真实原文（`words` 已裁剪至 2 个，实际 6 个）：
 ```json
 {
-  "lyric_index": 2,
-  "timestamp": 25.23,
-  "play_time": 24.73,
-  "duration": 2.95,
-  "text": "Si nici macar eu nu ma cunosc",
-  "words": [...]
+  "lyric_index": 0,
+  "timestamp": 4.44,
+  "play_time": 3.94,
+  "duration": 3.48,
+  "text": "Cold enough to chill my bones",
+  "words": [
+    {"timestamp": 4.44, "play_time": 3.94, "duration": 1.08, "text": "Cold "},
+    {"timestamp": 5.52, "play_time": 5.02, "duration": 0.36, "text": "enough "}
+  ]
 }
 ```
 
@@ -251,86 +365,124 @@
 - `words[]` - 同 `text_detailed.words`
 - 仅包含有逐字数据的行（无逐字的行不出现在此数组中）
 
-**逐字数据可用性：**
-- 目前仅网易云音乐（CloudMusic）播放器提供逐字数据（通过 YRC 格式解析）
-- 其他播放器的 `text_detailed` 始终为 `{}`，`lyrics_detailed` 始终为 `[]`
-- 并非所有网易云歌曲都有 YRC 数据，部分歌曲仅有 LRC（此时也为空）
-- YRC 与 LRC 的文本可能存在标点差异（如 `,` vs `'`），服务端通过模糊匹配自动关联
+**逐字数据可用性（实测）：**
+- 网易云音乐（YRC）、QQ 音乐（QRC）、酷狗音乐（KRC）提供逐字数据。三者的 `text_detailed` 复用同一结构，下游无需按平台分支解析。酷狗在拿不到 KRC、回落到行级 LRC 时无逐字
+- 并非所有歌曲都有逐字数据。**同一首歌里也可以逐行不同**——实测一首 51 行的歌里 42 行有逐字，其余 9 行（8 个空行 + 1 行纯人声 `"Woo...Yeah..."`）为 `{}`
+- `lyrics_detailed[].text` 与对应的 `lyrics[].text` 可能有标点差异，**不可用于相等比较**
 
-**无歌词时：**
+**无歌词时** — 真实原文（qqmusic 纯音乐，`lyric_update` 同时发 `index: -1`）：
 ```json
 {
   "code": 0,
   "msg": "success",
-  "player": "wesing",
-  "data": {}
+  "player": "qqmusic",
+  "data": {
+    "title": "Road to You - Ryan Farish",
+    "duration": 235,
+    "play_time": 0,
+    "progress": 0,
+    "count": 0,
+    "lyrics": [],
+    "lyrics_detailed": []
+  }
 }
 ```
+
+> ⚠️ **`data` 不是 `{}`**——它是完整对象，只是 `lyrics` 为空数组、`count` 为 `0`。
+> `title` / `duration` 照常有值。判断有无歌词请用 `data.count === 0` 或 `data.lyrics.length === 0`，
+> **不要用 `!data.lyrics`**（空数组是 truthy）。
+>
+> 另有一个**中间态**同样长这样：歌曲信息已读到、歌词还在拉的瞬间（`title` 有值、`count: 0`）。
+> 二者在这个端点上无法区分，需要配合 `lyric_update` 的 `index`（纯音乐时为 `-1`）。
 
 ---
 
 ### 4. `/lyric_update` - 当前歌词（最新一条）
 
-**正常响应（播放中）：**
-```json
-{
-  "code": 0,
-  "msg": "success",
-  "player": "wesing",
-  "data": {
-    "index": 5,
-    "text": "君に嘘をついていた",
-    "sub_text": "",
-    "timestamp": 9.0,
-    "play_time": 9.15,
-    "progress": 0.4167,
-    "text_detailed": {}
-  }
-}
-```
-
-**说明：**
-- `index` - 歌词行号（`-1` 表示当前歌曲为纯音乐，见下方说明）
-- `text` - 主歌词文本
-- `sub_text` - 副歌词文本（翻译/音译等，无时为空字符串）
-- `timestamp` - 歌词时间戳（秒）
-- `play_time` - 实际播放时间（秒）；根据偏移量调整后的时间
-- `progress` - 播放进度（0-1）
-- `text_detailed` - 主歌词逐字/细粒度扩展；无逐字时为空对象 `{}`
-
-**无歌词时：**
-```json
-{
-  "code": 0,
-  "msg": "success",
-  "player": "wesing",
-  "data": {}
-}
-```
-
-**纯音乐：**
+**正常响应（播放中）** — 真实原文（cloudmusicv3，`words` 裁剪至 2 个、实际 8 个）：
 ```json
 {
   "code": 0,
   "msg": "success",
   "player": "cloudmusicv3",
   "data": {
-    "index": -1,
-    "text": "",
-    "sub_text": "",
-    "timestamp": 0,
-    "play_time": 45.2,
-    "progress": 0,
-    "text_detailed": {}
+    "index": 1,
+    "text": "It feels like I don't know you anymore",
+    "sub_text": "感觉就像我已经不再认识你了",
+    "timestamp": 7.57,
+    "play_time": 7.07,
+    "progress": 0.030527605,
+    "text_detailed": {
+      "timestamp": 7.92,
+      "play_time": 7.42,
+      "duration": 3.48,
+      "words": [
+        {"timestamp": 7.92, "play_time": 7.42, "duration": 0.06, "text": "It "},
+        {"timestamp": 7.98, "play_time": 7.48, "duration": 0.3,  "text": "feels "}
+      ]
+    }
   }
 }
 ```
 
+**说明：**
+- `index` - 歌词行号（`-1` = 平台没有歌词，见下方）
+- `text` - 主歌词文本
+- `sub_text` - 副歌词文本（翻译，无时为空字符串）。**cloudmusicv3 / qqmusic 有，wesing / kugou 恒为空**
+- `timestamp` - 该行的原始时间戳（秒）
+- `play_time` - **本行的播出时间**（秒）= `timestamp − offset`，**恒小于 `timestamp`**
+- `progress` - **整首播到哪**（0–1，实时位置 / 总时长）
+- `text_detailed` - 该行的逐字扩展；无逐字时为空对象 `{}`
+
+> ⚠️ **`play_time` 与 `progress` 不是一个量**。示例里 `play_time=7.07`、`progress=0.0305`，
+> 而 `7.07/234.308 = 0.0302`——**差值不是误差**：前者来自歌词时间轴，后者来自实时时钟。
+> 二者在常规行上只差一个轮询滞后（毫秒级），**写反了长期没有症状**，直到某行的逐字时间轴
+> 早于行时间戳时才会突然错开数秒。
+>
+> **画进度条 / 做插值锚点请用 `progress`（× `duration` 反推位置），不要用 `play_time`。**
+
+**无缓存时**（服务刚起、或该播放器还没播过歌）— 真实原文：
+```json
+{"code":0,"msg":"success","player":"","data":{}}
+```
+
+根端点在没有活跃播放器时，`player` 也是空字符串。
+
+**平台没有歌词时**（`index: -1`）— 真实原文（qqmusic 纯音乐，播到 28 秒）：
+```json
+{
+  "index": -1,
+  "text": "",
+  "sub_text": "",
+  "timestamp": 0,
+  "play_time": 28.151,
+  "progress": 0.12511556,
+  "text_detailed": {}
+}
+```
+
 **`index: -1` 说明：**
-- 当播放器确认当前歌曲为纯音乐（无歌词）时，返回 `index: -1` 而非空对象
-- 此时 `text`、`sub_text` 均为空字符串，`timestamp` 为 `0`，`progress` 为 `0`
-- 与此事件同时，服务端还会发送一条 `all_lyrics`，其 `count: 0`，`lyrics: []`
-- 客户端判断有无歌词请用 `msg.data.index !== -1`，而非 `msg.data.text`
+
+- 含义是**平台完全没有返回歌词数据**，不是「这是纯音乐」——两者不等价，见下
+- `text` / `sub_text` 为空字符串，`timestamp` 为 `0`
+- **`play_time` 与 `progress` 照常跟着歌走**（示例：`28.151` / `0.125` = `28.151/225`）。歌没有歌词，但它还在播
+- 与它同时，服务端会发一条 `all_lyrics`，其 `count: 0`、`lyrics: []`
+- **判断有无歌词用 `msg.data.index === -1`**，而非 `msg.data.text`
+
+#### 「纯音乐」不一定触发 `index: -1`
+
+各平台对没有歌词的歌，返回的数据不一样：
+
+| 平台 | 平台返回什么 | 我们发什么 |
+|---|---|---|
+| **qqmusic** | API 返回零行 | `index: -1`，`text: ""` |
+| **cloudmusicv3** | 一行「纯音乐，请欣赏」 | `index: -1`，**`text: "纯音乐，请欣赏"`** |
+| **kugou** | 一行「纯音乐，请欣赏」（与网易云一字不差） | 同上 |
+| **wesing** | —— | **不会出现**：K 歌平台曲库内所有歌都带词 |
+
+服务端已把三家**归一成 `index: -1`**，下游只需认这一个判据。但**平台的提示语原样保留在 `text` 里**——它是平台的数据，不是我们编的。如何处理该文本由下游决定（本项目自带的 `lyric_page.html` 忽略它）。
+
+> **所以 `index === -1` 时 `text` 可能非空。** 别写成 `if (data.text) 显示歌词`——那会把「纯音乐，请欣赏」当歌词渲染。判据永远是 `index`。
 
 ---
 
@@ -342,7 +494,7 @@
   "player": "wesing",
   "data": {
     "status": "playing",
-    "detail": "告白 - 花澤香菜"
+    "detail": "晚风 - 陈婧霏"
   }
 }
 ```
@@ -353,7 +505,29 @@
 - `"loading"` - 歌曲加载中，detail 为歌曲名称
 - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
 - `"paused"` - 暂停中（play_time 停止推进时自动检测），detail 为歌曲标题
-- `"standby"` - 待机状态，播放器已退出
+- `"standby"` - **不只是「播放器已退出」**，`detail` 有五种语义，见下
+
+##### ⚠️ `standby` 的 `detail` 有五种
+
+**别把 `standby` 一律当成「播放器已退出」**——那会让你提示主播「请启动网易云」，而他的网易云开着：
+
+| `detail` | 真实含义 |
+|---|---|
+| `"网易云音乐已退出"` / `"QQ音乐已退出"` / `"K歌客户端已退出"` | 进程真的没了 → 提示启动 |
+| `"酷狗音乐 CDP 已断开"` | 进程可能还在，是调试端口断了 → 提示重启 |
+| **`"网易云音乐 v2.10.13.6067 不支持（需 v3+）"`** | **进程开着，版本太老** → 提示**升级**，让他去「启动」是错的 |
+
+实测同框（同一次录制，间隔 16 秒）：
+
+```text
+standby  '网易云音乐已退出'
+standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'
+standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒后重发
+```
+
+版本不支持时该事件**每 30 秒重发一次且不去重**（服务端每 30 秒重探版本）。升级到 v3 后**最长等 30 秒**才恢复取词——不是没重试。
+
+> 区分这五种目前只能**匹配 `detail` 文本**（服务端没有更细的状态码）。`"不支持"` 是版本问题的稳定特征。
 
 **尚未获取到状态时：**
 ```json
@@ -376,9 +550,9 @@
   "msg": "success",
   "player": "wesing",
   "data": {
-    "name": "告白",
-    "singer": "花澤香菜",
-    "title": "告白 - 花澤香菜",
+    "name": "晚风",
+    "singer": "陈婧霏",
+    "title": "晚风 - 陈婧霏",
     "cover": "http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg",
     "cover_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
   }
@@ -398,22 +572,54 @@
 **说明：**
 - 直接切歌（A→B）时，不会先返回空再返回 B，而是直接返回 B 的信息
 
+#### ⚠️ 每首歌会推**两条** `song_info_update`，第一条没有封面
+
+这是 WS/SSE 侧的行为，但直接决定你怎么用这个端点。实测（四首歌全中）：
+
+```text
+ms=103007  红日   cover=有  cover_base64=(空)        ← 第一条
+ms=103195  红日   cover=有  cover_base64=232427     ← 第二条，188ms 后
+```
+
+**这是设计**：先把文字信息给前端渲染，封面下载完再补一条。**别等第二条再渲染歌名**。
+
+> **而且可能永远没有第二条。** 实测有歌曲的 `cover` 字段本身就是空的（封面 URL 获取失败，命令行会打 `[!] 封面 URL 获取失败`），此时不会发起下载，也就没有第二条：
+>
+> ```text
+> ms=38880   都是夜归人   cover=(空)   cover_base64=(空)   ← 只有这一条
+> ```
+>
+> 写「等到 `cover_base64` 再显示」的前端，在这些歌上会永远白屏。**拿到就用，没有就算**。
+
+（背景：wesing 的内存同步不一致，封面偶尔会拿到上一首或拿不到，那是平台行为。）
+
 ---
 
 ### Per-player 端点
 
-除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径：
+除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径。**四个播放器都有**：
 
 ```
-/wesing/all_lyrics        /cloudmusicv3/all_lyrics
-/wesing/lyric_update      /cloudmusicv3/lyric_update
-/wesing/status_update     /cloudmusicv3/status_update
-/wesing/song_info         /cloudmusicv3/song_info
-/wesing/lyric_update-SSE  /cloudmusicv3/lyric_update-SSE
-/wesing/song_info-SSE     /cloudmusicv3/song_info-SSE
+/wesing/all_lyrics          /cloudmusicv3/all_lyrics
+/wesing/lyric_update        /cloudmusicv3/lyric_update
+/wesing/status_update       /cloudmusicv3/status_update
+/wesing/song_info           /cloudmusicv3/song_info
+/wesing/lyric_update-SSE    /cloudmusicv3/lyric_update-SSE
+/wesing/song_info-SSE       /cloudmusicv3/song_info-SSE
+/wesing/ws                  /cloudmusicv3/ws
+
+/qqmusic/all_lyrics         /kugou/all_lyrics
+/qqmusic/lyric_update       /kugou/lyric_update
+/qqmusic/status_update      /kugou/status_update
+/qqmusic/song_info          /kugou/song_info
+/qqmusic/lyric_update-SSE   /kugou/lyric_update-SSE
+/qqmusic/song_info-SSE      /kugou/song_info-SSE
+/qqmusic/ws                 /kugou/ws
 ```
 
 Per-player 端点始终返回指定播放器的数据，不受路由切换影响。响应格式与根端点相同，`player` 字段固定为对应播放器名。
+
+> 端点全表也可以直接问服务：`GET /service-status` 的 `endpoints` 字段列出全部可用地址（含 per-player 与网易云特效通道），`player_support` 列出所有播放器。**那是运行时的真源，比本文档更新得快。**
 
 ---
 
@@ -430,7 +636,7 @@ data: {"type":"lyric_update","player":"wesing","data":{}}
 
 **初始发送（有歌词时）：**
 ```
-data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"君に嘘をついていた","sub_text":"","timestamp":9.0,"play_time":9.15,"progress":0.5,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"更不应舍弃","sub_text":"","timestamp":30.429,"play_time":30.229,"progress":0.10236486,"text_detailed":{}}}
 ```
 
 **播放过程中，每当歌词更新时接收：**
@@ -454,10 +660,9 @@ data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"新歌�
 ```
 
 **特性：**
-- ✅ 完全支持 UTF-8 编码（中文、日文、韩文、俄文等所有语言）
-- ✅ 服务器设置了 `Content-Type: text/event-stream; charset=utf-8`
-- ✅ 连接时始终立即发送当前状态
-- 实时推送，延迟极低
+- 响应头 `Content-Type: text/event-stream; charset=utf-8`
+- **严格单类型**：本端点只推送 `lyric_update`，**不推送 `all_lyrics`** —— 需要歌词全文请调用 `/all_lyrics` 或改用 WebSocket
+- 载荷与 WebSocket 逐字节同构，**含 `type` 字段**（`data: {"type":"lyric_update","player":"...","data":{...}}`）
 - 支持跨域（CORS）
 
 **客户端使用示例（JavaScript）：**
@@ -483,7 +688,7 @@ data: {"type":"song_info_update","player":"wesing","data":{}}
 
 **初始发送（有歌曲信息时）：**
 ```
-data: {"type":"song_info_update","player":"wesing","data":{"name":"告白","singer":"花澤香菜","title":"告白 - 花澤香菜","cover":"http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg","cover_base64":"data:image/jpeg;base64,..."}}
+data: {"type":"song_info_update","player":"wesing","data":{"name":"晚风","singer":"陈婧霏","title":"晚风 - 陈婧霏","cover":"http://imgcache.qq.com/music/photo/mid_album_800/r/k/003JA09X2m9xrk.jpg","cover_base64":"data:image/jpeg;base64,..."}}
 ```
 
 **播放过程中，歌曲切换时接收：**
@@ -498,9 +703,7 @@ data: {"type":"song_info_update","player":"wesing","data":{}}
 - 直接切歌（A→B）时，不会先发送空再发送 B，而是直接发送 B 的信息
 
 **特性：**
-- ✅ 完全支持 UTF-8 编码
-- ✅ 连接时始终立即发送当前状态
-- 实时推送，延迟极低
+- 响应以 UTF-8 编码
 - 支持跨域（CORS）
 
 **客户端使用示例（JavaScript）：**
@@ -572,7 +775,7 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
   "player": "wesing",
   "data": {
     "status": "playing",
-    "detail": "告白 - 花澤香菜"
+    "detail": "晚风 - 陈婧霏"
   }
 }
 ```
@@ -583,7 +786,29 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 - `"loading"` - 歌曲加载中，detail 为歌曲名称
 - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
 - `"paused"` - 暂停中（play_time 停止推进时自动检测），detail 为歌曲标题
-- `"standby"` - 待机状态，播放器已退出
+- `"standby"` - **不只是「播放器已退出」**，`detail` 有五种语义，见下
+
+##### ⚠️ `standby` 的 `detail` 有五种
+
+**别把 `standby` 一律当成「播放器已退出」**——那会让你提示主播「请启动网易云」，而他的网易云开着：
+
+| `detail` | 真实含义 |
+|---|---|
+| `"网易云音乐已退出"` / `"QQ音乐已退出"` / `"K歌客户端已退出"` | 进程真的没了 → 提示启动 |
+| `"酷狗音乐 CDP 已断开"` | 进程可能还在，是调试端口断了 → 提示重启 |
+| **`"网易云音乐 v2.10.13.6067 不支持（需 v3+）"`** | **进程开着，版本太老** → 提示**升级**，让他去「启动」是错的 |
+
+实测同框（同一次录制，间隔 16 秒）：
+
+```text
+standby  '网易云音乐已退出'
+standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'
+standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒后重发
+```
+
+版本不支持时该事件**每 30 秒重发一次且不去重**（服务端每 30 秒重探版本）。升级到 v3 后**最长等 30 秒**才恢复取词——不是没重试。
+
+> 区分这五种目前只能**匹配 `detail` 文本**（服务端没有更细的状态码）。`"不支持"` 是版本问题的稳定特征。
 
 **无状态时（服务刚启动尚未获取到状态）：**
 ```json
@@ -602,9 +827,9 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
   "type": "song_info_update",
   "player": "wesing",
   "data": {
-    "name": "告白",
-    "singer": "花澤香菜",
-    "title": "告白 - 花澤香菜",
+    "name": "晚风",
+    "singer": "陈婧霏",
+    "title": "晚风 - 陈婧霏",
     "cover": "http://imgcache.qq.com/music/photo/mid_album_500/a/b/001aBcDe23FgHi.jpg",
     "cover_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
   }
@@ -631,11 +856,11 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
   "player": "wesing",
   "data": {
     "index": 5,
-    "text": "君に嘘をついていた",
+    "text": "更不应舍弃",
     "sub_text": "",
-    "timestamp": 9.0,
-    "play_time": 9.15,
-    "progress": 0.4167,
+    "timestamp": 30.429,
+    "play_time": 30.229,
+    "progress": 0.10236486,
     "text_detailed": {}
   }
 }
@@ -667,7 +892,7 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 }
 ```
 
-> `index: -1` 表示播放器确认当前歌曲为纯音乐（无歌词）。此情况下 `data` 不为 `{}`，客户端应使用 `msg.data.index !== undefined && msg.data.index === -1` 来识别纯音乐，而非依赖 `msg.data.text`。与此事件同时到达的 `all_lyrics` 中 `count: 0`，`lyrics: []`。
+> `index: -1` 表示播放器确认当前歌曲为纯音乐（无歌词）。此情况下 `data` 不为 `{}`，客户端用 `msg.data.index === -1` 判断，而非依赖 `msg.data.text`。与此事件同时到达的 `all_lyrics` 中 `count: 0`，`lyrics: []`。
 
 #### 4. `all_lyrics` - 完整歌词列表
 
@@ -677,20 +902,27 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
   "type": "all_lyrics",
   "player": "wesing",
   "data": {
-    "title": "告白 - 花澤香菜",
-    "duration": 236.0,
-    "play_time": 1.2,
-    "progress": 0.0051,
-    "count": 12,
+    "title": "都是夜归人 - 许美静",
+    "duration": 296,
+    "play_time": 0,
+    "progress": 0,
+    "count": 38,
     "lyrics": [
-      {"index": 0, "timestamp": 0.5, "play_time": 0.3, "text": "いつもそばにいるのに", "sub_text": "", "text_detailed": {}},
-      {"index": 1, "timestamp": 2.1, "play_time": 1.9, "text": "ふと気付くと遠すぎて", "sub_text": "", "text_detailed": {}},
-      {"index": 2, "timestamp": 3.8, "play_time": 3.6, "text": "手を伸ばしても届かない", "sub_text": "", "text_detailed": {}}
+      {"index": 0, "timestamp": 25.44, "play_time": 25.24, "text": "是冰冻的时分 已过夜深的夜晚", "sub_text": "", "text_detailed": {}},
+      {"index": 1, "timestamp": 31.483, "play_time": 31.282999, "text": "往事就像流星刹那划过心房", "sub_text": "", "text_detailed": {}},
+      {"index": 2, "timestamp": 37.716, "play_time": 37.516, "text": "灰暗的深夜 是寂寞的世界", "sub_text": "", "text_detailed": {}}
     ],
     "lyrics_detailed": []
   }
 }
 ```
+
+> **示例已裁剪**：`lyrics` 实际 38 行（此处留 3），`count: 38` 是真实值。数值一律取自录制原文。
+>
+> `play_time: 0` / `progress: 0` 不是占位——**WS 的 `all_lyrics` 只在切歌时发**，那一刻歌刚开始。
+> 而 **HTTP 的 `/all_lyrics` 会给实时值**（它读缓存，跟着 `lyric_update` 走）。同一个端点名，两种传输的语义不同。
+>
+> wesing 的 `sub_text` 恒为 `""`、`text_detailed` 恒为 `{}`、`lyrics_detailed` 恒为 `[]`——它没有翻译与逐字的数据来源。kugou 的翻译同样恒空，但**逐字有**（KRC 源；回落行级 LRC 时才为 `{}` / `[]`）。
 
 **无歌词时：**
 ```json
@@ -716,7 +948,7 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 
 #### 6. `playback_pause` - 暂停播放
 
-当 play_time 连续多次不变时检测为暂停：
+播放暂停时发送，`data.play_time` 为暂停时刻的播放时间：
 ```json
 {
   "type": "playback_pause",
@@ -775,7 +1007,7 @@ play_time 重新推进时发送：
 - 当 `to` 为空时，紧随其后会收到一条 `player_clear` 事件（见下方第 9 条）
 - Per-player 订阅者（如 `/wesing/ws`）**不会**收到此事件
 - 当 `to` 非空时，紧随其后会收到新播放器的**已缓存**状态事件（`status_update` + `song_info_update` + `all_lyrics` + `lyric_update` 中已有的部分）。如果新播放器刚启动、缓存尚未建立（如正处于 loading 阶段），则只会收到已有的事件（可能仅 `status_update`），其余事件在播放器实际上报后才会到达
-- 服务端会自动抑制 FullState 已推送的事件类型，避免后续实时事件重复到达。仅抑制 FullState 实际包含的类型，不会吞掉缓存中不存在的首次数据
+- 切换后随 FullState 推送过的事件类型不会立即重复推送第二遍；FullState 未包含的类型，其首次数据仍会正常到达
 
 #### 9. `player_clear` - 活跃播放器清除（仅根订阅者收到）
 
@@ -833,17 +1065,26 @@ play_time 重新推进时发送：
 ← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":5,"text":"在时间里等你","sub_text":"","timestamp":46.0,"play_time":46.1,"progress":0.16,"text_detailed":{}}}
 ...
 
-（歌曲播放完毕）
-← {"type":"lyric_idle","player":"cloudmusicv3","data":{}}
+（歌曲播放完毕 —— **仅 wesing 会发 lyric_idle**，网易云/QQ/酷狗不发此事件）
+← {"type":"lyric_idle","player":"wesing","data":{}}
 
-（播放器退出）
-← {"type":"status_update","player":"cloudmusicv3","data":{"status":"standby","detail":"播放器已退出"}}
-← {"type":"status_update","player":"cloudmusicv3","data":{"status":"waiting_process","detail":"播放器未启动"}}
+（播放器退出 —— detail 逐家不同，不是「播放器已退出」这种泛称）
+← {"type":"status_update","player":"cloudmusicv3","data":{"status":"standby","detail":"网易云音乐已退出"}}
+← {"type":"status_update","player":"cloudmusicv3","data":{"status":"waiting_process","detail":"网易云音乐未启动"}}
 
-（所有播放器均无活动 —— 活跃播放器清除）
+（若装的是 v2 —— 进程开着，但版本不支持。每 30 秒重发一次）
+← {"type":"status_update","player":"cloudmusicv3","data":{"status":"standby","detail":"网易云音乐 v2.10.13.6067 不支持（需 v3+）"}}
+
+（所有播放器均无活动 —— 活跃播放器清除。这两条**必定成对、按此顺序**）
 ← {"type":"player_switch","player":"","data":{"from":"cloudmusicv3","to":""}}
 ← {"type":"player_clear","player":"","data":{}}
 ```
+
+> **上面的事件顺序取自真实录音**（05-cloudmusic）。几处容易想当然的地方：
+> - **`player_switch` 先于 `status_update`**，不是反过来
+> - **切歌时 `song_info_update` 发两次**（第二条带封面），中间夹着 `all_lyrics`
+> - **`player_switch(to="")` 与 `player_clear` 必定成对且按此顺序**，中间不会插别的
+> - 歌词行的 `lyric_update` 未在此列出（太密），实测一首歌 40~90 条
 
 ---
 
@@ -999,13 +1240,17 @@ curl http://localhost:8765/service-status
 | 播放器退出 | `status_update` → `standby` / `waiting_process` | 清空歌词与歌曲信息 |
 | 播放器切换 | `player_switch`（`to` 非空） | 重置显示，等待紧随其后的新播放器初始状态 |
 | 所有播放器无活动 | `player_switch`（`to=""`）+ `player_clear` | 清空所有显示（歌词、封面、进度等） |
-| 歌曲播放结束 | `lyric_idle` | 可选：清空歌词或保持最后一行显示 |
+| 歌曲播放结束 | `lyric_idle` — **仅 wesing 会发** | 可选：清空歌词或保持最后一行显示 |
 
 > **推荐做法：** 用 `status_update` 的 `status` 字段作为主判断依据。当 status 为 `playing` 或 `paused` 时显示歌词，其他状态时清空。
+>
+> **别把 `lyric_idle` 当主判据**——只有 wesing 发它（见下），另外三家一次都不发，你的清空逻辑会在它们身上完全不触发。
 
 ### `lyric_idle` 的定位
 
-`lyric_idle` 是**纯通知事件**（`data` 始终为 `{}`），表示当前歌曲的歌词轮询已结束（可能是歌曲播放完毕、切歌、或窗口关闭）。服务端不会随此事件清空任何缓存数据。
+**只有 wesing 会发这个事件。** cloudmusicv3 / qqmusic / kugou **一次都不发**（实测 + 代码：`EventLyricIdle` 全仓仅两处，都在 `player/wesing/`）。订阅另外三家的客户端永远等不到它。
+
+`lyric_idle` 是**纯通知事件**（`data` 为 `{}`），表示 wesing 当前歌曲的歌词轮询已结束（歌曲播放完毕、切歌、或 K 歌窗口关闭）。服务端不会随此事件清空任何缓存数据。
 
 前端可以：
 - **忽略** — 等后续 `status_update` 或新歌数据自然覆盖（推荐）
@@ -1034,7 +1279,6 @@ curl http://localhost:8765/service-status
 3. `all_lyrics`（新歌词列表）
 4. `lyric_update`（新歌第一行）
 
-前端只需监听这些事件并用新数据覆盖即可，**不需要等待或处理任何清空消息**。
 
 **Replay（重播同一首歌）** 时行为因播放器而异：
 
@@ -1059,7 +1303,7 @@ WebSocket 断线后重新连接时，服务端会立即发送已缓存的初始�
 
 | 场景 | 推荐端点 | 理由 |
 |------|----------|------|
-| OBS 直播画面 | 根端点 `/ws` | 自动跟随活跃播放器，一个源搞定 |
+| OBS 直播画面 | 根端点 `/ws` | 自动跟随活跃播放器，单个连接即可覆盖全部播放器 |
 | 调试特定播放器 | Per-player `/<player>/ws` | 不受路由切换干扰 |
 | 多播放器同时展示 | 分别连接各 Per-player | 各自独立，互不影响 |
 

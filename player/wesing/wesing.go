@@ -93,6 +93,19 @@ const (
 	exitProcessDied exitReason = iota
 	exitSongChanged
 	exitWindowClosed
+	// exitDeadAddr 播放时间地址读得通、值也「合理」，但从未推进过——地址是死的。
+	// 唯一的处置是让 runSession 打掉 cachedTimeAddr 重新选址，见 issue #44。
+	exitDeadAddr
+)
+
+// 死地址自愈的两个常数，见 issue #44。
+const (
+	// deadAddrTimeout 从进入轮询算起，多久没见过 playTime > 0 就判定地址是死的。
+	//
+	// 取值依据：健康态下 all_lyrics 的 play_time 实测就是 1.6~1.75s（进入轮询时歌已在放），
+	// 即首个 tick 即为真，这条路径永不触发。5s 是给「主播开歌就暂停在 0.0」这类合法场景
+	// 留的余量——它会白扫一次（几百 ms），但每首歌至多一次，代价可控。
+	deadAddrTimeout = 5 * time.Second
 )
 
 func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec float32, pollInterval time.Duration) {
@@ -106,6 +119,11 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 	var cachedTimeAddr uint32
 	var lastPhase proc.PlayPhase
 	lastLoadingTitle := ""
+
+	// deadAddrRetriedFor 记录已为哪首歌重新选过址（issue #44），保证每首歌至多重扫一次。
+	// 以歌名为键而不是布尔量：换歌自然重置，而「同一首歌反复触发」被挡住——AOB 是全内存
+	// 扫描（几百 ms），无节制重扫会把 CPU 烧掉，比它要修的问题更糟。
+	deadAddrRetriedFor := ""
 
 	for {
 		select {
@@ -125,7 +143,11 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			if lastPhase != proc.PhaseStandby {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: "K歌窗口未打开"})
 				p.Emit(player.EventClearSongData, nil)
-				p.Emit(player.EventLyricIdle, nil)
+				// lyric_idle 是**对外**事件，载荷必须是 {} 而非 null（「空数据一律 {}」，
+				// openapi.yaml:10）。传 nil 会序列化成 null——实测就是这么破的。
+				// 紧邻的 clear_song_data 传 nil 无妨：它是内部事件，被 server 的
+				// internalEvents 拦住，根本不会序列化。
+				p.Emit(player.EventLyricIdle, struct{}{})
 				lastPhase = proc.PhaseStandby
 			}
 			lastTitle = ""
@@ -236,8 +258,9 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		lastPhase = proc.PhasePlaying
 
 		// 歌词轮询循环
-		exitR := p.pollLyrics(handle, pid, lyrics, timeAddr, offsetSec, pollInterval, lastTitle, songTitle, songDuration)
-		p.Emit(player.EventLyricIdle, nil)
+		exitR := p.pollLyrics(handle, pid, lyrics, timeAddr, offsetSec, pollInterval, lastTitle, songTitle, songDuration,
+			deadAddrRetriedFor != lastTitle)
+		p.Emit(player.EventLyricIdle, struct{}{}) // 对外事件：{} 而非 null，理由同 :146
 
 		switch exitR {
 		case exitProcessDied:
@@ -249,6 +272,15 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		case exitWindowClosed:
 			log.Info("K歌窗口已关闭")
 			lastTitle = ""
+			continue
+		case exitDeadAddr:
+			// 打掉缓存，逼 initSong 走 FindPlayTimeAddr 重扫（issue #44）。
+			//
+			// **不清 lastTitle**：这不是切歌，是同一首歌重来。清了会让上面的
+			// `state.SongTitle != lastTitle` 重新成立，deadAddrRetriedFor 的记忆随之作废，
+			// 于是每 5 秒重扫一次、永不停止。
+			deadAddrRetriedFor = lastTitle
+			cachedTimeAddr = 0
 			continue
 		}
 	}
@@ -315,7 +347,8 @@ func (p *WesingPlayer) getSongMeta(handle syscall.Handle, pid uint32, windowTitl
 }
 
 func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []lyric.LyricLine, timeAddr uint32,
-	offsetSec float32, pollInterval time.Duration, currentTitle string, fullSongTitle string, songDuration float32) exitReason {
+	offsetSec float32, pollInterval time.Duration, currentTitle string, fullSongTitle string, songDuration float32,
+	allowDeadAddrExit bool) exitReason {
 
 	lastLineIdx := -1
 	failCount := 0
@@ -341,6 +374,12 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 	var minimizedAt time.Time
 	var playTimeAtMinimize float32
 	wasMinimized := false
+
+	// 死地址检测（issue #44）：sawProgress 只由**内存直读的原始值**置位，
+	// 绝不能挪到最小化插值之后——那里 playTime 被改写成 playTimeAtMinimize + elapsed，
+	// 死地址（恒 0）一旦赶上最小化就会算出 0 + elapsed > 0，把自己伪装成活的。
+	sawProgress := false
+	pollStart := time.Now()
 
 	for {
 		select {
@@ -388,6 +427,24 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			continue
 		}
 		failCount = 0
+
+		// === 死地址检测（issue #44）===
+		//
+		// 上面那道闸拦不住「读得通、值也合理、但永远是同一个 0」。0 是完全合法的播放时间
+		// （选址就发生在转 playing 的第一个 tick，此刻歌在前奏，真地址内容必然是 0），
+		// 所以不能在校验里排除它——排除 0 会在最常见的时机拒掉真地址。
+		//
+		// 能区分「开头的 0」与「死地址的 0」的信号只有一个：**时间有没有推进过**。
+		// 真地址至多在开头逗留一瞬；死地址永远停在 0。
+		//
+		// 必须放在最小化插值（下方）之前：那里会把 playTime 改写成 playTimeAtMinimize + elapsed。
+		if playTime > 0 {
+			sawProgress = true
+		}
+		if allowDeadAddrExit && !sawProgress && time.Since(pollStart) > deadAddrTimeout {
+			log.Warn("播放时间 %v 内从未推进（恒为 %.2fs），疑似地址失效，重新定位", deadAddrTimeout, playTime)
+			return exitDeadAddr
+		}
 
 		// Replay / seek-back 检测（在暂停检测之前，避免 unpause + replay 同 tick 双重 resume）
 		if lastPlayTime > 0 && playTime < lastPlayTime-2.0 {

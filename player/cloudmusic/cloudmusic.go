@@ -382,7 +382,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 							Lyrics: []player.LyricLine{}, Count: 0,
 						})
 						p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-							Index: -1, Text: "", Timestamp: 0, PlayTime: playTime,
+							Index: -1, Text: "", Timestamp: 0, PlayTime: playTime, Progress: progress,
 						})
 					}
 				} else {
@@ -429,10 +429,34 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				playTime := clock.GetCurrent()
 				progress := player.ClampProgress(playTime, songDuration)
 
-				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-					Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
-					Lyrics: lyricItems, Count: len(lyricItems),
-				})
+				// 网易云对没有歌词的歌返回一行「纯音乐，请欣赏」而非空歌词，归一成 index:-1。
+				//
+				// 这里是两条路径的汇合点，故只需拦一次：
+				//   :356 CDP 说是纯音乐 → HTTP API 二次确认 → API 返回那句提示语，
+				//        而 hasRealText 认为它是真文本（它没错，那七个字确实是文本），
+				//        于是判定「API 说有歌词」并流到这里。**CDP 的判断本来是对的。**
+				//   :389 CDP 说有歌词 → resolveCDPLyrics 解析出那一行 → 也流到这里。
+				//
+				// activeLyrics 必须一起清：它是后续轮询的输入，不清的话 all_lyrics 说
+				// count:0、轮询却仍按那一行发 index:0。
+				if player.IsPureMusicOnly(lyricItems) {
+					log.Info("平台只返回提示语「%s」，按无歌词处理", lyricItems[0].Text)
+					pureHint := lyricItems[0].Text
+					activeLyrics = nil
+					isPureMusic = true
+					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+						Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+						Lyrics: []player.LyricLine{}, Count: 0,
+					})
+					p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+						Index: -1, Text: pureHint, Timestamp: 0, PlayTime: playTime, Progress: progress,
+					})
+				} else {
+					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+						Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+						Lyrics: lyricItems, Count: len(lyricItems),
+					})
+				}
 			}
 
 			// 切歌时主动发 status_update（lastPlayingState 不再重置，state change 段不会重复触发）
@@ -463,10 +487,28 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 				playTime := clock.GetCurrent()
 				progress := player.ClampProgress(playTime, songDuration)
-				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-					Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
-					Lyrics: lyricItems, Count: len(lyricItems),
-				})
+
+				// 同 :420 —— Redux 里同样可能只有那一行提示语。
+				// 文案与那边逐字一致（AGENTS.md §6.1）：来源是 Redux 这件事，上面那条
+				// 「歌词加载完成(Redux)」已经说了；这里再分叉一版措辞只会让 grep 漏掉一半。
+				if player.IsPureMusicOnly(lyricItems) {
+					log.Info("平台只返回提示语「%s」，按无歌词处理", lyricItems[0].Text)
+					pureHint := lyricItems[0].Text
+					activeLyrics = nil
+					isPureMusic = true
+					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+						Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+						Lyrics: []player.LyricLine{}, Count: 0,
+					})
+					p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+						Index: -1, Text: pureHint, Timestamp: 0, PlayTime: playTime, Progress: progress,
+					})
+				} else {
+					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+						Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+						Lyrics: lyricItems, Count: len(lyricItems),
+					})
+				}
 			}
 		}
 
@@ -484,7 +526,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				Lyrics: []player.LyricLine{}, Count: 0,
 			})
 			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				Index: -1, Text: "", Timestamp: 0, PlayTime: playTime,
+				Index: -1, Text: "", Timestamp: 0, PlayTime: playTime, Progress: progress,
 			})
 		}
 

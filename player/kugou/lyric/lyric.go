@@ -1,12 +1,15 @@
 package lyric
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +22,9 @@ type Line struct {
 	Index int
 	Time  float32 // seconds
 	Text  string
+	// Detailed 逐字时间轴（仅 KRC 源有；LRC 源为零值，序列化成 {}）。
+	// PlayTime 此处不填，由调用方按 offset 统一套（见 kugou.go 的 applyDetailedOffset）。
+	Detailed player.LyricTextDetailed
 }
 
 // httpClient with timeout for lyric API calls
@@ -235,34 +241,60 @@ func callSearch(keyword string, durationMs int, hash string) (*searchResponse, e
 	return &sr, nil
 }
 
-// download fetches the LRC content for a candidate (lyrics.kugou.com endpoint
-// still accepts ids issued by krcs).
+// download fetches lyrics for a candidate (lyrics.kugou.com endpoint still
+// accepts ids issued by krcs).
+//
+// 先要 KRC（字级），拿不到再回落 LRC（行级）。搜索端点本就是 krcs.kugou.com（KRC 搜索），
+// id/accesskey 两种格式通用，只是此前一直写死 fmt=lrc、把字级时间轴整个放弃了。
+//
+// **回落不是可选项**：KRC 可能缺失/解不开（魔数不符、密钥换代、zlib 坏），那时必须仍能出
+// 行级歌词——绝不因为逐字拿不到就让主播整首没词。逐字有没有由 Line.Detailed 如实反映。
 func download(id, accessKey string) ([]Line, error) {
-	dlURL := fmt.Sprintf(
-		"https://lyrics.kugou.com/download?ver=1&client=pc&id=%s&accesskey=%s&fmt=lrc&charset=utf8",
-		id, accessKey,
-	)
-	resp, err := httpClient.Get(dlURL)
+	if content, err := fetchContent(id, accessKey, "krc"); err == nil && content != "" {
+		if plain, derr := krcDecrypt(content); derr == nil {
+			if lines := parseKRC(plain); len(lines) > 0 {
+				return lines, nil
+			}
+		}
+	}
+	// 回落：行级 LRC（既有行为，一字未改）
+	content, err := fetchContent(id, accessKey, "lrc")
 	if err != nil {
-		return nil, fmt.Errorf("lyric download: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("lyric download body: %w", err)
-	}
-	var dr downloadResponse
-	if err := json.Unmarshal(body, &dr); err != nil {
-		return nil, fmt.Errorf("lyric download parse: %w", err)
-	}
-	if dr.Status != 200 || dr.Content == "" {
+	if content == "" {
 		return nil, nil
 	}
-	lrcBytes, err := base64.StdEncoding.DecodeString(dr.Content)
+	lrcBytes, err := base64.StdEncoding.DecodeString(content)
 	if err != nil {
 		return nil, fmt.Errorf("lyric base64 decode: %w", err)
 	}
 	return parseLRC(string(lrcBytes)), nil
+}
+
+// fetchContent 按指定格式（krc/lrc）取回 base64 的歌词内容；无内容时返回空串而非错误。
+func fetchContent(id, accessKey, format string) (string, error) {
+	dlURL := fmt.Sprintf(
+		"https://lyrics.kugou.com/download?ver=1&client=pc&id=%s&accesskey=%s&fmt=%s&charset=utf8",
+		id, accessKey, format,
+	)
+	resp, err := httpClient.Get(dlURL)
+	if err != nil {
+		return "", fmt.Errorf("lyric download: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("lyric download body: %w", err)
+	}
+	var dr downloadResponse
+	if err := json.Unmarshal(body, &dr); err != nil {
+		return "", fmt.Errorf("lyric download parse: %w", err)
+	}
+	if dr.Status != 200 {
+		return "", nil
+	}
+	return dr.Content, nil
 }
 
 // normalizeName strips common KuGou version suffixes (伴奏/伴唱/Live) so the
@@ -352,6 +384,152 @@ func resolveCanonicalHash(normName, normSinger string, targetDurationMs int) (st
 		}
 	}
 	return "", nil
+}
+
+// krcXORKey 是酷狗 KRC 的固定异或密钥（16 字节，循环使用）。
+var krcXORKey = [16]byte{0x40, 0x47, 0x61, 0x77, 0x5E, 0x32, 0x74, 0x47, 0x51, 0x36, 0x31, 0x2D, 0xCE, 0xD2, 0x6E, 0x69}
+
+var (
+	// krcLineRegex 匹配 KRC 行首：[行起始ms,行时长ms]
+	krcLineRegex = regexp.MustCompile(`^\[(\d+),(\d+)\](.*)$`)
+	// krcWordRegex 匹配 KRC 字级标记：<相对偏移ms,时长ms,0>
+	krcWordRegex = regexp.MustCompile(`<(\d+),(\d+),\d+>`)
+)
+
+// krcDecrypt 解开酷狗 KRC：base64 → 4 字节 "krc1" 魔数 → 逐字节异或定长密钥 → zlib → UTF-8。
+//
+// 与 QQ 的 QRC（3DES + zlib）是两套完全不同的东西，别混用。
+func krcDecrypt(contentB64 string) (string, error) {
+	blob, err := base64.StdEncoding.DecodeString(contentB64)
+	if err != nil {
+		return "", fmt.Errorf("krc base64: %w", err)
+	}
+	if len(blob) <= 4 || string(blob[:4]) != "krc1" {
+		return "", fmt.Errorf("krc 魔数不符（前 4 字节非 krc1）")
+	}
+	body := blob[4:]
+	dec := make([]byte, len(body))
+	for i, b := range body {
+		dec[i] = b ^ krcXORKey[i%16]
+	}
+	zr, err := zlib.NewReader(bytes.NewReader(dec))
+	if err != nil {
+		return "", fmt.Errorf("krc zlib init: %w", err)
+	}
+	defer zr.Close()
+	out, err := io.ReadAll(zr)
+	if err != nil {
+		return "", fmt.Errorf("krc zlib decompress: %w", err)
+	}
+	return string(out), nil
+}
+
+// parseKRCWords 从 KRC 行体解析逐字片段。行体形如：
+//
+//	<0,450,0>词<450,450,0>：<900,450,0>周
+//
+// **三家三个样，照抄任何一家都会错**：
+//
+//	QQ QRC  ：文字在前、时间戳在后，偏移**绝对**    风(28837,439)
+//	网易云 YRC：时间戳在前、文字在后，偏移**绝对**    (28837,439,0)风
+//	酷狗 KRC ：时间戳在前、文字在后，偏移**相对行首** <0,439,0>风   ← 本函数
+//
+// 故绝对时间 = lineStartMs + 偏移。把 KRC 的偏移当绝对时间用，每行的字会全挤到歌曲开头
+// （行级却是对的），症状极像"前端没对齐"，最难查。
+//
+// 实证：《晴天》行 [2250,2250] 的末字 <1800,450,0> → 2250+1800+450 = 4500，正好等于下一行
+// 起始 [4500,...]，逐字与行级严丝合缝。
+//
+// 不对片段文本做 TrimSpace：空格是逐字排版的一部分。
+// PlayTime 此处不填（offset 未知），由 kugou.go 的 applyDetailedOffset 统一套。
+func parseKRCWords(body string, lineStartMs int) []player.LyricTextDetailedWord {
+	tuples := krcWordRegex.FindAllStringSubmatchIndex(body, -1)
+	if len(tuples) == 0 {
+		return nil
+	}
+	words := make([]player.LyricTextDetailedWord, 0, len(tuples))
+	for i, m := range tuples {
+		offMs, err := strconv.Atoi(body[m[2]:m[3]])
+		if err != nil {
+			continue
+		}
+		durMs, err := strconv.Atoi(body[m[4]:m[5]])
+		if err != nil {
+			continue
+		}
+		// 文本 = 本标记之后、到下一个标记开头之间那段（同 YRC 的取法）
+		textEnd := len(body)
+		if i+1 < len(tuples) {
+			textEnd = tuples[i+1][0]
+		}
+		text := body[m[1]:textEnd]
+		if text == "" {
+			continue
+		}
+		words = append(words, player.LyricTextDetailedWord{
+			Timestamp: float32(lineStartMs+offMs) / 1000.0, // ← 相对转绝对
+			Duration:  float32(durMs) / 1000.0,
+			Text:      text,
+		})
+	}
+	return words
+}
+
+// parseKRC 解析 KRC 全文为 Line（含逐字）。
+//
+// 元数据标签（[ti:]/[ar:]/[al:]/[by:]/[offset:]）一律跳过——与既有 parseLRC 的行为一致：
+// 它对 [offset:] 也是丢弃的（parseTimestamp 解不出 "offset" 这个分钟数 → 整行没文本 → skip）。
+// 这里保持同样处理，不引入未经验证的偏移符号约定；真要支持需先找到 offset 非 0 的样本验证方向。
+func parseKRC(krc string) []Line {
+	var lines []Line
+	for _, raw := range strings.Split(krc, "\n") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		m := krcLineRegex.FindStringSubmatch(raw)
+		if m == nil {
+			continue // 元数据标签行 / 空行
+		}
+		lineStartMs, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		lineDurMs, err := strconv.Atoi(m[2])
+		if err != nil {
+			continue
+		}
+		words := parseKRCWords(m[3], lineStartMs)
+		if len(words) == 0 {
+			continue
+		}
+		var text strings.Builder
+		for _, w := range words {
+			text.WriteString(w.Text)
+		}
+		plain := strings.TrimSpace(text.String())
+		if plain == "" {
+			continue
+		}
+		lineTimestamp := float32(lineStartMs) / 1000.0
+		lineDuration := float32(lineDurMs) / 1000.0
+		if lineDurMs == 0 {
+			for _, w := range words {
+				lineDuration += w.Duration
+			}
+		}
+		lines = append(lines, Line{
+			Index: len(lines),
+			Time:  lineTimestamp,
+			Text:  plain,
+			Detailed: player.LyricTextDetailed{
+				Timestamp: lineTimestamp,
+				Duration:  lineDuration,
+				Words:     words,
+			},
+		})
+	}
+	return lines
 }
 
 // parseLRC parses an LRC-format string into Line slices.

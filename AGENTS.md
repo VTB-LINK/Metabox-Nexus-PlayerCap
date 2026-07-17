@@ -582,35 +582,63 @@ Banner、`server.NewServer`、`NewRouter` 的 normalStates 建表、端点表、
 
 **「逐字：否」是断言，不是报告。**
 
-全仓 11 处 `逐字：` 日志中，8 处把值**写死**成 `否`，只有 3 处真检测：
+全仓 `逐字：` 日志现有 **13 处：10 处真检测、3 处仍写死 `否`**。本节初写时是「8 写死、3 真检测」——qqmusic（QRC）与 kugou（KRC，`97f60d8`）的逐字先后接入后都改用了真检测，见下方实证。
 
 | 写法 | 位置 |
 |---|---|
-| ✅ 真检测 `lyricDetailedFlag()`（cloudmusic.go:515-522，遍历 `TextDetailed.Words`） | `player/cloudmusic/cloudmusic.go:301`、`:329` |
-| ✅ 真检测 `detailedFlag()`（fetch.go:145-152） | `player/cloudmusic/lyric/fetch.go:141` |
-| ❌ 写死 `否` | `player/wesing/wesing.go:267`、`player/qqmusic/qqmusic.go:181`、`:198`、`player/kugou/kugou.go:340`、`:343`、`:346`、**`player/cloudmusic/cloudmusic.go:342`、`:379`** |
+| ✅ 真检测（`detailedFlag()` / `lyricDetailedFlag()`，遍历 `TextDetailed.Words`） | `player/cloudmusic`（CDP / API / fetch 共 3 处）、`player/qqmusic`（4 处）、`player/kugou`（3 处，`97f60d8` 起）——**按符号找，行号已漂** |
+| ❌ 写死 `否` | `player/wesing/wesing.go`（确无逐字源，尚可辩护）、`player/cloudmusic/cloudmusic.go` 两条 Redux 分支（同文件里 `lyricDetailedFlag()` 就在手边却没用） |
 
-后果：**就算有人把逐字接通了，日志还是会说「否」**——它不是在报告状态，是在断言状态。接线的人会据此以为自己没做成，回去改一个本来就对的实现。注意最后两行：`cloudmusic.go` 自己有 `lyricDetailedFlag()`，却在两条 Redux 分支上写死 `否`——同一个文件里两种写法并存。
+后果：**就算有人把逐字接通了，日志还是会说「否」**——它不是在报告状态，是在断言状态，接线者会据此以为自己没做成、回去改一个本来就对的实现。
+
+**这条已被两次兑现、且证明有用**：qqmusic 与 kugou 接通逐字时，接线者都在代码里留了注释显式引用本节（`kugou.go`、`qqmusic.go` 各有一句「绝不写死——AGENTS.md §6.1」）并改用真检测，没踩坑。剩下 3 处写死里，`wesing` 那处确无逐字源、尚可辩护；`cloudmusic` 的两条 Redux 分支仍是隐患——同一文件里两种写法并存。
 
 **新增任何 `<状态>：<值>` 形态的日志，值必须来自函数调用。** 想不出怎么检测，就把这个字段从日志里删掉：不报好过报错。
 
 ### 6.2 例外（机制不同，须写明理由）
 
-**wesing 与另外三家的不一致是合法的，不要「对齐」它。**
+**四家的能力不一致，且它不是「wesing vs 另外三家」**——2026-07-17 全量实测（WS 录音 + 代码真源双证）：
 
-wesing 扫的是内存里**已渲染完成**的歌词：`player/wesing/lyric/reader.go:11-15` 的 `LyricLine` 只有 `{Index, Time, Text}` 三个字段；`wesing.go:173` 调 `BuildLyricLine` 时 subText 传 `""`、TextDetailed 传零值。整个 `player/wesing/` 包**零 HTTP 引用**（实测 grep `net/http` 无命中）——没有歌词 API、没有翻译源、没有逐字源。所以「翻译」「逐字」这些概念对 wesing 根本不成立，给它硬凑一个一致的字段就是撒谎。
+| | `sub_text`（翻译） | `text_detailed`（逐字） | 纯音乐 |
+|---|---|---|---|
+| **wesing** | 无 | 无 | **情况不存在** |
+| **cloudmusicv3** | **有** | **有**（YRC） | 平台返回「纯音乐，请欣赏」→ 归一为 `index:-1` |
+| **qqmusic** | **有** | **有**（QRC） | API 返回零行 → `index:-1` |
+| **kugou** | 无 | **有**（KRC，`97f60d8` 起） | 同 cloudmusic（两家文案一字不差） |
 
-（精确一点：wesing 有 mid，`songinfo.go:107` 从内存 JSON 里刮出来的，但它只用于 `FindCoverURL` 的内存 AOB 匹配，不用于任何取词请求。别把「有 mid」误读成「能查歌词」。）
+**翻译是两家有两家无；逐字自 `97f60d8` 起是三家有（cloudmusicv3 / qqmusic / kugou）、wesing 无。** 此前本节把 kugou 与 wesing 并列为「翻译逐字都无」——逐字那半现在过时了：`97f60d8` 从 `krcs.kugou.com` 拿 `fmt=krc` 解出字级时间轴，把 `kugou.go` 里写死的「逐字：否」改成了 `detailedFlag()` 真检测。**但翻译那半仍成立**：kugou 给 `BuildLyricLine` / `BuildLyricUpdate` 的第 4 个参数（subText）仍硬传 `""`（`kugou.go:566`、`:622`），`kugou.go` 的 `SubText` 赋值点仍为 **0 处**——KRC 只有字级时间轴，没有翻译源。kugou 的逐字是**条件性**的：拿不到 KRC、回落到行级 `fmt=lrc` 时 `text_detailed` 为 `{}`、`lyrics_detailed` 为 `[]`，由 `detailedFlag()` 如实反映。wesing 仍两者皆无。
 
-**关键区别，文档必须能分清：**
+#### 「没有」分两种，别混
 
-| | wesing 的「无翻译/无逐字」 | 「逐字：否」写死 |
+**① 无来源 —— 还没挖出取词路径**（wesing 的翻译与逐字、kugou 的翻译）
+
+> kugou 的**逐字**曾属此类，`97f60d8` 已挖通（KRC）——正应验了本节稍后仓库所有者那句「将来挖出来了就该补上」。剩下 wesing 两者、kugou 翻译仍无来源。
+
+wesing 扫的是内存里**已渲染完成**的歌词：`player/wesing/lyric/reader.go` 的 `LyricLine` 只有 `{Index, Time, Text}` 三个字段。整个 `player/wesing/` 包**零 HTTP 引用**（实测 grep `net/http` 无命中）。
+
+**但这只等于「我们目前拿不到」，不等于「平台没有」。** 仓库所有者原话：「逐字和翻译，是因为我们还没挖出来。」将来挖出来了就该补上，那不是破坏一致性，是补齐。
+
+⚠️ **本节此前写的是「这些概念对 wesing 根本不成立」——那是把「没找到」写成了「不存在」**，正是本文档反复警告的那个动作（见 §3.0）。一个未经验证的推论被写进规范，就成了后人不再质疑的前提。
+
+它还与 §6.1 自相矛盾：那里写着「**就算有人把逐字接通了**，日志还是会说『否』」——那句话的前提正是「逐字可以被接通」。同一份文档，两处打架，而没人发现。
+
+（精确一点：wesing 有 mid，`lyric/songinfo.go` 从内存 JSON 里刮出来的，但它只用于 `FindCoverURL` 的内存 AOB 匹配，不用于任何取词请求。别把「有 mid」误读成「能查歌词」。）
+
+**② 情况不存在 —— 领域约束**（wesing 的纯音乐）
+
+wesing 是 K 歌平台，**曲库内所有歌都带词**。所以「纯音乐」这个状态对它不成立，`index:-1` 结构上永远不会发出。这不是实现限制，改不改代码都一样。
+
+（`initSong` 里 `len(lyrics)==0` 直接返回失败、一个事件都不发——那描述的是「假如出现纯音乐会怎样」，而那个前提不成立。别把实现细节当理由写。）
+
+#### 例外还是 bug
+
+| | 「无来源」 | 「逐字：否」写死 |
 |---|---|---|
-| 决定者 | 机制（内存里就没有这个数据） | 实现偷懒（有检测器不用） |
-| 定性 | **合法例外** | **bug** |
-| 该怎么办 | 写明理由，保持不一致 | 修 |
+| 决定者 | 我们还没挖出那条路径 | 实现偷懒（有检测器不用） |
+| 定性 | **合法现状**，但标注为待办 | **bug** |
+| 该怎么办 | 写明「目前无来源」，别写成「不可能」 | 修 |
 
-判据：**问「把它做成一致需要什么」。**答案是「换一套数据来源」→ 例外。答案是「调一下已有的那个函数」→ bug。
+判据：**问「把它做成一致需要什么」。**答案是「换一套数据来源」→ 现状，如实标注。答案是「调一下已有的那个函数」→ bug。
 
 **方括号走私是故意约定，别当 typo 修。** 6 处 `logger.New("CloudMusic] [CDP")` 这类写法，靠把 `] [` 塞进模块名伪造二级标签，渲染成 `[CloudMusic] [CDP]`。6 处全部带 `// 渲染为 [X] [Y]` 注释。logger 只认单个模块名（logger.go:11-13），这是在不改 logger 的前提下拿到层级前缀的唯一办法。
 
@@ -679,6 +707,21 @@ wesing 扫的是内存里**已渲染完成**的歌词：`player/wesing/lyric/rea
 **窗口状态检测**：`GetPlayState` 靠窗口标题做三态判定（memory.go:224-237、:272-278）——`CLyricRenderWnd` 存在 = `PhasePlaying`，只有「全民K歌 - xxx」= `PhaseLoading`，都没有 = `PhaseStandby`。拖动检测走 `GetGUIThreadInfo` 的 `GUI_INMOVESIZE`（:260-269），用于抑制拖窗时的假冻结。
 
 **「只读」的边界**：wesing 只读扫描、网易云/酷狗走 CDP。**qqmusic 不是只读**——`mem.go:249` 用 `PROCESS_ALL_ACCESS` 开句柄，`WriteProcessMemory` 在 `mem.go:497`，`InjectSliderAOB` 本体在 `mem.go:545`。它只是**运行时不写**：调用点已因 issue #39 注释关闭（qqmusic.go:86-88）。**绝不恢复它**——产出 `SliderVal` 零消费方，代价是 codecave + E9 跳转，属杀软重点盯的注入签名；补丁写进 QQ 音乐地址空间后**本程序退出不撤销**（全仓无 `VirtualFreeEx`），恢复后做 A/B 必须每轮重启 QQ 音乐本身。理由见 qqmusic.go:65-85 的注释块。
+
+**wesing 的内存内容不保证与当前歌曲同步。** 逆向时实测：**换歌之后，内存里的东西常常还是上一首的**，且严重程度因机器而异（本地数据库状态可能是变量之一）。这不是我们的 bug，是 wesing 自己的行为——**别试图「修」它，要假设它会发生**。
+
+这一条解释了一整族症状，遇到时先想到它：
+
+- **封面经常拿到上一首**（`[!] 封面 URL 获取失败` 或字节数与上一首完全相同）。`FindCoverURL` 靠 mid 做内存 AOB 匹配，匹配到的可能是陈旧的那份。叠加「三家封面 goroutine 无取消、无代次守卫」（§3 已记）后更难看。
+- **播放时间地址选中一个「永远是 0」的实例**（issue #44）。AOB 命中的很可能是**上一次会话/上一首歌的残留结构体**——它字体 `1E`、行高 `2D` 一应俱全，`+0x10` 的指针也有效，**只是不再被更新了**。
+
+**关键推论，动手前必读：陈旧实例与真实例在静态上无法区分。** 它们的每一个字节都合法。所以以下方向全都无效，别浪费时间：
+
+- 往 `validateTimeAddr` 里加更多特征字节 —— 陈旧实例同样满足
+- 排除「可疑」的值（比如 0）—— 0 是歌曲开头的合法值，排除它会在最常见的时机拒掉真实例（issue #44 的第一个错误方向）
+- 加强 `ptr10` 的指针校验 —— 陈旧实例的指针也是有效的
+
+**唯一能区分的信号是「它会不会动」。** 真实例至多在开头逗留一瞬；陈旧实例永远不变。`wesing.go` 的 `sawProgress` + `exitDeadAddr` 就是这个判据的实现（issue #44）。**任何新的内存读取都该问一句：如果它是陈旧的，我怎么发现？**
 
 ### 7.2 NewCallback 必须包级 —— 唯一有自动门禁的一条
 
