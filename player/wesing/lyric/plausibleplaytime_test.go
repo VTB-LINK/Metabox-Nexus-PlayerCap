@@ -24,6 +24,7 @@ func TestIsPlausiblePlayTime(t *testing.T) {
 		{"上界内", 99999.9, true},
 		{"恰好上界", 100000, false},
 		{"超上界", 100001, false},
+		{"issue #46 真机录到的堆残留 timestamp", 1.501759e18, false}, // reader.go 靠它挡掉越界乱码行
 		{"负数", -0.001, false},
 		{"大负数", -5000, false},
 		{"正无穷", posInf, false},

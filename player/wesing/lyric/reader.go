@@ -53,7 +53,17 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 			continue
 		}
 
-		// 过滤垃圾数据：已有有效歌词后遇到 time<=0，说明后面全是无效数据
+		// issue #46：越过真实行数后，尾部 entry 是堆残留，把它的字节当 float 解读常得到
+		// 荒谬值（真机实测 1.5e18）。这类值绕过下面「归零/回退」两道闸（那两道只挡 <=0 与
+		// 回退），连同乱码文本被当成一行歌词 append、推上对外 API——1.5e18 的 timestamp 会把
+		// 前端插值直接带飞。复用 IsPlausiblePlayTime（接受式 [0,100000)、拒 NaN/Inf，已由
+		// plausibleplaytime_test 覆盖）挡掉它；合法开场行 time=0 在范围内、照常通过，
+		// 不碰 :56 的 len(lyrics)>0 有意设计。
+		if !IsPlausiblePlayTime(timeVal) {
+			break
+		}
+
+		// 过滤垃圾数据：已有有效歌词后遇到 time<=0（中途归零），说明后面全是无效数据
 		if len(lyrics) > 0 && timeVal <= 0 {
 			break
 		}

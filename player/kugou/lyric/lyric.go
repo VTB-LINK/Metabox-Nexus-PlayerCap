@@ -22,6 +22,9 @@ type Line struct {
 	Index int
 	Time  float32 // seconds
 	Text  string
+	// SubText 第二行歌词（翻译）。KRC 内嵌 [language:] 轨才有；LRC 回落为空。
+	// 纯文本、无独立时间轴——继承本行时间，applyDetailedOffset 不碰它。
+	SubText string
 	// Detailed 逐字时间轴（仅 KRC 源有；LRC 源为零值，序列化成 {}）。
 	// PlayTime 此处不填，由调用方按 offset 统一套（见 kugou.go 的 applyDetailedOffset）。
 	Detailed player.LyricTextDetailed
@@ -394,6 +397,9 @@ var (
 	krcLineRegex = regexp.MustCompile(`^\[(\d+),(\d+)\](.*)$`)
 	// krcWordRegex 匹配 KRC 字级标记：<相对偏移ms,时长ms,0>
 	krcWordRegex = regexp.MustCompile(`<(\d+),(\d+),\d+>`)
+	// krcLangTagRegex 匹配 KRC 头部 [language:base64json]（酷狗把翻译/音译塞这里）。
+	// base64 字母表不含 ']'，故 [^\]]+ 恰好截到闭合方括号。
+	krcLangTagRegex = regexp.MustCompile(`\[language:([^\]]+)\]`)
 )
 
 // krcDecrypt 解开酷狗 KRC：base64 → 4 字节 "krc1" 魔数 → 逐字节异或定长密钥 → zlib → UTF-8。
@@ -481,7 +487,9 @@ func parseKRCWords(body string, lineStartMs int) []player.LyricTextDetailedWord 
 // 它对 [offset:] 也是丢弃的（parseTimestamp 解不出 "offset" 这个分钟数 → 整行没文本 → skip）。
 // 这里保持同样处理，不引入未经验证的偏移符号约定；真要支持需先找到 offset 非 0 的样本验证方向。
 func parseKRC(krc string) []Line {
+	trans := parseKRCTranslation(krc) // 按 [start,dur] 行序号对齐的译文（nil=无翻译轨）
 	var lines []Line
+	rawIdx := -1 // 第几个 [start,dur] 行（含被跳过的 0 词行），与 trans 索引严格对齐
 	for _, raw := range strings.Split(krc, "\n") {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -489,8 +497,11 @@ func parseKRC(krc string) []Line {
 		}
 		m := krcLineRegex.FindStringSubmatch(raw)
 		if m == nil {
-			continue // 元数据标签行 / 空行
+			continue // 元数据标签行 / 空行——不占翻译槽位
 		}
+		// 每个 [start,dur] 行占一个翻译槽位。必须在**任何** continue 之前自增：被 0 词/空文本
+		// 跳过的行在译轨里照样有一格，漏加会让其后整轨译文错位一格（承重，见 parseKRCTranslation）。
+		rawIdx++
 		lineStartMs, err := strconv.Atoi(m[1])
 		if err != nil {
 			continue
@@ -518,10 +529,15 @@ func parseKRC(krc string) []Line {
 				lineDuration += w.Duration
 			}
 		}
+		var sub string
+		if rawIdx < len(trans) {
+			sub = trans[rawIdx]
+		}
 		lines = append(lines, Line{
-			Index: len(lines),
-			Time:  lineTimestamp,
-			Text:  plain,
+			Index:   len(lines),
+			Time:    lineTimestamp,
+			Text:    plain,
+			SubText: sub,
 			Detailed: player.LyricTextDetailed{
 				Timestamp: lineTimestamp,
 				Duration:  lineDuration,
@@ -530,6 +546,54 @@ func parseKRC(krc string) []Line {
 		})
 	}
 	return lines
+}
+
+// parseKRCTranslation 从 KRC 头部的 [language:] 标签解出**中文翻译轨**，返回按主歌词
+// [start,dur] 行序号对齐的 []string（第 i 项 = 第 i 个 [start,dur] 行的译文，缺则空串）。
+// 无 [language:] 标签 / 解不开 / 无翻译轨时返回 nil。
+//
+// [language:] 是 base64 编码的 JSON：
+//
+//	{"content":[
+//	   {"lyricContent":[["译文行"],...], "type":1},   // type=1 中文翻译 ← 本函数只取它
+//	   {"lyricContent":[["ro","ma"],...],"type":0}    // type=0 罗马音（wire 无第三行字段，不做）
+//	 ], "version":1}
+//
+// **与网易云的机制根本不同，别照抄 MergeTlyric**：网易云是独立 tlyric LRC、按**毫秒时间戳**
+// 匹配；酷狗是同一份 KRC 内嵌、**按行号位置对齐**——lyricContent[i] 就是第 i 个 [start,dur]
+// 行的译文，本身无时间戳。故调用方必须数「每个 [start,dur] 行」（含被跳过的 0 词行）来对齐，
+// 一旦按「产出的 Line 数」对齐，遇到被跳过的行就整轨错位。
+//
+// 抽成纯函数是为了可测：这是「一错就整首译文错位」的路径。
+func parseKRCTranslation(krc string) []string {
+	m := krcLangTagRegex.FindStringSubmatch(krc)
+	if m == nil {
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(m[1])
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Content []struct {
+			LyricContent [][]string `json:"lyricContent"`
+			Type         int        `json:"type"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	for _, blk := range doc.Content {
+		if blk.Type != 1 {
+			continue // 只取中文翻译；type=0 是罗马音
+		}
+		out := make([]string, len(blk.LyricContent))
+		for i, frags := range blk.LyricContent {
+			out[i] = strings.TrimSpace(strings.Join(frags, ""))
+		}
+		return out
+	}
+	return nil
 }
 
 // parseLRC parses an LRC-format string into Line slices.
