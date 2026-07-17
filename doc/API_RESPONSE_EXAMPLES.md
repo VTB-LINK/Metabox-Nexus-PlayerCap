@@ -297,12 +297,12 @@
 |---|---|---|
 | **cloudmusicv3** | 有 | 有（YRC） |
 | **qqmusic** | 有 | 有（QRC） |
-| **wesing** | 恒 `""` | 恒 `{}` |
-| **kugou** | 恒 `""` | 有（KRC）\* |
+| **wesing** | 恒 `""` | 有（内存字级）\* |
+| **kugou** | 有（KRC）\* | 有（KRC）\* |
 
-**翻译**两家有（cloudmusicv3 / qqmusic）、两家无（wesing / kugou 恒 `""`）；**逐字**三家有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC）、wesing 无。字段一律存在（值可能为空），下游不必按平台分支取值。
+**逐字**四家都有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC / wesing 内存字级）；**翻译**三家有（cloudmusicv3 / qqmusic / kugou）、wesing 无。字段一律存在（值可能为空），下游不必按平台分支取值。
 
-\* kugou 的逐字取决于 KRC 源当次是否可得：拿不到 KRC、回落到行级 LRC 时，`text_detailed` 为 `{}`、`lyrics_detailed` 为 `[]`。
+\* 逐字均**逐行**判定：kugou 拿不到 KRC、回落行级 LRC 时该行 `text_detailed` 为 `{}`；wesing 的逐字来自进程内存的卡拉OK字级时间，某行字级时间轴不合法（NaN / 越界 / 非单调）时该行退回行级、为 `{}`。kugou 翻译另需 KRC 头部含中文译轨（无译轨时 `sub_text` 为空，逐字不受影响）。
 
 #### 歌词数组前几行可能是元数据
 
@@ -428,7 +428,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 **说明：**
 - `index` - 歌词行号（`-1` = 平台没有歌词，见下方）
 - `text` - 主歌词文本
-- `sub_text` - 副歌词文本（翻译，无时为空字符串）。**cloudmusicv3 / qqmusic 有，wesing / kugou 恒为空**
+- `sub_text` - 副歌词文本（翻译，无时为空字符串）。**cloudmusicv3 / qqmusic / kugou 有，wesing 恒为空**（kugou 仅 KRC 含中文译轨时有值）
 - `timestamp` - 该行的原始时间戳（秒）
 - `play_time` - **本行的播出时间**（秒）= `timestamp − offset`，**恒小于 `timestamp`**
 - `progress` - **整首播到哪**（0–1，实时位置 / 总时长）
@@ -922,7 +922,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 > `play_time: 0` / `progress: 0` 不是占位——**WS 的 `all_lyrics` 只在切歌时发**，那一刻歌刚开始。
 > 而 **HTTP 的 `/all_lyrics` 会给实时值**（它读缓存，跟着 `lyric_update` 走）。同一个端点名，两种传输的语义不同。
 >
-> wesing 的 `sub_text` 恒为 `""`、`text_detailed` 恒为 `{}`、`lyrics_detailed` 恒为 `[]`——它没有翻译与逐字的数据来源。kugou 的翻译同样恒空，但**逐字有**（KRC 源；回落行级 LRC 时才为 `{}` / `[]`）。
+> wesing 的 `sub_text` 恒为 `""`——无翻译源（其曲库 mid 非 QQ 系，走不通 QQ 译源）；但**逐字有**，来自进程内存的卡拉OK字级时间，某行时间轴不合法时该行退回行级 `{}`。kugou 的翻译与逐字都有（KRC 源；回落行级 LRC 时 `sub_text` 为空、`text_detailed` / `lyrics_detailed` 为 `{}` / `[]`）。
 
 **无歌词时：**
 ```json

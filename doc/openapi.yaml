@@ -206,7 +206,7 @@ paths:
         - `lyrics` - 按 index 排序的歌词数组
         - `lyrics[].timestamp` - 该歌词行的原始起始时间（秒）
         - `lyrics[].play_time` - 该歌词行应用 offset 后的展示时间（秒）
-        - `lyrics[].sub_text` - 翻译歌词文本；仅 cloudmusicv3 与 qqmusic 提供，wesing 与 kugou 恒为空字符串
+        - `lyrics[].sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
         - `lyrics[].text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
         - `lyrics_detailed` - 完整逐字歌词集合（仅包含有逐字数据的行）。cloudmusicv3（YRC）/ qqmusic（QRC）/ kugou（KRC）提供逐字时有内容；kugou 回落到行级 LRC 时、以及 wesing（无逐字源），恒为 `[]`
       responses:
@@ -295,7 +295,7 @@ paths:
 
         - `index` - 歌词行号；`-1` 表示平台未返回可用歌词数据（见下方说明）
         - `text` - 主歌词文本
-        - `sub_text` - 翻译歌词文本；仅 cloudmusicv3 与 qqmusic 提供，wesing 与 kugou 恒为空字符串
+        - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
         - `timestamp` - 歌词时间戳（秒）
         - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1 时例外：`timestamp` 恒为 0，而 `play_time` 是整曲播放位置
         - `progress` - 整曲播放进度（0-1），= 实时播放位置 / 歌曲总时长；与 `play_time`（本行歌词的播出时间）无换算关系
@@ -323,7 +323,7 @@ paths:
                           - $ref: "#/components/schemas/EmptyObject"
               examples:
                 播放中:
-                  summary: 播放中（wesing）。wesing 不提供逐字与翻译，text_detailed 恒为 {}、sub_text 恒为空。
+                  summary: 播放中（wesing，此行无逐字）。wesing 的逐字来自进程内存的卡拉OK字级时间、逐行判定，时间轴不合法的行退回行级、text_detailed 为 {}（如本例）；wesing 无翻译，sub_text 恒空。
                   value:
                     code: 0
                     msg: success
@@ -930,7 +930,7 @@ paths:
 
         - `index` - 歌词行号；`-1` 表示平台未返回可用歌词数据（见下方说明）
         - `text` - 主歌词文本
-        - `sub_text` - 翻译歌词文本；仅 cloudmusicv3 与 qqmusic 提供，wesing 与 kugou 恒为空字符串
+        - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
         - `timestamp` - 歌词时间戳（秒）
         - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1 时例外：`timestamp` 恒为 0，而 `play_time` 是整曲播放位置
         - `progress` - 整曲播放进度（0-1），= 实时播放位置 / 歌曲总时长；与 `play_time`（本行歌词的播出时间）无换算关系
@@ -1861,7 +1861,7 @@ components:
           example: "往事就像流星刹那划过心房"
         sub_text:
           type: string
-          description: 翻译歌词文本；仅 cloudmusicv3 与 qqmusic 提供，wesing 与 kugou 恒为空字符串
+          description: 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
           example: ""
         timestamp:
           type: number
@@ -1905,7 +1905,7 @@ components:
           example: "往事就像流星刹那划过心房"
         sub_text:
           type: string
-          description: 翻译歌词文本；仅 cloudmusicv3 与 qqmusic 提供，wesing 与 kugou 恒为空字符串
+          description: 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
           example: ""
         text_detailed:
           $ref: "#/components/schemas/LyricTextDetailed"
@@ -1913,7 +1913,7 @@ components:
     LyricTextDetailed:
       oneOf:
         - type: object
-          description: 逐字歌词，由 cloudmusicv3（YRC）、qqmusic（QRC）、kugou（KRC）提供，三者复用同一结构、下游无需按平台分支解析。是否带逐字取决于该来源当次是否可得——kugou 拿不到 KRC、回落到行级 LRC 时无逐字，此时为 `{}`；wesing 不提供逐字，恒为 `{}`。
+          description: 逐字歌词，由 cloudmusicv3（YRC）、qqmusic（QRC）、kugou（KRC）、wesing（进程内存卡拉OK字级时间）四家提供，复用同一结构、下游无需按平台分支解析。是否带逐字**逐行**判定：kugou 拿不到 KRC 回落行级 LRC、或 wesing 某行字级时间轴不合法时，该行退回行级、此字段为 `{}`。
           maxProperties: 0
           example: {}
         - type: object

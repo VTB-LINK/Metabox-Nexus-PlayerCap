@@ -10,8 +10,6 @@
 
 ---
 
----
-
 ## 0. 最高约束
 
 读不完全文就只读这五条。每一条都对应已经发生过的故障。
@@ -316,7 +314,8 @@ default: // "standby", "waiting_process", "waiting_song", 以及未来任何未�
 - **发版必须发布 dotcom（VTB-LINK）那个 draft。** ❌ — client-version 与两个 CDN **全部指向 dotcom 的 release**，vlink.dev 不对外暴露。漏发 = 版本号出去了但下载 404。vlink.dev 的 draft 是内部留档。清缓存由镜像过去的 workflow 在 dotcom 侧触发（`.github` 被 sync-source-to-dotcom 全量镜像，无排除）。 — `.github/workflows/release.yml:21,192,195`
 - **更新下载 SHA256 校验失败必须删除损坏文件并终止更新流程。** ❌ — updater 会用下载物替换自身 exe，放过一个损坏或被篡改的二进制 = 把客户端刷成砖。注意仅当 digest 非空才校验，依赖网关下发。 — `main.go:403,414`
 - **dev 构建刻意不用 canonical 名，不要把它「修」成 canonical。** ❌ — 那会让开发构建带上被自动更新识别的身份，破坏「开发构建跳过更新」的既有设计。 — `main.go:581`
-- **`doc/openapi.yaml` 是 API 文档的唯一真源；线上 apifox 是它的手动导入产物（下游副本，不是权威）。** ❌ — 加端点必须先改 openapi.yaml。**已知缺口**：player enum 无 kugou，`grep -c effect doc/openapi.yaml` = 0，而 effect 端点早已注册（`server/server.go:431`）。
+- **`doc/openapi.yaml` 是 API 文档的唯一真源；线上 apifox 是它的手动导入产物（下游副本，不是权威）。** ❌ — 加端点必须先改 openapi.yaml。（此前记的两处缺口——player enum 缺 kugou、effect 端点未进文档——已在 issue #43 补齐。）
+- **`RELEASE_BODY.md` 与 `README.md` 写下的每一句能力 / 版本描述，都必须反映当下代码——新增或修改时逐句回代码核，打 tag 发版前再通篇对一遍。** ❌（靠人守，无门禁）— **过时是这两份文书的头号敌人，也是最难自查的一种错：动手的人往往照脑子里的旧印象写，而代码早已变了。本条就是为防这个而立的。** 它们没有 `tools/docsample` 那样的门禁盯着，只能靠动手时逐句核代码，不能凭记忆。实例：3.0 rc 阶段 `RELEASE_BODY.md` 仍停在 `beta.14`（落后十几个 tag，「逐字仅网易云」早已不成立），`README.md` 功能特性写着「各播放器支持逐字/翻译」「输出音译」「支持所有语言」——全是旧印象，而代码是逐字/翻译三家有、wesing 无，音译（KRC `type=0` 罗马音）被**显式丢弃**，UTF-8 也不该当卖点吹。**文风等同 `doc/`：严肃、准确、简洁，不写营销话术（「极大提升」「完美」「强大」「毫秒级」）或 AI 腔的形容词堆砌；能力按播放器如实列，别用「各播放器」抹平差异。**
 
 ### 3.6 Windows 机制
 
@@ -325,9 +324,9 @@ default: // "standby", "waiting_process", "waiting_song", 以及未来任何未�
 - **绝不把 `uintptr` 转回 `unsafe.Pointer` 去取地址；要算偏移就在切片上算。** ❌ — 潜伏 UAF：GC 不认识 uintptr，对象可能已被移动/回收。当前全仓 `unsafe.Pointer(uintptr` **零命中**，保持它。 — `player/qqmusic/mem.go`、`player/kugou/watchdog/watchdog.go`
 - **读 VS_FIXEDFILEINFO 必须先校验 `Signature == 0xFEEF04BD`。** ❌ — 不校验就是拿垃圾内存当版本号。 — `player/kugou/watchdog/watchdog.go:320`、`player/qqmusic/mem.go:455`
 - **绝不恢复 `InjectSliderAOB()`。** ❌ — 见 issue #39。它是全项目唯一会写外部进程内存的路径（装 codecave + 打 E9 跳转），是杀软重点盯的注入签名，而其产出 `SliderVal` 至今零消费方。实现体原样保留在 `player/qqmusic/mem.go:545`，调用已在 `player/qqmusic/qqmusic.go:77,86` 注释关闭。**恢复的前置条件是先证明有消费方**，不是「照模板补全」。
-- **22.41 的 `SongIDDurCheckOff` 交叉核对绝不能删——它不是多余的校验。** ❌ — 22.41 的数字 songID 不在 now-playing 显示对象里，而在另一处「播放会话」结构（`knownVersions["22.41"]` 的 `SongIDOff`，按符号找）。这两处**在换歌瞬间会短暂不同步**：显示对象先更新（切歌检测因此触发），会话结构还留着上一首的 songID。`ReadAllMetadata` 用会话结构自带的时长与显示时长精确核对，不一致即把 songId 归 0，交给下面的补取重试。删掉这步 = 换歌瞬间拿**上一首**的 songID 去请求 → **整首推错歌词，比空白更糟且不自愈**。稳态下两处时长恒等（CE 多次连读实测），核对不会误杀。
-- **22.41 换歌后的歌词补取（`lyricsPending`）绝不能退回「等不到就认账」。** ❌ — songID（会话结构）与 songMid（堆上报 JSON）**都滞后显示对象数秒**，而显示对象先更新、先触发切歌检测。原逻辑等 500ms 拿不到就认领 lastName 并按「无歌词」收场，可认领后不再进换歌分支 → **永不重试 → 整首空白**（真机实测约 80% 的切歌命中此路径）。现行：立即认领并发标题（overlay 不停在上一首），随后在 `lyricRetryWindow` 内每 `lyricRetryInterval` 重试，songID / songMid 谁先落位用谁，取到即中途替换 all_lyrics。**`FindSongMid` 是全内存扫描**，故只在 songID 缺位时才跑且受节流约束——**别把它挪进 poll 热路径**。
-- **22.41 的三条反直觉事实，别照 22.16/22.22 的样子「补全」。** ❌ — ① 歌名/歌手是 UTF-16 `WCHAR*` 不是窄 SSO（GBK 字节全内存零命中、UTF-16 60+ 命中，CE 实测），故 `UseWideStrings=true`；按窄 SSO 去读会把指针字节当文本。② 客户端上报的 `songid` **恒为 0**（QQ 改用 songmid 做主键），别据此断定「22.41 没有 songID」——真 ID 在会话结构里，见上两条。③ `FastTimerPtr` 留 0 是对的不是漏填：22.16/22.22 要另找快速计时器，是因为它们结构体内的 `ProgressOff` 数秒一跳；22.41 的 `ProgressOff` 实测亚秒级高分辨率（快速连读每次都变），本地时钟插值以它为锚已足够，补一个 FastTimer 只是多一层可断的间接。
+- **22.31/22.41 的 `SongIDDurCheckOff` 交叉核对绝不能删——它不是多余的校验。** ❌ — 这两版（宽字符模型）的数字 songID 都不在 now-playing 显示对象里，而在另一处「播放会话」结构（`knownVersions` 对应条目的 `SongIDOff`，按符号找）。这两处**在换歌瞬间会短暂不同步**：显示对象先更新（切歌检测因此触发），会话结构还留着上一首的 songID。`ReadAllMetadata` 用会话结构自带的时长与显示时长精确核对，不一致即把 songId 归 0，交给下面的补取重试。删掉这步 = 换歌瞬间拿**上一首**的 songID 去请求 → **整首推错歌词，比空白更糟且不自愈**。稳态下两处时长恒等（CE 多次连读实测），核对不会误杀。
+- **22.31/22.41 换歌后的歌词补取（`lyricsPending`）绝不能退回「等不到就认账」。** ❌ — songID（会话结构）与 songMid（堆上报 JSON）**都滞后显示对象数秒**，而显示对象先更新、先触发切歌检测。原逻辑等 500ms 拿不到就认领 lastName 并按「无歌词」收场，可认领后不再进换歌分支 → **永不重试 → 整首空白**（真机实测约 80% 的切歌命中此路径）。现行：立即认领并发标题（overlay 不停在上一首），随后在 `lyricRetryWindow` 内每 `lyricRetryInterval` 重试，songID / songMid 谁先落位用谁，取到即中途替换 all_lyrics。**`FindSongMid` 是全内存扫描**，故只在 songID 缺位时才跑且受节流约束——**别把它挪进 poll 热路径**。
+- **22.31/22.41 的三条反直觉事实，别照 22.16/22.22 的样子「补全」。** ❌ —（宽字符切换发生在 22.22→22.31 之间，两版同一套模型）① 歌名/歌手是 UTF-16 `WCHAR*` 不是窄 SSO（GBK 字节全内存零命中、UTF-16 多命中，CE 实测），故 `UseWideStrings=true`；按窄 SSO 去读会把指针字节当文本。② 客户端上报的 `songid` **恒为 0**（QQ 改用 songmid 做主键），别据此断定「没有 songID」——真 ID 在会话结构里，见上两条。③ `FastTimerPtr` 留 0 是对的不是漏填：22.16/22.22 要另找快速计时器，是因为它们结构体内的 `ProgressOff` 数秒一跳；22.31/22.41 的 `ProgressOff` 实测亚秒级高分辨率（快速连读每次都变），本地时钟插值以它为锚已足够，补一个 FastTimer 只是多一层可断的间接。
 - **网易云 canvas 严格只读，绝不改尺寸。** ❌ — 改尺寸会让网易云崩溃。
 - **网易云 watchdog 的保活标记只能用 `--disable-backgrounding-occluded-windows`。** ❌ — 换成 `--remote-debugging-port=9222` 会漏判「有调试口但没保活参数」的实例，让它逃过重启 → 窗口被遮挡时渲染器降帧 → 特效镜像掉帧；换成 `--disable-features=CalculateNativeWinOcclusion` 更糟，那是**网易云子进程自带的**，会误判成已注入。 — `player/cloudmusic/watchdog/process.go`
 - **注册表注入仅当自启项已存在时才修补，不代为创建。** ❌ — 代为创建 = 替用户改开机启动，越权。 — `player/cloudmusic/watchdog/registry.go`
@@ -424,7 +423,7 @@ default: // "standby", "waiting_process", "waiting_song", 以及未来任何未�
 |---|---|---|
 | 内存只读扫描 | `player/wesing/` | `OpenProcess` + `ReadProcessMemory`（`proc/memory.go`），PE 导出表定位 vtable |
 | CDP + React fiber 遍历 | `player/cloudmusic/` | 注入 JS 遍历 fiber 树（`cdp/client.go` 的 `ForceFetchLyricsInRedux`） |
-| 内存偏移表 | `player/qqmusic/` | 按 exe 版本查偏移表（`mem.go` 的 `knownVersions`）。**取词主键分三种，别假定统一**：`22.16`/`22.22` 只用数字 songID；`20.05` 用 songMid（`SongMidParamsOff`/`StreamURLOff`，从结构体内 URL 串解析）；`22.41` 主用会话结构里的 songID（`SongIDOff` + `SongIDDurCheckOff` 核对），songMid 仅作兜底（`SongMidFromHeap` → `FindSongMid` 扫堆 JSON）。未知版本回退 `22.16` 偏移，读出的是垃圾——见 `ssoFromBuf` 注释 |
+| 内存偏移表 | `player/qqmusic/` | 按 exe 版本查偏移表（`mem.go` 的 `knownVersions`，现覆盖 `20.05`/`21.81`/`22.16`/`22.22`/`22.31`/`22.41`）。**取词主键分三种，别假定统一**：`22.16`/`22.22`（窄 SSO）只用数字 songID；`20.05` 用 songMid（`SongMidParamsOff`/`StreamURLOff`，从结构体内 URL 串解析）；`22.31`/`22.41`（宽字符，同一套模型）主用会话结构里的 songID（`SongIDOff` + `SongIDDurCheckOff` 核对），songMid 仅作兜底（`SongMidFromHeap` → `FindSongMid` 扫堆 JSON）。未知版本回退 `22.16` 偏移，读出的是垃圾——见 `ssoFromBuf` 注释 |
 | CDP + 二进制补丁 | `player/kugou/` | patch `libcef.dll` 开 CDP（`watchdog/`）+ 提权 helper |
 
 **必须实现 `player.Player` 四方法：`Name`/`Start`/`Stop`/`Events`。嵌入 `BaseEmitter` 后只需自行写 `Start()`。**
@@ -582,39 +581,44 @@ Banner、`server.NewServer`、`NewRouter` 的 normalStates 建表、端点表、
 
 **「逐字：否」是断言，不是报告。**
 
-全仓 `逐字：` 日志现有 **13 处：10 处真检测、3 处仍写死 `否`**。本节初写时是「8 写死、3 真检测」——qqmusic（QRC）与 kugou（KRC，`97f60d8`）的逐字先后接入后都改用了真检测，见下方实证。
+全仓 `逐字：` 日志现有 **13 处：11 处真检测、2 处仍写死 `否`**。本节初写时是「8 写死、3 真检测」——qqmusic（QRC）、kugou（KRC，`97f60d8`）、wesing（内存 `CharElement`）的逐字先后接入后都改用了真检测，见下方实证。
 
 | 写法 | 位置 |
 |---|---|
-| ✅ 真检测（`detailedFlag()` / `lyricDetailedFlag()`，遍历 `TextDetailed.Words`） | `player/cloudmusic`（CDP / API / fetch 共 3 处）、`player/qqmusic`（4 处）、`player/kugou`（3 处，`97f60d8` 起）——**按符号找，行号已漂** |
-| ❌ 写死 `否` | `player/wesing/wesing.go`（确无逐字源，尚可辩护）、`player/cloudmusic/cloudmusic.go` 两条 Redux 分支（同文件里 `lyricDetailedFlag()` 就在手边却没用） |
+| ✅ 真检测（`detailedFlag()` / `lyricDetailedFlag()`，遍历 `TextDetailed.Words`） | `player/cloudmusic`（CDP / API / fetch 共 3 处）、`player/qqmusic`（4 处）、`player/kugou`（3 处，`97f60d8` 起）、`player/wesing`（`detailedFlag()`）——**按符号找，行号已漂** |
+| ❌ 写死 `否` | `player/cloudmusic/cloudmusic.go` 两条 Redux 分支（同文件里 `lyricDetailedFlag()` 就在手边却没用） |
 
 后果：**就算有人把逐字接通了，日志还是会说「否」**——它不是在报告状态，是在断言状态，接线者会据此以为自己没做成、回去改一个本来就对的实现。
 
-**这条已被两次兑现、且证明有用**：qqmusic 与 kugou 接通逐字时，接线者都在代码里留了注释显式引用本节（`kugou.go`、`qqmusic.go` 各有一句「绝不写死——AGENTS.md §6.1」）并改用真检测，没踩坑。剩下 3 处写死里，`wesing` 那处确无逐字源、尚可辩护；`cloudmusic` 的两条 Redux 分支仍是隐患——同一文件里两种写法并存。
+**这条已被三次兑现、且证明有用**：qqmusic、kugou、wesing 接通逐字时，接线者都改用了真检测（qqmusic/kugou 还在代码里留注释显式引用本节「绝不写死——AGENTS.md §6.1」），没踩坑。**尤其 wesing 那处**——本节曾断言它「确无逐字源、尚可辩护」，正是这类写死最危险的形状：把「还没去读」误当成「机制上没有」，反而拦住了接线。实测证明字级时间就在 `CharElement` 里。剩下 2 处写死是 `cloudmusic` 的两条 Redux 分支——同一文件里 `lyricDetailedFlag()` 就在手边却没用，仍是隐患。
 
 **新增任何 `<状态>：<值>` 形态的日志，值必须来自函数调用。** 想不出怎么检测，就把这个字段从日志里删掉：不报好过报错。
 
 ### 6.2 例外（机制不同，须写明理由）
 
-**四家的能力不一致，且它不是「wesing vs 另外三家」**——2026-07-17 全量实测（WS 录音 + 代码真源双证）：
+**四家的能力不一致。** 截至 `447686b`（2026-07-18），逐字与翻译都是 cloudmusicv3 / qqmusic / kugou 三家有、wesing 无——能力上现在确实是「wesing vs 另外三家」。但**这是逐步挖出来的、不是天然分界**：kugou 一度也被归进「都无」（见 §6.1 的写死日志与下文 ①），先后两个 commit 才把它的逐字与翻译从 KRC 挖通。wesing 现在的「无」同样可能只是「还没挖」，别倒果为因（下文 ①②）。以下为代码真源 + WS 录音双证：
 
 | | `sub_text`（翻译） | `text_detailed`（逐字） | 纯音乐 |
 |---|---|---|---|
-| **wesing** | 无 | 无 | **情况不存在** |
+| **wesing** | 无 | **有**（内存直读 `CharElement`，非 HTTP） | **情况不存在** |
 | **cloudmusicv3** | **有** | **有**（YRC） | 平台返回「纯音乐，请欣赏」→ 归一为 `index:-1` |
 | **qqmusic** | **有** | **有**（QRC） | API 返回零行 → `index:-1` |
-| **kugou** | 无 | **有**（KRC，`97f60d8` 起） | 同 cloudmusic（两家文案一字不差） |
+| **kugou** | **有**（KRC 内嵌 `[language:]`） | **有**（KRC，`97f60d8` 起） | 同 cloudmusic（两家文案一字不差） |
 
-**翻译是两家有两家无；逐字自 `97f60d8` 起是三家有（cloudmusicv3 / qqmusic / kugou）、wesing 无。** 此前本节把 kugou 与 wesing 并列为「翻译逐字都无」——逐字那半现在过时了：`97f60d8` 从 `krcs.kugou.com` 拿 `fmt=krc` 解出字级时间轴，把 `kugou.go` 里写死的「逐字：否」改成了 `detailedFlag()` 真检测。**但翻译那半仍成立**：kugou 给 `BuildLyricLine` / `BuildLyricUpdate` 的第 4 个参数（subText）仍硬传 `""`（`kugou.go:566`、`:622`），`kugou.go` 的 `SubText` 赋值点仍为 **0 处**——KRC 只有字级时间轴，没有翻译源。kugou 的逐字是**条件性**的：拿不到 KRC、回落到行级 `fmt=lrc` 时 `text_detailed` 为 `{}`、`lyrics_detailed` 为 `[]`，由 `detailedFlag()` 如实反映。wesing 仍两者皆无。
+**逐字现在四家全有；翻译三家有（cloudmusicv3 / qqmusic / kugou）、只有 wesing 无。** 本节几经订正，两条曾经的「过时」都已翻案：
+
+- **kugou 逐字**（`97f60d8`）：从 `krcs.kugou.com` 拿 `fmt=krc` 解出字级时间轴。**kugou 翻译**（`447686b`）：同一份 KRC 里内嵌的 `[language:]` 标签（base64 JSON，`type=1` 中文翻译轨，按 `[start,dur]` 行号对齐，非网易云那种时间戳匹配）→ 赋进 `SubText`。二者同一次 `fmt=krc` 请求、同一次解密，白搭车。kugou 的逐字/翻译都是**条件性**的：拿不到 KRC、回落到行级 `fmt=lrc` 时 `text_detailed`/`sub_text` 都空，由 `detailedFlag()` 如实反映。
+- **wesing 逐字**（内存直读）：**曾断言「机制上不成立」，实测推翻**。全民K歌是卡拉OK，字级时间就在 `CharElement` 里——`+0x04` 字起始秒、`+0x08` 字时长秒（2026-07-18 实测：首字起始 = 行时间，行内严格递增，末字终点≤下一行起点，53/53 行吻合；**跨进程重启一致**，只有模块基址随 ASLR 变、结构体内偏移全不变）。`reader.go` 的 `LoadLyrics` 此前遍历 `CharElement` 只读了文本（`+0x00`→RenderData），这两个时间字段整个略过了——不是「没有逐字源」，是「没去读」。时间轴不合法的行退回行级（`Detailed` 为空 `{}`），由 `detailedFlag()` 如实反映。
+
+**只剩 wesing 翻译仍无来源**：`player/wesing/` 包零 HTTP，渲染内存里只有演唱歌词、无翻译轨；它手里的 mid（`songinfo.go` 从内存 JSON 刮的）是**全民K歌曲库 mid，不是 QQ 音乐 songmid**（2026-07-18 实测：拿去 QQ `fcg_query_lyric_new` 返 `retcode=-1901`、`musicu.fcg` 返 `songID=0/qrc=0`），故走不通 QQ 那条翻译源。要上 wesing 翻译得先找到可用的外部翻译源。
 
 #### 「没有」分两种，别混
 
-**① 无来源 —— 还没挖出取词路径**（wesing 的翻译与逐字、kugou 的翻译）
+**① 无来源 —— 还没挖出取词路径**（现只剩 **wesing 的翻译**一项）
 
-> kugou 的**逐字**曾属此类，`97f60d8` 已挖通（KRC）——正应验了本节稍后仓库所有者那句「将来挖出来了就该补上」。剩下 wesing 两者、kugou 翻译仍无来源。
+> 这一类正在逐条被挖通：kugou 逐字（`97f60d8`，KRC）、kugou 翻译（`447686b`，KRC 内嵌 `[language:]`）、wesing 逐字（内存 `CharElement`）先后挖通——应验了本节稍后仓库所有者那句「将来挖出来了就该补上」。**只剩 wesing 翻译无来源**。
 
-wesing 扫的是内存里**已渲染完成**的歌词：`player/wesing/lyric/reader.go` 的 `LyricLine` 只有 `{Index, Time, Text}` 三个字段。整个 `player/wesing/` 包**零 HTTP 引用**（实测 grep `net/http` 无命中）。
+wesing 扫的是内存里**已渲染完成**的歌词：`player/wesing/lyric/reader.go` 的 `LyricLine` 是 `{Index, Time, Text, Detailed}`（`Detailed` 即逐字，`SubText` 尚无——无翻译源）。整个 `player/wesing/` 包**零 HTTP 引用**（实测 grep `net/http` 无命中）——这正是翻译无来源的根：翻译要么来自外部 API（与 zero-HTTP 设计冲突），要么内存里有翻译轨（渲染内存只有演唱词，没有）。**注意「零 HTTP」不再等于「零逐字」**：逐字来自内存字级时间，不需要 HTTP。
 
 **但这只等于「我们目前拿不到」，不等于「平台没有」。** 仓库所有者原话：「逐字和翻译，是因为我们还没挖出来。」将来挖出来了就该补上，那不是破坏一致性，是补齐。
 
@@ -771,6 +775,19 @@ WebGL canvas 默认 `preserveDrawingBuffer:false`，合成后绘制缓冲被清�
 5. **AOB 扫描**：把 vtable 值当 4 字节小端模式在可写区域搜（`Uint32ToAOB` + `AOBScan`，:51-53）→ 首个命中 = LyricHost 实例；歌词子结构 = `hostAddr + 0x0C`（:60）
 
 **这条链上的每个魔数（`0x3C`/`0x78`/`0xE8`/`C7 07`/`0x0C`）都是逆向出来的，不是标准。** 改 wesing 取词前先读完这个函数——它失败时只返回 error（finder.go:25/32/39/46/56），wesing 会跳过本轮重试，不会有任何提示告诉你是哪一步断的，只有 `log.Detail` 的几行地址（:27/34/41/48）能定位。排查时把日志级别看全。
+
+**子结构之后的内存布局（`reader.go` `LoadLyrics` 读的，同样全是逆向魔数）：**
+
+```
+子结构 +0x48 / +0x50   = vector<LyricEntry*> 的 begin / end
+LyricEntry +0x00       = float 行起始秒
+LyricEntry +0x08 / +0x0C = vector<CharElement*> 的 begin / end（字级单元：中文一字、英文一词）
+CharElement +0x00      = RenderData*（+0x00 → null 结尾 UTF-16LE 文本）
+CharElement +0x04      = float 字起始秒（绝对）   ← 逐字
+CharElement +0x08      = float 字时长秒           ← 逐字
+```
+
+`+0x04`/`+0x08` 就是 wesing 逐字的来源（见 §6.2）。**2026-07-18 实测跨进程重启一致**：基址随 ASLR 变（无所谓，链的第 1、5 步靠模块枚举 + AOB 扫堆重新定位），但上面所有**结构体内偏移不变**。合法性判据：首字起始 ≈ 行起始、行内 `+0x04` 单调不减、`+0x08` ∈ [0,100)——任一破即整行退回行级（`reader.go` 的 `wordsOK`），不推半截错位的逐字。垃圾防护复用行级同一个 `IsPlausiblePlayTime`（接受式，拒 NaN/Inf，见 §3.7）。
 
 ### 7.6 网易云 canvas 严格只读
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"syscall"
 
+	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
 
@@ -12,6 +13,10 @@ type LyricLine struct {
 	Index int     // 行索引
 	Time  float32 // 开始时间（秒）
 	Text  string  // 歌词文本
+	// Detailed 逐字时间轴。全民K歌是卡拉OK，字级时间就在 CharElement 里（+0x04 起始 / +0x08
+	// 时长，秒；CE 实测跨重启稳定）。时间轴不合法的行退回零值 → 序列化成 {}、只出行级。
+	// PlayTime 此处不填，由 wesing.go 的 applyDetailedOffset 按 offset 统一套。
+	Detailed player.LyricTextDetailed
 }
 
 // LoadLyrics 从内存中加载所有歌词行
@@ -87,9 +92,14 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 			continue // 跳过异常数据
 		}
 
-		// 逐元素读取：CharElement* → RenderData* → UTF-16LE 字符串
-		// 注意：中文歌词每个 CharElement 是单个汉字，英文歌词每个是一个单词
+		// 逐元素读取：CharElement* → RenderData* → UTF-16LE 字符串。
+		// CharElement 是卡拉OK的字级单元：+0x00=RenderData(文本)、+0x04=字起始秒、+0x08=字时长秒。
+		// 中文每个 CharElement 是单个汉字、英文每个是一个单词。文本一直在读，+0x04/+0x08 两个
+		// 时间字段此前整个略过了——逐字就出在这。
 		text := make([]rune, 0, numChars*4)
+		words := make([]player.LyricTextDetailedWord, 0, numChars)
+		wordsOK := true            // 时间轴是否全程合法（有一处坏就整行退回行级）
+		var lastWordT float32 = -1 // 单调性检查锚
 		for c := uint32(0); c < numChars; c++ {
 			charElemPtr, err := proc.ReadUint32(handle, charBegin+c*4)
 			if err != nil || charElemPtr == 0 {
@@ -108,22 +118,52 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 			if err != nil || len(rawBytes) < 2 {
 				continue
 			}
+			wordRunes := make([]rune, 0, 8)
 			for j := 0; j+1 < len(rawBytes); j += 2 {
 				wchar := uint16(rawBytes[j]) | uint16(rawBytes[j+1])<<8
 				if wchar == 0 {
 					break
 				}
-				text = append(text, rune(wchar))
+				wordRunes = append(wordRunes, rune(wchar))
 			}
-		}
+			if len(wordRunes) == 0 {
+				continue
+			}
+			text = append(text, wordRunes...)
 
-		if len(text) > 0 {
-			lyrics = append(lyrics, LyricLine{
-				Index: int(i),
-				Time:  timeVal,
-				Text:  string(text),
+			// 字级时间：+0x04 起始（秒，绝对）、+0x08 时长（秒）。复用行级同一个接受式判定
+			// IsPlausiblePlayTime（拒 NaN/Inf/越界，防堆残留把时间轴带飞）；再加单调与时长合理性。
+			// 任一处不合法即 wordsOK=false → 整行 Detailed 作废、退回行级，不推半截错位的逐字。
+			wStart, _ := proc.ReadFloat32(handle, charElemPtr+0x04)
+			wDur, _ := proc.ReadFloat32(handle, charElemPtr+0x08)
+			if !IsPlausiblePlayTime(wStart) || wStart < lastWordT-0.001 || wDur < 0 || wDur > 100 {
+				wordsOK = false
+			}
+			lastWordT = wStart
+			words = append(words, player.LyricTextDetailedWord{
+				Timestamp: wStart,
+				Duration:  wDur,
+				Text:      string(wordRunes),
 			})
 		}
+
+		if len(text) == 0 {
+			continue
+		}
+		line := LyricLine{
+			Index: int(i),
+			Time:  timeVal,
+			Text:  string(text),
+		}
+		// 逐字：仅当整行时间轴合法才附上；否则 Detailed 保持零值（→ {}），退回行级。
+		if wordsOK && len(words) > 0 {
+			line.Detailed = player.LyricTextDetailed{
+				Timestamp: timeVal, // 行起始（= 首字起始，实测相等）
+				Duration:  words[len(words)-1].Timestamp + words[len(words)-1].Duration - words[0].Timestamp,
+				Words:     words,
+			}
+		}
+		lyrics = append(lyrics, line)
 	}
 
 	return lyrics, nil

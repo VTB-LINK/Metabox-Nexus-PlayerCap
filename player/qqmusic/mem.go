@@ -197,6 +197,26 @@ var knownVersions = map[string]dllOffsets{
 		DurationOff:  0xE8,
 		ProgressOff:  0xEC,
 	},
+	"22.31": {
+		// CE 实测（32-bit x86，2026-07-18）：与 22.41 同一套宽字符模型（UTF-16 WCHAR* 指针，
+		// 非 22.22 的窄 SSO——宽字符切换发生在 22.22→22.31 之间）。now-playing 显示对象布局
+		// 与 22.41 逐字段一致，仅基址不同：+0x00 Name*、+0x04 Singer*、+0x08 Album*、
+		// +0x0C 进度ms（实测亚秒高分辨率 → 无需 FastTimer）、+0x10 时长ms。
+		// 上报 songid 恒 0；真数字 songID 同样在「播放会话」结构里（87/95 签名后第 8 字节），
+		// 距 Struct1 0x71FD8（绝对 QQMusic.dll+0xCA52B0）。实测：享福服务器 songID=621653818
+		// (0x250DAF3A) 恰落此偏移。SongIDDurCheckOff（+0x71FE0=DLL+0xCA52B8）自带时长与显示
+		// 时长交叉核对，防换歌瞬间读到上一首。SongMidFromHeap 兜底。
+		Struct1:           0xC332D8,
+		NameOff:           0x00,
+		SingerOff:         0x04,
+		AlbumOff:          0x08,
+		ProgressOff:       0x0C,
+		DurationOff:       0x10,
+		SongIDOff:         0x71FD8,
+		SongIDDurCheckOff: 0x71FE0,
+		UseWideStrings:    true,
+		SongMidFromHeap:   true,
+	},
 	"22.41": {
 		// CE 实测（32-bit x86）：结构体由窄 SSO 改为 UTF-16 WCHAR* 指针。
 		// now-playing 显示对象在 QQMusic.dll 静态 .data（Struct1），跨歌验证字段原地更新：

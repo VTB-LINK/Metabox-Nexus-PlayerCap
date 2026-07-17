@@ -1,41 +1,58 @@
-### 3.0.0-beta.14
+### 3.0.0
 
-这是 3.0.0-beta.14 预发布版本，引入逐字歌词（Word-level Lyrics）功能，为所有播放器预置逐字架构，并显著改善歌词文本匹配稳健性。
+自 v2 以来的一次大版本更新。v2 只接入全民K歌与网易云两家、输出行级歌词；3.0 扩展到四家播放器，新增逐字歌词、翻译第二行与网易云特效镜像，并对歌词时间语义、事件契约与对外接口做了系统性收敛。**含破坏性字段变更，下游需同步（见文末）。**
 
-#### 新功能
+#### 新增播放器（两家 → 四家）
 
-- **逐字歌词（Per-word Lyrics）**：网易云音乐播放器现支持 YRC 逐字歌词解析与输出。API 响应新增 `text_detailed`（每行逐字数据）和 `lyrics_detailed`（全量逐字集合）字段。
-- **悬浮歌词页逐字特效**：内置 Fade（渐显）和 Reveal（擦除）两种逐字动画模式，默认 Fade；通过编辑器下拉选单或 `word_fx` URL 参数控制。
-- **displayStart 逻辑**：当逐字首词时间早于逐行时间时，`play_time` 使用更早的时间触发显示，确保前端不漏字。
-- **全局 `BuildLyricLine` 工厂函数**：所有播放器统一使用共享工厂构建 `LyricLine`，为未来其他播放器引入逐字做好架构准备。
+- **QQ 音乐（`qqmusic`）**：进程内存读取定位元数据，本地时钟插值进度，QRC 歌词（3DES 解密）。适配 20.05 / 21.81 / 22.16 / 22.22 / 22.31 / 22.41 多个客户端版本。
+- **酷狗音乐（`kugou`）**：自动 patch libcef.dll 打开 CEF DevTools 端口，CDP 取播放信息；watchdog 自动定位安装目录、必要时提权修补并重启。KRC 歌词。未知 libcef 版本按字节指纹拒绝盲打。
 
-#### 改进
+#### 新增能力
 
-- **歌词文本匹配大幅增强**：引入 `NormalizeLyricText`（去标点+小写）全局归一化，修复 LRC 与 YRC 标点差异导致的逐字匹配失败（如 `,` vs `'`、行尾 `!` 等）。
-- **歌名匹配增强**：引入 `NormalizeSongName` / `SameSongName` 共享函数，网易云搜索结果比对和酷狗关键字搜索均升级为去标点模糊匹配。
-- **回跳 Seek 检测优化**：CloudMusic 回跳阈值从 1.5s 降至 1.0s（前跳保持 1.5s），改善逐字场景下的同行内 seek 响应。
-- **酷狗歌手匹配改进**：`singerMatches` 使用 `NormalizeSongName` 对比，容忍标点差异。
+- **逐字歌词**（`text_detailed` / `lyrics_detailed`）：四家播放器输出每字的时间戳与持续时间——cloudmusicv3（YRC）、qqmusic（QRC）、kugou（KRC）、wesing（进程内存的卡拉OK字级时间）。前端可实现卡拉OK式逐字高亮。
+- **翻译第二行**（`sub_text`）：cloudmusicv3、qqmusic、kugou 三家解析并投递翻译（该字段在 v2 存在但从未被填充）。wesing 无翻译源。仅中文翻译，不含音译。
+- **网易云特效歌词镜像**：只读镜像网易云特效歌词的 WebGL 画面给 OBS，不改动源画面，主播可常开工具栏；工具栏/顶栏不入帧。支持非特效时淡出回退纯净歌词、最小化屏外保活、无订阅者自动停采。新增 `/cloudmusicv3/effect-ws` 端点与独立镜像页。
+- **前端逐字特效**：歌词页新增基于逐字时间戳的 fade（渐显）/ reveal（擦除）高亮；配置编辑器新增「特效」模式与四家播放器、副歌词开关。
 
-#### 悬浮歌词页变更
+#### 歌词与事件契约
 
-- **逐字特效选单**：编辑器「显示」组新增「逐字特效」下拉（渐显 / 擦除 / 关闭），替代原布尔开关。
-- **URL 参数**：`word_fx=fade`（默认，可省略）/ `word_fx=reveal` / `word_fx=0`（关闭）。
-- **Reveal 模式 Glow 限制**：Reveal 使用 CSS mask，与 text-shadow 冲突，因此 Reveal 模式下自动禁用 glow 以避免方形裁切。Fade 模式不受影响。
+- **纯音乐信号跨播放器归一**：此前三家表达不一致（网易云/酷狗把「纯音乐，请欣赏」当一行歌词推出）。现统一为 `all_lyrics` 发 `count:0`、`lyric_update` 发 `index:-1`，提示语原样保留在 `text`。下游判据收敛为 `index === -1` 即无歌词。
+- **`play_time` 语义统一**：固定为「本行歌词的播出时间」（= `timestamp` − offset）；此前多数播放器发的是实时播放位置。`all_lyrics` 新增 `progress` 与每行 `play_time`。
+- **空载荷统一为 `{}`**：`lyric_idle` 等空数据不再发 `null`，避免下游读字段报错。
+- **`clear_song_data` 下架**：收敛为内部事件，不再出现在对外 API。
+- **暂停 / 恢复 / seek 检测覆盖四家**：新增的 qqmusic、kugou 同样支持前跳、回跳与暂停恢复。
 
-#### 架构变更
+#### 接口
 
-- `player/player.go` 新增：`BuildLyricLine`、`LyricDisplayStart`、`NormalizeLyricText`、`SameLyricText`、`NormalizeSongName`、`SameSongName` 全局工具函数。
-- 所有播放器（WeSing / QQ Music / Kugou / CloudMusic）的 `toLyricLines` 和 `LyricUpdate` 发射统一使用 `BuildLyricLine`，为逐字扩展做好占位。
-- `cloudmusic/lyric/fetch.go` 本地归一化函数改为代理全局 `player.NormalizeLyricText` / `player.NormalizeSongName`。
-- `kugou/lyric/lyric.go` 歌名匹配升级为 `player.SameSongName`。
+- **per-player 端点扩到四家**：`/qqmusic/*`、`/kugou/*` 全套端点随播放器自动注册。
+- **网易云特效端点**：`/cloudmusicv3/effect-ws`（对外，二进制帧 + 状态）、`/cloudmusicv3/effect-ingest`（内部）。
+- **并发正确性**：修复四个 HTTP 读端点锁外读取造成的数据竞争；WS 写失败改为关连接并注销订阅者（此前僵尸订阅者残留在册）。
+- **根端点语义对齐**：无活跃播放器时不再随机返回某个待机播放器的残留数据，与 WS 的 `player_clear` 一致。
+- **文档整改**：`openapi.yaml` 与响应示例系统性重写——示例值换为真实录音、订正按播放器而异的行为、清除营销腔（issue #43）；新增 `docsample` 门禁，要求每个示例数值都能在真实录音中逐字节找到。
 
-#### 升级提示
+#### 稳定性修复
 
-- **API 新增字段（向后兼容）**：`text_detailed` 和 `lyrics_detailed` 为新增字段，无逐字时分别为 `{}` 和 `[]`，不影响现有客户端解析。
-- **悬浮歌词页**：逐字特效默认开启（Fade），无需额外配置；如需关闭使用 `word_fx=0`。
+- **wesing 死地址自愈**：`cachedTimeAddr` 一旦锁死会导致整场会话歌词不动、OBS 空屏、必须重启；现可自动重新定位。
+- **wesing 歌词越界读**：越界的堆残留曾被当成一行乱码歌词（`timestamp` 达 1.5e18）推上对外 API，加一道时间上界守卫（`IsPlausiblePlayTime`，同一守卫也拦下 NaN 播放时间地址）。
+- **跨歌串标题 / 串封面**：封面异步下载迟到回写会把上一首的标题、封面覆盖到当前歌，现以代次守卫丢弃过期回写。
+- **路由归属确定化**：修复多播放器并存时 OBS 根画面每约 5 秒随机硬切。
+- **歌词显示修复**（cloudmusicv3 / qqmusic）：压缩型 LRC 裸时间戳上屏、间奏空行被吞、0 行歌词停在上一首等。
+- **酷狗 UAC 限流**：用户拒绝提权后不再每 2 秒反复弹窗夺焦。
+- 内存读取路径的进程存活硬化（模块枚举截断、版本探测校验、回调配额）。
+
+#### 运维
+
+- **自动更新**：版本判定按完整 semver 比较，支持预发布（alpha / beta / rc）升级；新增 `-force` 约定用于受控回退。下载物强制 SHA256 校验。
+- **配置**：`config.yml` 改为 exe 所在目录优先（此前计划任务 / 自启的工作目录是 System32，会在那里读写）；新增网易云特效策略键；per-player 轮询间隔纳入安全钳制。
+
+#### 破坏性变更（下游务必同步）
+
+- **歌词字段重命名**：`time` → `timestamp`、`line_index` → `index`、`song_title` → `title`。
+- **`play_time` 语义变化**：从「实时播放位置」改为「本行歌词的播出时间」（= `timestamp` − offset）。需要整曲进度请改用 `progress`。
+- **纯音乐表示**：从「`index:0` + 提示语当歌词」改为「`index:-1`，提示语保留在 `text`」。
 
 #### 已知限制
 
-- 逐字歌词目前仅网易云音乐可用（依赖 NetEase YRC 数据）。
-- 并非所有网易云歌曲都有 YRC（部分仅有 LRC），此时退化为逐行显示。
-- Reveal 模式与 glow 效果互斥（CSS mask 限制）。
+- Windows 专用。
+- wesing 无翻译（其曲库 mid 非 QQ 系、走不通翻译源）；逐字有——来自进程内存的卡拉OK字级时间。
+- 逐字与翻译并非每首歌都有，取决于对应平台是否提供该数据。

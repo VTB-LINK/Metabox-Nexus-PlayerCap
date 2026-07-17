@@ -190,9 +190,13 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 
 		// Broadcast lyrics
 		offsetSec := float32(p.offsetMs) / 1000.0
+		// 逐字 words 的 play_time 按 offset 统一套一次（在存进 lyrics、供本处与 pollLyrics 共用之前）。
+		// BuildLyricLine 只调行级 play_time、Detailed 原样透传（对照 cloudmusic 的 applyTextDetailedOffset），
+		// 不套这一步逐字高亮会整体偏一个 offset，而行级是对的。
+		applyDetailedOffset(lyrics, offsetSec)
 		lyricItems := make([]player.LyricLine, len(lyrics))
 		for i, l := range lyrics {
-			lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", player.LyricTextDetailed{}, offsetSec)
+			lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", l.Detailed, offsetSec)
 		}
 
 		// 歌曲总时长
@@ -296,7 +300,7 @@ func (p *WesingPlayer) initSong(handle syscall.Handle, pid uint32, modules []pro
 	if err != nil || len(lyrics) == 0 {
 		return nil, 0, false
 	}
-	log.Info("歌词加载完成: %d 行；逐字：否", len(lyrics))
+	log.Info("歌词加载完成: %d 行；逐字：%s", len(lyrics), detailedFlag(lyrics))
 
 	if cachedTimeAddr != 0 {
 		// 与 validateTimeAddr 共用同一个判定，别再各写一份——这两处曾经是一对拷贝，
@@ -511,9 +515,10 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			lastLineIdx = currentIdx
 			l := lyrics[currentIdx]
 			// playTime 是内存直读的实时位置，只喂 Progress；play_time 由 BuildLyricUpdate
-			// 按歌词时间轴算。wesing 无逐字，故 detailed 传零值。
+			// 按歌词时间轴算。KRC 源无关——wesing 逐字直接来自 CharElement 内存（l.Detailed），
+			// words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传；无逐字的行为零值 {}。
 			p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-				l.Index, l.Time, l.Text, "", player.LyricTextDetailed{},
+				l.Index, l.Time, l.Text, "", l.Detailed,
 				offsetSec, playTime, songDuration,
 			))
 		}
@@ -525,4 +530,32 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 func (p *WesingPlayer) isProcessAlive() bool {
 	_, err := proc.FindProcess("WeSing.exe")
 	return err == nil
+}
+
+// applyDetailedOffset 把 offset 套到每行逐字的 play_time（行级 play_time 由 BuildLyric* 自己算）。
+// **必须在存进 lyrics、供 all_lyrics 与 pollLyrics 共用之前只跑一次**：LoadLyrics 只填了 words 的
+// Timestamp（内存原值）、留空 PlayTime，这里补上。对照 cloudmusic 的 applyTextDetailedOffset、
+// qqmusic/kugou 的同名函数。无逐字的行 Words 为空、天然跳过。
+func applyDetailedOffset(lyrics []lyric.LyricLine, offsetSec float32) {
+	for i := range lyrics {
+		d := &lyrics[i].Detailed
+		if len(d.Words) == 0 {
+			continue
+		}
+		d.PlayTime = player.AdjustLyricPlayTime(d.Timestamp, offsetSec)
+		for j := range d.Words {
+			d.Words[j].PlayTime = player.AdjustLyricPlayTime(d.Words[j].Timestamp, offsetSec)
+		}
+	}
+}
+
+// detailedFlag 报告这批歌词**实际**有没有逐字，绝不写死（AGENTS.md §6.1）。wesing 的逐字来自
+// CharElement 的字级时间；时间轴不合法的行退回行级、Detailed 为空，此时如实报「否」。
+func detailedFlag(lyrics []lyric.LyricLine) string {
+	for _, l := range lyrics {
+		if len(l.Detailed.Words) > 0 {
+			return "是"
+		}
+	}
+	return "否"
 }
