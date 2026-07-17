@@ -140,10 +140,8 @@ func (p *CloudMusicPlayer) Start() {
 				// 提醒，状态变了该再提醒；这条是给我们的情报，一台机器一次就够）。
 				telemetry.ReportOnce("cloudmusic.unsupported_version",
 					"网易云音乐版本不支持 CDP（需 v3+）",
-					map[string]any{
-						"version":  unsupported.Version,
-						"exe_path": unsupported.ExePath,
-					})
+					map[string]string{"cloudmusicv3.version": unsupported.Version},
+					map[string]any{"exe_path": unsupported.ExePath})
 
 				warnedUnsupported = true
 			}

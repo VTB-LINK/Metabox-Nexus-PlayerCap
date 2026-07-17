@@ -708,6 +708,8 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 	} else {
 		log.Info("酷狗版本: %s（推荐版本为 %s，实际以 libcef.dll 字节指纹为准）", ver, knownVersion)
 	}
+	// 全量版本 tag：支持与否都设，让 Sentry 聚合野外最多的酷狗版本（异常上报只覆盖被拒的版本）。
+	telemetry.SetPlayerVersion("kugou", ver)
 
 	// 但保留一道**负向**黑名单：已知不兼容的大版本在字节校验之前就确定性拒绝。10.x 与
 	// 补丁针对的 20.x 是不同的 CEF 基线，偏移不同；orig 指纹通常能识别，但黑名单零成本、
@@ -719,10 +721,8 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 		// 与网易云 v2 那条同构。
 		telemetry.ReportOnce("kugou.version_unsupported",
 			"酷狗 10.x 系列不受支持（补丁只针对 20.x 的 CEF 基线）",
-			map[string]any{
-				"kugou_version": ver,
-				"known_version": knownVersion,
-			})
+			map[string]string{"kugou.version": ver},
+			map[string]any{"known_version": knownVersion})
 		return fmt.Errorf("%w：酷狗 %s 属 10.x 系列，补丁只针对 %s（CEF 基线不同）", ErrVersionUnsupported, ver, knownVersion)
 	}
 
@@ -740,8 +740,8 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 		// 所以这里报的是酷狗版本，只作线索，不能直接当 CEF 版本用。
 		telemetry.ReportOnce("kugou.libcef_unsupported",
 			"酷狗的 libcef.dll 与已知偏移不符，已拒绝打补丁",
+			map[string]string{"kugou.version": ver},
 			map[string]any{
-				"kugou_version": ver,
 				"known_version": knownVersion,
 				"libcef_path":   libcefPath,
 			})
@@ -789,10 +789,8 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 		// 被杀软挡住**，那决定要不要去做白名单引导之类的事。
 		telemetry.ReportOnce("kugou.patch_reverted",
 			"酷狗补丁写入后字节未变更（疑似被杀软静默回滚）",
-			map[string]any{
-				"kugou_version": ver,
-				"libcef_path":   libcefPath,
-			})
+			map[string]string{"kugou.version": ver},
+			map[string]any{"libcef_path": libcefPath})
 		return fmt.Errorf("patch 写入后验证失败：字节未变更（请检查防病毒软件）")
 	}
 

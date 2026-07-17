@@ -405,6 +405,7 @@ func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) (
 		// 后果是调用方 emit 空歌词，**主播整首看不到歌词**，比翻译那条重得多，故单独一个 key。
 		telemetry.ReportOnce("qqmusic.lyric_decrypt_failed",
 			"QQ 音乐主歌词解密失败（是密文但解不开）—— 主播看到无歌词",
+			nil,
 			map[string]any{
 				"error":   err.Error(), // decryptIfNeeded 已把 crypt 与 len 拼进来了
 				"song_id": data.SongID,
@@ -448,6 +449,7 @@ func attachTrans(lines []lyricLine, rawTrans string, crypt int) {
 		// 这两种，而它们要采取的行动完全不同。
 		telemetry.ReportOnce("qqmusic.trans_decrypt_failed",
 			"QQ 音乐翻译歌词解密失败（是密文但解不开）—— 本首无 sub_text",
+			nil,
 			map[string]any{"error": err.Error()})
 		return
 	}

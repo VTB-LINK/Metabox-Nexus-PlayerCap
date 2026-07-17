@@ -49,7 +49,11 @@ var (
 // key 同时是 Sentry 的 fingerprint：同 key 的事件聚成一个 issue，具体差异（版本号、路径）
 // 放 extra 里。所以 key 要是**稳定的类别**（"cloudmusic.unsupported_version"），
 // 别把版本号拼进去 —— 那会让每个版本裂成一个 issue。
-func ReportOnce(key, message string, extra map[string]any) {
+//
+// tags vs extra 的分工：**低基数、要能在 Sentry 里分面/聚合的进 tags**（版本号这类——
+// 就那几个值，正好用来看「野外最多的是哪个版本」）；**高基数或只供人读的进 extra**
+// （exe 路径、歌名样本——放进 tag 会把面炸成一堆值，还怕上限）。
+func ReportOnce(key, message string, tags map[string]string, extra map[string]any) {
 	if !Enabled() {
 		return
 	}
@@ -74,12 +78,33 @@ func ReportOnce(key, message string, extra map[string]any) {
 		// 拼进版本号之类的变量，那时同一类事件会裂成一堆 issue。
 		scope.SetFingerprint([]string{key})
 
+		// 低基数、可分面的进 tag（调用方挑好了的，通常是版本号）。
+		for tk, tv := range tags {
+			scope.SetTag(tk, tv)
+		}
+
 		if len(extra) > 0 {
-			// 用 context 而不是 tag 装细节：tag 是分面用的、只能是 string、且怕高基数
-			// （版本号、路径都属于高基数）。context 是给人读的，没这些限制。
+			// 高基数或只供人读的进 context：tag 只能是 string、且怕高基数（路径、歌名样本
+			// 那种），context 没这些限制。
 			scope.SetContext(key, extra)
 		}
 
 		sentry.CaptureMessage(message)
+	})
+}
+
+// SetPlayerVersion 把某个播放器检测到的版本设成全局 tag（`<player>.version`）。此后这台
+// 机器上报的**任何**事件都带上它，于是能在 Sentry 的 tag 面里聚合「野外最多的是哪个版本」。
+// 版本号是低基数，天生适合 tag。空版本不设。
+//
+// 它只给**已有**事件加维度、不主动发事件——正常运行从不上报的机器不会因此产生流量。
+// 因此这里看到的版本分布偏向「上报过事件的机器」，不是全量；要无偏全量得在启动时主动上报
+// 一次（那是另一个决定，本函数不做）。
+func SetPlayerVersion(player, version string) {
+	if !Enabled() || version == "" {
+		return
+	}
+	sentry.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetTag(player+".version", version)
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -242,6 +243,70 @@ var knownVersions = map[string]dllOffsets{
 	},
 }
 
+// parseVer 把 "22.21" 解析成可比较的整数（major*1000+minor）。detectVersion 用
+// fmt.Sprintf("%d.%02d") 产出版本号，格式恒为 major.minor。
+func parseVer(s string) (int, bool) {
+	maj, min, ok := strings.Cut(s, ".")
+	if !ok {
+		return 0, false
+	}
+	a, e1 := strconv.Atoi(maj)
+	b, e2 := strconv.Atoi(min)
+	if e1 != nil || e2 != nil {
+		return 0, false
+	}
+	return a*1000 + b, true
+}
+
+// nearestKnownVersion 返回 knownVersions 里 semver 距离 detected 最近的 key。
+//
+// 未知版本没有正确的偏移表，只能挑一个已知版本的偏移去赌。写死某个版本（此前是 22.16）
+// 对「比最新还新」的版本必错——22.16 是窄 SSO，而 22.31/22.41 已切宽 WCHAR*，用窄模型
+// 读宽指针立刻乱码。按距离取最近至少让这种版本落到 22.41、字符串模型跟得上。
+//
+// 但这是启发式，不是保证：版本号距离 ≠ 结构距离。22.16→22.22 字段偏移整个搬家（Name
+// 0x00→0x80）、22.22→22.31 窄转宽，正好落在两代之间的未知版本仍是赌，且跨字符串模型
+// 切换点会赌错。所以走这条路径必须上报读到的歌名样本（见 ReadAllMetadata），让野外数据
+// 判断赌对没有、哪些版本需要补表。
+//
+// 距离相等时取版本号更大的一侧：确定的 tie-break（不受 map 迭代序影响），且新版更可能
+// 延续最近的结构。
+func nearestKnownVersion(detected string) string {
+	dv, ok := parseVer(detected)
+	if !ok {
+		return latestKnownVersion()
+	}
+	best := ""
+	bestDist, bestVer := -1, -1
+	for k := range knownVersions {
+		kv, ok := parseVer(k)
+		if !ok {
+			continue
+		}
+		d := kv - dv
+		if d < 0 {
+			d = -d
+		}
+		if bestDist < 0 || d < bestDist || (d == bestDist && kv > bestVer) {
+			bestDist, bestVer, best = d, kv, k
+		}
+	}
+	return best
+}
+
+// latestKnownVersion 返回版本号最大的已知 key。用作「连版本号都读不到」时的默认——
+// 比写死最老版本更贴近现实：读不到版本的机器若是新装的，多半是新版本。
+func latestKnownVersion() string {
+	best := ""
+	bestVer := -1
+	for k := range knownVersions {
+		if kv, ok := parseVer(k); ok && kv > bestVer {
+			bestVer, best = kv, k
+		}
+	}
+	return best
+}
+
 type QQMusicMem struct {
 	pid            uint32
 	hProcess       uintptr
@@ -254,6 +319,7 @@ type QQMusicMem struct {
 	progressTsPtr  uintptr    // Address where GetTickCount timestamp is stored
 	version        string     // 检测到的 QQ 音乐版本号，如 "22.16"
 	offsets        dllOffsets // 当前版本的偏移量
+	fallbackTo     string     // 非空=version 无偏移表、按 nearestKnownVersion 回退到的版本；用于上报歌名样本判断赌对没有
 }
 
 func (m *QQMusicMem) CheckValid() bool {
@@ -371,6 +437,11 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 
 // detectVersion 从 QQMusic.exe 的 PE 版本资源中提取版本号并匹配偏移表
 func (m *QQMusicMem) detectVersion() {
+	// 检测到的版本（已知 / 未知 / 读不到都算）设成全局 tag，让 Sentry 聚合「野外最多的是
+	// 哪个 QQ 音乐版本」——异常上报只覆盖出问题的版本，这条覆盖全部。defer 兜住三条 return
+	// 分支；m.version 在每条分支都已赋值。
+	defer func() { telemetry.SetPlayerVersion("qqmusic", m.version) }()
+
 	// 优先使用 QueryFullProcessImageNameW：直接从已打开的 hProcess 获取 exe 路径，
 	// 避免 findQQMusicExePath 误返回其他版本的安装路径
 	exePath := ""
@@ -391,18 +462,23 @@ func (m *QQMusicMem) detectVersion() {
 		exePath = findQQMusicExePath(m.pid)
 	}
 
+	// 连版本号都读不到（路径 / PE 资源失败）：没有可算距离的信息，退到最新已知版本。
 	if exePath == "" {
-		log.Warn("无法获取 QQMusic.exe 路径，使用默认偏移 (v22.16)")
-		m.version = "22.16"
-		m.offsets = knownVersions["22.16"]
+		fb := latestKnownVersion()
+		log.Warn("无法获取 QQMusic.exe 路径，回退到最新已知版本 v%s", fb)
+		m.version = "unknown"
+		m.fallbackTo = fb
+		m.offsets = knownVersions[fb]
 		return
 	}
 
 	major, minor := getFileVersion(exePath)
 	if major == 0 && minor == 0 {
-		log.Warn("版本检测失败，使用默认偏移 (v22.16)")
-		m.version = "22.16"
-		m.offsets = knownVersions["22.16"]
+		fb := latestKnownVersion()
+		log.Warn("版本检测失败，回退到最新已知版本 v%s", fb)
+		m.version = "unknown"
+		m.fallbackTo = fb
+		m.offsets = knownVersions[fb]
 		return
 	}
 
@@ -412,18 +488,14 @@ func (m *QQMusicMem) detectVersion() {
 		m.offsets = offsets
 		log.Info("QQ 音乐版本: %s (偏移已匹配)", m.version)
 	} else {
-		log.Warn("QQ 音乐版本 %s 无已知偏移表，回退到 v22.16", m.version)
-		m.offsets = knownVersions["22.16"]
-
-		// 「预期之外」：这台机器上的 QQ 音乐是我们没见过的版本。回退偏移读出来的多半是垃圾
-		// （见 AGENTS.md §5.1），所以这条不是「降级运行」，是「正在读错内存」。
-		// 上报是为了知道野外有哪些版本 —— 那正是补偏移表的输入。
-		telemetry.ReportOnce("qqmusic.unknown_version",
-			"QQ 音乐版本无已知偏移表，已回退到 v22.16（读到的可能是垃圾）",
-			map[string]any{
-				"version":  m.version,
-				"fallback": "22.16",
-			})
+		// 「预期之外」：这台机器上的 QQ 音乐是我们没见过的版本，没有正确的偏移表。
+		// 按 semver 距离挑最近的已知版本去赌（而非写死某个版本）——读出来多半是垃圾
+		// （见 AGENTS.md §5.1），这不是「降级运行」，是「正在读错内存」。上报移到
+		// ReadAllMetadata：带上用这个 fallback 读到的歌名样本，才能判断赌对没有。
+		fb := nearestKnownVersion(m.version)
+		log.Warn("QQ 音乐版本 %s 无已知偏移表，按距离回退到 v%s", m.version, fb)
+		m.fallbackTo = fb
+		m.offsets = knownVersions[fb]
 	}
 }
 
@@ -1176,6 +1248,20 @@ func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 	}
 	if len(singer1) > 1 {
 		meta.Singer = singer1
+	}
+
+	// 用了未知版本的距离回退时，把第一次读到的歌名样本上报——这是判断「赌对没有」的唯一
+	// 野外依据：读出正常歌名 = 偏移大致对上，读出乱码 = 赌错、该版本需要补偏移表。
+	// ReportOnce 按 key 去重，只报第一首；key 不含版本号（高基数会把 issue 裂开），版本号
+	// 与样本放 extra。空名不报——那可能只是当前没歌在放，不代表偏移错。
+	if m.fallbackTo != "" && meta.Name != "" {
+		telemetry.ReportOnce("qqmusic.unknown_version",
+			"QQ 音乐版本无已知偏移表，已按 semver 距离回退（读到的可能是垃圾，附歌名样本供核对）",
+			map[string]string{
+				"qqmusic.version":     m.version,
+				"qqmusic.fallback_to": m.fallbackTo,
+			},
+			map[string]any{"name_sample": meta.Name})
 	}
 
 	duration = m.ReadUint32(struct1 + m.offsets.DurationOff)
