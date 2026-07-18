@@ -393,7 +393,14 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 
 			log.Info("♪ 歌曲: %s - %s (hash: %s)", currentName, currentSinger, info.Hash)
 
-			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: statusStr(info.PlayStatus), Detail: currentTitle})
+			// 切歌瞬间 CDP 常回一个过渡态 play_status（新歌尚未起播，读到空/stopped），statusStr
+			// 会把它塌成 standby。但 hash 已变，本身就证明「新歌入场」而非待机——这条 standby 发出去
+			// 会让路由器把 kugou 判为 idle：正在播的其他播放器立刻顶上又被抢回（overlay 硬切/闪烁；
+			// 单播放器时则 player_clear 瞬间全黑）。故过渡态不发 status_update，留给下方 play_status
+			// 变化检测下一帧读到真实 playing/paused 再发；真正的 playing/paused 一律照发。
+			if s := statusStr(info.PlayStatus); s != "standby" {
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: s, Detail: currentTitle})
+			}
 
 			// 取消上一首歌的封面 goroutine
 			if coverCancel != nil {
