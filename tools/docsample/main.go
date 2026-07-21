@@ -63,6 +63,9 @@ var (
 // 播放器录音里根本不会出现）。靠字段名区分，不靠缩进层级。
 var payloadFields = map[string]bool{
 	"index": true, "timestamp": true, "play_time": true,
+	// position 是整曲实时播放位置（pause/resume、all_lyrics 顶层、lyric_update 均有）。
+	// 不列入的话它的示例值会整批逃检——这正是 play_time 改名 position 后必须补的一环。
+	"position": true,
 	"progress": true, "duration": true, "count": true,
 	"text": true, "sub_text": true,
 	// detail 也是播放器产出的：要么是歌曲标题，要么是「网易云音乐已退出」这类

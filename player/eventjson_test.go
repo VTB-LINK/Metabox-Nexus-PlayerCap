@@ -90,7 +90,7 @@ func TestAllLyricsDataJSONFieldOrder(t *testing.T) {
 	data, err := json.Marshal(AllLyricsData{
 		Title:    "song",
 		Duration: 1,
-		PlayTime: 0,
+		Position: 0,
 		Progress: 0,
 		Count:    1,
 		Lyrics:   []LyricLine{{Index: 0, Text: "line"}},

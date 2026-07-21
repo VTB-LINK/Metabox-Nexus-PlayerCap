@@ -218,7 +218,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				progress := player.ClampProgress(float32(meta.ProgressMs)/1000.0, currentDurationSec)
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: title, Duration: currentDurationSec,
-					PlayTime: float32(meta.ProgressMs) / 1000.0,
+					Position: float32(meta.ProgressMs) / 1000.0,
 					Progress: progress,
 					Lyrics:   []player.LyricLine{}, Count: 0,
 				})
@@ -233,13 +233,13 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				progress := player.ClampProgress(playTimeSec, currentDurationSec)
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: title, Duration: currentDurationSec,
-					PlayTime: playTimeSec,
+					Position: playTimeSec,
 					Progress: progress,
 					Lyrics:   []player.LyricLine{}, Count: 0,
 				})
 				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
 					Index: -1, Text: "", SubText: "", Timestamp: 0,
-					PlayTime: playTimeSec, Progress: progress,
+					Position: playTimeSec, Progress: progress,
 				})
 			} else {
 				log.Info("歌词加载完成: %d 行；逐字：%s", len(currentLyrics), detailedFlag(currentLyrics))
@@ -247,7 +247,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				progress := player.ClampProgress(float32(meta.ProgressMs)/1000.0, currentDurationSec)
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: title, Duration: currentDurationSec,
-					PlayTime: float32(meta.ProgressMs) / 1000.0,
+					Position: float32(meta.ProgressMs) / 1000.0,
 					Progress: progress,
 					Count:    len(lyricItems), Lyrics: lyricItems,
 				})
@@ -310,14 +310,14 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 						if len(lines) == 0 {
 							log.Info("检测到纯音乐/无歌词，清空歌词；逐字：%s", detailedFlag(lines))
 							p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-								Title: title, Duration: currentDurationSec, PlayTime: psec, Progress: prog,
+								Title: title, Duration: currentDurationSec, Position: psec, Progress: prog,
 								Lyrics: []player.LyricLine{}, Count: 0,
 							})
 						} else {
 							log.Info("歌词加载完成(补取): %d 行；逐字：%s", len(lines), detailedFlag(lines))
 							items := toLyricLines(lines, offsetSec)
 							p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-								Title: title, Duration: currentDurationSec, PlayTime: psec, Progress: prog,
+								Title: title, Duration: currentDurationSec, Position: psec, Progress: prog,
 								Count: len(items), Lyrics: items,
 							})
 						}
@@ -366,8 +366,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			}
 			if seekDetected {
 				lastLineIdx = -1 // 重置歌词行号
+				posSec := float32(meta.ProgressMs) / 1000.0
 				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
-					PlayTime: float32(meta.ProgressMs) / 1000.0,
+					Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
 				})
 				resumeEmitted = true
 			}
@@ -375,8 +376,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			if isPaused {
 				isPaused = false
 				if !resumeEmitted {
+					posSec := float32(meta.ProgressMs) / 1000.0
 					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
-						PlayTime: float32(meta.ProgressMs) / 1000.0,
+						Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
 					})
 				}
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
@@ -395,8 +397,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		if elapsed.Seconds() > pauseTimeoutSec && !isPaused && lastName != "" {
 			isPaused = true
 			interpolatedMs = float32(anchorProgressMs)
+			posSec := float32(anchorProgressMs) / 1000.0
 			p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{
-				PlayTime: float32(anchorProgressMs) / 1000.0,
+				Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
 			})
 			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentTitle})
 			log.Info("暂停 @ %.2fs", float32(anchorProgressMs)/1000.0)
@@ -428,7 +431,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			lastLineIdx = trueIdx
 			line := currentLyrics[trueIdx]
 
-			// progressSec 是实时插值位置，只喂 Progress；play_time 由 BuildLyricUpdate 按
+			// progressSec 是实时插值位置，进 Position、并据它算 Progress；play_time 由 BuildLyricUpdate 按
 			// 歌词时间轴算。逐字（TextDetailed）的 offset 已在 applyDetailedOffset 里套过。
 			p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
 				trueIdx, line.Time, line.Text, line.SubText, line.Detailed,

@@ -270,7 +270,7 @@ default: // "standby", "waiting_process", "waiting_song", 以及未来任何未�
 
 ### 3.1 路由与优先级
 
-- **`router.Run()` 必须无条件先调 `srv.UpdatePlayerState(evt)`，再做任何路由决策。** ❌ — 缓存更新与「是否广播」必须解耦：`buildInitEvents` 用 `ps.PlayTime` 组装 all_lyrics，不回写会让中途连入的前端拿到一首歌开头的进度，歌词跳位。 — `server/router.go:104`
+- **`router.Run()` 必须无条件先调 `srv.UpdatePlayerState(evt)`，再做任何路由决策。** ❌ — 缓存更新与「是否广播」必须解耦：`buildInitEvents` 用 `ps.Position` 组装 all_lyrics，不回写会让中途连入的前端拿到一首歌开头的进度，歌词跳位。 — `server/router.go:104`
 - **优先组（prior）的评估绝不加任何门控条件。** ❌ — K 歌一开唱必须秒切主输出，任何延迟或条件化都是直播事故。`evaluatePriorGroup` 与 `watchExpire` 里的 prior 路径都是无条件的——**不要以「对称化」为名重构掉**。 — `server/router.go:223,262,408`
 - **普通组的 `priorGroupBlocking()` 门控绝不删。两组不对称是刻意的。** ❌ — 普通组要过门、优先组不过门，正是「K 歌盖住一切」的实现。 — `server/router.go:229,236,334,424,431`
 - **优先播放器暂停后的 holding 只能由 `prior-player-expire` 超时释放。** ❌ — 这是「唱歌中途暂停不要被网易云抢走画面」的唯一机制。注意整套超时（含普通组）被 `if r.cfg.PriorPlayerExpire > 0` 一把总闸门控——**设为 0 会静默关闭全部超时，holding 永不释放**。 — `server/router.go:403`

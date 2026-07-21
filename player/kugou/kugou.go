@@ -456,7 +456,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 				Title:    currentTitle,
 				Duration: currentDurationSec,
-				PlayTime: initPlay,
+				Position: initPlay,
 				Progress: progress,
 				Lyrics:   lyricItems,
 				Count:    len(lyricItems),
@@ -465,7 +465,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				// Progress 必须带上：它的契约是「整首播到哪」，纯音乐时歌照样在走。
 				// 漏掉它会让 Go 零值兜出一个 0，与同一事件里的 all_lyrics.progress 自相矛盾。
 				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index: -1, Text: pureHint, Timestamp: 0, PlayTime: initPlay, Progress: progress,
+					Index: -1, Text: pureHint, Timestamp: 0, Position: initPlay, Progress: progress,
 				})
 			}
 
@@ -497,7 +497,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 					anchorProgressSec = progressSec
 				}
 				anchorTime = time.Now()
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: anchorProgressSec})
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: anchorProgressSec, Progress: player.ClampProgress(anchorProgressSec, currentDurationSec)})
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
 				log.Info("恢复 @ %.2fs", anchorProgressSec)
 			case "paused", "pause", "pasued":
@@ -513,7 +513,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 					anchorProgressSec = frozen
 				}
 				anchorTime = time.Now()
-				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: anchorProgressSec})
+				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: anchorProgressSec, Progress: player.ClampProgress(anchorProgressSec, currentDurationSec)})
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentTitle})
 				log.Info("暂停 @ %.2fs", anchorProgressSec)
 			default:
@@ -531,11 +531,11 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			if drift < -3.0 {
 				log.Info("检测到回跳: %.2fs → %.2fs", anchorProgressSec, progressSec)
 				lastLineIdx = -1
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: progressSec})
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: progressSec, Progress: player.ClampProgress(progressSec, currentDurationSec)})
 			} else if drift > 3.0 {
 				log.Info("检测到前跳: %.2fs → %.2fs", anchorProgressSec, progressSec)
 				lastLineIdx = -1
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: progressSec})
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: progressSec, Progress: player.ClampProgress(progressSec, currentDurationSec)})
 			}
 			anchorProgressSec = progressSec
 			anchorTime = time.Now()
@@ -566,7 +566,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			if trueIdx >= 0 && trueIdx != lastLineIdx {
 				lastLineIdx = trueIdx
 				line := currentLyrics[trueIdx]
-				// interpSec 是插值出的实时位置，只喂 Progress；play_time 由 BuildLyricUpdate
+				// interpSec 是插值出的实时位置，进 Position、并据它算 Progress；play_time 由 BuildLyricUpdate
 				// 按歌词时间轴算。KRC 源有逐字（line.Detailed）与翻译（line.SubText），LRC 回落
 				// 二者皆空。words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传。
 				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(

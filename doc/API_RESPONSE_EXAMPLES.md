@@ -198,7 +198,7 @@
 
 ### 3. `/all_lyrics` - 完整歌词列表
 
-**正常响应（有歌词时）** — 以下为真实响应原文（cloudmusicv3，2026-07-17 录制）：
+**正常响应（有歌词时）** — 以下为真实响应（cloudmusicv3，2026-07-17 录制；歌词内容为原文，顶层 `position` / `progress` 取切歌那一刻的 `0` / `0`）：
 
 ```json
 {
@@ -208,8 +208,8 @@
   "data": {
     "title": "Cold - Maroon 5 / Future",
     "duration": 234.308,
-    "play_time": 7.07,
-    "progress": 0.030527605,
+    "position": 0,
+    "progress": 0,
     "count": 88,
     "lyrics": [
       {
@@ -263,11 +263,11 @@
 ```
 
 > **示例已裁剪，只删元素不改值**：`lyrics` 实际 **88** 行（此处留 2）、`lyrics_detailed` 实际 **88** 项（留 1）、每行 `words` 实际 6 个（留 2）。
-> 所以 `count: 88` 与上面 `lyrics` 的长度对不上——**那是裁剪造成的，真实响应中两者一致**。数值一律是录制原文，未经修改。
+> 所以 `count: 88` 与上面 `lyrics` 的长度对不上——**那是裁剪造成的，真实响应中两者一致**。数值取自录制原文；顶层 `position` / `progress` 取切歌那一刻（`0` / `0`，此时二者天然一致）——mid-song 的自洽示例（`position ≈ progress × duration`）待新版重录后补。
 
 **说明：**
 - `duration` - 歌曲总时长（秒）
-- `play_time` - **最近一行歌词的播出时间**（秒），不是「现在播到哪」，详见下方
+- `position` - **整曲实时播放位置**（秒），= `progress × duration`，做插值锚点用它。逐行的播出时间见 `lyrics[].play_time`
 - `progress` - **整首播到哪**（0–1，实时播放位置 / 总时长）
 - `count` - 歌词行数（`lyrics` 的真实长度）
 - `title` - 歌曲标题（格式：歌曲名 - 歌手）
@@ -280,16 +280,13 @@
   - `lyric_index` - **对应 `lyrics[].index`**，用它关联回歌词行
   - `text` - 完全由 `words[].text` 拼接而来
 
-#### `play_time` 与 `progress` 是两个不同的量
+#### 顶层 `position` / `progress` 是整曲位置；`lyrics[].play_time` 是另一个量
 
-别把它们当同一个数的两种写法（示例里 `play_time=7.07`、`progress=0.0305`，而 `7.07/234.308 = 0.0302`——**差值不是误差**）：
+- **顶层 `position` 与 `progress` 是同一个量的两种写法**：`progress = position / duration`。例如 `position=7.15`、`duration=234.308` 时，`7.15 / 234.308 = 0.0305 = progress`。要绝对秒数用 `position`，画进度条用 `progress`，二者一致。
+- **`lyrics[].play_time` 是另一个量**：它是「这一行**何时该播出**」（= 该行 displayStart − offset，歌词时间轴上的点），与整曲播放位置无换算关系。逐字长引子行上，某行的 `play_time` 会比它的 `timestamp` 早数秒。
+- 做插值锚点用 `position`（或 `progress × duration`），**不要用 `lyrics[].play_time`**。
 
-| | 来源 | 含义 |
-|---|---|---|
-| `play_time` | 歌词时间轴 | 最近一行歌词**何时该播出**（= 该行 displayStart − offset） |
-| `progress` | 实时时钟 | **整首播到哪**（实时位置 / 总时长） |
-
-二者在常规行上只差一个轮询滞后（毫秒级），所以**写反了长期看不出症状**——直到某行的逐字时间轴早于行时间戳时才会突然错开数秒。**画进度条请用 `progress`，做插值锚点请用 `progress × duration`，不要用 `play_time`。**
+> 历史注记：此前顶层字段叫 `play_time`，且 HTTP `/all_lyrics` 因缓存 bug 存的是「最近一行的行时间」而非整曲位置，于是它与 `progress` 会差零点几秒——那不是设计，是 bug。3.0 正式版改名 `position` 并修复缓存，二者从此自洽。
 
 #### 平台能力矩阵（实测）
 
@@ -379,7 +376,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
   "data": {
     "title": "Road to You - Ryan Farish",
     "duration": 235,
-    "play_time": 0,
+    "position": 0,
     "progress": 0,
     "count": 0,
     "lyrics": [],
@@ -399,26 +396,27 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 
 ### 4. `/lyric_update` - 当前歌词（最新一条）
 
-**正常响应（播放中）** — 真实原文（cloudmusicv3，`words` 裁剪至 2 个、实际 8 个）：
+**正常响应（播放中）** — 真实原文（cloudmusicv3，`words` 裁剪至 2 个、实际 9 个）：
 ```json
 {
   "code": 0,
   "msg": "success",
   "player": "cloudmusicv3",
   "data": {
-    "index": 1,
-    "text": "It feels like I don't know you anymore",
-    "sub_text": "感觉就像我已经不再认识你了",
-    "timestamp": 7.57,
-    "play_time": 7.07,
-    "progress": 0.030527605,
+    "index": 37,
+    "text": "There's plenty of time to sleep when we die",
+    "sub_text": "死后自会长眠。",
+    "timestamp": 157.22,
+    "play_time": 156.46,
+    "position": 156.4659,
+    "progress": 0.62976056,
     "text_detailed": {
-      "timestamp": 7.92,
-      "play_time": 7.42,
-      "duration": 3.48,
+      "timestamp": 156.96,
+      "play_time": 156.46,
+      "duration": 7.02,
       "words": [
-        {"timestamp": 7.92, "play_time": 7.42, "duration": 0.06, "text": "It "},
-        {"timestamp": 7.98, "play_time": 7.48, "duration": 0.3,  "text": "feels "}
+        {"timestamp": 156.96, "play_time": 156.46, "duration": 0.18, "text": "There's "},
+        {"timestamp": 157.14, "play_time": 156.64, "duration": 0.57, "text": "plenty "}
       ]
     }
   }
@@ -430,16 +428,17 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 - `text` - 主歌词文本
 - `sub_text` - 副歌词文本（翻译，无时为空字符串）。**cloudmusicv3 / qqmusic / kugou 有，wesing 恒为空**（kugou 仅 KRC 含中文译轨时有值）
 - `timestamp` - 该行的原始时间戳（秒）
-- `play_time` - **本行的播出时间**（秒）= `timestamp − offset`，**恒小于 `timestamp`**
+- `play_time` - **本行的播出时间**（秒）= `timestamp − offset`，**恒小于 `timestamp`**（逐字长引子行取首字时刻，会更小）
+- `position` - **整曲实时播放位置**（秒），= `progress × duration`，做插值锚点用它；与 `play_time`（本行播出时间）是两个量
 - `progress` - **整首播到哪**（0–1，实时位置 / 总时长）
 - `text_detailed` - 该行的逐字扩展；无逐字时为空对象 `{}`
 
-> ⚠️ **`play_time` 与 `progress` 不是一个量**。示例里 `play_time=7.07`、`progress=0.0305`，
-> 而 `7.07/234.308 = 0.0302`——**差值不是误差**：前者来自歌词时间轴，后者来自实时时钟。
-> 二者在常规行上只差一个轮询滞后（毫秒级），**写反了长期没有症状**，直到某行的逐字时间轴
-> 早于行时间戳时才会突然错开数秒。
+> ⚠️ **`play_time` 是「本行何时该播出」，`position` 是「现在整曲播到哪」，两者不是一个量**。
+> `play_time` 来自歌词时间轴（= `timestamp − offset`），`position` 来自实时时钟（= `progress × duration`）。
+> 上例是常规行、二者仅差 0.006s（`156.46` vs `156.4659`）；但当某行的逐字首字早于行时间戳时
+> （cloudmusicv3 YRC 长引子行），`play_time` 会提前数秒、明显小于 `position`。
 >
-> **画进度条 / 做插值锚点请用 `progress`（× `duration` 反推位置），不要用 `play_time`。**
+> **画进度条 / 做插值锚点请用 `position`（或 `progress`），不要用 `play_time`。**
 
 **无缓存时**（服务刚起、或该播放器还没播过歌）— 真实原文：
 ```json
@@ -455,7 +454,8 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
   "text": "",
   "sub_text": "",
   "timestamp": 0,
-  "play_time": 28.151,
+  "play_time": 0,
+  "position": 28.151,
   "progress": 0.12511556,
   "text_detailed": {}
 }
@@ -465,7 +465,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 
 - 含义是**平台完全没有返回歌词数据**，不是「这是纯音乐」——两者不等价，见下
 - `text` / `sub_text` 为空字符串，`timestamp` 为 `0`
-- **`play_time` 与 `progress` 照常跟着歌走**（示例：`28.151` / `0.125` = `28.151/225`）。歌没有歌词，但它还在播
+- **`position` 与 `progress` 照常跟着歌走**（示例：`28.151` / `0.125` = `28.151/225`），`play_time` 为 `0`（无行可播出）。歌没有歌词，但它还在播
 - 与它同时，服务端会发一条 `all_lyrics`，其 `count: 0`、`lyrics: []`
 - **判断有无歌词用 `msg.data.index === -1`**，而非 `msg.data.text`
 
@@ -504,7 +504,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 - `"waiting_song"` - 播放器已启动但未选择歌曲
 - `"loading"` - 歌曲加载中，detail 为歌曲名称
 - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
-- `"paused"` - 暂停中（play_time 停止推进时自动检测），detail 为歌曲标题
+- `"paused"` - 暂停中（播放位置停止推进时自动检测），detail 为歌曲标题
 - `"standby"` - **不只是「播放器已退出」**，`detail` 有五种语义，见下
 
 ##### ⚠️ `standby` 的 `detail` 有五种
@@ -636,14 +636,14 @@ data: {"type":"lyric_update","player":"wesing","data":{}}
 
 **初始发送（有歌词时）：**
 ```
-data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"更不应舍弃","sub_text":"","timestamp":30.429,"play_time":30.229,"progress":0.10236486,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"更不应舍弃","sub_text":"","timestamp":30.429,"play_time":30.229,"position":30.229,"progress":0.10236486,"text_detailed":{}}}
 ```
 
 **播放过程中，每当歌词更新时接收：**
 ```
-data: {"type":"lyric_update","player":"wesing","data":{"index":3,"text":"手を伸ばしても届かない","sub_text":"","timestamp":3.8,"play_time":3.85,"progress":0.25,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":3,"text":"手を伸ばしても届かない","sub_text":"","timestamp":3.8,"play_time":3.85,"position":3.85,"progress":0.25,"text_detailed":{}}}
 
-data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い森の奥へ迷い込む","sub_text":"","timestamp":5.5,"play_time":5.6,"progress":0.3333,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い森の奥へ迷い込む","sub_text":"","timestamp":5.5,"play_time":5.6,"position":5.6,"progress":0.3333,"text_detailed":{}}}
 ```
 
 **完整生命周期示例：**
@@ -652,11 +652,11 @@ data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い�
 data: {"type":"lyric_update","player":"wesing","data":{}}
 
 （用户开始播放歌曲）
-data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05,"text_detailed":{}}}
-data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"position":18.15,"progress":0.05,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"position":20.05,"progress":0.1,"text_detailed":{}}}
 
 （切歌 — 服务端不发送清空消息，前端自行根据新歌数据重置显示）
-data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"新歌第一行歌词","sub_text":"","timestamp":15.0,"play_time":15.1,"progress":0.04,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"新歌第一行歌词","sub_text":"","timestamp":15.0,"play_time":15.1,"position":15.1,"progress":0.04,"text_detailed":{}}}
 ```
 
 **特性：**
@@ -785,7 +785,7 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 - `"waiting_song"` - 播放器已启动但未选择歌曲
 - `"loading"` - 歌曲加载中，detail 为歌曲名称
 - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
-- `"paused"` - 暂停中（play_time 停止推进时自动检测），detail 为歌曲标题
+- `"paused"` - 暂停中（播放位置停止推进时自动检测），detail 为歌曲标题
 - `"standby"` - **不只是「播放器已退出」**，`detail` 有五种语义，见下
 
 ##### ⚠️ `standby` 的 `detail` 有五种
@@ -860,6 +860,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
     "sub_text": "",
     "timestamp": 30.429,
     "play_time": 30.229,
+    "position": 30.229,
     "progress": 0.10236486,
     "text_detailed": {}
   }
@@ -885,8 +886,9 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
     "text": "",
     "sub_text": "",
     "timestamp": 0,
-    "play_time": 45.2,
-    "progress": 0,
+    "play_time": 0,
+    "position": 28.151,
+    "progress": 0.12511556,
     "text_detailed": {}
   }
 }
@@ -904,7 +906,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
   "data": {
     "title": "都是夜归人 - 许美静",
     "duration": 296,
-    "play_time": 0,
+    "position": 0,
     "progress": 0,
     "count": 38,
     "lyrics": [
@@ -919,7 +921,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 
 > **示例已裁剪**：`lyrics` 实际 38 行（此处留 3），`count: 38` 是真实值。数值一律取自录制原文。
 >
-> `play_time: 0` / `progress: 0` 不是占位——**WS 的 `all_lyrics` 只在切歌时发**，那一刻歌刚开始。
+> `position: 0` / `progress: 0` 不是占位——**WS 的 `all_lyrics` 只在切歌时发**，那一刻歌刚开始。
 > 而 **HTTP 的 `/all_lyrics` 会给实时值**（它读缓存，跟着 `lyric_update` 走）。同一个端点名，两种传输的语义不同。
 >
 > wesing 的 `sub_text` 恒为 `""`——无翻译源（其曲库 mid 非 QQ 系，走不通 QQ 译源）；但**逐字有**，来自进程内存的卡拉OK字级时间，某行时间轴不合法时该行退回行级 `{}`。kugou 的翻译与逐字都有（KRC 源；回落行级 LRC 时 `sub_text` 为空、`text_detailed` / `lyrics_detailed` 为 `{}` / `[]`）。
@@ -948,31 +950,33 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 
 #### 6. `playback_pause` - 暂停播放
 
-播放暂停时发送，`data.play_time` 为暂停时刻的播放时间：
+播放暂停时发送。`data.position` 为暂停时刻的整曲播放位置（秒），`data.progress` 为对应进度：
 ```json
 {
   "type": "playback_pause",
   "player": "wesing",
   "data": {
-    "play_time": 45.2
+    "position": 31.282999,
+    "progress": 0.105743244
   }
 }
 ```
 
 #### 7. `playback_resume` - 恢复播放
 
-play_time 重新推进时发送：
+`position` 发生非连续跳变时发送（恢复播放、或 seek / 拖动进度条）：
 ```json
 {
   "type": "playback_resume",
   "player": "wesing",
   "data": {
-    "play_time": 45.2
+    "position": 37.516,
+    "progress": 0.1268581
   }
 }
 ```
 
-> 注：前端收到 `playback_pause` 应停止时间插值，收到 `playback_resume` 应以 `play_time` 为锚点重新开始插值。
+> 注：前端收到 `playback_pause` 应停止时间插值，收到 `playback_resume` 应以 `position` 为锚点重新开始插值。
 
 #### 8. `player_switch` - 播放器切换（仅根订阅者收到）
 
@@ -1042,9 +1046,9 @@ play_time 重新推进时发送：
 ← {"type":"status_update","player":"wesing","data":{"status":"loading","detail":"有点甜"}}
 ← {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"有点甜 - 汪苏泷/BY2"}}
 ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":""}}
-← {"type":"all_lyrics","player":"wesing","data":{"title":"有点甜 - 汪苏泷/BY2","duration":236.0,"play_time":0.5,"progress":0.0021,"count":28,"lyrics":[...],"lyrics_detailed":[...]}}
-← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"progress":0.05,"text_detailed":{}}}
-← {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"progress":0.1,"text_detailed":{}}}
+← {"type":"all_lyrics","player":"wesing","data":{"title":"有点甜 - 汪苏泷/BY2","duration":236.0,"position":0.5,"progress":0.0021,"count":28,"lyrics":[...],"lyrics_detailed":[...]}}
+← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"position":18.15,"progress":0.05,"text_detailed":{}}}
+← {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"position":20.05,"progress":0.1,"text_detailed":{}}}
 ...
 ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}  ← 异步封面下载完成后补发
 ...
@@ -1053,16 +1057,16 @@ play_time 重新推进时发送：
 ← {"type":"player_switch","player":"cloudmusicv3","data":{"from":"wesing","to":"cloudmusicv3"}}
 ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"playing","detail":"如愿 - 王菲"}}
 ← {"type":"song_info_update","player":"cloudmusicv3","data":{"name":"如愿","singer":"王菲","title":"如愿 - 王菲","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}
-← {"type":"all_lyrics","player":"cloudmusicv3","data":{"title":"如愿 - 王菲","duration":280.0,"play_time":0.3,"progress":0.0011,"count":35,"lyrics":[...],"lyrics_detailed":[...]}}
-← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":0,"text":"我在时间尽头等你","sub_text":"","timestamp":25.5,"play_time":25.3,"progress":0.03,"text_detailed":{}}}
+← {"type":"all_lyrics","player":"cloudmusicv3","data":{"title":"如愿 - 王菲","duration":280.0,"position":0.3,"progress":0.0011,"count":35,"lyrics":[...],"lyrics_detailed":[...]}}
+← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":0,"text":"我在时间尽头等你","sub_text":"","timestamp":25.5,"play_time":25.3,"position":25.3,"progress":0.03,"text_detailed":{}}}
 ...
 
 （用户暂停播放）
-← {"type":"playback_pause","player":"cloudmusicv3","data":{"play_time":45.2}}
+← {"type":"playback_pause","player":"cloudmusicv3","data":{"position":31.282999,"progress":0.105743244}}
 
 （用户恢复播放）
-← {"type":"playback_resume","player":"cloudmusicv3","data":{"play_time":45.2}}
-← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":5,"text":"在时间里等你","sub_text":"","timestamp":46.0,"play_time":46.1,"progress":0.16,"text_detailed":{}}}
+← {"type":"playback_resume","player":"cloudmusicv3","data":{"position":31.282999,"progress":0.105743244}}
+← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":5,"text":"在时间里等你","sub_text":"","timestamp":46.0,"play_time":46.1,"position":46.1,"progress":0.16,"text_detailed":{}}}
 ...
 
 （歌曲播放完毕 —— **仅 wesing 会发 lyric_idle**，网易云/QQ/酷狗不发此事件）
@@ -1128,11 +1132,11 @@ ws.onmessage = (event) => {
       break;
       
     case 'playback_pause':
-      console.log(`[${msg.player}] 暂停 @ ${msg.data.play_time}s`);
+      console.log(`[${msg.player}] 暂停 @ ${msg.data.position}s`);
       break;
       
     case 'playback_resume':
-      console.log(`[${msg.player}] 恢复 @ ${msg.data.play_time}s`);
+      console.log(`[${msg.player}] 恢复 @ ${msg.data.position}s`);
       break;
       
     case 'player_switch':
@@ -1218,11 +1222,11 @@ curl http://localhost:8765/service-status
 |---|---|---|---|
 | `status_update` | `{"status":"...","detail":"..."}` | `{}` | `msg.data && msg.data.status` |
 | `song_info_update` | `{"name":"...","singer":"...","title":"...","cover":"...","cover_base64":"..."}` | `{}` | `msg.data && msg.data.title` |
-| `all_lyrics` | `{"title":"...","duration":N,"play_time":N,"progress":N,"count":N,"lyrics":[...],"lyrics_detailed":[...]}` | `{}` | `msg.data && msg.data.lyrics` |
+| `all_lyrics` | `{"title":"...","duration":N,"position":N,"progress":N,"count":N,"lyrics":[...],"lyrics_detailed":[...]}` | `{}` | `msg.data && msg.data.lyrics` |
 | `lyric_update` | `{"index":N,"text":"...","sub_text":"...","timestamp":N,...}` | `{}`（无缓存）或 `{"index":-1,"text":"",... }`（纯音乐） | `msg.data && msg.data.index !== undefined && msg.data.index !== -1` |
 | `lyric_idle` | — | `{}`（始终） | 收到即为空闲通知（前端自行决定是否响应） |
-| `playback_pause` | `{"play_time":N}` | — | 收到即为暂停 |
-| `playback_resume` | `{"play_time":N}` | — | 收到即为恢复 |
+| `playback_pause` | `{"position":N,"progress":N}` | — | 收到即为暂停 |
+| `playback_resume` | `{"position":N,"progress":N}` | — | 收到即为恢复 |
 | `player_switch` | `{"from":"...","to":"..."}` | — | 收到即为切换；`to` 为空时表示清除 |
 | `player_clear` | — | `{}`（始终） | 收到即清空显示 |
 
@@ -1259,17 +1263,19 @@ curl http://localhost:8765/service-status
 
 ### 时间插值
 
-服务端每次推送 `all_lyrics` 和 `lyric_update` 时携带 `play_time`（实际播放时间，秒）。建议前端实现本地时间插值以获得流畅的进度条/歌词高亮：
+服务端每次推送 `all_lyrics`、`lyric_update`、`playback_pause` / `playback_resume` 时携带 `position`（整曲实时播放位置，秒）。建议前端实现本地时间插值以获得流畅的进度条/歌词高亮：
 
 ```
-收到 all_lyrics → 记录 play_time 为初始锚点，立即开始插值（不必等 lyric_update）
-收到 lyric_update → 用新 play_time 校正锚点（消除累积误差）
-每帧更新 → 当前播放时间 = play_time + (now - 收到时间)
+收到 all_lyrics → 记录 position 为初始锚点，立即开始插值（不必等 lyric_update）
+收到 lyric_update → 用新 position 校正锚点（消除累积误差）
+每帧更新 → 当前播放位置 = position + (now - 收到时间)
 收到 playback_pause → 停止插值，冻结显示
-收到 playback_resume → 以新 play_time 为锚点重新开始插值
+收到 playback_resume → 以新 position 为锚点重新开始插值
 ```
 
-> **为什么用 `all_lyrics` 的 `play_time` 起步？** 部分歌曲从开始播放到第一条 `lyric_update` 可能有较长的前奏间隔（如 15-30 秒）。`all_lyrics` 在歌曲加载完成后立即推送，其 `play_time` 可作为插值的首个锚点，让进度条在前奏阶段就开始推进。
+> **为什么用 `all_lyrics` 的 `position` 起步？** 部分歌曲从开始播放到第一条 `lyric_update` 可能有较长的前奏间隔（如 15-30 秒）。`all_lyrics` 在歌曲加载完成后立即推送，其 `position` 可作为插值的首个锚点，让进度条在前奏阶段就开始推进。
+>
+> **别用 `lyric_update.play_time` 做锚点**——那是「本行何时该播出」（歌词时间轴），逐字长引子行会比实时位置早数秒。要整曲位置用 `position`。
 
 ### 切歌与 Replay
 
@@ -1284,10 +1290,10 @@ curl http://localhost:8765/service-status
 
 | 播放器 | Replay 行为 | 前端收到的事件 |
 |--------|-------------|----------------|
-| wesing | 歌曲不中断，`play_time` 回跳到开头 | `playback_resume`（新 `play_time`）→ `lyric_update`（从第一行开始） |
-| cloudmusicv3 | 无 replay 操作，仅支持进度条跳转 | `playback_resume`（跳转后的 `play_time`） |
+| wesing | 歌曲不中断，`position` 回跳到开头 | `playback_resume`（新 `position`）→ `lyric_update`（从第一行开始） |
+| cloudmusicv3 | 无 replay 操作，仅支持进度条跳转 | `playback_resume`（跳转后的 `position`） |
 
-> wesing 的 replay 和 cloudmusicv3 的进度条跳转均复用 `playback_resume` 事件。前端收到 `playback_resume` 后应以其 `play_time` 为锚点重置插值，下一条 `lyric_update` 会自然匹配到正确的歌词行。
+> wesing 的 replay 和 cloudmusicv3 的进度条跳转均复用 `playback_resume` 事件。前端收到 `playback_resume` 后应以其 `position` 为锚点重置插值，下一条 `lyric_update` 会自然匹配到正确的歌词行。
 
 ### 断线重连
 

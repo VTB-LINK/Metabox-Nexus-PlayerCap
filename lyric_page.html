@@ -1551,8 +1551,8 @@
         }
 
         // 时间插值状态
-        let timeAnchor = 0;       // 最近一次服务端 play_time（秒）
-        let timeAnchorAt = 0;     // 收到该 play_time 时的本地时间戳 (ms)
+        let timeAnchor = 0;       // 最近一次服务端播放位置（秒）
+        let timeAnchorAt = 0;     // 收到该位置时的本地时间戳 (ms)
         let interpolating = false; // 是否正在插值
         let rafId = null;          // requestAnimationFrame ID
 
@@ -1805,8 +1805,8 @@
                         if (data.data.title) {
                             document.getElementById('songTitle').textContent = '♪ ' + data.data.title;
                         }
-                        // 用 play_time 启动插值计时
-                        startInterpolation(data.data.play_time || 0);
+                        // 用 position（整曲实时播放位置）启动插值计时
+                        startInterpolation(data.data.position || 0);
                         // 丝滑过渡清空旧歌词（像切到空行一样退场），完成后显示占位
                         if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
                         const display = document.getElementById('lyricsDisplay');
@@ -1840,7 +1840,7 @@
                         updateDisplay(data.data);
                         updateAllLyricsHighlight(data.data.index);
                         document.getElementById('lineInfo').textContent = `第 ${data.data.index + 1} / ${allLyrics.length} 行`;
-                        // 校正插值锚点：用 progress 反推当前播放位置。
+                        // 校正插值锚点：用 position（整曲实时播放位置）直接作锚点。
                         //
                         // **绝不能用 data.data.play_time**：它是「本行何时该播出」
                         // （= timestamp - offset，歌词时间轴上的量），不是「现在播到哪」。
@@ -1849,11 +1849,10 @@
                         // 行，如 "A-A-All"：YRC 首字 10.92s 而 LRC 行标 14.58s），play_time 会
                         // 提前数秒，把时钟往回拨 → 进度条倒退、逐字高亮重跑。
                         //
-                        // progress 才是「整首播到哪」（实时位置/总时长，服务端契约），
-                        // 乘回 songDuration 即得播放位置，与 tickTime 和逐字高亮同一坐标系。
-                        // songDuration 未知（纯音乐/尚未拿到）时不校正，保留原锚点继续插值。
-                        if (songDuration > 0 && typeof data.data.progress === 'number') {
-                            correctInterpolation(data.data.progress * songDuration);
+                        // position 才是「整曲播到哪」（实时位置，服务端契约，= progress×duration），
+                        // 与 tickTime 和逐字高亮同一坐标系，直接作锚点、不必再乘 songDuration 反推。
+                        if (typeof data.data.position === 'number') {
+                            correctInterpolation(data.data.position);
                         }
                     }
                 }
@@ -1867,8 +1866,8 @@
                 }
 
                 if (data.type === 'playback_resume') {
-                    if (data.data && data.data.play_time !== undefined) {
-                        startInterpolation(data.data.play_time);
+                    if (data.data && data.data.position !== undefined) {
+                        startInterpolation(data.data.position);
                     }
                     isPlaying = true;
                     if (_wordFxWords.length > 0) startWordFxTick();

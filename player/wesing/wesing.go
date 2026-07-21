@@ -224,7 +224,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		initialProgress := player.ClampProgress(initialPlayTime, songDuration)
 		p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 			Title: songTitle, Duration: songDuration,
-			PlayTime: initialPlayTime, Progress: initialProgress,
+			Position: initialPlayTime, Progress: initialProgress,
 			Lyrics: lyricItems, Count: len(lyricItems),
 		})
 
@@ -458,7 +458,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 				paused = false
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: fullSongTitle})
 			}
-			p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
+			p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
 			frozen = false
 		}
 
@@ -494,14 +494,14 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 				if frozen && time.Since(frozenSince) >= pauseDuration && !paused {
 					paused = true
 					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: fullSongTitle})
-					p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: playTime})
+					p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
 				}
 			} else {
 				frozen = false
 				if paused {
 					paused = false
 					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: fullSongTitle})
-					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
+					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
 				}
 			}
 		}
@@ -514,7 +514,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 		if currentIdx != lastLineIdx && currentIdx >= 0 {
 			lastLineIdx = currentIdx
 			l := lyrics[currentIdx]
-			// playTime 是内存直读的实时位置，只喂 Progress；play_time 由 BuildLyricUpdate
+			// playTime 是内存直读的实时位置，进 Position、并据它算 Progress；play_time 由 BuildLyricUpdate
 			// 按歌词时间轴算。KRC 源无关——wesing 逐字直接来自 CharElement 内存（l.Detailed），
 			// words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传；无逐字的行为零值 {}。
 			p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(

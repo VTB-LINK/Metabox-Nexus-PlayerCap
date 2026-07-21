@@ -66,27 +66,42 @@ type StatusInfo struct {
 	Detail string `json:"detail"`
 }
 
-// LyricUpdate 歌词更新
+// LyricUpdate 歌词更新。
+//
+// 三个时间量别混：
+//   - Timestamp —— 歌词行的原始时间戳（歌词时间轴上的点，未减 offset）
+//   - PlayTime  —— 本行的**播出时间**（displayStart - offset）；index==-1 无行可播出，为 0
+//   - Position  —— **整曲实时播放位置**（秒，= Progress×Duration），每条都带、与 index 无关
 type LyricUpdate struct {
 	Index        int               `json:"index"`
 	Text         string            `json:"text"`
 	SubText      string            `json:"sub_text"`
 	Timestamp    float32           `json:"timestamp"`
 	PlayTime     float32           `json:"play_time"`
+	Position     float32           `json:"position"`
 	Progress     float32           `json:"progress"`
 	TextDetailed LyricTextDetailed `json:"text_detailed"`
 }
 
-// PlaybackTimeInfo 播放暂停/恢复事件载荷（仅 play_time）
+// PlaybackTimeInfo 播放暂停/恢复（含 seek）事件载荷。
+//
+// Position 是**整曲实时播放位置**（秒），不是歌词行的 play_time——它不减 offset，与
+// progress×duration 同量。此前字段名叫 play_time，与「歌词行播出时间」的 play_time 撞名却
+// 语义相反（实测暂停事件的 play_time 逐毫秒吻合 progress×duration、无需减 offset），
+// 3.0 正式版起改名 position 并补上 progress。
 type PlaybackTimeInfo struct {
-	PlayTime float32 `json:"play_time"`
+	Position float32 `json:"position"`
+	Progress float32 `json:"progress"`
 }
 
-// AllLyricsData 完整歌词
+// AllLyricsData 完整歌词。
+//
+// Position 是**整曲实时播放位置**（秒，= Progress×Duration）；顶层无「行」概念，故不设
+// 歌词行的 play_time——逐行 play_time 在 lyrics[i] 内。每次 WS 连接拿到的都是当下位置。
 type AllLyricsData struct {
 	Title    string      `json:"title,omitempty"`
 	Duration float32     `json:"duration"`
-	PlayTime float32     `json:"play_time"`
+	Position float32     `json:"position"`
 	Progress float32     `json:"progress"`
 	Count    int         `json:"count"`
 	Lyrics   []LyricLine `json:"lyrics"`
@@ -334,17 +349,18 @@ func IsPureMusicOnly(lyrics []LyricLine) bool {
 
 // BuildLyricUpdate 构造 lyric_update 载荷。**四个播放器都必须经由它**。
 //
-// 它存在的唯一理由是把这一对易错的语义锁在一处：
+// 它存在的唯一理由是把这三个易错的量锁在一处：
 //
 //	PlayTime —— 本行的**播出时间**（displayStart - offset），与 all_lyrics 里同一行逐字节相同
-//	Progress —— **整首播到哪**（实时播放位置 / 总时长），与 play_time 无关
+//	Position —— **整曲实时播放位置**（playPos 原值，秒），与 play_time 语义相反、不减 offset
+//	Progress —— Position / 总时长，钳在 [0,1]
 //
-// 两者一个来自歌词时间轴、一个来自实时时钟，恰好在常规行上只差一个轮询滞后（毫秒级），
+// PlayTime 来自歌词时间轴、Position/Progress 来自实时时钟，常规行上只差一个轮询滞后（毫秒级），
 // 所以写反了不会有任何症状——直到某行的逐字时间轴早于行时间戳时才会突然错开数秒。
 // 四家原先各写各的（cloudmusic 走公式，qqmusic/wesing/kugou 直接把实时位置塞进 play_time），
 // 正是这种「看不出差别」的分叉。
 //
-// playPos 传当前实时播放位置（各家的内存直读值或插值时钟），只用于算 Progress。
+// playPos 传当前实时播放位置（各家的内存直读值或插值时钟），进 Position、并据它算 Progress。
 func BuildLyricUpdate(index int, lineTime float32, text, subText string, detailed LyricTextDetailed, offsetSec, playPos, duration float32) *LyricUpdate {
 	return &LyricUpdate{
 		Index:        index,
@@ -352,6 +368,7 @@ func BuildLyricUpdate(index int, lineTime float32, text, subText string, detaile
 		SubText:      subText,
 		Timestamp:    lineTime,
 		PlayTime:     LyricPlayTime(lineTime, detailed, offsetSec),
+		Position:     playPos,
 		Progress:     ClampProgress(playPos, duration),
 		TextDetailed: detailed,
 	}

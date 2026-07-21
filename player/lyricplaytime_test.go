@@ -63,19 +63,20 @@ func TestLyricPlayTimeNeverNegative(t *testing.T) {
 	}
 }
 
-// 承重不变量：play_time 与 progress 是两个**独立**的量，绝不能互相串。
+// 承重不变量：play_time / position / progress 是三个**独立**的量，绝不能互相串。
 //
-// 用例刻意让两者的正确答案互不相同、也不等于任何输入：
+// 用例刻意让三者的正确答案互不相同、也不等于任何单一输入：
 //
-//	play_time = 170.0 - 0.5      = 169.5   （歌词时间轴，与 playPos 无关）
-//	progress  = 100.0 / 200.0    = 0.5     （实时时钟，与 timestamp 无关）
+//	play_time = 170.0 - 0.5      = 169.5   （歌词时间轴，本行何时上屏）
+//	position  = 100.0            = 100.0   （实时时钟，整曲播到哪，playPos 原值、不减 offset）
+//	progress  = 100.0 / 200.0    = 0.5     （position / 总时长）
 //
-// 于是「把实时位置塞进 play_time」（旧的 qqmusic/wesing/kugou 写法，得 100.0）或
-// 「用 timestamp 算 progress」（得 0.85）都会立刻变红。真机上这两种错法只差一个轮询滞后、
-// 毫秒级，肉眼与线上数据都看不出来——这正是需要一条合成用例把它钉死的原因。
+// 于是「把实时位置塞进 play_time」（旧的 qqmusic/wesing/kugou 写法，得 100.0）、
+// 「用 timestamp 算 progress」（得 0.85）、或漏掉 position（得 0）都会立刻变红。真机上这些
+// 错法只差一个轮询滞后、毫秒级，肉眼与线上数据都看不出来——这正是需要合成用例把它钉死的原因。
 //
-// 变异自证：把 BuildLyricUpdate 里的 PlayTime 改成 playPos，或把 Progress 改成
-// ClampProgress(lineTime, duration)，本例分别变红。
+// 变异自证：把 BuildLyricUpdate 里的 PlayTime 改成 playPos、删掉 Position: playPos、
+// 或把 Progress 改成 ClampProgress(lineTime, duration)，本例分别变红。
 func TestBuildLyricUpdateKeepsPlayTimeAndProgressIndependent(t *testing.T) {
 	u := BuildLyricUpdate(3, 170.0, "text", "sub", LyricTextDetailed{}, 0.5, 100.0, 200.0)
 
@@ -83,8 +84,12 @@ func TestBuildLyricUpdateKeepsPlayTimeAndProgressIndependent(t *testing.T) {
 		t.Fatalf("PlayTime = %v, want 169.5；play_time 是「本行何时该播出」"+
 			"(timestamp-offset)，不是当前播放位置(playPos=100)", u.PlayTime)
 	}
+	if u.Position != 100.0 {
+		t.Fatalf("Position = %v, want 100.0；position 是整曲实时播放位置(playPos)，"+
+			"与 play_time(169.5) 语义相反、不减 offset", u.Position)
+	}
 	if u.Progress != 0.5 {
-		t.Fatalf("Progress = %v, want 0.5；progress 是「整首播到哪」(playPos/duration)，"+
+		t.Fatalf("Progress = %v, want 0.5；progress 是「整首播到哪」(position/duration)，"+
 			"不该用 timestamp 算(那会得 0.85)", u.Progress)
 	}
 	if u.Timestamp != 170.0 {

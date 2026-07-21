@@ -17,7 +17,7 @@
 #### 歌词与事件契约
 
 - **纯音乐信号跨播放器归一**：此前三家表达不一致（网易云/酷狗把「纯音乐，请欣赏」当一行歌词推出）。现统一为 `all_lyrics` 发 `count:0`、`lyric_update` 发 `index:-1`，提示语原样保留在 `text`。下游判据收敛为 `index === -1` 即无歌词。
-- **`play_time` 语义统一**：固定为「本行歌词的播出时间」（= `timestamp` − offset）；此前多数播放器发的是实时播放位置。`all_lyrics` 新增 `progress` 与每行 `play_time`。
+- **播放位置与歌词时间分成两个字段**：整曲实时播放位置改由新字段 `position` 承载，`play_time` 收敛为「本行歌词的播出时间」。此前二者混在 `play_time` 里、语义相反却同名。详见文末破坏性变更。
 - **空载荷统一为 `{}`**：`lyric_idle` 等空数据不再发 `null`，避免下游读字段报错。
 - **`clear_song_data` 下架**：收敛为内部事件，不再出现在对外 API。
 - **暂停 / 恢复 / seek 检测覆盖四家**：新增的 qqmusic、kugou 同样支持前跳、回跳与暂停恢复。
@@ -48,7 +48,7 @@
 #### 破坏性变更（下游务必同步）
 
 - **歌词字段重命名**：`time` → `timestamp`、`line_index` → `index`、`song_title` → `title`。
-- **`play_time` 语义变化**：从「实时播放位置」改为「本行歌词的播出时间」（= `timestamp` − offset）。需要整曲进度请改用 `progress`。
+- **整曲位置迁到新字段 `position`，`play_time` 改指本行播出时间**：v2 的 `play_time`（实时播放位置）在 3.0 里改由 `position` 承载（`all_lyrics` 顶层、`lyric_update`、`playback_pause` / `playback_resume` 均带；`progress = position / duration`）；`play_time` 改指「本行歌词的播出时间」（= `timestamp` − offset，`index:-1` 时为 `0`）。`playback_pause` / `playback_resume` 另新增 `progress`。**要整曲位置 / 进度用 `position` / `progress`，不要用 `play_time`。**
 - **纯音乐表示**：从「`index:0` + 提示语当歌词」改为「`index:-1`，提示语保留在 `text`」。
 
 #### 已知限制

@@ -57,7 +57,7 @@ type PlayerState struct {
 	AllLyrics   []LyricItem
 	Title       string
 	Duration    float32
-	PlayTime    float32
+	Position    float32 // 整曲实时播放位置（秒）；喂 all_lyrics 的 position
 	Progress    float32
 }
 
@@ -283,7 +283,7 @@ func (s *Server) buildInitEvents(playerName string) []WSEvent {
 			Title:    ps.Title,
 			Lyrics:   ps.AllLyrics,
 			Duration: ps.Duration,
-			PlayTime: ps.PlayTime,
+			Position: ps.Position,
 			Progress: ps.Progress,
 			Count:    len(ps.AllLyrics),
 		}})
@@ -382,16 +382,19 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 			ps.LyricUpdate = &LyricUpdate{
 				Index: msg.Index, Text: msg.Text, SubText: msg.SubText,
 				Timestamp: msg.Timestamp, PlayTime: msg.PlayTime,
-				Progress: msg.Progress, TextDetailed: msg.TextDetailed,
+				Position: msg.Position, Progress: msg.Progress, TextDetailed: msg.TextDetailed,
 			}
-			// 同步更新 PlayTime 与 Progress 缓存，保持 FullState 时效性。
+			// 同步更新 Position 与 Progress 缓存，保持 FullState 时效性。
 			//
-			// **两个必须一起更新**：它们是同一时刻的两个投影（play_time 是绝对秒数、
-			// progress 是它除以时长），漏掉任何一个都会让 buildInitEvents / FullState /
-			// HTTP 拼出一个自相矛盾的 all_lyrics——此前只更新 PlayTime，于是 Progress
-			// 从切歌那一刻起永远停在 0（实测 280 次 HTTP 采样零例外：play_time=134.86 而
-			// progress=0，而它该是 0.5756）。症状：切播放器时进度条归零，而时间在走。
-			ps.PlayTime = msg.PlayTime
+			// **两个必须一起更新**：它们是同一时刻的两个投影（position 是整曲实时位置的绝对
+			// 秒数、progress 是它除以时长），漏掉任何一个都会让 buildInitEvents / FullState /
+			// HTTP 拼出一个自相矛盾的 all_lyrics——此前只更新位置缓存、Progress 从切歌那一刻起
+			// 永远停在 0（实测 280 次 HTTP 采样零例外：位置=134.86 而 progress=0，本应 0.5756）。
+			// 症状：切播放器时进度条归零，而时间在走。
+			//
+			// 存 msg.Position（整曲实时位置）而非 msg.PlayTime（本行播出时间）：后者在逐字引子
+			// 行上会早于行时间戳数秒，拿它当 all_lyrics 的整曲位置会自相矛盾。position 无歧义。
+			ps.Position = msg.Position
 			ps.Progress = msg.Progress
 		}
 	case player.EventAllLyrics:
@@ -399,7 +402,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 			ps.AllLyrics = msg.Lyrics
 			ps.Title = msg.Title
 			ps.Duration = msg.Duration
-			ps.PlayTime = msg.PlayTime
+			ps.Position = msg.Position
 			ps.Progress = msg.Progress
 			ps.LyricUpdate = nil // 新歌词到达，旧 lyric_update 已失效；避免中途连入的客户端收到上一首的歌词行
 		}
@@ -409,7 +412,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 		ps.AllLyrics = nil
 		ps.Title = ""
 		ps.Duration = 0
-		ps.PlayTime = 0
+		ps.Position = 0
 		ps.Progress = 0
 	}
 	s.mu.Unlock()
@@ -695,7 +698,7 @@ func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 				Title:    ps.Title,
 				Lyrics:   ps.AllLyrics,
 				Duration: ps.Duration,
-				PlayTime: ps.PlayTime,
+				Position: ps.Position,
 				Progress: ps.Progress,
 				Count:    len(ps.AllLyrics),
 			}

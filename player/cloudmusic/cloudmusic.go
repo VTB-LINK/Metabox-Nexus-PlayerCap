@@ -376,11 +376,11 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						playTime := clock.GetCurrent()
 						progress := player.ClampProgress(playTime, songDuration)
 						p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-							Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+							Title: songTitle, Duration: songDuration, Position: playTime, Progress: progress,
 							Lyrics: []player.LyricLine{}, Count: 0,
 						})
 						p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-							Index: -1, Text: "", Timestamp: 0, PlayTime: playTime, Progress: progress,
+							Index: -1, Text: "", Timestamp: 0, Position: playTime, Progress: progress,
 						})
 					}
 				} else {
@@ -443,15 +443,15 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					activeLyrics = nil
 					isPureMusic = true
 					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-						Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+						Title: songTitle, Duration: songDuration, Position: playTime, Progress: progress,
 						Lyrics: []player.LyricLine{}, Count: 0,
 					})
 					p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-						Index: -1, Text: pureHint, Timestamp: 0, PlayTime: playTime, Progress: progress,
+						Index: -1, Text: pureHint, Timestamp: 0, Position: playTime, Progress: progress,
 					})
 				} else {
 					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-						Title: songTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+						Title: songTitle, Duration: songDuration, Position: playTime, Progress: progress,
 						Lyrics: lyricItems, Count: len(lyricItems),
 					})
 				}
@@ -495,15 +495,15 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					activeLyrics = nil
 					isPureMusic = true
 					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-						Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+						Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
 						Lyrics: []player.LyricLine{}, Count: 0,
 					})
 					p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-						Index: -1, Text: pureHint, Timestamp: 0, PlayTime: playTime, Progress: progress,
+						Index: -1, Text: pureHint, Timestamp: 0, Position: playTime, Progress: progress,
 					})
 				} else {
 					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-						Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+						Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
 						Lyrics: lyricItems, Count: len(lyricItems),
 					})
 				}
@@ -520,11 +520,11 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			playTime := clock.GetCurrent()
 			progress := player.ClampProgress(playTime, songDuration)
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-				Title: currentSongTitle, Duration: songDuration, PlayTime: playTime, Progress: progress,
+				Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
 				Lyrics: []player.LyricLine{}, Count: 0,
 			})
 			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				Index: -1, Text: "", Timestamp: 0, PlayTime: playTime, Progress: progress,
+				Index: -1, Text: "", Timestamp: 0, Position: playTime, Progress: progress,
 			})
 		}
 
@@ -572,7 +572,8 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 				clock.BaseRealTime = float32(data.DomTimeSec)
 				clock.AnchorTime = time.Now()
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: clock.GetCurrent()})
+				pos := clock.GetCurrent()
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: pos, Progress: player.ClampProgress(pos, songDuration)})
 				seeked = true
 			}
 		}
@@ -585,12 +586,12 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				if !seeked {
 					playTime := clock.GetCurrent()
 					log.Info("恢复 @ %.2fs", playTime)
-					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{PlayTime: playTime})
+					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
 				}
 			} else {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentSongTitle})
 				playTime := clock.GetCurrent()
-				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{PlayTime: playTime})
+				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
 				log.Info("暂停 @ %.2fs", playTime)
 			}
 		}
@@ -600,7 +601,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if trueLineIdx != lastLineIdx {
 				lastLineIdx = trueLineIdx
 				currentLine := activeLyrics[trueLineIdx]
-				// clock.GetCurrent() 是插值出的实时位置，只喂 Progress；play_time 由
+				// clock.GetCurrent() 是插值出的实时位置，进 Position、并据它算 Progress；play_time 由
 				// BuildLyricUpdate 按歌词时间轴算（原先为取它而构造了整个 LyricLine）。
 				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
 					trueLineIdx, currentLine.Time, currentLine.Text, currentLine.SubText,

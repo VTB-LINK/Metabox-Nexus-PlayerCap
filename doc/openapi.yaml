@@ -200,7 +200,7 @@ paths:
 
         - `player` - 数据来源播放器（根端点时为当前活跃播放器）
         - `duration` - 歌曲总时长（秒）
-        - `play_time` - 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
+        - `position` - 整曲实时播放位置（秒），= `progress × duration`，用于前端插值计时的初始锚点。逐行的播出时间见 `lyrics[].play_time`
         - `progress` - 当前播放进度（0-1），与 `lyric_update.progress` 同类型
         - `count` - 歌词行数
         - `lyrics` - 按 index 排序的歌词数组
@@ -233,7 +233,7 @@ paths:
                     data:
                       title: "Cold - Maroon 5 / Future"
                       duration: 234.308
-                      play_time: 0
+                      position: 0
                       progress: 0
                       count: 88
                       lyrics:
@@ -279,7 +279,7 @@ paths:
                     data:
                       title: "Sunset - Klonopin"
                       duration: 180
-                      play_time: 0
+                      position: 0
                       progress: 0
                       count: 0
                       lyrics: []
@@ -297,8 +297,9 @@ paths:
         - `text` - 主歌词文本
         - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
         - `timestamp` - 歌词时间戳（秒）
-        - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1 时例外：`timestamp` 恒为 0，而 `play_time` 是整曲播放位置
-        - `progress` - 整曲播放进度（0-1），= 实时播放位置 / 歌曲总时长；与 `play_time`（本行歌词的播出时间）无换算关系
+        - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
+        - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量
+        - `progress` - 整曲播放进度（0-1），= `position / 歌曲总时长`；与 `play_time`（本行歌词的播出时间）无换算关系
         - `text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
 
         **`index: -1` 纯音乐说明：**
@@ -334,28 +335,30 @@ paths:
                       sub_text: ""
                       timestamp: 31.483
                       play_time: 31.282999
+                      position: 31.282999
                       progress: 0.105743244
                       text_detailed: {}
                 播放中（逐字 + 翻译）:
-                  summary: 播放中（cloudmusicv3，YRC 逐字 + 翻译）。words 已裁剪至 2 个，实际 8 个——只删元素不改值。
+                  summary: 播放中（cloudmusicv3，YRC 逐字 + 翻译，真实录音）。words 已裁剪至 2 个，实际 9 个——只删元素不改值。本行逐字首字（156.96）早于行时间戳（157.22），故 play_time 取首字时刻减 offset；position（整曲实时位置 156.4659）与 play_time（156.46）此处相差 0.006s。
                   value:
                     code: 0
                     msg: success
                     player: cloudmusicv3
                     data:
-                      index: 1
-                      text: "It feels like I don't know you anymore"
-                      sub_text: "感觉就像我已经不再认识你了"
-                      timestamp: 7.57
-                      play_time: 7.07
-                      progress: 0.030527605
+                      index: 37
+                      text: "There's plenty of time to sleep when we die"
+                      sub_text: "死后自会长眠。"
+                      timestamp: 157.22
+                      play_time: 156.46
+                      position: 156.4659
+                      progress: 0.62976056
                       text_detailed:
-                        timestamp: 7.92
-                        play_time: 7.42
-                        duration: 3.48
+                        timestamp: 156.96
+                        play_time: 156.46
+                        duration: 7.02
                         words:
-                          - { timestamp: 7.92, play_time: 7.42, duration: 0.06, text: "It " }
-                          - { timestamp: 7.98, play_time: 7.48, duration: 0.3, text: "feels " }
+                          - { timestamp: 156.96, play_time: 156.46, duration: 0.18, text: "There's " }
+                          - { timestamp: 157.14, play_time: 156.64, duration: 0.57, text: "plenty " }
                 尚无数据:
                   summary: 服务端还没有该播放器的歌词数据（播放器未启动，或启动后尚未播放）。这不是「本曲无歌词」——那种情况 data 是下面两例的完整对象。
                   value:
@@ -364,7 +367,7 @@ paths:
                     player: wesing
                     data: {}
                 无可用歌词（qqmusic）:
-                  summary: 平台返回零行歌词时 text 为空字符串。timestamp 为 0，而 play_time / progress 照常反映整曲播放位置（此例为中途接入，故非 0）。
+                  summary: 平台返回零行歌词时 text 为空字符串。timestamp 为 0、play_time 为 0（无行可播出），而 position / progress 照常反映整曲播放位置（此例为中途接入，故非 0）。
                   value:
                     code: 0
                     msg: success
@@ -374,7 +377,8 @@ paths:
                       text: ""
                       sub_text: ""
                       timestamp: 0
-                      play_time: 28.151
+                      play_time: 0
+                      position: 28.151
                       progress: 0.12511556
                       text_detailed: {}
                 无可用歌词（cloudmusicv3 / kugou）:
@@ -388,7 +392,8 @@ paths:
                       text: "纯音乐，请欣赏"
                       sub_text: ""
                       timestamp: 0
-                      play_time: 197.18834
+                      play_time: 0
+                      position: 197.18834
                       progress: 0.6551108
                       text_detailed: {}
 
@@ -496,12 +501,12 @@ paths:
 
         **初始补发（连接时已有缓存歌词）：**
         ```
-        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"progress":0.105743244,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
         ```
 
         **播放过程中，每当歌词更新时接收：**
         ```
-        data: {"type":"lyric_update","player":"wesing","data":{"index":2,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","timestamp":37.716,"play_time":37.516,"progress":0.1268581,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":2,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","timestamp":37.716,"play_time":37.516,"position":37.516,"progress":0.1268581,"text_detailed":{}}}
         ```
 
         **完整生命周期示例：**
@@ -510,11 +515,11 @@ paths:
         data: {"type":"lyric_update","player":"wesing","data":{}}
 
         （用户开始播放歌曲）
-        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","timestamp":25.44,"play_time":25.24,"progress":0.08530405,"text_detailed":{}}}
-        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"progress":0.105743244,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","timestamp":25.44,"play_time":25.24,"position":25.24,"progress":0.08530405,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
 
         （切歌 — 服务端不发送清空消息，前端自行根据新歌数据重置显示）
-        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"啊","sub_text":"","timestamp":3.012,"play_time":2.812,"progress":0.009628378,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"啊","sub_text":"","timestamp":3.012,"play_time":2.812,"position":2.812,"progress":0.009628378,"text_detailed":{}}}
         ```
 
         **约束：**
@@ -544,7 +549,7 @@ paths:
                 有歌词时:
                   summary: 有歌词时
                   value: |
-                    data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"progress":0.105743244,"text_detailed":{}}}
+                    data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
                 无歌词时:
                   summary: 无歌词时
                   value: |
@@ -670,7 +675,7 @@ paths:
 
         播放中（有歌词时）：
         ```json
-        {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"progress":0.105743244,"text_detailed":{}}}
+        {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
         ```
         无歌词时：
         ```json
@@ -683,7 +688,7 @@ paths:
 
         有歌词时：
         ```json
-        {"type":"all_lyrics","player":"wesing","data":{"title":"都是夜归人 - 许美静","duration":296,"play_time":1.75,"progress":0.0059121624,"count":38,"lyrics":[{"index":0,"timestamp":25.44,"play_time":25.24,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","text_detailed":{}},{"index":1,"timestamp":31.483,"play_time":31.282999,"text":"往事就像流星刹那划过心房","sub_text":"","text_detailed":{}},{"index":2,"timestamp":37.716,"play_time":37.516,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","text_detailed":{}}],"lyrics_detailed":[]}}（lyrics 已裁剪至 3 行，实际 38 行）
+        {"type":"all_lyrics","player":"wesing","data":{"title":"都是夜归人 - 许美静","duration":296,"position":1.75,"progress":0.0059121624,"count":38,"lyrics":[{"index":0,"timestamp":25.44,"play_time":25.24,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","text_detailed":{}},{"index":1,"timestamp":31.483,"play_time":31.282999,"text":"往事就像流星刹那划过心房","sub_text":"","text_detailed":{}},{"index":2,"timestamp":37.716,"play_time":37.516,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","text_detailed":{}}],"lyrics_detailed":[]}}（lyrics 已裁剪至 3 行，实际 38 行）
         ```
         无歌词时：
         ```json
@@ -706,23 +711,23 @@ paths:
 
         **6. `playback_pause` - 暂停播放**
 
-        播放暂停时发送，`data.play_time` 为暂停时刻的播放位置：
+        播放暂停时发送。`data.position` 为暂停时刻的整曲播放位置（秒），`data.progress` 为对应进度：
         ```json
-        {"type":"playback_pause","player":"wesing","data":{"play_time":32.2}}
+        {"type":"playback_pause","player":"wesing","data":{"position":31.282999,"progress":0.105743244}}
         ```
 
         ---
 
         **7. `playback_resume` - 恢复播放 / 跳转**
 
-        `play_time` 发生非连续跳变时发送，两种情形都会触发：从暂停中恢复播放；以及 seek / 拖动进度条。
-        后者的 `play_time` 是**跳转后的新位置，可能小于上一次的值**。
+        `position` 发生非连续跳变时发送，两种情形都会触发：从暂停中恢复播放；以及 seek / 拖动进度条。
+        后者的 `position` 是**跳转后的新位置，可能小于上一次的值**。
 
         因此本事件**不保证与 `playback_pause` 成对出现**，实际收到的 `playback_resume` 通常多于 `playback_pause`。
         ```json
-        {"type":"playback_resume","player":"wesing","data":{"play_time":32.25}}
+        {"type":"playback_resume","player":"wesing","data":{"position":37.516,"progress":0.1268581}}
         ```
-        前端收到 `playback_pause` 应停止时间插值，收到 `playback_resume` 应以 `play_time` 为锚点重新开始插值。
+        前端收到 `playback_pause` 应停止时间插值，收到 `playback_resume` 应以 `position` 为锚点重新开始插值。
 
         ---
 
@@ -762,7 +767,7 @@ paths:
         ← {"type":"player_switch","player":"wesing","data":{"from":"","to":"wesing"}}
         ← {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"晚风 - 陈婧霏"}}
         ← {"type":"song_info_update","player":"wesing","data":{"name":"晚风","singer":"陈婧霏","title":"晚风 - 陈婧霏","cover":"http://imgcache.qq.com/music/photo/mid_album_800/r/k/003JA09X2m9xrk.jpg","cover_base64":""}}
-        ← {"type":"all_lyrics","player":"wesing","data":{"title":"晚风 - 陈婧霏","duration":176,"play_time":0,"progress":0,"count":34,"lyrics":[...],"lyrics_detailed":[]}}
+        ← {"type":"all_lyrics","player":"wesing","data":{"title":"晚风 - 陈婧霏","duration":176,"position":0,"progress":0,"count":34,"lyrics":[...],"lyrics_detailed":[]}}
 
         （封面异步下载完成，补发第二条 song_info_update，此时 cover_base64 有值）
         ← {"type":"song_info_update","player":"wesing","data":{"name":"晚风","singer":"陈婧霏","title":"晚风 - 陈婧霏","cover":"http://imgcache.qq.com/music/photo/mid_album_800/r/k/003JA09X2m9xrk.jpg","cover_base64":"data:image/jpeg;base64,..."}}
@@ -770,8 +775,8 @@ paths:
         （随播放进度逐行推送 lyric_update，格式见 /lyric_update 端点）
 
         （用户暂停 / 恢复；resume 也可由拖动进度条触发）
-        ← {"type":"playback_pause","player":"wesing","data":{"play_time":32.2}}
-        ← {"type":"playback_resume","player":"wesing","data":{"play_time":32.25}}
+        ← {"type":"playback_pause","player":"wesing","data":{"position":32.2,"progress":0.105743244}}
+        ← {"type":"playback_resume","player":"wesing","data":{"position":32.25,"progress":0.1268581}}
 
         （wesing 歌曲播放结束 / 切歌 / 窗口关闭——lyric_idle 仅 wesing 发送）
         ← {"type":"lyric_idle","player":"wesing","data":{}}
@@ -810,10 +815,10 @@ paths:
               console.log(`[${msg.player}] 歌词空闲`);
               break;
             case 'playback_pause':
-              console.log(`[${msg.player}] 暂停 @ ${msg.data.play_time}s`);
+              console.log(`[${msg.player}] 暂停 @ ${msg.data.position}s`);
               break;
             case 'playback_resume':
-              console.log(`[${msg.player}] 恢复 @ ${msg.data.play_time}s`);
+              console.log(`[${msg.player}] 恢复 @ ${msg.data.position}s`);
               break;
             case 'player_switch':
               console.log(`播放器切换: ${msg.data.from} → ${msg.data.to}`);
@@ -838,7 +843,7 @@ paths:
         Per-player 端点始终返回指定播放器的数据，不受路由切换影响。响应格式与根端点相同，`player` 字段固定为对应播放器名。
 
         - `duration` - 歌曲总时长（秒）
-        - `play_time` - 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
+        - `position` - 整曲实时播放位置（秒），= `progress × duration`，用于前端插值计时的初始锚点。逐行的播出时间见 `lyrics[].play_time`
         - `count` - 歌词行数
         - `lyrics` - 按 index 排序的歌词数组
       parameters:
@@ -867,7 +872,7 @@ paths:
                     data:
                       title: "Cold - Maroon 5 / Future"
                       duration: 234.308
-                      play_time: 0
+                      position: 0
                       progress: 0
                       count: 88
                       lyrics:
@@ -913,7 +918,7 @@ paths:
                     data:
                       title: "Sunset - Klonopin"
                       duration: 180
-                      play_time: 0
+                      position: 0
                       progress: 0
                       count: 0
                       lyrics: []
@@ -932,8 +937,9 @@ paths:
         - `text` - 主歌词文本
         - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
         - `timestamp` - 歌词时间戳（秒）
-        - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1 时例外：`timestamp` 恒为 0，而 `play_time` 是整曲播放位置
-        - `progress` - 整曲播放进度（0-1），= 实时播放位置 / 歌曲总时长；与 `play_time`（本行歌词的播出时间）无换算关系
+        - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
+        - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量
+        - `progress` - 整曲播放进度（0-1），= `position / 歌曲总时长`；与 `play_time`（本行歌词的播出时间）无换算关系
 
         **`index: -1` 纯音乐说明：** 参见根端点 `/lyric_update` 的说明。
       parameters:
@@ -965,7 +971,9 @@ paths:
                       sub_text: ""
                       timestamp: 31.483
                       play_time: 31.282999
+                      position: 31.282999
                       progress: 0.105743244
+                      text_detailed: {}
                 无歌词时:
                   summary: 无歌词时
                   value:
@@ -1085,7 +1093,7 @@ paths:
 
         **事件格式：**
         ```
-        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"progress":0.105743244,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
         ```
 
         **约束：**
@@ -1105,7 +1113,7 @@ paths:
                 有歌词时:
                   summary: 有歌词时
                   value: |
-                    data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"progress":0.105743244,"text_detailed":{}}}
+                    data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
                 无歌词时:
                   summary: 无歌词时
                   value: |
@@ -1313,6 +1321,7 @@ webhooks:
                     sub_text: ""
                     timestamp: 31.483
                     play_time: 31.282999
+                    position: 31.282999
                     progress: 0.105743244
                     text_detailed: {}
               无歌词时:
@@ -1321,7 +1330,7 @@ webhooks:
                   player: wesing
                   data: {}
               无可用歌词:
-                summary: 平台未返回可用歌词。kugou / cloudmusicv3 对纯音乐会返回一行「纯音乐，请欣赏」，服务端把 index 归一为 -1 但保留该文本；qqmusic 返回零行时 text 为 ""。timestamp 恒为 0，而 play_time / progress 照常反映整曲播放位置。
+                summary: 平台未返回可用歌词。kugou / cloudmusicv3 对纯音乐会返回一行「纯音乐，请欣赏」，服务端把 index 归一为 -1 但保留该文本；qqmusic 返回零行时 text 为 ""。timestamp 恒为 0、play_time 恒为 0（无行可播出），而 position / progress 照常反映整曲播放位置。
                 value:
                   type: lyric_update
                   player: kugou
@@ -1330,7 +1339,8 @@ webhooks:
                     text: "纯音乐，请欣赏"
                     sub_text: ""
                     timestamp: 0
-                    play_time: 197.18834
+                    play_time: 0
+                    position: 197.18834
                     progress: 0.6551108
                     text_detailed: {}
       responses:
@@ -1370,7 +1380,7 @@ webhooks:
                   data:
                     title: "都是夜归人 - 许美静"
                     duration: 296
-                    play_time: 1.75
+                    position: 1.75
                     progress: 0.0059121624
                     count: 38
                     lyrics:
@@ -1425,7 +1435,7 @@ webhooks:
       summary: 暂停播放事件
       operationId: onPlaybackPause
       description: |
-        播放暂停时发送，`data.play_time` 为暂停时刻的播放位置。前端收到后应停止时间插值。
+        播放暂停时发送。`data.position` 为暂停时刻的整曲播放位置（秒），`data.progress` 为对应进度。前端收到后应停止时间插值。
       requestBody:
         required: true
         content:
@@ -1446,7 +1456,8 @@ webhooks:
               type: playback_pause
               player: wesing
               data:
-                play_time: 32.2
+                position: 31.282999
+                progress: 0.105743244
       responses:
         "200":
           description: 事件已接收
@@ -1457,8 +1468,8 @@ webhooks:
       summary: 恢复播放事件
       operationId: onPlaybackResume
       description: |
-        `play_time` 发生非连续跳变时发送：从暂停恢复播放，或 seek / 拖动进度条（此时 `play_time` 可能小于上一次的值）。
-        因此本事件不保证与 `playback_pause` 成对出现。前端收到后应以 `play_time` 为锚点重新开始插值。
+        `position` 发生非连续跳变时发送：从暂停恢复播放，或 seek / 拖动进度条（此时 `position` 可能小于上一次的值）。
+        因此本事件不保证与 `playback_pause` 成对出现。前端收到后应以 `position` 为锚点重新开始插值。
       requestBody:
         required: true
         content:
@@ -1479,7 +1490,8 @@ webhooks:
               type: playback_resume
               player: wesing
               data:
-                play_time: 32.25
+                position: 37.516
+                progress: 0.1268581
       responses:
         "200":
           description: 事件已接收
@@ -1846,13 +1858,13 @@ components:
 
     LyricUpdateData:
       type: object
-      required: [index, text, sub_text, timestamp, play_time, progress, text_detailed]
+      required: [index, text, sub_text, timestamp, play_time, position, progress, text_detailed]
       properties:
         index:
           type: integer
           description: |
             歌词行号。
-            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 为空、`timestamp` 为 `0`，`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 为 `""`），而 `play_time` / `progress` 照常反映整曲播放位置。同时会配套发送一条 `all_lyrics`（`count: 0`、`lyrics: []`）。
+            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出），而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 为 `""`）。同时会配套发送一条 `all_lyrics`（`count: 0`、`lyrics: []`）。
             客户端用 `msg.data.index === -1` 判断有无歌词，不要依赖 `msg.data.text` 是否为空。
           example: 1
         text:
@@ -1871,12 +1883,17 @@ components:
         play_time:
           type: number
           format: float
-          description: 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行），取首字时刻，play_time 小于该基准。它与整曲播放位置 `progress` 不是同一个量。`index` 为 -1 时例外——`timestamp` 恒为 0，`play_time` 此时是整曲播放位置
+          description: 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行），取首字时刻，play_time 小于该基准。它与整曲播放位置是两个量。`index` 为 -1（无可显示歌词）时为 0
+          example: 31.282999
+        position:
+          type: number
+          format: float
+          description: 整曲实时播放位置（秒），每条 lyric_update 都带、与 index 无关。= progress × duration，不减 offset。与 play_time（本行播出时间）是两个量——常规行上二者相近，逐字长引子行上 play_time 会明显更小
           example: 31.282999
         progress:
           type: number
           format: float
-          description: 整曲播放进度（0-1），= 实时播放位置 / 歌曲总时长。与 play_time（本行歌词的播出时间）不是同一个量，两者无换算关系
+          description: 整曲播放进度（0-1），= position / 歌曲总时长。与 play_time（本行歌词的播出时间）不是同一个量
           example: 0.105743244
         text_detailed:
           $ref: "#/components/schemas/LyricTextDetailed"
@@ -1998,7 +2015,7 @@ components:
 
     AllLyricsData:
       type: object
-      required: [title, duration, play_time, progress, count, lyrics, lyrics_detailed]
+      required: [title, duration, position, progress, count, lyrics, lyrics_detailed]
       properties:
         title:
           type: string
@@ -2009,10 +2026,10 @@ components:
           format: float
           description: 歌曲总时长（秒）
           example: 296
-        play_time:
+        position:
           type: number
           format: float
-          description: 发送时的当前播放时间（秒），用于前端插值计时的初始锚点
+          description: 整曲实时播放位置（秒），= progress × duration，用于前端插值计时的初始锚点。顶层无「行」概念，逐行 play_time 在 lyrics[i] 内
           example: 1.75
         progress:
           type: number
@@ -2036,13 +2053,18 @@ components:
 
     PlaybackTimeInfo:
       type: object
-      required: [play_time]
+      required: [position, progress]
       properties:
-        play_time:
+        position:
           type: number
           format: float
-          description: 当前播放时间（秒）
-          example: 32.2
+          description: 整曲实时播放位置（秒）。不是歌词行的 play_time——它不减 offset，等价于 progress × duration。前端收到后以此为锚点重新开始插值
+          example: 31.282999
+        progress:
+          type: number
+          format: float
+          description: 整曲播放进度（0-1），= position / 歌曲总时长
+          example: 0.105743244
 
     PlayerSwitchInfo:
       type: object
