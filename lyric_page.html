@@ -1805,8 +1805,10 @@
                         if (data.data.title) {
                             document.getElementById('songTitle').textContent = '♪ ' + data.data.title;
                         }
-                        // 用 position（整曲实时播放位置）启动插值计时
-                        startInterpolation(data.data.position || 0);
+                        // 用 position（整曲实时播放位置）启动插值计时；旧服务端无 position 时退回 play_time。
+                        const startAnchor = (typeof data.data.position === 'number') ? data.data.position
+                            : (typeof data.data.play_time === 'number') ? data.data.play_time : 0;
+                        startInterpolation(startAnchor);
                         // 丝滑过渡清空旧歌词（像切到空行一样退场），完成后显示占位
                         if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
                         const display = document.getElementById('lyricsDisplay');
@@ -1850,9 +1852,18 @@
                         // 提前数秒，把时钟往回拨 → 进度条倒退、逐字高亮重跑。
                         //
                         // position 才是「整曲播到哪」（实时位置，服务端契约，= progress×duration），
-                        // 与 tickTime 和逐字高亮同一坐标系，直接作锚点、不必再乘 songDuration 反推。
+                        // 与 tickTime 和逐字高亮同一坐标系。优先用它；但前后端版本错位时（OBS 缓存旧页、
+                        // 或服务端未重启到新版）position 可能缺席，此时退回 progress×songDuration（同一个值）。
+                        // **绝不能因缺 position 就跳过校正**——那会让锚点冻在开头、currentTime 永远追不上
+                        // 字的 play_time，逐字每行卡在半透明（reveal 恒 0）不动。
+                        let anchorPos;
                         if (typeof data.data.position === 'number') {
-                            correctInterpolation(data.data.position);
+                            anchorPos = data.data.position;
+                        } else if (songDuration > 0 && typeof data.data.progress === 'number') {
+                            anchorPos = data.data.progress * songDuration;
+                        }
+                        if (typeof anchorPos === 'number') {
+                            correctInterpolation(anchorPos);
                         }
                     }
                 }
@@ -1866,8 +1877,11 @@
                 }
 
                 if (data.type === 'playback_resume') {
-                    if (data.data && data.data.position !== undefined) {
-                        startInterpolation(data.data.position);
+                    // 有 position 用 position；旧服务端只发 play_time 时退回它，别让锚点变 NaN。
+                    const resumeAnchor = (data.data && typeof data.data.position === 'number') ? data.data.position
+                        : (data.data && typeof data.data.play_time === 'number') ? data.data.play_time : undefined;
+                    if (typeof resumeAnchor === 'number') {
+                        startInterpolation(resumeAnchor);
                     }
                     isPlaying = true;
                     if (_wordFxWords.length > 0) startWordFxTick();
