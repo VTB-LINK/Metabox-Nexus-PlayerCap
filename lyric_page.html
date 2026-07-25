@@ -313,11 +313,42 @@
         }
 
         .lyric-sub-text {
-            font-size: 0.85rem;
-            font-weight: 300;
-            color: rgba(255, 255, 255, 0.4);
-            margin-top: 4px;
-            letter-spacing: 1px;
+            /* 默认继承歌词（current）样式；可被 sub_* 参数覆盖 */
+            font-size: 2rem;
+            font-weight: 700;
+            color: #fff;
+            text-shadow: 0 0 40px rgba(255, 107, 107, 0.5), 0 0 80px rgba(255, 107, 107, 0.2);
+            line-height: 1.8;
+            letter-spacing: 2px;
+            max-width: 100%;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        /* 歌词 + 译文作为一个整体（zone）：一起入场/退场、一起被锚定 */
+        .lyric-zone {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            width: 100%;
+            max-width: 100%;
+        }
+        .lyric-zone.appear {
+            animation: zone-appear 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        .lyric-zone.exit {
+            animation: zone-exit 0.35s cubic-bezier(0.64, 0, 0.78, 0) forwards;
+        }
+        /* zone 专属入场/退场：终点/起点为 scale(1)（= zone 静态），避免动画结束/开始时
+           相对静态态发生 1.02↔1.0 的瞬时跳变。当前行的放大强调由其自身静态 scale(1.02) 提供。 */
+        @keyframes zone-appear {
+            from { opacity: 0; transform: translateY(30px) scale(0.95); filter: blur(4px); }
+            to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+        }
+        @keyframes zone-exit {
+            from { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+            to   { opacity: 0; transform: translateY(-30px) scale(0.95); filter: blur(4px); }
         }
 
         .lyric-line.next {
@@ -973,6 +1004,27 @@
             color: #fff;
         }
 
+        /* 通用九宫格对齐 widget（中心+4边+4角，点亮即选中，参考 OBS） */
+        .grid-align {
+            display: grid;
+            grid-template-columns: repeat(3, 22px);
+            grid-template-rows: repeat(3, 22px);
+            gap: 3px;
+            flex-shrink: 0;
+        }
+        .grid-align-cell {
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.05);
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .grid-align-cell:hover { border-color: rgba(255, 255, 255, 0.45); }
+        .grid-align-cell.active {
+            background: rgba(90, 150, 255, 0.85);
+            border-color: rgba(140, 190, 255, 1);
+        }
+
         .editor-row input[type="number"] {
             width: 70px;
             text-align: center;
@@ -1332,6 +1384,7 @@
         const stPpTime = parseFloat(urlParams.get('st_pp_time') || '3');
         const stPpPause = parseFloat(urlParams.get('st_pp_pause') || '1.5');
         const stScrollEase = urlParams.get('st_scroll_ease') || 'ease-in-out';
+        const stShrinkMin = Math.max(0.1, Math.min(1, parseFloat(urlParams.get('st_shrink_min') || '0.5')));
 
         // 歌词（纯）溢出模式参数
         const pureOverflow = urlParams.get('overflow') || 'wrap';
@@ -1339,8 +1392,31 @@
         const purePpTime = parseFloat(urlParams.get('pp_time') || '3');
         const purePpPause = parseFloat(urlParams.get('pp_pause') || '1.5');
         const pureScrollEase = urlParams.get('scroll_ease') || 'ease-in-out';
+        const pureShrinkMin = Math.max(0.1, Math.min(1, parseFloat(urlParams.get('shrink_min') || '0.5')));
         const oneLineMode = urlParams.has('one_line');
         const showSubText = urlParams.has('sub_text');
+        const subPos = urlParams.get('sub_pos') === 'above' ? 'above' : 'below';
+        // 译文独立样式覆盖（各自缺省 = 继承歌词；4a 已让 .lyric-sub-text 继承歌词全套样式）
+        const subColor = urlParams.get('sub_color') || null;
+        const subFontScale = Math.max(0.2, Math.min(3, parseFloat(urlParams.get('sub_font_scale')) || 1)); // 相对歌词，1=同大
+        const subFont = urlParams.get('sub_font') || null;
+        const subGlowRaw = urlParams.get('sub_glow');               // null=继承歌词, 'off'/'0'=强制关, 其它/空=强制开
+        const subGlowColor = urlParams.get('sub_glow_color') || null;
+        const subStrokeRaw = urlParams.get('sub_stroke');           // null=继承歌词, 'off'/'0'=强制关, 其它/空=强制开
+        const subStrokeWidth = urlParams.get('sub_stroke_width') || '1';
+        const subStrokeColor = urlParams.get('sub_stroke_color') || '#000';
+        // 译文与歌词之间的空白间距倍率（作用于 zone 的 gap，默认 1 = 现状 6px），最小 0.05
+        const subGap = Math.max(0.05, Math.min(10, parseFloat(urlParams.get('sub_gap')) || 1));
+        // 译文溢出：缺省 wrap（向后兼容，旧带 sub_text 的 URL 译文仍换行）。
+        // 编辑器「继承歌词」会在 collect 时把歌词的溢出模式显式写入 sub_overflow。
+        // scroll/pingpong/shrink 的时序参数缺省继承歌词对应值。
+        const _subNum = (k, d) => urlParams.has(k) ? parseFloat(urlParams.get(k)) : d;
+        const subOverflow = urlParams.get('sub_overflow') || 'wrap';
+        const subScrollSpeed = _subNum('sub_scroll_speed', pureScrollSpeed);
+        const subPpTime = _subNum('sub_pp_time', purePpTime);
+        const subPpPause = _subNum('sub_pp_pause', purePpPause);
+        const subScrollEase = urlParams.get('sub_scroll_ease') || pureScrollEase;
+        const subShrinkMin = Math.max(0.1, Math.min(1, _subNum('sub_shrink_min', pureShrinkMin)));
         const wordFxEnabled = urlParams.get('word_fx') !== '0' && urlParams.get('word_fx') !== 'off';
         const wordFxMode = (function() {
             const v = urlParams.get('word_fx');
@@ -1375,6 +1451,33 @@
         const fontScale = Math.max(0.5, Math.min(3, parseFloat(urlParams.get('font_scale')) || 1));
         const textAlignRaw = urlParams.get('text_align') || 'center';
         const textAlign = ['left', 'center', 'right'].includes(textAlignRaw) ? textAlignRaw : 'center';
+        // 九宫格锚定 lyric_anchor（tl/t/tr/l/c/r/bl/b/br）：拆成水平(hAlign)+垂直(vAlign)。
+        // 缺省回退到 text_align 作水平、垂直居中——与旧行为完全一致。
+        const ANCHOR_MAP = {
+            tl: ['left', 'top'], t: ['center', 'top'], tr: ['right', 'top'],
+            l: ['left', 'center'], c: ['center', 'center'], r: ['right', 'center'],
+            bl: ['left', 'bottom'], b: ['center', 'bottom'], br: ['right', 'bottom']
+        };
+        const anchorRaw = urlParams.get('lyric_anchor');
+        // 必须用 hasOwnProperty：方括号取值会沿原型链解析，anchorRaw 为 constructor/toString/
+        // __proto__/valueOf/hasOwnProperty 等时会取到 Object.prototype 成员（真值）骗过守卫，
+        // 随后对函数/对象做数组解构抛 TypeError，中断顶层脚本 → WS 不连、overlay 整页空白。
+        const anchorSet = !!(anchorRaw && Object.prototype.hasOwnProperty.call(ANCHOR_MAP, anchorRaw));
+        let hAlign, vAlign;
+        if (anchorSet) {
+            [hAlign, vAlign] = ANCHOR_MAP[anchorRaw];
+        } else {
+            hAlign = textAlign;
+            vAlign = 'center';
+        }
+        // 溢出容器的水平对齐：shrink 完全跟随对齐；pingpong 仅在**显式九宫格锚点**时跟随左/右
+        // （text_align 回退或居中一律保持左=向后兼容——旧 scroll/pingpong 溢出行恒左，
+        // 不能因 text_align=right 就改变）；scroll(marquee) 恒左。
+        function _overflowAlign(mode, align, isAnchored) {
+            if (mode === 'shrink') return align;
+            if (mode === 'pingpong' && isAnchored && (align === 'left' || align === 'right')) return align;
+            return 'left';
+        }
 
         // === 编辑器模式检测 ===
         const isEditorMode = urlParams.toString() === '';
@@ -1389,6 +1492,14 @@
             fontLink.rel = 'stylesheet';
             document.head.appendChild(fontLink);
             document.body.style.fontFamily = `'${customFont.replace(/\+/g, ' ')}', 'Noto Sans SC', sans-serif`;
+        }
+
+        // 加载译文自定义字体（Google Fonts；本地字体名亦可，link 404 无碍，font-family 仍解析）
+        if (subFont) {
+            const subFontLink = document.createElement('link');
+            subFontLink.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(subFont).replace(/%20/g, '+')}:wght@300;400;700;900&display=swap`;
+            subFontLink.rel = 'stylesheet';
+            document.head.appendChild(subFontLink);
         }
 
         // 根据 title 模式应用样式（复用 pure 逻辑）
@@ -1434,7 +1545,8 @@
             if (strokeEnabled) {
                 strokeCSS = `-webkit-text-stroke: ${strokeWidth}px ${strokeColor}; paint-order: stroke fill;`;
             }
-            dynamicRules.push(`.lyric-line.current { color: ${textColor} !important; text-shadow: ${shadowCSS} !important; ${strokeCSS} }`);
+            // 译文默认继承歌词样式：同一规则一并作用于 .lyric-sub-text（sub_* 覆盖在 Step 4b 追加）
+            dynamicRules.push(`.lyric-line.current, .lyric-sub-text { color: ${textColor} !important; text-shadow: ${shadowCSS} !important; ${strokeCSS} }`);
             if (dynamicRules.length) {
                 const style = document.createElement('style');
                 style.textContent = dynamicRules.join('\n');
@@ -1452,9 +1564,47 @@
             }
             if (extraRules.length) {
                 const style = document.createElement('style');
-                style.textContent = `.lyric-line.current { ${extraRules.join(' ')} }`;
+                style.textContent = `.lyric-line.current, .lyric-sub-text { ${extraRules.join(' ')} }`;
                 document.head.appendChild(style);
             }
+        }
+
+        // 译文独立样式覆盖：仅覆盖被显式指定的属性，其余继承歌词。
+        // 该 <style> 追加在上面「继承歌词」的注入之后，.lyric-sub-text 同特异性下后者胜出。
+        const subOverride = [];
+        if (subColor) subOverride.push(`color: ${subColor} !important;`);
+        if (subFontScale !== 1) subOverride.push(`font-size: calc(2rem * ${fontScale} * ${subFontScale}) !important;`);
+        if (subFont) subOverride.push(`font-family: '${subFont.replace(/\+/g, ' ')}', 'Noto Sans SC', sans-serif !important;`);
+        if (subGlowRaw !== null) {
+            if (subGlowRaw === 'off' || subGlowRaw === '0') {
+                subOverride.push(`text-shadow: none !important;`);
+            } else {
+                const sgc = subGlowColor || 'rgba(255, 107, 107, 0.5)';
+                subOverride.push(`text-shadow: 0 0 20px ${sgc}, 0 0 40px ${sgc}, 0 0 80px ${sgc} !important;`);
+            }
+        }
+        if (subStrokeRaw !== null) {
+            if (subStrokeRaw === 'off' || subStrokeRaw === '0') {
+                subOverride.push(`-webkit-text-stroke: 0 !important;`);
+            } else {
+                subOverride.push(`-webkit-text-stroke: ${subStrokeWidth}px ${subStrokeColor} !important; paint-order: stroke fill;`);
+            }
+        }
+        if (subOverride.length) {
+            const subStyleEl = document.createElement('style');
+            subStyleEl.textContent = `.lyric-sub-text { ${subOverride.join(' ')} }`;
+            document.head.appendChild(subStyleEl);
+        }
+
+        // 译文与歌词间空白倍率：默认 1 不注入（保持现状 6px flex gap + 行高留白）。
+        // 偏离 1 时给译文加 (subGap-1)em 的 margin——间距大头是 line-height 留白（≈0.8em），
+        // 单纯缩 flex gap 收效甚微，故用负 margin 吃掉留白：0.05≈-0.95em 贴合、5≈+4em 很松。
+        // 用 em 随字号缩放；加在译文朝向歌词的一侧（below→margin-top，above→margin-bottom）。
+        if (subGap !== 1) {
+            const gapStyleEl = document.createElement('style');
+            const gapSide = subPos === 'above' ? 'margin-bottom' : 'margin-top';
+            gapStyleEl.textContent = `.lyric-sub-text { ${gapSide}: ${(subGap - 1).toFixed(3)}em; }`;
+            document.head.appendChild(gapStyleEl);
         }
 
         // 字号缩放 & 文本对齐 动态样式
@@ -1465,17 +1615,18 @@
                 layoutRules.push(`.lyric-line.prev { font-size: calc(1rem * ${fontScale}); }`);
                 layoutRules.push(`.lyric-line.current { font-size: calc(2rem * ${fontScale}); }`);
                 layoutRules.push(`.lyric-line.next { font-size: calc(1rem * ${fontScale}); }`);
-                layoutRules.push(`.lyric-sub-text { font-size: calc(0.85rem * ${fontScale}); }`);
+                layoutRules.push(`.lyric-sub-text { font-size: calc(2rem * ${fontScale}); }`);
             }
-            if (textAlign !== 'center') {
-                const pad = textAlign === 'left' ? 'padding-left: 4px;' : 'padding-right: 4px;';
-                layoutRules.push(`.lyric-line, .lyric-sub-text { text-align: ${textAlign}; width: 100%; ${pad} box-sizing: border-box; }`);
+            // 水平对齐（hAlign）：来自 lyric_anchor 的水平分量，缺省回退 text_align
+            if (hAlign !== 'center') {
+                const pad = hAlign === 'left' ? 'padding-left: 4px;' : 'padding-right: 4px;';
+                layoutRules.push(`.lyric-line, .lyric-sub-text { text-align: ${hAlign}; width: 100%; ${pad} box-sizing: border-box; }`);
                 // 缩放原点跟随对齐方向，防止放大后裁切
-                const origin = textAlign === 'left' ? 'left center' : 'right center';
-                const dir = textAlign === 'left' ? -1 : 1;
+                const origin = hAlign === 'left' ? 'left center' : 'right center';
+                const dir = hAlign === 'left' ? -1 : 1;
                 layoutRules.push(`.lyric-line { transform-origin: ${origin}; }`);
                 // prev/next 偏移：都往远离对齐边的方向偏移，避免裁切
-                const away = textAlign === 'left' ? 1 : -1;
+                const away = hAlign === 'left' ? 1 : -1;
                 layoutRules.push(`.lyric-line.prev { transform: translateX(${3 * away}px); }`);
                 layoutRules.push(`.lyric-line.next { transform: translateX(${5 * away}px); }`);
                 // 出入场动画改为水平滑动
@@ -1487,6 +1638,10 @@
                     from { opacity: 1; transform: translateX(0) scale(1.02); filter: blur(0); }
                     to { opacity: 0; transform: translateX(${-30 * dir}px) scale(0.95); filter: blur(4px); }
                 }`);
+            }
+            // 垂直锚定（vAlign）：来自 lyric_anchor 的垂直分量，把整块贴屏幕上/下
+            if (vAlign !== 'center') {
+                layoutRules.push(`.lyrics-display { justify-content: ${vAlign === 'top' ? 'flex-start' : 'flex-end'}; }`);
             }
             if (layoutRules.length) {
                 const style = document.createElement('style');
@@ -1633,6 +1788,7 @@
                 't':  { x: 0,   y: -dy },
                 'tr': { x:  dx, y: -dy },
                 'l':  { x: -dx, y: 0 },
+                'c':  { x: 0,   y: 0 },
                 'r':  { x:  dx, y: 0 },
                 'bl': { x: -dx, y:  dy },
                 'b':  { x: 0,   y:  dy },
@@ -1769,7 +1925,7 @@
                             cleanupScrollAnim();
                             transitionOut(display, () => {
                                 if (stOverflow !== 'wrap') {
-                                    display.innerHTML = `<div class="lyric-line current appear" style="overflow:hidden;text-align:left;width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${displayText}</span></div>`;
+                                    display.innerHTML = `<div class="lyric-line current appear" style="overflow:hidden;text-align:${_overflowAlign(stOverflow, hAlign, anchorSet)};width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${displayText}</span></div>`;
                                     requestAnimationFrame(() => {
                                         requestAnimationFrame(() => {
                                             const wrap = display.querySelector('.st-scroll-wrap');
@@ -1979,15 +2135,57 @@
             };
         }
 
-        // === 溢出滚动引擎（通用） ===
-        let _scrollAnim = null;
-        let _scrollPpTimer = null;
-        function cleanupScrollAnim() {
-            if (_scrollAnim) { _scrollAnim.cancel(); _scrollAnim = null; }
-            if (_scrollPpTimer) { clearTimeout(_scrollPpTimer); _scrollPpTimer = null; }
+        // === 溢出滚动引擎（通用，per-element） ===
+        // 动画状态挂在各自的 wrapEl 上（wrapEl._scrollAnim / wrapEl._ppTimer），
+        // 用 _scrollActiveEls 追踪所有在滚的元素，使歌词行与译文行能同时独立滚动。
+        const _scrollActiveEls = new Set();
+        function _cleanupScrollEl(el) {
+            if (el._scrollAnim) {
+                // 冻结当前滚动位置到 inline transform：退场时停在滚到的位置，
+                // 避免 cancel() 把元素瞬间复位回起点（最左）造成弹跳
+                try {
+                    const cur = getComputedStyle(el).transform;
+                    if (cur && cur !== 'none') el.style.transform = cur;
+                } catch (e) {}
+                el._scrollAnim.cancel();
+                el._scrollAnim = null;
+            }
+            if (el._ppTimer) { clearTimeout(el._ppTimer); el._ppTimer = null; }
+        }
+        function cleanupScrollAnim(el) {
+            if (el) {
+                _cleanupScrollEl(el);
+                _scrollActiveEls.delete(el);
+            } else {
+                _scrollActiveEls.forEach(_cleanupScrollEl);
+                _scrollActiveEls.clear();
+            }
+        }
+        // pingpong 往返滚动（供 pingpong 模式与 shrink 缩不下时的回退共用）。
+        // 从自然位 translateX(0) 出发，往返到远端 ext 再回来——起播即停在自然位，
+        // 避免首帧从自然位瞬跳到某个非零起点（右对齐时尤为明显）。
+        function _runPingPong(wrapEl, ext, cfg) {
+            function pingPongCycle() {
+                wrapEl._scrollAnim = wrapEl.animate([
+                    { transform: 'translateX(0)' },
+                    { transform: 'translateX(' + ext + 'px)' }
+                ], { duration: cfg.ppTime * 1000, easing: cfg.ease, fill: 'forwards' });
+                wrapEl._scrollAnim.onfinish = () => {
+                    wrapEl._ppTimer = setTimeout(() => {
+                        wrapEl._scrollAnim = wrapEl.animate([
+                            { transform: 'translateX(' + ext + 'px)' },
+                            { transform: 'translateX(0)' }
+                        ], { duration: cfg.ppTime * 1000, easing: cfg.ease, fill: 'forwards' });
+                        wrapEl._scrollAnim.onfinish = () => {
+                            wrapEl._ppTimer = setTimeout(pingPongCycle, cfg.ppPause * 1000);
+                        };
+                    }, cfg.ppPause * 1000);
+                };
+            }
+            wrapEl._ppTimer = setTimeout(pingPongCycle, cfg.ppPause * 1000);
         }
         function initScrollAnimation(wrapEl, cfg) {
-            cleanupScrollAnim();
+            cleanupScrollAnim(wrapEl);
             const clipEl = wrapEl.parentElement;
             const cs = getComputedStyle(clipEl);
             const padL = parseFloat(cs.paddingLeft) || 0;
@@ -1996,6 +2194,13 @@
             const containerWidth = clipEl.clientWidth - padL - padR;
             if (textWidth <= containerWidth) return; // 无溢出无需滚动
             const overflow = textWidth - containerWidth;
+            _scrollActiveEls.add(wrapEl);
+
+            // pingpong 往返的远端 ext：从自然位（translateX 0，由容器 text-align 决定露开头/末尾）
+            // 出发——left/center 对齐自然位露开头，向左移 -overflow 露末尾；right 对齐自然位露末尾，
+            // 向右移 +overflow 露开头。始终从自然位起播，无瞬跳。
+            const _ta = cs.textAlign;
+            const ppExt = (_ta === 'right' || _ta === 'end') ? overflow : -overflow;
 
             if (cfg.mode === 'scroll') {
                 const gap = 80;
@@ -2003,7 +2208,7 @@
                 wrapEl.innerHTML = origHTML + '<span style="display:inline-block;width:' + gap + 'px;"></span>' + origHTML;
                 const scrollDist = textWidth + gap;
                 const duration = (scrollDist / cfg.speed) * 1000;
-                _scrollAnim = wrapEl.animate([
+                wrapEl._scrollAnim = wrapEl.animate([
                     { transform: 'translateX(0)' },
                     { transform: 'translateX(-' + scrollDist + 'px)' }
                 ], {
@@ -2017,31 +2222,34 @@
                     wrapEl.style.opacity = '1';
                 });
             } else if (cfg.mode === 'pingpong') {
-                function pingPongCycle() {
-                    _scrollAnim = wrapEl.animate([
-                        { transform: 'translateX(0)' },
-                        { transform: 'translateX(-' + overflow + 'px)' }
-                    ], { duration: cfg.ppTime * 1000, easing: cfg.ease, fill: 'forwards' });
-                    _scrollAnim.onfinish = () => {
-                        _scrollPpTimer = setTimeout(() => {
-                            _scrollAnim = wrapEl.animate([
-                                { transform: 'translateX(-' + overflow + 'px)' },
-                                { transform: 'translateX(0)' }
-                            ], { duration: cfg.ppTime * 1000, easing: cfg.ease, fill: 'forwards' });
-                            _scrollAnim.onfinish = () => {
-                                _scrollPpTimer = setTimeout(pingPongCycle, cfg.ppPause * 1000);
-                            };
-                        }, cfg.ppPause * 1000);
-                    };
+                _runPingPong(wrapEl, ppExt, cfg);
+            } else if (cfg.mode === 'shrink') {
+                const scale = containerWidth / textWidth;
+                if (scale >= cfg.shrinkMin) {
+                    // 用字号缩放而非 transform:scale——字号会触发重排，行高随内容降低、
+                    // 布局盒收紧，便于 zone 内歌词与译文贴合（transform 不重排会留大片空白）。
+                    // 水平落位由容器 text-align 决定（shrink 模式跟随全局对齐），无需 transform-origin。
+                    // 关键：letter-spacing 是绝对 px、不随字号缩放；只缩字号会因字距残留而裁切
+                    //（长英文行字母多最明显，如 goodbye 被切成 good）——故字距按同比例一起缩，
+                    // 再留 1% 余量吸收字形亚像素舍入。
+                    const fit = scale * 0.99;
+                    const curPx = parseFloat(getComputedStyle(wrapEl).fontSize) || 16;
+                    const curLS = parseFloat(getComputedStyle(wrapEl).letterSpacing) || 0;
+                    wrapEl.style.fontSize = (curPx * fit) + 'px';
+                    if (curLS) wrapEl.style.letterSpacing = (curLS * fit) + 'px';
+                } else {
+                    // 缩到最小仍放不下 → 回退 pingpong（决策 4）
+                    _runPingPong(wrapEl, ppExt, cfg);
                 }
-                _scrollPpTimer = setTimeout(pingPongCycle, cfg.ppPause * 1000);
             }
         }
 
         // 便捷：歌名模式滚动配置
-        const _stScrollCfg = { mode: stOverflow, speed: stScrollSpeed, ppTime: stPpTime, ppPause: stPpPause, ease: stScrollEase };
+        const _stScrollCfg = { mode: stOverflow, speed: stScrollSpeed, ppTime: stPpTime, ppPause: stPpPause, ease: stScrollEase, shrinkMin: stShrinkMin };
         // 便捷：歌词模式滚动配置
-        const _pureScrollCfg = { mode: pureOverflow, speed: pureScrollSpeed, ppTime: purePpTime, ppPause: purePpPause, ease: pureScrollEase };
+        const _pureScrollCfg = { mode: pureOverflow, speed: pureScrollSpeed, ppTime: purePpTime, ppPause: purePpPause, ease: pureScrollEase, shrinkMin: pureShrinkMin };
+        // 便捷：译文滚动配置（时序缺省继承歌词）
+        const _subScrollCfg = { mode: subOverflow, speed: subScrollSpeed, ppTime: subPpTime, ppPause: subPpPause, ease: subScrollEase, shrinkMin: subShrinkMin };
 
         // === 歌词过渡动效引擎 ===
         let _exitTimer = null;
@@ -2049,12 +2257,19 @@
             // 取消上一次未完成的退场
             if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
 
+            const zones = container.querySelectorAll('.lyric-zone');
             const lines = container.querySelectorAll('.lyric-line, .lyric-sub-text, .idle-text');
-            if (lines.length === 0) {
+            if (lines.length === 0 && zones.length === 0) {
                 afterExit();
                 return;
             }
+            // zone 作为整体退场（内部当前行 + 译文一起滑出）
+            zones.forEach(z => {
+                z.classList.remove('appear');
+                z.classList.add('exit');
+            });
             lines.forEach(el => {
+                if (el.closest('.lyric-zone')) return; // zone 内的行随 zone 整体退场，不单独处理
                 el.classList.remove('appear');
                 if (el.classList.contains('current')) {
                     el.classList.add('exit');
@@ -2148,50 +2363,56 @@
             // 停止上一行的逐字 tick
             stopWordFxTick();
 
-            let html = '';
             const useWordFx = hasWordData(data);
+            const hasSub = showSubText && !!data.sub_text;
 
+            // 当前行内容（逐字 or 纯文本）
+            const inner = useWordFx ? buildWordHtml(data.text_detailed.words) : escapeHtml(data.text);
+
+            // 当前行 HTML：one_line + 溢出模式用 scroll-wrap 容器；否则普通。
+            // 有译文时 appear 挂到外层 zone，当前行本身不带 appear（避免双重动画）。
+            const appearCls = hasSub ? '' : ' appear';
+            let currentHtml;
+            if (oneLineMode && pureOverflow !== 'wrap') {
+                const al = _overflowAlign(pureOverflow, hAlign, anchorSet);
+                currentHtml = `<div class="lyric-line current${appearCls}" style="overflow:hidden;text-align:${al};width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${inner}</span></div>`;
+            } else {
+                currentHtml = `<div class="lyric-line current${appearCls}">${inner}</div>`;
+            }
+
+            // zone：有译文时把 当前行 + 译文 包成一个整体（一起入场/退场/锚定）；
+            // 无译文时保持裸 current（含 appear），与旧版逐字节一致。
+            let coreHtml;
+            if (hasSub) {
+                let subHtml;
+                if (subOverflow !== 'wrap') {
+                    // 译文溢出：用 scroll-wrap 容器（译文永不逐字，scroll 无克隆坑）
+                    const subAl = _overflowAlign(subOverflow, hAlign, anchorSet);
+                    subHtml = `<div class="lyric-sub-text" style="overflow:hidden;text-align:${subAl};width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${escapeHtml(data.sub_text)}</span></div>`;
+                } else {
+                    subHtml = `<div class="lyric-sub-text">${escapeHtml(data.sub_text)}</div>`;
+                }
+                const zoneInner = subPos === 'above' ? (subHtml + currentHtml) : (currentHtml + subHtml);
+                coreHtml = `<div class="lyric-zone appear">${zoneInner}</div>`;
+            } else {
+                coreHtml = currentHtml;
+            }
+
+            let html = '';
             if (!oneLineMode) {
-                // 原模式：显示前一行、当前行、后一行
+                // 三行模式：前一行、（当前行[+译文] zone）、后一行
                 const prevIdx = findLyricByIndex(data.index - 1);
-                const currIdx = findLyricByIndex(data.index);
                 const nextIdx = findLyricByIndex(data.index + 1);
-
                 if (prevIdx !== null) {
                     html += `<div class="lyric-line prev">${escapeHtml(allLyrics[prevIdx].text)}</div>`;
                 }
-
-                if (useWordFx) {
-                    html += `<div class="lyric-line current appear">${buildWordHtml(data.text_detailed.words)}</div>`;
-                } else {
-                    html += `<div class="lyric-line current appear">${escapeHtml(data.text)}</div>`;
-                }
-                if (showSubText && data.sub_text) {
-                    html += `<div class="lyric-sub-text">${escapeHtml(data.sub_text)}</div>`;
-                }
-
+                html += coreHtml;
                 if (nextIdx !== null) {
                     html += `<div class="lyric-line next">${escapeHtml(allLyrics[nextIdx].text)}</div>`;
                 }
             } else {
-                // one_line 模式：只显示当前行
-                if (useWordFx) {
-                    const wordContent = buildWordHtml(data.text_detailed.words);
-                    if (pureOverflow !== 'wrap') {
-                        html += `<div class="lyric-line current appear" style="overflow:hidden;text-align:left;width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${wordContent}</span></div>`;
-                    } else {
-                        html += `<div class="lyric-line current appear">${wordContent}</div>`;
-                    }
-                } else {
-                    if (pureOverflow !== 'wrap') {
-                        html += `<div class="lyric-line current appear" style="overflow:hidden;text-align:left;width:100%;padding:0 6px;box-sizing:border-box;"><span class="st-scroll-wrap" style="display:inline-block;white-space:nowrap;">${escapeHtml(data.text)}</span></div>`;
-                    } else {
-                        html += `<div class="lyric-line current appear">${escapeHtml(data.text)}</div>`;
-                    }
-                }
-                if (showSubText && data.sub_text) {
-                    html += `<div class="lyric-sub-text">${escapeHtml(data.sub_text)}</div>`;
-                }
+                // one_line 模式：只显示当前行[+译文]
+                html = coreHtml;
             }
 
             cleanupScrollAnim();
@@ -2202,11 +2423,20 @@
                     _wordFxWords = data.text_detailed.words;
                     startWordFxTick();
                 }
-                if (oneLineMode && pureOverflow !== 'wrap') {
+                // 溢出滚动：歌词(one_line)与译文各自独立初始化（per-element 引擎支持同时滚动）
+                const needLyricScroll = oneLineMode && pureOverflow !== 'wrap';
+                const needSubScroll = hasSub && subOverflow !== 'wrap';
+                if (needLyricScroll || needSubScroll) {
                     requestAnimationFrame(() => {
                         requestAnimationFrame(() => {
-                            const wrap = display.querySelector('.st-scroll-wrap');
-                            if (wrap) initScrollAnimation(wrap, _pureScrollCfg);
+                            if (needLyricScroll) {
+                                const lw = display.querySelector('.lyric-line.current .st-scroll-wrap');
+                                if (lw) initScrollAnimation(lw, _pureScrollCfg);
+                            }
+                            if (needSubScroll) {
+                                const sw = display.querySelector('.lyric-sub-text .st-scroll-wrap');
+                                if (sw) initScrollAnimation(sw, _subScrollCfg);
+                            }
                         });
                     });
                 }
@@ -2519,6 +2749,13 @@
                                     <span class="toggle-slider"></span>
                                 </label>
                             </div>
+                            <div class="editor-row editor-sub-row" id="rowSubPos" style="display:none;">
+                                <label>译文位置</label>
+                                <select id="cfgSubPos">
+                                    <option value="below">歌词下方</option>
+                                    <option value="above">歌词上方</option>
+                                </select>
+                            </div>
                             <div class="editor-row">
                                 <label>逐字特效</label>
                                 <select id="cfgWordFx">
@@ -2533,12 +2770,19 @@
                                 <span class="editor-range-value" id="fontScaleVal">1×</span>
                             </div>
                             <div class="editor-row">
-                                <label>文本对齐</label>
-                                <select id="cfgTextAlign">
-                                    <option value="center">居中</option>
-                                    <option value="left">靠左</option>
-                                    <option value="right">靠右</option>
-                                </select>
+                                <label>对齐锚点</label>
+                                <div class="grid-align" data-target="cfgLyricAnchor">
+                                    <div class="grid-align-cell" data-val="tl"></div>
+                                    <div class="grid-align-cell" data-val="t"></div>
+                                    <div class="grid-align-cell" data-val="tr"></div>
+                                    <div class="grid-align-cell" data-val="l"></div>
+                                    <div class="grid-align-cell" data-val="c"></div>
+                                    <div class="grid-align-cell" data-val="r"></div>
+                                    <div class="grid-align-cell" data-val="bl"></div>
+                                    <div class="grid-align-cell" data-val="b"></div>
+                                    <div class="grid-align-cell" data-val="br"></div>
+                                </div>
+                                <input type="hidden" id="cfgLyricAnchor" value="c">
                             </div>
                         </div>
 
@@ -2551,6 +2795,7 @@
                                     <option value="wrap">自动换行</option>
                                     <option value="scroll">循环滚动</option>
                                     <option value="pingpong">Ping-Pong</option>
+                                    <option value="shrink">自动缩小</option>
                                 </select>
                             </div>
                             <div class="editor-row editor-sub-row" id="rowPureScrollSpeed" style="display:none;">
@@ -2576,6 +2821,11 @@
                                     <option value="ease-in">渐入 (ease-in)</option>
                                     <option value="ease-out">渐出 (ease-out)</option>
                                 </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowPureShrinkMin" style="display:none;">
+                                <label>最小缩放</label>
+                                <input type="range" id="cfgPureShrinkMin" min="0.2" max="1" value="0.5" step="0.05">
+                                <span class="editor-range-value" id="pureShrinkMinVal">0.5×</span>
                             </div>
                         </div>
 
@@ -2617,6 +2867,7 @@
                                     <option value="wrap">自动换行</option>
                                     <option value="scroll">循环滚动</option>
                                     <option value="pingpong">Ping-Pong</option>
+                                    <option value="shrink">自动缩小</option>
                                 </select>
                             </div>
                             <div class="editor-row editor-sub-row" id="rowStScrollSpeed" style="display:none;">
@@ -2642,6 +2893,11 @@
                                     <option value="ease-in">渐入 (ease-in)</option>
                                     <option value="ease-out">渐出 (ease-out)</option>
                                 </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowStShrinkMin" style="display:none;">
+                                <label>最小缩放</label>
+                                <input type="range" id="cfgStShrinkMin" min="0.2" max="1" value="0.5" step="0.05">
+                                <span class="editor-range-value" id="stShrinkMinVal">0.5×</span>
                             </div>
                         </div>
 
@@ -2690,6 +2946,87 @@
                                     <button class="color-reset" data-target="cfgStrokeColor" data-default="#000000" title="重置">↺</button>
                                 </div>
                             </div>
+                        </div>
+
+                        <!-- 译文样式（歌词模式，开启副歌词时相关；各项缺省=继承歌词） -->
+                        <div class="editor-group" data-modes="default pure" id="grpSubStyle" style="display:none;">
+                            <div class="editor-group-title">译文样式</div>
+                            <div class="editor-row">
+                                <label>译文溢出</label>
+                                <select id="cfgSubOverflow">
+                                    <option value="inherit">继承歌词</option>
+                                    <option value="wrap">自动换行</option>
+                                    <option value="scroll">循环滚动</option>
+                                    <option value="pingpong">Ping-Pong</option>
+                                    <option value="shrink">自动缩小</option>
+                                </select>
+                            </div>
+                            <div class="editor-row">
+                                <label>译文间距</label>
+                                <input type="range" id="cfgSubGap" min="0.05" max="5" value="1" step="0.05">
+                                <span class="editor-range-value" id="subGapVal">1×</span>
+                            </div>
+                            <div class="editor-row">
+                                <label>译文字号</label>
+                                <input type="range" id="cfgSubFontScale" min="0.2" max="3" value="1" step="0.1">
+                                <span class="editor-range-value" id="subFontScaleVal">1×</span>
+                            </div>
+                            <div class="editor-row">
+                                <label>译文颜色</label>
+                                <select id="cfgSubColorMode">
+                                    <option value="inherit">继承歌词</option>
+                                    <option value="custom">自定义</option>
+                                </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowSubColor" style="display:none;">
+                                <label>颜色</label>
+                                <div class="color-input-group">
+                                    <input type="color" id="cfgSubColor" value="#ffffff">
+                                    <input type="text" class="color-hex" id="hexSubColor" value="#ffffff" maxlength="7">
+                                    <button class="color-reset" data-target="cfgSubColor" data-default="#ffffff" title="重置">↺</button>
+                                </div>
+                            </div>
+                            <div class="editor-row">
+                                <label>发光效果</label>
+                                <select id="cfgSubGlow">
+                                    <option value="inherit">继承歌词</option>
+                                    <option value="on">开启</option>
+                                    <option value="off">关闭</option>
+                                </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowSubGlowColor" style="display:none;">
+                                <label>发光颜色</label>
+                                <div class="color-input-group">
+                                    <input type="color" id="cfgSubGlowColor" value="#ff6b6b">
+                                    <input type="text" class="color-hex" id="hexSubGlowColor" value="#ff6b6b" maxlength="7">
+                                    <button class="color-reset" data-target="cfgSubGlowColor" data-default="#ff6b6b" title="重置">↺</button>
+                                </div>
+                            </div>
+                            <div class="editor-row">
+                                <label>描边效果</label>
+                                <select id="cfgSubStroke">
+                                    <option value="inherit">继承歌词</option>
+                                    <option value="on">开启</option>
+                                    <option value="off">关闭</option>
+                                </select>
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowSubStrokeWidth" style="display:none;">
+                                <label>描边厚度</label>
+                                <input type="number" id="cfgSubStrokeWidth" value="1" min="0.5" max="5" step="0.5">
+                            </div>
+                            <div class="editor-row editor-sub-row" id="rowSubStrokeColor" style="display:none;">
+                                <label>描边颜色</label>
+                                <div class="color-input-group">
+                                    <input type="color" id="cfgSubStrokeColor" value="#000000">
+                                    <input type="text" class="color-hex" id="hexSubStrokeColor" value="#000000" maxlength="7">
+                                    <button class="color-reset" data-target="cfgSubStrokeColor" data-default="#000000" title="重置">↺</button>
+                                </div>
+                            </div>
+                            <div class="editor-row"><label>译文字体</label></div>
+                            <div class="font-search-wrap">
+                                <input type="text" id="subFontSearch" placeholder="继承歌词 / 点击选择或搜索本地字体...">
+                            </div>
+                            <div id="subFontList" class="font-list"></div>
                         </div>
 
                         <!-- 歌名样式（歌名模式） -->
@@ -2814,16 +3151,18 @@
                             </div>
                             <div class="editor-row editor-sub-row" id="rowCoverPauseDir" style="display:none;">
                                 <label>缩小方向</label>
-                                <select id="cfgCoverPauseDir">
-                                    <option value="tl">↖ 左上</option>
-                                    <option value="t">↑ 上</option>
-                                    <option value="tr">↗ 右上</option>
-                                    <option value="l">← 左</option>
-                                    <option value="r">→ 右</option>
-                                    <option value="bl" selected>↙ 左下</option>
-                                    <option value="b">↓ 下</option>
-                                    <option value="br">↘ 右下</option>
-                                </select>
+                                <div class="grid-align" data-target="cfgCoverPauseDir">
+                                    <div class="grid-align-cell" data-val="tl"></div>
+                                    <div class="grid-align-cell" data-val="t"></div>
+                                    <div class="grid-align-cell" data-val="tr"></div>
+                                    <div class="grid-align-cell" data-val="l"></div>
+                                    <div class="grid-align-cell" data-val="c"></div>
+                                    <div class="grid-align-cell" data-val="r"></div>
+                                    <div class="grid-align-cell" data-val="bl"></div>
+                                    <div class="grid-align-cell" data-val="b"></div>
+                                    <div class="grid-align-cell" data-val="br"></div>
+                                </div>
+                                <input type="hidden" id="cfgCoverPauseDir" value="bl">
                             </div>
                         </div>
 
@@ -3007,6 +3346,47 @@
                 }
                 if (document.getElementById('cfgSubText').checked) {
                     params.set('sub_text', '');
+                    const sp = document.getElementById('cfgSubPos').value;
+                    if (sp && sp !== 'below') params.set('sub_pos', sp);
+                    // 译文溢出：「继承歌词」= 显式镜像歌词当前溢出模式；非 wrap 才写入
+                    const subOvSel = document.getElementById('cfgSubOverflow').value;
+                    const subOvResolved = subOvSel === 'inherit'
+                        ? document.getElementById('cfgPureOverflow').value : subOvSel;
+                    if (subOvResolved && subOvResolved !== 'wrap') params.set('sub_overflow', subOvResolved);
+                    // 译文独立样式（各项缺省=继承歌词，不写入）
+                    const sgap = document.getElementById('cfgSubGap').value;
+                    if (sgap && sgap !== '1') params.set('sub_gap', sgap);
+                    const sfs = document.getElementById('cfgSubFontScale').value;
+                    if (sfs && sfs !== '1') params.set('sub_font_scale', sfs);
+                    if (document.getElementById('cfgSubColorMode').value === 'custom') {
+                        params.set('sub_color', document.getElementById('cfgSubColor').value);
+                    }
+                    const sglow = document.getElementById('cfgSubGlow').value;
+                    if (sglow === 'on') {
+                        params.set('sub_glow', '');
+                        const sgc = document.getElementById('cfgSubGlowColor').value;
+                        if (sgc && sgc !== '#ff6b6b') params.set('sub_glow_color', sgc);
+                    } else if (sglow === 'off') {
+                        params.set('sub_glow', 'off');
+                    }
+                    const sstroke = document.getElementById('cfgSubStroke').value;
+                    if (sstroke === 'on') {
+                        params.set('sub_stroke', '');
+                        const ssw = document.getElementById('cfgSubStrokeWidth').value;
+                        if (ssw && ssw !== '1') params.set('sub_stroke_width', ssw);
+                        const ssc = document.getElementById('cfgSubStrokeColor').value;
+                        if (ssc && ssc !== '#000000') params.set('sub_stroke_color', ssc);
+                    } else if (sstroke === 'off') {
+                        params.set('sub_stroke', 'off');
+                    }
+                    const sfontRaw = (document.getElementById('subFontSearch').value || '').trim();
+                    if (sfontRaw) {
+                        // 列表选择写入的是本地化名；解析回 family（未匹配则按用户手输的字体名原样用）
+                        const subEntry = (window._localFonts || []).find(f =>
+                            (typeof f === 'string' ? f : f.display) === sfontRaw);
+                        const subFam = subEntry ? (typeof subEntry === 'string' ? subEntry : subEntry.family) : sfontRaw;
+                        params.set('sub_font', subFam);
+                    }
                 }
                 if (document.getElementById('cfgWordFx').value !== 'fade') {
                     const wfx = document.getElementById('cfgWordFx').value;
@@ -3028,8 +3408,14 @@
                         const ppPause = document.getElementById('cfgPurePpPause').value;
                         if (ppPause && ppPause !== '1.5') params.set('pp_pause', ppPause);
                     }
-                    const ease = document.getElementById('cfgPureScrollEase').value;
-                    if (ease && ease !== 'ease-in-out') params.set('scroll_ease', ease);
+                    if (pOv === 'shrink') {
+                        const sm = document.getElementById('cfgPureShrinkMin').value;
+                        if (sm && sm !== '0.5') params.set('shrink_min', sm);
+                    }
+                    if (pOv === 'scroll' || pOv === 'pingpong') {
+                        const ease = document.getElementById('cfgPureScrollEase').value;
+                        if (ease && ease !== 'ease-in-out') params.set('scroll_ease', ease);
+                    }
                 }
 
                 const player = document.getElementById('cfgPlayer').value;
@@ -3079,8 +3465,14 @@
                 // 字号缩放 & 文本对齐（根据模式读取不同控件）
                 const fs = document.getElementById(isSt ? 'cfgStFontScale' : 'cfgFontScale').value;
                 if (fs && fs !== '1') params.set('font_scale', fs);
-                const ta = document.getElementById(isSt ? 'cfgStTextAlign' : 'cfgTextAlign').value;
-                if (ta && ta !== 'center') params.set('text_align', ta);
+                if (isSt) {
+                    const ta = document.getElementById('cfgStTextAlign').value;
+                    if (ta && ta !== 'center') params.set('text_align', ta);
+                } else {
+                    // 歌词：九宫格锚点（默认 c=居中，缺省不写入=旧行为）
+                    const anchor = document.getElementById('cfgLyricAnchor').value;
+                    if (anchor && anchor !== 'c') params.set('lyric_anchor', anchor);
+                }
 
                 // 歌名溢出参数
                 if (mode === 'title') {
@@ -3097,8 +3489,14 @@
                             const ppPause = document.getElementById('cfgStPpPause').value;
                             if (ppPause && ppPause !== '1.5') params.set('st_pp_pause', ppPause);
                         }
-                        const ease = document.getElementById('cfgStScrollEase').value;
-                        if (ease && ease !== 'ease-in-out') params.set('st_scroll_ease', ease);
+                        if (ov === 'shrink') {
+                            const sm = document.getElementById('cfgStShrinkMin').value;
+                            if (sm && sm !== '0.5') params.set('st_shrink_min', sm);
+                        }
+                        if (ov === 'scroll' || ov === 'pingpong') {
+                            const ease = document.getElementById('cfgStScrollEase').value;
+                            if (ease && ease !== 'ease-in-out') params.set('st_scroll_ease', ease);
+                        }
                     }
                 }
 
@@ -3190,6 +3588,25 @@
                 document.getElementById('rowStrokeWidth').style.display = strokeOn ? 'flex' : 'none';
                 document.getElementById('rowStrokeColor').style.display = strokeOn ? 'flex' : 'none';
 
+                // 译文位置子控件（开启副歌词时显示）
+                const subTextOn = document.getElementById('cfgSubText').checked;
+                document.getElementById('rowSubPos').style.display = subTextOn ? 'flex' : 'none';
+
+                // 译文样式组：仅在歌词模式且开启副歌词时显示
+                const grpSub = document.getElementById('grpSubStyle');
+                if (grpSub) {
+                    const m = getActiveMode();
+                    grpSub.style.display = (subTextOn && (m === 'default' || m === 'pure')) ? '' : 'none';
+                }
+                // 译文样式子控件
+                document.getElementById('rowSubColor').style.display =
+                    document.getElementById('cfgSubColorMode').value === 'custom' ? 'flex' : 'none';
+                document.getElementById('rowSubGlowColor').style.display =
+                    document.getElementById('cfgSubGlow').value === 'on' ? 'flex' : 'none';
+                const subStrokeMode = document.getElementById('cfgSubStroke').value;
+                document.getElementById('rowSubStrokeWidth').style.display = subStrokeMode === 'on' ? 'flex' : 'none';
+                document.getElementById('rowSubStrokeColor').style.display = subStrokeMode === 'on' ? 'flex' : 'none';
+
                 // 歌名样式子控件
                 const stGlowOn = document.getElementById('cfgStGlow').checked;
                 document.getElementById('rowStGlowColor').style.display = stGlowOn ? 'flex' : 'none';
@@ -3225,6 +3642,7 @@
                     document.getElementById('rowStPpTime').style.display = ov === 'pingpong' ? 'flex' : 'none';
                     document.getElementById('rowStPpPause').style.display = ov === 'pingpong' ? 'flex' : 'none';
                     document.getElementById('rowStScrollEase').style.display = (ov === 'scroll' || ov === 'pingpong') ? 'flex' : 'none';
+                    document.getElementById('rowStShrinkMin').style.display = ov === 'shrink' ? 'flex' : 'none';
                 }
 
                 // 歌词溢出子控件
@@ -3233,19 +3651,23 @@
                 document.getElementById('rowPurePpTime').style.display = pureOv === 'pingpong' ? 'flex' : 'none';
                 document.getElementById('rowPurePpPause').style.display = pureOv === 'pingpong' ? 'flex' : 'none';
                 document.getElementById('rowPureScrollEase').style.display = (pureOv === 'scroll' || pureOv === 'pingpong') ? 'flex' : 'none';
+                document.getElementById('rowPureShrinkMin').style.display = pureOv === 'shrink' ? 'flex' : 'none';
             }
 
             // 绑定所有控件事件
-            const controls = ['cfgOneLine', 'cfgSubText', 'cfgWordFx', 'cfgFontScale', 'cfgTextAlign', 'cfgPlayer', 'cfgColor',
+            const controls = ['cfgOneLine', 'cfgSubText', 'cfgSubPos', 'cfgSubOverflow',
+                'cfgSubGap', 'cfgSubFontScale', 'cfgSubColorMode', 'cfgSubColor', 'cfgSubGlow', 'cfgSubGlowColor',
+                'cfgSubStroke', 'cfgSubStrokeWidth', 'cfgSubStrokeColor',
+                'cfgWordFx', 'cfgFontScale', 'cfgLyricAnchor', 'cfgPlayer', 'cfgColor',
                 'cfgGlow', 'cfgGlowColor', 'cfgStroke', 'cfgStrokeWidth', 'cfgStrokeColor',
                 'cfgBg', 'cfgBgTransparent',
                 'cfgCoverStyle', 'cfgCoverRotate', 'cfgSpinSpeed', 'cfgCoverSize',
                 'cfgCoverPause', 'cfgCoverPauseHold',
                 'cfgTitleFormat', 'cfgTitleSep',
                 'cfgStColor', 'cfgStGlow', 'cfgStGlowColor', 'cfgStStroke', 'cfgStStrokeWidth', 'cfgStStrokeColor',
-                'cfgStOverflow', 'cfgStScrollSpeed', 'cfgStPpTime', 'cfgStPpPause', 'cfgStScrollEase',
+                'cfgStOverflow', 'cfgStScrollSpeed', 'cfgStPpTime', 'cfgStPpPause', 'cfgStScrollEase', 'cfgStShrinkMin',
                 'cfgStFontScale', 'cfgStTextAlign',
-                'cfgPureOverflow', 'cfgPureScrollSpeed', 'cfgPurePpTime', 'cfgPurePpPause', 'cfgPureScrollEase',
+                'cfgPureOverflow', 'cfgPureScrollSpeed', 'cfgPurePpTime', 'cfgPurePpPause', 'cfgPureScrollEase', 'cfgPureShrinkMin',
                 // 特效模式控件
                 'cfgFxQuality', 'cfgFxOpacity', 'cfgFxFit', 'cfgFxOffmode', 'cfgFxFadeIn', 'cfgFxFadeOut',
                 'cfgFxFadeInDelay', 'cfgFxResume', 'cfgFxBgMode', 'cfgFxBg', 'cfgFxHeaderClickable', 'cfgFxFooterClickable'];
@@ -3294,6 +3716,24 @@
                 toggleSubRows();
                 sendShrinkUpdate();
             });
+
+            // 通用九宫格 widget：点击格子写回 data-target 指向的隐藏 input 并 dispatch change，
+            // 从而复用该 input 现有的一切接线（controls[] / _dirSelect 监听 / collectLyricParams 读 .value）。
+            function initGridAligns() {
+                document.querySelectorAll('.grid-align').forEach(grid => {
+                    const target = document.getElementById(grid.dataset.target);
+                    if (!target) return;
+                    const cells = grid.querySelectorAll('.grid-align-cell');
+                    const setActive = (val) => cells.forEach(c => c.classList.toggle('active', c.dataset.val === val));
+                    setActive(target.value);
+                    cells.forEach(cell => cell.addEventListener('click', () => {
+                        target.value = cell.dataset.val;
+                        setActive(cell.dataset.val);
+                        target.dispatchEvent(new Event('change'));
+                    }));
+                });
+            }
+            initGridAligns();
             document.getElementById('cfgStScrollSpeed').addEventListener('input', () => {
                 document.getElementById('stScrollSpeedVal').textContent = document.getElementById('cfgStScrollSpeed').value + ' px/s';
             });
@@ -3315,6 +3755,18 @@
             document.getElementById('cfgPurePpPause').addEventListener('input', () => {
                 document.getElementById('purePpPauseVal').textContent = document.getElementById('cfgPurePpPause').value + 's';
             });
+            document.getElementById('cfgPureShrinkMin').addEventListener('input', () => {
+                document.getElementById('pureShrinkMinVal').textContent = document.getElementById('cfgPureShrinkMin').value + '×';
+            });
+            document.getElementById('cfgStShrinkMin').addEventListener('input', () => {
+                document.getElementById('stShrinkMinVal').textContent = document.getElementById('cfgStShrinkMin').value + '×';
+            });
+            document.getElementById('cfgSubGap').addEventListener('input', () => {
+                document.getElementById('subGapVal').textContent = document.getElementById('cfgSubGap').value + '×';
+            });
+            document.getElementById('cfgSubFontScale').addEventListener('input', () => {
+                document.getElementById('subFontScaleVal').textContent = document.getElementById('cfgSubFontScale').value + '×';
+            });
 
             // === 颜色 hex 输入同步 + 重置 ===
             const colorPairs = [
@@ -3325,6 +3777,9 @@
                 { color: 'cfgStColor', hex: 'hexStColor' },
                 { color: 'cfgStGlowColor', hex: 'hexStGlowColor' },
                 { color: 'cfgStStrokeColor', hex: 'hexStStrokeColor' },
+                { color: 'cfgSubColor', hex: 'hexSubColor' },
+                { color: 'cfgSubGlowColor', hex: 'hexSubGlowColor' },
+                { color: 'cfgSubStrokeColor', hex: 'hexSubStrokeColor' },
                 { color: 'cfgFxBg', hex: 'hexFxBg' }
             ];
             colorPairs.forEach(({ color, hex }) => {
@@ -3394,6 +3849,8 @@
                         fontEntries.sort((a, b) => a.display.localeCompare(b.display, 'zh'));
                         window._localFonts = fontEntries;
                         renderFontList(fontEntries);
+                        // 译文字体选择器共享同一份本地字体缓存
+                        renderSubFontList(fontEntries);
                         document.getElementById('btnLoadFonts').style.display = 'none';
                         document.getElementById('fontSearchWrap').style.display = '';
                         document.getElementById('fontLocalArea').style.display = 'block';
@@ -3541,6 +3998,54 @@
                 }
                 refreshPreview();
             });
+
+            // === 译文字体选择器（与歌词字体同款；独立实例，共享 window._localFonts 数据） ===
+            // 列表渲染在 #subFontList、以各字体自身渲染、显示本地化名；点击写入搜索框显示名。
+            // collectLyricParams 提交时再把显示名解析回 family；留空=继承歌词。
+            function renderSubFontList(fonts) {
+                const list = document.getElementById('subFontList');
+                if (!list) return;
+                list.innerHTML = fonts.map(f => {
+                    const family = typeof f === 'string' ? f : f.family;
+                    const display = typeof f === 'string' ? f : f.display;
+                    return `<div class="font-item" data-font="${family.replace(/"/g, '&quot;')}" style="font-family:'${family.replace(/'/g, "\\'")}'">${display}</div>`;
+                }).join('');
+                list.querySelectorAll('.font-item').forEach(el => {
+                    el.addEventListener('click', () => selectSubFont(el.dataset.font));
+                });
+            }
+            function selectSubFont(name) {
+                const entry = (window._localFonts || []).find(f => (typeof f === 'string' ? f : f.family) === name);
+                const displayName = entry ? (typeof entry === 'string' ? entry : entry.display) : name;
+                document.getElementById('subFontSearch').value = displayName;
+                const list = document.getElementById('subFontList');
+                list.querySelectorAll('.font-item').forEach(el => el.classList.toggle('selected', el.dataset.font === name));
+                list.classList.remove('open');
+                refreshPreview();
+            }
+            const _subFontSearchEl = document.getElementById('subFontSearch');
+            if (_subFontSearchEl) {
+                _subFontSearchEl.addEventListener('input', () => {
+                    const q = _subFontSearchEl.value.toLowerCase();
+                    const filtered = (window._localFonts || []).filter(f => {
+                        if (typeof f === 'string') return f.toLowerCase().includes(q);
+                        return f.display.toLowerCase().includes(q) || f.family.toLowerCase().includes(q);
+                    });
+                    renderSubFontList(filtered);
+                    document.getElementById('subFontList').classList.add('open');
+                });
+                _subFontSearchEl.addEventListener('focus', async () => {
+                    await initFontSelector(); // 首次聚焦触发权限请求（需用户手势）
+                    renderSubFontList(window._localFonts || []);
+                    document.getElementById('subFontList').classList.add('open');
+                });
+                _subFontSearchEl.addEventListener('blur', () => {
+                    setTimeout(() => {
+                        document.getElementById('subFontList').classList.remove('open');
+                        refreshPreview(); // 应用当前输入（含手输的非列表字体名）
+                    }, 200);
+                });
+            }
 
             // === URL 复制 ===
             function getBaseURL() {
