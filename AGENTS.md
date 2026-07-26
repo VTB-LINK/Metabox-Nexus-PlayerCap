@@ -1241,7 +1241,7 @@ LOW 三段常对同一处代码给出不同的、逐级更准的判断——只�
 | 子命令 | 干什么 | 谁在跑 |
 |---|---|---|
 | `tools/genconfig` | 把 `config.DefaultConfigContent()` 写成 clean 的 config.yml，使发版不受开发者本地 config.yml（park 等个人参数）影响 | **CI**，Linux runner 原生 `GOOS= GOARCH= go run`（`release.yml`、`build-windows.yml`） |
-| `tools/winicon` | 从高分母版 PNG 生成多尺寸 Windows 图标 `.syso`（16..256 每档 CatmullRom 重采样 → 多尺寸 .ico → goversioninfo 带版本信息）。纯 Go 跨平台，Linux 出 win/amd64 资源 | **CI**，两个 workflow 构建前 `GOOS= GOARCH= go run`；也可本地跑（见 §13.5） |
+| `tools/winicon` | 从高分母版 PNG 生成多尺寸 Windows 图标 `.syso`（16..256 每档 Lanczos3 缩 + unsharp 锐化 → 多尺寸 .ico → goversioninfo 带版本信息）。纯 Go 跨平台，Linux 出 win/amd64 资源 | **CI**，两个 workflow 构建前 `GOOS= GOARCH= go run`；也可本地跑（见 §13.5） |
 | `tools/devserver` | 只起 server + 特效捕获器的最小组合（不启其他播放器，避开 watchdog/提权副作用）；`:8766` 控制口 `GET /active?p=` 切活跃播放器 | 人（本地） |
 | `tools/cdpexplore` | 一次性 CDP 探针：`eval <jsfile>` / `evals "<expr>"` / `screencast <n> [ms]` | 人（本地） |
 | `tools/parktest` | 手测 park 包：`park` / `unpark` / `restore` / `list` / `status` | 人（本地） |
@@ -1265,8 +1265,10 @@ exe 图标由 Go 链接器自动链接根目录 `resource_windows_amd64.syso`。
 
 **为什么改**：旧做法是手搓一张 ~400px **单尺寸** .ico → .syso；小尺寸场景（任务栏/资源管理器
 列表 16–32px）由 Windows 在**显示时**劣质降采样 → 细线条 logo 锯齿。现按 electron-builder 思路
-在**构建期**从母版把全套尺寸（16/24/32/48/64/128/256）各自高质量缩好再打包，Windows 直接取
-对应尺寸那张。校验：解析 exe PE 的 `RT_GROUP_ICON` 应声明 **7 档**；只有一档就是退回了锯齿老路。
+在**构建期**从母版把全套 DPI 尺寸（16/20/24/32/40/48/64/96/128/256，其中 20/40 专为 125%/250%
+的标题栏小图标）各自用 Lanczos3 缩好、再补 unsharp 锐化后打包，Windows 直接取对应尺寸那张。
+校验：解析 exe PE 的 `RT_GROUP_ICON` 应声明 **10 档**；只有一档是退回锯齿老路，缺 DPI 中间档
+（如 250% 缺 40）则高分屏标题栏发糊。小尺寸偏软则调 `-filter`/`-sharpen`（默认 lanczos3 + 0.6）。
 
 **改图标别忘**：两个 workflow 的图标步骤都依赖 `tools/winicon` + 对应母版——删/改母版或生成器要
 同步二者。换 logo 后本地重生成根 syso（命令见 winicon README）并提交；`.gitattributes` 的

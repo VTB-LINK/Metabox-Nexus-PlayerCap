@@ -5,7 +5,8 @@ exe 的图标来自 Go 链接器自动链接的 `resource_windows_amd64.syso`（
 
 ## 为什么要生成器（别再手搓单尺寸 .ico）
 
-Windows 的 `.ico` 是多分辨率容器，应内含 16/24/32/48/64/128/256 各尺寸、每张按该分辨率
+Windows 的 `.ico` 是多分辨率容器，应内含覆盖各 DPI 的多档尺寸（本项目 16/20/24/32/40/48/64/96/128/256，
+其中 20/40 专为 125%/250% 的标题栏小图标），每张按该分辨率
 单独渲染。显示时系统直接取对应尺寸那张。
 
 若 `.ico` 只塞一张大图（早期做法是一张 ~400px），任务栏（~32px）、资源管理器 / 第三方列表
@@ -17,8 +18,9 @@ Windows 的 `.ico` 是多分辨率容器，应内含 16/24/32/48/64/128/256 各�
 
 - `masters/metabox5-sqr.png` —— 发版 / 默认图标母版（紫色立方体，2021×2021 正方形）。
 - `masters/metabox10-sqr.png` —— 备用 / 开发变体母版（2021×2021）。
-- `../../tools/winicon/` —— 纯 Go 生成器：读母版 → CatmullRom 缩 7 档 → 打多尺寸 `.ico`
-  → goversioninfo 编成带版本信息的 `.syso`。跨平台，Linux CI 也能产出 windows/amd64 资源。
+- `../../tools/winicon/` —— 纯 Go 生成器：读母版 → Lanczos3 缩全套 DPI 尺寸（10 档）→ unsharp 锐化 → 打多尺寸
+  `.ico` → goversioninfo 编成带版本信息的 `.syso`。跨平台，Linux CI 也能产出 windows/amd64 资源。
+  `-filter`（lanczos3/catmullrom）与 `-sharpen`（默认 0.6，0 关）可调；小图标发糊就是这两项没做够。
 
 ## 生成
 
@@ -44,5 +46,5 @@ go run ./tools/winicon -master build-assets/winicon/masters/metabox10-sqr.png -v
 
 ## 校验
 
-生成后可解析 exe 的 PE 资源确认 `RT_GROUP_ICON` 声明了 7 档（16→256）——这才是 Windows
-实际能看到的尺寸集；只有一档就是退回了锯齿老路。
+生成后可解析 exe 的 PE 资源确认 `RT_GROUP_ICON` 声明了全部 10 档（含 40 覆盖 250% DPI 标题栏）
+——这才是 Windows 实际能看到的尺寸集；只有一档就是退回锯齿老路，缺 DPI 中间档则高分屏发糊。
