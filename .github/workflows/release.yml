@@ -61,10 +61,6 @@ jobs:
         with:
           go-version: '1.25'
 
-      - name: Use release Windows icon resources
-        run: |
-          cp build-assets/winicon/release/resource_windows_amd64.syso resource_windows_amd64.syso
-
       - name: Set up GitHub CLI
         run: |
           if command -v gh &>/dev/null; then
@@ -86,6 +82,17 @@ jobs:
           echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
           echo "Release version: ${VERSION} (tag: ${TAG_NAME})"
+
+      - name: Generate Windows icon resource (multi-size + version)
+        run: |
+          # 从高分母版生成多尺寸图标 .syso（16/24/32/48/64/128/256，每档 CatmullRom 高质量重采样）
+          # 并写入版本信息（tag 版本）。取代旧的「拷贝单尺寸静态 .syso」——单尺寸会让 Windows 在
+          # 小尺寸场景现缩大图产生锯齿。纯 Go、跨平台：GOOS= GOARCH= 让生成器在 runner(linux) 原生
+          # 运行，产物仍是 windows/amd64 资源，随后被 go build 自动链接。
+          GOOS= GOARCH= go run ./tools/winicon \
+            -master build-assets/winicon/masters/metabox5-sqr.png \
+            -version "${{ steps.vars.outputs.VERSION }}" \
+            -o resource_windows_amd64.syso
 
       - name: Build Windows executable
         env:

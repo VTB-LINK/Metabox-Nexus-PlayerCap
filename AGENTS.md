@@ -1227,8 +1227,9 @@ LOW 三段常对同一处代码给出不同的、逐级更准的判断——只�
 │   └── race_test.go            # ✅ HTTP 端点锁内取快照的竞态门禁
 ├── tools/                      # ★ 全部为本地开发/CI 工具，非出货路径
 ├── doc/                        # 三份文档，均已确定滞后（见 13.6）
-├── build-assets/winicon/{main,release}/resource_windows_amd64.syso
-├── resource_windows_amd64.syso # ★ 已入库，等同 release 变体
+├── build-assets/winicon/masters/{metabox5,metabox10}-sqr.png # 图标母版（5=发版/默认紫，10=dev）
+├── build-assets/winicon/README.md # 图标子系统说明
+├── resource_windows_amd64.syso # ★ 已入库；由 tools/winicon 从母版5生成的多尺寸变体
 ├── config.yml, effect_page.html, effect_display.html, lyric_page.html, lyric_display.html
 └── .gitattributes              # 全局 eol=lf + *.syso binary（注释是防回退的，别删）
 ```
@@ -1239,7 +1240,8 @@ LOW 三段常对同一处代码给出不同的、逐级更准的判断——只�
 
 | 子命令 | 干什么 | 谁在跑 |
 |---|---|---|
-| `tools/genconfig` | 把 `config.DefaultConfigContent()` 写成 clean 的 config.yml，使发版不受开发者本地 config.yml（park 等个人参数）影响 | **CI**，Linux runner 原生 `GOOS= GOARCH= go run`（`release.yml:93`、`build-windows.yml:84`） |
+| `tools/genconfig` | 把 `config.DefaultConfigContent()` 写成 clean 的 config.yml，使发版不受开发者本地 config.yml（park 等个人参数）影响 | **CI**，Linux runner 原生 `GOOS= GOARCH= go run`（`release.yml`、`build-windows.yml`） |
+| `tools/winicon` | 从高分母版 PNG 生成多尺寸 Windows 图标 `.syso`（16..256 每档 CatmullRom 重采样 → 多尺寸 .ico → goversioninfo 带版本信息）。纯 Go 跨平台，Linux 出 win/amd64 资源 | **CI**，两个 workflow 构建前 `GOOS= GOARCH= go run`；也可本地跑（见 §13.5） |
 | `tools/devserver` | 只起 server + 特效捕获器的最小组合（不启其他播放器，避开 watchdog/提权副作用）；`:8766` 控制口 `GET /active?p=` 切活跃播放器 | 人（本地） |
 | `tools/cdpexplore` | 一次性 CDP 探针：`eval <jsfile>` / `evals "<expr>"` / `screencast <n> [ms]` | 人（本地） |
 | `tools/parktest` | 手测 park 包：`park` / `unpark` / `restore` / `list` / `status` | 人（本地） |
@@ -1249,17 +1251,26 @@ LOW 三段常对同一处代码给出不同的、逐级更准的判断——只�
 仅为 `config/` + `logger/`。❌ 靠人（自检：
 `GOOS=linux GOARCH=amd64 go build ./config/... ./logger/... ./tools/genconfig`）。
 
-### 13.5 两套图标 .syso —— 本地构建默认是 release 变体
+### 13.5 图标 .syso —— 构建期从母版生成，别再手搓单尺寸
 
-| 路径 | sha256 前缀 | 谁 cp 它 |
-|---|---|---|
-| `resource_windows_amd64.syso`（根，**已入库**） | `d27c9d79…` | 无人；Go 自动链接 |
-| `build-assets/winicon/release/…syso` | `d27c9d79…` **与根目录逐字节相同** | `release.yml:40` |
-| `build-assets/winicon/main/…syso` | `9f0c363c…` **不同** | `build-windows.yml:29` |
+exe 图标由 Go 链接器自动链接根目录 `resource_windows_amd64.syso`。唯一真源 =
+`build-assets/winicon/masters/` 的高分母版（2021×2021）+ 生成器 `tools/winicon`
+（详见 `build-assets/winicon/README.md`）。**已不再有 `winicon/{main,release}/*.syso` 静态副本。**
 
-**别以为「不 cp 就没图标」——本地 `go build .` 会静默链上根目录那个 .syso，且它就是 release 变体。**
-CI 的 cp 是**切换 main/release 变体**，不是启用图标；`.gitignore` 无 syso 条目。**本地 cp 切过变体后
-别误提交根目录 .syso。** ❌ 靠人。
+| 环境 | 母版 | 版本 | 图标怎么来 |
+|---|---|---|---|
+| 发版（`release.yml`） | `metabox5-sqr`（紫） | tag 版本 | 构建前 `GOOS= GOARCH= go run ./tools/winicon` 生成 |
+| main dev（`build-windows.yml`） | `metabox10-sqr` | `0.0.0` 占位 | 同上（保留 dev≠release 图标区分） |
+| 本地 `go build .` | 根目录已入库的 syso（母版5生成，version 0.0.0） | — | 无人；Go 自动链接 |
+
+**为什么改**：旧做法是手搓一张 ~400px **单尺寸** .ico → .syso；小尺寸场景（任务栏/资源管理器
+列表 16–32px）由 Windows 在**显示时**劣质降采样 → 细线条 logo 锯齿。现按 electron-builder 思路
+在**构建期**从母版把全套尺寸（16/24/32/48/64/128/256）各自高质量缩好再打包，Windows 直接取
+对应尺寸那张。校验：解析 exe PE 的 `RT_GROUP_ICON` 应声明 **7 档**；只有一档就是退回了锯齿老路。
+
+**改图标别忘**：两个 workflow 的图标步骤都依赖 `tools/winicon` + 对应母版——删/改母版或生成器要
+同步二者。换 logo 后本地重生成根 syso（命令见 winicon README）并提交；`.gitattributes` 的
+`*.syso binary` 保留。❌ 靠人。
 
 ### 13.6 doc/ 三份文档的已知滞后点（具名）
 
