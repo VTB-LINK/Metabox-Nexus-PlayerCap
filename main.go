@@ -9,6 +9,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/kugou"
 	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
 	"Metabox-Nexus-PlayerCap/player/qqmusic"
+	"Metabox-Nexus-PlayerCap/player/sodamusic"
 	"Metabox-Nexus-PlayerCap/player/wesing"
 	"Metabox-Nexus-PlayerCap/server"
 	"Metabox-Nexus-PlayerCap/telemetry"
@@ -65,7 +66,7 @@ func main() {
 	cfg := config.Load()
 
 	// 播放器注册表（新增播放器只需在此追加）
-	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName}
+	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName}
 
 	fmt.Println("===========================================================")
 	fmt.Println("   Metabox-Nexus-PlayerCap 多播放器歌词实时推送服务          ")
@@ -198,6 +199,7 @@ func main() {
 	cp := cloudmusic.New(cfg.GetPlayerOffset("cloudmusicv3"), cfg.GetPlayerPoll("cloudmusicv3"))
 	qp := qqmusic.New(cfg.GetPlayerOffset("qqmusic"), cfg.GetPlayerPoll("qqmusic"))
 	kp := kugou.New(cfg.GetPlayerOffset("kugou"), cfg.GetPlayerPoll("kugou"))
+	sp := sodamusic.New(cfg.GetPlayerOffset("sodamusic"), cfg.GetPlayerPoll("sodamusic"))
 
 	// 创建路由器
 	router := server.NewRouter(&cfg, srv, playerNames)
@@ -205,6 +207,7 @@ func main() {
 	router.Register(cp)
 	router.Register(qp)
 	router.Register(kp)
+	router.Register(sp)
 
 	// 启动播放器 goroutines
 	//
@@ -215,6 +218,7 @@ func main() {
 	go func() { defer telemetry.Guard(); cp.Start() }()
 	go func() { defer telemetry.Guard(); qp.Start() }()
 	go func() { defer telemetry.Guard(); kp.Start() }()
+	go func() { defer telemetry.Guard(); sp.Start() }()
 
 	// 启动时若发现上次崩溃遗留的「网易云屏外泊车」状态，立即还原窗口
 	park.RestoreOrphaned()

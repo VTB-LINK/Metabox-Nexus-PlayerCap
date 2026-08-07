@@ -334,11 +334,14 @@
             width: 100%;
             max-width: 100%;
         }
+        /* 入场/退场时长走 CSS 变量：逐字模式下由「上一行唱完 → 本行第一个字」的真实间隙
+           决定（见 JS 的 tickPreRoll），密集歌只有几十毫秒空档时动画必须跟着压缩，
+           否则入场没放完这一行就唱过去了。未设置时回落到原本的 0.5s / 0.35s。 */
         .lyric-zone.appear {
-            animation: zone-appear 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+            animation: zone-appear var(--fx-appear, 0.5s) cubic-bezier(0.22, 1, 0.36, 1);
         }
         .lyric-zone.exit {
-            animation: zone-exit 0.35s cubic-bezier(0.64, 0, 0.78, 0) forwards;
+            animation: zone-exit var(--fx-exit, 0.35s) cubic-bezier(0.64, 0, 0.78, 0) forwards;
         }
         /* zone 专属入场/退场：终点/起点为 scale(1)（= zone 静态），避免动画结束/开始时
            相对静态态发生 1.02↔1.0 的瞬时跳变。当前行的放大强调由其自身静态 scale(1.02) 提供。 */
@@ -358,15 +361,15 @@
         }
 
         .lyric-line.appear {
-            animation: lyric-appear 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+            animation: lyric-appear var(--fx-appear, 0.5s) cubic-bezier(0.22, 1, 0.36, 1);
         }
 
         .lyric-line.exit {
-            animation: lyric-exit 0.35s cubic-bezier(0.64, 0, 0.78, 0) forwards;
+            animation: lyric-exit var(--fx-exit, 0.35s) cubic-bezier(0.64, 0, 0.78, 0) forwards;
         }
 
         .lyric-line.exit-fade {
-            animation: lyric-exit-fade 0.35s cubic-bezier(0.64, 0, 0.78, 0) forwards;
+            animation: lyric-exit-fade var(--fx-exit, 0.35s) cubic-bezier(0.64, 0, 0.78, 0) forwards;
         }
 
         /* Word-level (逐字) effects */
@@ -1424,6 +1427,41 @@
             if (v === 'reveal') return 'reveal';
             return 'fade'; // default
         })();
+        // === 逐字模式下的「提前入场」 ===
+        //
+        // 原行为：收到 lyric_update 才开始退场(300ms) → 渲染 → 入场(500ms)，入场放完已是 800ms 之后。
+        // 行级模式看不出来；逐字模式下第一个字的起始时间**就是**行起始时间，于是入场还没放完，
+        // 前几个字已经唱过去了，短行甚至整行唱完。
+        //
+        // 改为由本地时钟提前触发。**提前量与动画时长是两个独立的量**，别再把它们绑在一起：
+        //
+        //   提前量 lead —— 本行比它的第一个字早多久出现。它同时就是「最多入侵上一句多少」：
+        //                  行间隙 ≥ lead 时上一句已经唱完，入侵为 0；间隙不足时差额即入侵量。
+        //   动画时长 anim —— 从触发到入场放完要多久。与 lead 无关。
+        //
+        // 入场放完的时刻 = 第一个字 + (anim − lead)。anim == lead 则正好卡在第一个字上；
+        // anim > lead 则动画会盖过开头几个字（可接受，密集歌下比硬切好看）；anim < lead 则
+        // 动画先放完、再空等一段才开唱。三种都由调用者自己选。
+        //
+        // 提前量不能是固定值：真实歌词的行间隙差异极大（实测《我们》中位 1419ms、89% 的间隙 ≥800ms；
+        // 而《Cold》87 个间隙里**没有一个** ≥800ms、39 个 ≤0）。固定提前 800ms 在密集歌上等于
+        // 每行都把上一行最后 800ms 的逐字高亮切掉。故 lead = 该行**真实可用的间隙**，再按下面两个
+        // 上下限钳制。
+        //
+        // word_fx_lead_max：间隙充足时的提前量上限。0 = 关闭提前入场，回到原行为。
+        // word_fx_lead_min：间隙为 0（上一行唱完即接本行）时仍要提前的量，也就是能接受的最大入侵。
+        //                   给 0 则密集歌下本行与第一个字同时出现。
+        // word_fx_anim：动画总时长（触发 → 入场放完），毫秒。**不给则跟随 lead**（= 入场最后一帧
+        //                   正好落在第一个字上，本参数引入前的行为）。给了就固定成这个值。
+        const preRollLeadFull = 0.8; // 秒，与 EXIT_HANDOFF_MS + APPEAR_DUR_MS 对应，改动画时长要一起改
+        const wordFxLeadMax = Math.max(0, Math.min(preRollLeadFull,
+            (parseFloat(urlParams.get('word_fx_lead_max')) || 500) / 1000));
+        const wordFxLeadMin = Math.max(0, Math.min(wordFxLeadMax,
+            (urlParams.has('word_fx_lead_min') ? parseFloat(urlParams.get('word_fx_lead_min')) : 430) / 1000));
+        // null = 跟随 lead。上限 2000ms：再长的入场会盖住整行，已经不是「入场」了。
+        const wordFxAnim = urlParams.has('word_fx_anim')
+            ? Math.max(0, Math.min(2, (parseFloat(urlParams.get('word_fx_anim')) || 800) / 1000))
+            : null;
         const fontColor = urlParams.get('color') || null;
         const customFont = urlParams.get('font') || null;
         const glowEnabled = urlParams.has('glow');
@@ -1955,6 +1993,7 @@
                     } else if (data.data && data.data.lyrics) {
                         // 同播放器切歌：重置歌词状态
                         currentIndex = -1;
+                        resetLineFx();
                         allLyrics = data.data.lyrics;
                         songDuration = data.data.duration || 0;
                         renderAllLyrics();
@@ -1994,10 +2033,33 @@
                         //     别的下游可自行决定显示与否。判据只认 index，不看 text。
                         //   · 空行：text 为空但 index >= 0，歌词间奏。保留上一行，不清屏。
                     } else {
-                        currentIndex = data.data.index;
-                        updateDisplay(data.data);
-                        updateAllLyricsHighlight(data.data.index);
-                        document.getElementById('lineInfo').textContent = `第 ${data.data.index + 1} / ${allLyrics.length} 行`;
+                        // 提前入场之后，这条服务端事件才是「这一行现在开始唱了」的通知。
+                        // 两种情况都**不能重渲染**，否则刚放完的入场动画会从头再来一遍：
+                        //
+                        //   ① 事件对应的正是当前显示的行 —— 常规情形。
+                        //   ② 事件对应的是当前显示行的**上一行** —— 密集歌里真实会发生：
+                        //      行间隙为 0 时提前量只有 wordFxLeadMin，而服务端的 lyric_update
+                        //      受轮询间隔与网络影响可能更晚到，届时本地已经提前推进到下一行。
+                        //      此时按事件回退一行 = 画面往回跳，比不处理糟得多。
+                        //
+                        // 代价（已知、可接受）：主播恰好往回 seek **一行**且落在 ② 的窗口里时，
+                        // 这次回退会被当成迟到事件吞掉，画面要等到下一行才跟上。窗口是几百毫秒，
+                        // 而它换掉的是密集歌上每一行都可能发生的回跳。
+                        const targetPos = findLyricByIndex(data.data.index);
+                        const alreadyShown = targetPos !== null && (
+                            targetPos === _shownPos ||
+                            (_preRolledPos === _shownPos && targetPos === _shownPos - 1)
+                        );
+                        if (!alreadyShown) {
+                            _shownPos = targetPos !== null ? targetPos : -1;
+                            _preRolledPos = -1;
+                            currentIndex = data.data.index;
+                            updateDisplay(data.data);
+                            updateAllLyricsHighlight(data.data.index);
+                            document.getElementById('lineInfo').textContent = `第 ${data.data.index + 1} / ${allLyrics.length} 行`;
+                        } else if (targetPos === _shownPos) {
+                            _preRolledPos = -1; // 这一行的事件已到，它不再算「提前」的了
+                        }
                         // 校正插值锚点：用 position（整曲实时播放位置）直接作锚点。
                         //
                         // **绝不能用 data.data.play_time**：它是「本行何时该播出」
@@ -2054,6 +2116,7 @@
                     // 封面与旋转保留，由后续 song_info_update 自然触发切歌过渡动效
                     _lastSongInfoKey = '';
                     currentIndex = -1;
+                    resetLineFx();
                     allLyrics = [];
                     songDuration = 0;
                     stopInterpolation();
@@ -2086,6 +2149,7 @@
                     // 活跃播放器已清除：重置所有显示
                     _lastSongInfoKey = '';
                     currentIndex = -1;
+                    resetLineFx();
                     allLyrics = [];
                     songDuration = 0;
                     stopInterpolation();
@@ -2252,10 +2316,34 @@
         const _subScrollCfg = { mode: subOverflow, speed: subScrollSpeed, ppTime: subPpTime, ppPause: subPpPause, ease: subScrollEase, shrinkMin: subShrinkMin };
 
         // === 歌词过渡动效引擎 ===
+        //
+        // 三个时长是一组，改一个要一起改：退场动画 350ms、交接点 300ms（略短于退场，让入场无缝衔接）、
+        // 入场动画 500ms。「收到切行 → 入场放完」= 交接点 + 入场 = 800ms，即 preRollLeadFull。
+        const EXIT_DUR_MS = 350;
+        const EXIT_HANDOFF_MS = 300;
+        const APPEAR_DUR_MS = 500;
+
+        // applyFxScale 把这一次过渡的动画时长按 scale 缩放（scale=1 即原时长，>1 拉长，<1 压缩）。
+        // 写在容器上由 .lyric-zone / .lyric-line 继承；scale 为 null/1 时把变量**删掉**而不是写死，
+        // 免得残留值影响到不走这条路径的渲染（歌名模式那两处也用 .appear）。
+        function applyFxScale(container, scale) {
+            if (!container) return;
+            if (scale === null || scale === undefined || !(scale >= 0) || scale === 1) {
+                container.style.removeProperty('--fx-exit');
+                container.style.removeProperty('--fx-appear');
+                return;
+            }
+            container.style.setProperty('--fx-exit', (EXIT_DUR_MS * scale).toFixed(0) + 'ms');
+            container.style.setProperty('--fx-appear', (APPEAR_DUR_MS * scale).toFixed(0) + 'ms');
+        }
+
         let _exitTimer = null;
-        function transitionOut(container, afterExit) {
+        function transitionOut(container, afterExit, scale) {
             // 取消上一次未完成的退场
             if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
+            // scale 缺省（走服务端 lyric_update 那条原路径）= 1，即原时长。
+            const s = (typeof scale === 'number' && scale >= 0) ? scale : 1;
+            applyFxScale(container, s);
 
             const zones = container.querySelectorAll('.lyric-zone');
             const lines = container.querySelectorAll('.lyric-line, .lyric-sub-text, .idle-text');
@@ -2280,7 +2368,7 @@
             _exitTimer = setTimeout(() => {
                 _exitTimer = null;
                 afterExit();
-            }, 300); // 略短于 exit 动画时长(350ms)，让入场无缝衔接
+            }, EXIT_HANDOFF_MS * s); // 略短于 exit 动画时长，让入场无缝衔接
         }
 
         // === 逐字高亮状态 ===
@@ -2357,7 +2445,9 @@
             _wordFxRafId = requestAnimationFrame(tickWordFx);
         }
 
-        function updateDisplay(data) {
+        // fxScale：本次过渡的动画时长倍率（<1 = 压缩）。由 tickPreRoll 按真实行间隙算出；
+        // 走服务端 lyric_update 这条原路径时不传，即原时长。
+        function updateDisplay(data, fxScale) {
             const display = document.getElementById('lyricsDisplay');
 
             // 停止上一行的逐字 tick
@@ -2440,7 +2530,7 @@
                         });
                     });
                 }
-            });
+            }, fxScale);
         }
 
         function findLyricByIndex(index) {
@@ -2448,6 +2538,68 @@
                 if (allLyrics[i].index === index) return i;
             }
             return null;
+        }
+
+        // === 逐字模式的提前入场 ===
+        //
+        // lineOnset：本行**第一个字**的起始时刻。有逐字就用 words[0].play_time，没有就退回行级
+        // play_time。两者在 KRC 上恒等（字级偏移相对行首、首字即行首），但网易云 YRC 的长引子行
+        // 首字会早于行时间戳，那时必须取首字——「入场最后一帧落在第一个字上」说的就是它。
+        function lineOnset(l) {
+            const w = l && l.text_detailed && l.text_detailed.words;
+            return (w && w.length) ? w[0].play_time : (l ? (l.play_time || 0) : 0);
+        }
+        // lineEnd：本行唱完的时刻。只有逐字才知道；没有逐字返回 null（= 不知道，别猜）。
+        function lineEnd(l) {
+            const w = l && l.text_detailed && l.text_detailed.words;
+            if (!w || !w.length) return null;
+            const last = w[w.length - 1];
+            return last.play_time + (last.duration || 0);
+        }
+
+        // _shownPos   当前**已渲染**的 allLyrics 下标（不是 index 字段）。两条渲染路径都要维护它。
+        // _preRolledPos 若等于 _shownPos，说明这一行是**提前**渲染的、它的 lyric_update 还没到。
+        let _shownPos = -1;
+        let _preRolledPos = -1;
+
+        function resetLineFx() { _shownPos = -1; _preRolledPos = -1; }
+
+        // tickPreRoll 每帧检查「下一行」是否该开始入场了。由 tickTime 的 RAF 驱动，用的是
+        // 同一个本地插值时钟，所以它与逐字高亮天然同源、不会互相漂。
+        //
+        // 只处理**有逐字的行**：行级模式的入场滞后看不出来（没有字级参照物），维持原行为不动，
+        // 免得为一个看不见的问题给直播主路径引入风险。
+        function tickPreRoll(currentTime) {
+            if (!wordFxEnabled || wordFxLeadMax <= 0) return;
+            if (titleMode || allLyrics.length === 0) return;
+
+            const pos = _shownPos + 1;
+            if (pos <= 0 || pos >= allLyrics.length) return; // 首行不提前：进场时机由服务端首条 lyric_update 定
+
+            const line = allLyrics[pos];
+            const words = line.text_detailed && line.text_detailed.words;
+            if (!words || !words.length) return;
+
+            const onset = lineOnset(line);
+            // 可用间隙 = 上一行唱完到本行第一个字。上一行没有逐字（不知道何时唱完）就按
+            // 「间隙充足」处理——那种混排极少，且宁可动画完整也不要莫名其妙的硬切。
+            const prevEnd = lineEnd(allLyrics[pos - 1]);
+            const gap = (prevEnd === null) ? wordFxLeadMax : Math.max(0, onset - prevEnd);
+            const lead = Math.min(wordFxLeadMax, Math.max(wordFxLeadMin, gap));
+
+            if (currentTime < onset - lead) return; // 还没到该起动的时刻
+            if (currentTime >= onset) return;       // 已经开唱（seek 落在行中、卡顿追帧）→ 交给 lyric_update 走原路径
+
+            _shownPos = pos;
+            _preRolledPos = pos;
+            currentIndex = line.index;
+            // 动画时长与 lead 解耦：wordFxAnim 为 null 时才跟随 lead（入场最后一帧正好落在
+            // 第一个字上）。给了固定值就用它——入场放完的时刻随之变成「第一个字 + (anim − lead)」。
+            const anim = (wordFxAnim === null) ? lead : wordFxAnim;
+            updateDisplay(line, anim / preRollLeadFull);
+            updateAllLyricsHighlight(line.index);
+            const li = document.getElementById('lineInfo');
+            if (li) li.textContent = `第 ${line.index + 1} / ${allLyrics.length} 行`;
         }
 
         function updateStatus(status, detail, title) {
@@ -2576,6 +2728,7 @@
             const progress = songDuration > 0 ? Math.min(currentTime / songDuration, 1) : 0;
             document.getElementById('progressFill').style.width = `${(progress * 100).toFixed(1)}%`;
             document.getElementById('timeInfo').textContent = `${formatTime(currentTime)} / ${formatTime(songDuration)}`;
+            tickPreRoll(currentTime);
             rafId = requestAnimationFrame(tickTime);
         }
 
@@ -2728,6 +2881,7 @@
                                     <option value="cloudmusicv3">网易云音乐</option>
                                     <option value="qqmusic">QQ音乐</option>
                                     <option value="kugou">酷狗音乐</option>
+                                    <option value="sodamusic">汽水音乐</option>
                                 </select>
                             </div>
                         </div>

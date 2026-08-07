@@ -1,8 +1,8 @@
 # Metabox-Nexus-PlayerCap API 响应示例
 
-> **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器（如 `"wesing"`、`"cloudmusicv3"`、`"qqmusic"`）。  
+> **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器。当前五家：`"wesing"`、`"cloudmusicv3"`、`"qqmusic"`、`"kugou"`、`"sodamusic"`。  
 > **空数据约定：** 所有事件在无数据时统一返回 `"data": {}`（空对象），而非 `null`。  
-> **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`、`/qqmusic/ws`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
+> **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`、`/sodamusic/ws`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
 
 ---
 
@@ -295,11 +295,14 @@
 | **cloudmusicv3** | 有 | 有（YRC） |
 | **qqmusic** | 有 | 有（QRC） |
 | **wesing** | 恒 `""` | 有（内存字级）\* |
-| **kugou** | 有（KRC）\* | 有（KRC）\* |
+| **kugou** | 有（KRC 内嵌译轨，按行号对齐）\* | 有（KRC）\* |
+| **sodamusic** | 有（独立 tlyric LRC，按时间戳对齐）\*\* | 有（平台下发的明文 KRC）\*\* |
 
-**逐字**四家都有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC / wesing 内存字级）；**翻译**三家有（cloudmusicv3 / qqmusic / kugou）、wesing 无。字段一律存在（值可能为空），下游不必按平台分支取值。
+**逐字**五家都有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC / sodamusic 明文 KRC / wesing 内存字级）；**翻译**四家有（cloudmusicv3 / qqmusic / kugou / sodamusic）、wesing 无。字段一律存在（值可能为空），下游不必按平台分支取值。
 
 \* 逐字均**逐行**判定：kugou 拿不到 KRC、回落行级 LRC 时该行 `text_detailed` 为 `{}`；wesing 的逐字来自进程内存的卡拉OK字级时间，某行字级时间轴不合法（NaN / 越界 / 非单调）时该行退回行级、为 `{}`。kugou 翻译另需 KRC 头部含中文译轨（无译轨时 `sub_text` 为空，逐字不受影响）。
+
+\*\* sodamusic **不逐行判定**：平台给不出 KRC 时整曲按无歌词处理（`index: -1`、`lyrics: []`），所以它的每一行要么都带逐字、要么根本没有行——`lyrics_detailed` 与 `lyrics` 恒等长或同时为空。它的翻译是平台单独下发的一份 LRC（`translations.cn`），按绝对时间戳与主歌词行对齐，与 kugou 内嵌译轨的行号对齐**不是同一种机制**；该曲无译轨、或某行未被译轨覆盖（间奏）时 `sub_text` 为空。
 
 #### 歌词数组前几行可能是元数据
 
@@ -426,7 +429,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 **说明：**
 - `index` - 歌词行号（`-1` = 平台没有歌词，见下方）
 - `text` - 主歌词文本
-- `sub_text` - 副歌词文本（翻译，无时为空字符串）。**cloudmusicv3 / qqmusic / kugou 有，wesing 恒为空**（kugou 仅 KRC 含中文译轨时有值）
+- `sub_text` - 副歌词文本（翻译，无时为空字符串）。**cloudmusicv3 / qqmusic / kugou / sodamusic 有，wesing 恒为空**（kugou 仅 KRC 含中文译轨时有值；sodamusic 仅平台下发了 `translations.cn` 译轨且该行被覆盖时有值）
 - `timestamp` - 该行的原始时间戳（秒）
 - `play_time` - **本行的播出时间**（秒）= `timestamp − offset`，**恒小于 `timestamp`**（逐字长引子行取首字时刻，会更小）
 - `position` - **整曲实时播放位置**（秒），= `progress × duration`，做插值锚点用它；与 `play_time`（本行播出时间）是两个量
@@ -478,9 +481,10 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 | **qqmusic** | API 返回零行 | `index: -1`，`text: ""` |
 | **cloudmusicv3** | 一行「纯音乐，请欣赏」 | `index: -1`，**`text: "纯音乐，请欣赏"`** |
 | **kugou** | 一行「纯音乐，请欣赏」（与网易云一字不差） | 同上 |
+| **sodamusic** | 不下发 KRC（`lyrics.type` 非 `krc` 或内容为空） | `index: -1`，`text: ""` |
 | **wesing** | —— | **不会出现**：K 歌平台曲库内所有歌都带词 |
 
-服务端已把三家**归一成 `index: -1`**，下游只需认这一个判据。但**平台的提示语原样保留在 `text` 里**——它是平台的数据，不是我们编的。如何处理该文本由下游决定（本项目自带的 `lyric_page.html` 忽略它）。
+服务端已把四家**归一成 `index: -1`**，下游只需认这一个判据。但**平台的提示语原样保留在 `text` 里**——它是平台的数据，不是我们编的。如何处理该文本由下游决定（本项目自带的 `lyric_page.html` 忽略它）。
 
 > **所以 `index === -1` 时 `text` 可能非空。** 别写成 `if (data.text) 显示歌词`——那会把「纯音乐，请欣赏」当歌词渲染。判据永远是 `index`。
 
@@ -505,16 +509,16 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 - `"loading"` - 歌曲加载中，detail 为歌曲名称
 - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
 - `"paused"` - 暂停中（播放位置停止推进时自动检测），detail 为歌曲标题
-- `"standby"` - **不只是「播放器已退出」**，`detail` 有五种语义，见下
+- `"standby"` - **不只是「播放器已退出」**，`detail` 有六种语义，见下
 
-##### ⚠️ `standby` 的 `detail` 有五种
+##### ⚠️ `standby` 的 `detail` 有六种
 
 **别把 `standby` 一律当成「播放器已退出」**——那会让你提示主播「请启动网易云」，而他的网易云开着：
 
 | `detail` | 真实含义 |
 |---|---|
 | `"网易云音乐已退出"` / `"QQ音乐已退出"` / `"K歌客户端已退出"` | 进程真的没了 → 提示启动 |
-| `"酷狗音乐 CDP 已断开"` | 进程可能还在，是调试端口断了 → 提示重启 |
+| `"酷狗音乐 CDP 已断开"` / `"汽水音乐 CDP 已断开"` | 进程可能还在，是调试端口断了 → 提示重启 |
 | **`"网易云音乐 v2.10.13.6067 不支持（需 v3+）"`** | **进程开着，版本太老** → 提示**升级**，让他去「启动」是错的 |
 
 实测同框（同一次录制，间隔 16 秒）：
@@ -527,7 +531,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 
 版本不支持时该事件**每 30 秒重发一次且不去重**（服务端每 30 秒重探版本）。升级到 v3 后**最长等 30 秒**才恢复取词——不是没重试。
 
-> 区分这五种目前只能**匹配 `detail` 文本**（服务端没有更细的状态码）。`"不支持"` 是版本问题的稳定特征。
+> 区分这六种目前只能**匹配 `detail` 文本**（服务端没有更细的状态码）。`"不支持"` 是版本问题的稳定特征。
 
 **尚未获取到状态时：**
 ```json
@@ -597,7 +601,7 @@ ms=103195  红日   cover=有  cover_base64=232427     ← 第二条，188ms 后
 
 ### Per-player 端点
 
-除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径。**四个播放器都有**：
+除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径。**五个播放器都有**：
 
 ```
 /wesing/all_lyrics          /cloudmusicv3/all_lyrics
@@ -608,13 +612,13 @@ ms=103195  红日   cover=有  cover_base64=232427     ← 第二条，188ms 后
 /wesing/song_info-SSE       /cloudmusicv3/song_info-SSE
 /wesing/ws                  /cloudmusicv3/ws
 
-/qqmusic/all_lyrics         /kugou/all_lyrics
-/qqmusic/lyric_update       /kugou/lyric_update
-/qqmusic/status_update      /kugou/status_update
-/qqmusic/song_info          /kugou/song_info
-/qqmusic/lyric_update-SSE   /kugou/lyric_update-SSE
-/qqmusic/song_info-SSE      /kugou/song_info-SSE
-/qqmusic/ws                 /kugou/ws
+/qqmusic/all_lyrics         /kugou/all_lyrics         /sodamusic/all_lyrics
+/qqmusic/lyric_update       /kugou/lyric_update       /sodamusic/lyric_update
+/qqmusic/status_update      /kugou/status_update      /sodamusic/status_update
+/qqmusic/song_info          /kugou/song_info          /sodamusic/song_info
+/qqmusic/lyric_update-SSE   /kugou/lyric_update-SSE   /sodamusic/lyric_update-SSE
+/qqmusic/song_info-SSE      /kugou/song_info-SSE      /sodamusic/song_info-SSE
+/qqmusic/ws                 /kugou/ws                 /sodamusic/ws
 ```
 
 Per-player 端点始终返回指定播放器的数据，不受路由切换影响。响应格式与根端点相同，`player` 字段固定为对应播放器名。
@@ -786,16 +790,16 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 - `"loading"` - 歌曲加载中，detail 为歌曲名称
 - `"playing"` - 播放中，detail 为歌曲标题（格式: 歌曲名 - 歌手）
 - `"paused"` - 暂停中（播放位置停止推进时自动检测），detail 为歌曲标题
-- `"standby"` - **不只是「播放器已退出」**，`detail` 有五种语义，见下
+- `"standby"` - **不只是「播放器已退出」**，`detail` 有六种语义，见下
 
-##### ⚠️ `standby` 的 `detail` 有五种
+##### ⚠️ `standby` 的 `detail` 有六种
 
 **别把 `standby` 一律当成「播放器已退出」**——那会让你提示主播「请启动网易云」，而他的网易云开着：
 
 | `detail` | 真实含义 |
 |---|---|
 | `"网易云音乐已退出"` / `"QQ音乐已退出"` / `"K歌客户端已退出"` | 进程真的没了 → 提示启动 |
-| `"酷狗音乐 CDP 已断开"` | 进程可能还在，是调试端口断了 → 提示重启 |
+| `"酷狗音乐 CDP 已断开"` / `"汽水音乐 CDP 已断开"` | 进程可能还在，是调试端口断了 → 提示重启 |
 | **`"网易云音乐 v2.10.13.6067 不支持（需 v3+）"`** | **进程开着，版本太老** → 提示**升级**，让他去「启动」是错的 |
 
 实测同框（同一次录制，间隔 16 秒）：
@@ -808,7 +812,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 
 版本不支持时该事件**每 30 秒重发一次且不去重**（服务端每 30 秒重探版本）。升级到 v3 后**最长等 30 秒**才恢复取词——不是没重试。
 
-> 区分这五种目前只能**匹配 `detail` 文本**（服务端没有更细的状态码）。`"不支持"` 是版本问题的稳定特征。
+> 区分这六种目前只能**匹配 `detail` 文本**（服务端没有更细的状态码）。`"不支持"` 是版本问题的稳定特征。
 
 **无状态时（服务刚启动尚未获取到状态）：**
 ```json
@@ -867,6 +871,43 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 }
 ```
 
+**播放中（sodamusic，明文 KRC 逐字）：**
+```json
+{
+  "type": "lyric_update",
+  "player": "sodamusic",
+  "data": {
+    "index": 27,
+    "text": "谁能够代替我 漫步在宽阔的大路",
+    "sub_text": "",
+    "timestamp": 130.93,
+    "play_time": 130.73,
+    "position": 130.86787,
+    "progress": 0.675775,
+    "text_detailed": {
+      "timestamp": 130.93,
+      "play_time": 130.73,
+      "duration": 5.69,
+      "words": [
+        { "timestamp": 130.93, "play_time": 130.73, "duration": 0.29, "text": "谁" },
+        { "timestamp": 131.65, "play_time": 131.45, "duration": 0.29, "text": "能" },
+        { "timestamp": 132.05, "play_time": 131.85, "duration": 0.29, "text": "够" }
+      ]
+    }
+  }
+}
+```
+
+> **`words` 已裁剪至 3 个，实际 14 个——只删元素不改值。** 这条录制时 offset 为 200ms。
+>
+> KRC 的字级偏移是**相对行首**的，首字偏移恒为 0，所以 `text_detailed.timestamp` 恒等于行
+> `timestamp`、`play_time` 恒等于 `timestamp − offset`。这和 cloudmusicv3 的 YRC 不同——那边
+> 长引子行的首字会**早于**行时间戳，`play_time` 因此小于 `timestamp − offset`。两家共用同一个
+> 结构，但别把 kugou / sodamusic 上「恒等」的观察当成契约推广到 cloudmusicv3。
+>
+> `position`（130.868）与 `play_time`（130.73）在常规行上只差一个轮询滞后，看起来像同一个量，
+> **但它们语义相反**：前者是整曲实时位置、不减 offset；后者是本行的播出时间、减了 offset。
+
 **无歌词时：**
 ```json
 {
@@ -924,7 +965,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 > `position: 0` / `progress: 0` 不是占位——**WS 的 `all_lyrics` 只在切歌时发**，那一刻歌刚开始。
 > 而 **HTTP 的 `/all_lyrics` 会给实时值**（它读缓存，跟着 `lyric_update` 走）。同一个端点名，两种传输的语义不同。
 >
-> wesing 的 `sub_text` 恒为 `""`——无翻译源（其曲库 mid 非 QQ 系，走不通 QQ 译源）；但**逐字有**，来自进程内存的卡拉OK字级时间，某行时间轴不合法时该行退回行级 `{}`。kugou 的翻译与逐字都有（KRC 源；回落行级 LRC 时 `sub_text` 为空、`text_detailed` / `lyrics_detailed` 为 `{}` / `[]`）。
+> wesing 的 `sub_text` 恒为 `""`——无翻译源（其曲库 mid 非 QQ 系，走不通 QQ 译源）；但**逐字有**，来自进程内存的卡拉OK字级时间，某行时间轴不合法时该行退回行级 `{}`。kugou 的翻译与逐字都有（KRC 源；回落行级 LRC 时 `sub_text` 为空、`text_detailed` / `lyrics_detailed` 为 `{}` / `[]`）。sodamusic 也都有，但无行级回落：KRC 解不出即整曲按无歌词处理。
 
 **无歌词时：**
 ```json
@@ -1248,11 +1289,11 @@ curl http://localhost:8765/service-status
 
 > **推荐做法：** 用 `status_update` 的 `status` 字段作为主判断依据。当 status 为 `playing` 或 `paused` 时显示歌词，其他状态时清空。
 >
-> **别把 `lyric_idle` 当主判据**——只有 wesing 发它（见下），另外三家一次都不发，你的清空逻辑会在它们身上完全不触发。
+> **别把 `lyric_idle` 当主判据**——只有 wesing 发它（见下），另外四家一次都不发，你的清空逻辑会在它们身上完全不触发。
 
 ### `lyric_idle` 的定位
 
-**只有 wesing 会发这个事件。** cloudmusicv3 / qqmusic / kugou **一次都不发**（实测 + 代码：`EventLyricIdle` 全仓仅两处，都在 `player/wesing/`）。订阅另外三家的客户端永远等不到它。
+**只有 wesing 会发这个事件。** cloudmusicv3 / qqmusic / kugou / sodamusic **一次都不发**（实测 + 代码：`EventLyricIdle` 全仓仅两处，都在 `player/wesing/`）。订阅另外四家的客户端永远等不到它。
 
 `lyric_idle` 是**纯通知事件**（`data` 为 `{}`），表示 wesing 当前歌曲的歌词轮询已结束（歌曲播放完毕、切歌、或 K 歌窗口关闭）。服务端不会随此事件清空任何缓存数据。
 

@@ -459,6 +459,10 @@ qqmusic-offset: 400
 # 酷狗音乐 配置
 kugou-offset: 430
 # kugou-poll: 30
+
+# 汽水音乐 配置
+sodamusic-offset: 340
+# sodamusic-poll: 30
 `
 
 // DefaultConfigContent 返回内置默认配置模板（唯一权威来源）。

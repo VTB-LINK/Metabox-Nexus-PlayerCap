@@ -9,26 +9,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/player"
+	"Metabox-Nexus-PlayerCap/player/krc"
 )
 
-// Line represents a single lyric line
-type Line struct {
-	Index int
-	Time  float32 // seconds
-	Text  string
-	// SubText 第二行歌词（翻译）。KRC 内嵌 [language:] 轨才有；LRC 回落为空。
-	// 纯文本、无独立时间轴——继承本行时间，applyDetailedOffset 不碰它。
-	SubText string
-	// Detailed 逐字时间轴（仅 KRC 源有；LRC 源为零值，序列化成 {}）。
-	// PlayTime 此处不填，由调用方按 offset 统一套（见 kugou.go 的 applyDetailedOffset）。
-	Detailed player.LyricTextDetailed
-}
+// Line 是一条歌词行。KRC 明文解析已抽到公共包 player/krc（与汽水音乐共用单一真源），
+// 此处别名它，使本包 LRC 回落路径与 kugou.go 的 []Line 用法一字不改。
+// LRC 源只填 Index/Time/Text，SubText/Detailed 留零值（序列化成空/{}）。
+type Line = krc.Line
 
 // httpClient with timeout for lyric API calls
 var httpClient = &http.Client{Timeout: 8 * time.Second}
@@ -255,7 +247,7 @@ func callSearch(keyword string, durationMs int, hash string) (*searchResponse, e
 func download(id, accessKey string) ([]Line, error) {
 	if content, err := fetchContent(id, accessKey, "krc"); err == nil && content != "" {
 		if plain, derr := krcDecrypt(content); derr == nil {
-			if lines := parseKRC(plain); len(lines) > 0 {
+			if lines := krc.ParsePlainKRC(plain); len(lines) > 0 {
 				return lines, nil
 			}
 		}
@@ -392,16 +384,6 @@ func resolveCanonicalHash(normName, normSinger string, targetDurationMs int) (st
 // krcXORKey 是酷狗 KRC 的固定异或密钥（16 字节，循环使用）。
 var krcXORKey = [16]byte{0x40, 0x47, 0x61, 0x77, 0x5E, 0x32, 0x74, 0x47, 0x51, 0x36, 0x31, 0x2D, 0xCE, 0xD2, 0x6E, 0x69}
 
-var (
-	// krcLineRegex 匹配 KRC 行首：[行起始ms,行时长ms]
-	krcLineRegex = regexp.MustCompile(`^\[(\d+),(\d+)\](.*)$`)
-	// krcWordRegex 匹配 KRC 字级标记：<相对偏移ms,时长ms,0>
-	krcWordRegex = regexp.MustCompile(`<(\d+),(\d+),\d+>`)
-	// krcLangTagRegex 匹配 KRC 头部 [language:base64json]（酷狗把翻译/音译塞这里）。
-	// base64 字母表不含 ']'，故 [^\]]+ 恰好截到闭合方括号。
-	krcLangTagRegex = regexp.MustCompile(`\[language:([^\]]+)\]`)
-)
-
 // krcDecrypt 解开酷狗 KRC：base64 → 4 字节 "krc1" 魔数 → 逐字节异或定长密钥 → zlib → UTF-8。
 //
 // 与 QQ 的 QRC（3DES + zlib）是两套完全不同的东西，别混用。
@@ -428,172 +410,6 @@ func krcDecrypt(contentB64 string) (string, error) {
 		return "", fmt.Errorf("krc zlib decompress: %w", err)
 	}
 	return string(out), nil
-}
-
-// parseKRCWords 从 KRC 行体解析逐字片段。行体形如：
-//
-//	<0,450,0>词<450,450,0>：<900,450,0>周
-//
-// **三家三个样，照抄任何一家都会错**：
-//
-//	QQ QRC  ：文字在前、时间戳在后，偏移**绝对**    风(28837,439)
-//	网易云 YRC：时间戳在前、文字在后，偏移**绝对**    (28837,439,0)风
-//	酷狗 KRC ：时间戳在前、文字在后，偏移**相对行首** <0,439,0>风   ← 本函数
-//
-// 故绝对时间 = lineStartMs + 偏移。把 KRC 的偏移当绝对时间用，每行的字会全挤到歌曲开头
-// （行级却是对的），症状极像"前端没对齐"，最难查。
-//
-// 实证：《晴天》行 [2250,2250] 的末字 <1800,450,0> → 2250+1800+450 = 4500，正好等于下一行
-// 起始 [4500,...]，逐字与行级严丝合缝。
-//
-// 不对片段文本做 TrimSpace：空格是逐字排版的一部分。
-// PlayTime 此处不填（offset 未知），由 kugou.go 的 applyDetailedOffset 统一套。
-func parseKRCWords(body string, lineStartMs int) []player.LyricTextDetailedWord {
-	tuples := krcWordRegex.FindAllStringSubmatchIndex(body, -1)
-	if len(tuples) == 0 {
-		return nil
-	}
-	words := make([]player.LyricTextDetailedWord, 0, len(tuples))
-	for i, m := range tuples {
-		offMs, err := strconv.Atoi(body[m[2]:m[3]])
-		if err != nil {
-			continue
-		}
-		durMs, err := strconv.Atoi(body[m[4]:m[5]])
-		if err != nil {
-			continue
-		}
-		// 文本 = 本标记之后、到下一个标记开头之间那段（同 YRC 的取法）
-		textEnd := len(body)
-		if i+1 < len(tuples) {
-			textEnd = tuples[i+1][0]
-		}
-		text := body[m[1]:textEnd]
-		if text == "" {
-			continue
-		}
-		words = append(words, player.LyricTextDetailedWord{
-			Timestamp: float32(lineStartMs+offMs) / 1000.0, // ← 相对转绝对
-			Duration:  float32(durMs) / 1000.0,
-			Text:      text,
-		})
-	}
-	return words
-}
-
-// parseKRC 解析 KRC 全文为 Line（含逐字）。
-//
-// 元数据标签（[ti:]/[ar:]/[al:]/[by:]/[offset:]）一律跳过——与既有 parseLRC 的行为一致：
-// 它对 [offset:] 也是丢弃的（parseTimestamp 解不出 "offset" 这个分钟数 → 整行没文本 → skip）。
-// 这里保持同样处理，不引入未经验证的偏移符号约定；真要支持需先找到 offset 非 0 的样本验证方向。
-func parseKRC(krc string) []Line {
-	trans := parseKRCTranslation(krc) // 按 [start,dur] 行序号对齐的译文（nil=无翻译轨）
-	var lines []Line
-	rawIdx := -1 // 第几个 [start,dur] 行（含被跳过的 0 词行），与 trans 索引严格对齐
-	for _, raw := range strings.Split(krc, "\n") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		m := krcLineRegex.FindStringSubmatch(raw)
-		if m == nil {
-			continue // 元数据标签行 / 空行——不占翻译槽位
-		}
-		// 每个 [start,dur] 行占一个翻译槽位。必须在**任何** continue 之前自增：被 0 词/空文本
-		// 跳过的行在译轨里照样有一格，漏加会让其后整轨译文错位一格（承重，见 parseKRCTranslation）。
-		rawIdx++
-		lineStartMs, err := strconv.Atoi(m[1])
-		if err != nil {
-			continue
-		}
-		lineDurMs, err := strconv.Atoi(m[2])
-		if err != nil {
-			continue
-		}
-		words := parseKRCWords(m[3], lineStartMs)
-		if len(words) == 0 {
-			continue
-		}
-		var text strings.Builder
-		for _, w := range words {
-			text.WriteString(w.Text)
-		}
-		plain := strings.TrimSpace(text.String())
-		if plain == "" {
-			continue
-		}
-		lineTimestamp := float32(lineStartMs) / 1000.0
-		lineDuration := float32(lineDurMs) / 1000.0
-		if lineDurMs == 0 {
-			for _, w := range words {
-				lineDuration += w.Duration
-			}
-		}
-		var sub string
-		if rawIdx < len(trans) {
-			sub = trans[rawIdx]
-		}
-		lines = append(lines, Line{
-			Index:   len(lines),
-			Time:    lineTimestamp,
-			Text:    plain,
-			SubText: sub,
-			Detailed: player.LyricTextDetailed{
-				Timestamp: lineTimestamp,
-				Duration:  lineDuration,
-				Words:     words,
-			},
-		})
-	}
-	return lines
-}
-
-// parseKRCTranslation 从 KRC 头部的 [language:] 标签解出**中文翻译轨**，返回按主歌词
-// [start,dur] 行序号对齐的 []string（第 i 项 = 第 i 个 [start,dur] 行的译文，缺则空串）。
-// 无 [language:] 标签 / 解不开 / 无翻译轨时返回 nil。
-//
-// [language:] 是 base64 编码的 JSON：
-//
-//	{"content":[
-//	   {"lyricContent":[["译文行"],...], "type":1},   // type=1 中文翻译 ← 本函数只取它
-//	   {"lyricContent":[["ro","ma"],...],"type":0}    // type=0 罗马音（wire 无第三行字段，不做）
-//	 ], "version":1}
-//
-// **与网易云的机制根本不同，别照抄 MergeTlyric**：网易云是独立 tlyric LRC、按**毫秒时间戳**
-// 匹配；酷狗是同一份 KRC 内嵌、**按行号位置对齐**——lyricContent[i] 就是第 i 个 [start,dur]
-// 行的译文，本身无时间戳。故调用方必须数「每个 [start,dur] 行」（含被跳过的 0 词行）来对齐，
-// 一旦按「产出的 Line 数」对齐，遇到被跳过的行就整轨错位。
-//
-// 抽成纯函数是为了可测：这是「一错就整首译文错位」的路径。
-func parseKRCTranslation(krc string) []string {
-	m := krcLangTagRegex.FindStringSubmatch(krc)
-	if m == nil {
-		return nil
-	}
-	raw, err := base64.StdEncoding.DecodeString(m[1])
-	if err != nil {
-		return nil
-	}
-	var doc struct {
-		Content []struct {
-			LyricContent [][]string `json:"lyricContent"`
-			Type         int        `json:"type"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil
-	}
-	for _, blk := range doc.Content {
-		if blk.Type != 1 {
-			continue // 只取中文翻译；type=0 是罗马音
-		}
-		out := make([]string, len(blk.LyricContent))
-		for i, frags := range blk.LyricContent {
-			out[i] = strings.TrimSpace(strings.Join(frags, ""))
-		}
-		return out
-	}
-	return nil
 }
 
 // parseLRC parses an LRC-format string into Line slices.

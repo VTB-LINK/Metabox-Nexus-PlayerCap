@@ -5,11 +5,11 @@ info:
   description: |
     VTB-TOOLS Metabox-Nexus-PlayerCap 多播放器歌词捕获服务 API。
 
-    **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器（如 `"wesing"`、`"cloudmusicv3"`、`"qqmusic"`）。
+    **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器。当前五家：`"wesing"`（全民K歌）、`"cloudmusicv3"`（网易云音乐 v3）、`"qqmusic"`（QQ 音乐）、`"kugou"`（酷狗音乐）、`"sodamusic"`（汽水音乐）。**五家的能力不一致**，逐字与翻译的差异见各字段说明。
 
     **空数据约定：** 所有事件在无数据时统一返回 `"data": {}`（空对象），而非 `null`。
 
-    **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`、`/qqmusic/ws`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
+    **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`、`/sodamusic/ws`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
 
     **Root WS 空闲态：** 当客户端连入根端点 `/ws` 且当前没有活跃播放器时，服务端会立即发送一个 `player_clear` 初始事件，而不是静默不输出。
 
@@ -131,19 +131,26 @@ paths:
                         poll: 30
                         prior-player: ["wesing"]
                         prior-player-expire: 15
+                        cloudmusicv3-effect-strategy: fadeout
                         wesing-offset: 200
                         wesing-poll: 30
                         cloudmusicv3-offset: 500
                         cloudmusicv3-poll: 30
                         qqmusic-offset: 200
                         qqmusic-poll: 50
+                        kugou-offset: 430
+                        kugou-poll: 30
+                        sodamusic-offset: 200
+                        sodamusic-poll: 30
                       config_overwritten: ["offset", "wesing-poll"]
-                      player_support: ["wesing", "cloudmusicv3", "qqmusic"]
+                      player_support: ["wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic"]
                       player_running: ["wesing"]
                       player_status:
                         wesing: playing
                         cloudmusicv3: waiting_process
                         qqmusic: waiting_process
+                        kugou: waiting_process
+                        sodamusic: waiting_process
                       endpoints:
                         health-check: "http://0.0.0.0:8765/health-check"
                         service-status: "http://0.0.0.0:8765/service-status"
@@ -180,6 +187,22 @@ paths:
                           song_info: "http://0.0.0.0:8765/qqmusic/song_info"
                           lyric_update-SSE: "http://0.0.0.0:8765/qqmusic/lyric_update-SSE"
                           song_info-SSE: "http://0.0.0.0:8765/qqmusic/song_info-SSE"
+                        kugou:
+                          ws: "ws://0.0.0.0:8765/kugou/ws"
+                          all_lyrics: "http://0.0.0.0:8765/kugou/all_lyrics"
+                          lyric_update: "http://0.0.0.0:8765/kugou/lyric_update"
+                          status_update: "http://0.0.0.0:8765/kugou/status_update"
+                          song_info: "http://0.0.0.0:8765/kugou/song_info"
+                          lyric_update-SSE: "http://0.0.0.0:8765/kugou/lyric_update-SSE"
+                          song_info-SSE: "http://0.0.0.0:8765/kugou/song_info-SSE"
+                        sodamusic:
+                          ws: "ws://0.0.0.0:8765/sodamusic/ws"
+                          all_lyrics: "http://0.0.0.0:8765/sodamusic/all_lyrics"
+                          lyric_update: "http://0.0.0.0:8765/sodamusic/lyric_update"
+                          status_update: "http://0.0.0.0:8765/sodamusic/status_update"
+                          song_info: "http://0.0.0.0:8765/sodamusic/song_info"
+                          lyric_update-SSE: "http://0.0.0.0:8765/sodamusic/lyric_update-SSE"
+                          song_info-SSE: "http://0.0.0.0:8765/sodamusic/song_info-SSE"
                       client_count: 2
                       ws_connected:
                         connected: true
@@ -206,9 +229,9 @@ paths:
         - `lyrics` - 按 index 排序的歌词数组
         - `lyrics[].timestamp` - 该歌词行的原始起始时间（秒）
         - `lyrics[].play_time` - 该歌词行应用 offset 后的展示时间（秒）
-        - `lyrics[].sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
+        - `lyrics[].sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
         - `lyrics[].text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
-        - `lyrics_detailed` - 完整逐字歌词集合（仅包含有逐字数据的行）。cloudmusicv3（YRC）/ qqmusic（QRC）/ kugou（KRC）提供逐字时有内容；kugou 回落到行级 LRC 时、以及 wesing（无逐字源），恒为 `[]`
+        - `lyrics_detailed` - 完整逐字歌词集合（仅包含有逐字数据的行）。cloudmusicv3（YRC）/ qqmusic（QRC）/ kugou（KRC）/ sodamusic（明文 KRC）提供逐字时有内容；kugou 回落到行级 LRC 时、以及 wesing（无逐字源），恒为 `[]`。sodamusic 无行级回落，故它的 `lyrics_detailed` 要么与 `lyrics` 等长，要么两者同时为空
       responses:
         "200":
           description: 200 成功
@@ -270,6 +293,42 @@ paths:
                           words:
                             - { timestamp: 4.44, play_time: 3.94, duration: 1.08, text: "Cold " }
                             - { timestamp: 5.52, play_time: 5.02, duration: 0.36, text: "enough " }
+                有歌词时（sodamusic，明文 KRC 逐字）:
+                  summary: 中途接入 sodamusic（真实录音）。示例已裁剪，只删元素不改值：lyrics 实际 35 行（此处留 1）、lyrics_detailed 实际 35 项（留 1）、每行 words 实际 6 个（留 3），故 count 与数组长度对不上，真实响应中两者一致。注意 sodamusic 的 title 是「歌手 - 歌名」（同 kugou，与 wesing / cloudmusicv3 / qqmusic 相反）；lyrics_detailed 与 lyrics 等长（它无行级回落）。
+                  value:
+                    code: 0
+                    msg: success
+                    player: sodamusic
+                    data:
+                      title: "今晚吃什么呢 - 代替我（Tonight）"
+                      duration: 193.65599
+                      position: 102.935074
+                      progress: 0.5315357
+                      count: 35
+                      lyrics:
+                        - index: 0
+                          timestamp: 0.09
+                          play_time: 0
+                          text: "谁能够代替我"
+                          sub_text: ""
+                          text_detailed:
+                            timestamp: 0.09
+                            play_time: 0
+                            duration: 1.29
+                            words:
+                              - { timestamp: 0.09, play_time: 0, duration: 0.23, text: "谁" }
+                              - { timestamp: 0.32, play_time: 0.11999999, duration: 0.18, text: "能" }
+                              - { timestamp: 0.5, play_time: 0.3, duration: 0.18, text: "够" }
+                      lyrics_detailed:
+                        - lyric_index: 0
+                          timestamp: 0.09
+                          play_time: 0
+                          duration: 1.29
+                          text: "谁能够代替我"
+                          words:
+                            - { timestamp: 0.09, play_time: 0, duration: 0.23, text: "谁" }
+                            - { timestamp: 0.32, play_time: 0.11999999, duration: 0.18, text: "能" }
+                            - { timestamp: 0.5, play_time: 0.3, duration: 0.18, text: "够" }
                 无歌词时:
                   summary: 平台未返回歌词（cloudmusicv3 纯音乐）。data 不是空对象——lyrics 为空数组、count 为 0，而 title/duration 照常有值。
                   value:
@@ -295,16 +354,16 @@ paths:
 
         - `index` - 歌词行号；`-1` 表示平台未返回可用歌词数据（见下方说明）
         - `text` - 主歌词文本
-        - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
+        - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
         - `timestamp` - 歌词时间戳（秒）
-        - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
+        - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 与 sodamusic 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
         - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量
         - `progress` - 整曲播放进度（0-1），= `position / 歌曲总时长`；与 `play_time`（本行歌词的播出时间）无换算关系
         - `text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
 
         **`index: -1` 纯音乐说明：**
         当平台未返回任何歌词数据时，发送 `index: -1` 而非空对象 `{}`。此时 `timestamp` 为 `0`，`sub_text` 为空字符串，`text_detailed` 为 `{}`；**`progress` 照常反映整曲播放进度，不为 `0`**（歌没有歌词，但它还在播）。
-        **`text` 不保证为空**：cloudmusicv3 与 kugou 对纯音乐返回一行「纯音乐，请欣赏」，服务端已把 `index` 归一为 `-1`，但该提示语原样保留在 `text` 里；qqmusic 的 API 返回零行时 `text` 为 `""`。
+        **`text` 不保证为空**：cloudmusicv3 与 kugou 对纯音乐返回一行「纯音乐，请欣赏」，服务端已把 `index` 归一为 `-1`，但该提示语原样保留在 `text` 里；qqmusic 的 API 返回零行、以及 sodamusic 的平台未给出 KRC（`lyrics.type` 非 `krc` 或内容为空）时，`text` 为 `""`。提示语归一逻辑对五家统一生效，只是尚未观测到汽水发出这一行。
         判断有无歌词一律用 `index !== -1`，不要看 `text`。
         与此同时会发送一条 `all_lyrics`（`count: 0`，`lyrics: []`）。
         客户端利用 `msg.data.index === -1` 识别纯音乐，而非依赖 `msg.data.text`。
@@ -359,6 +418,28 @@ paths:
                         words:
                           - { timestamp: 156.96, play_time: 156.46, duration: 0.18, text: "There's " }
                           - { timestamp: 157.14, play_time: 156.64, duration: 0.57, text: "plenty " }
+                播放中（sodamusic，明文 KRC 逐字）:
+                  summary: 播放中（sodamusic，真实录音）。words 已裁剪至 3 个，实际 14 个——只删元素不改值。KRC 的字级偏移相对行首、首字即行首，故 text_detailed.timestamp 恒等于行 timestamp、play_time 恒等于 timestamp 减 offset（此处 offset=200ms），不会像 cloudmusicv3 的 YRC 引子行那样提前。本曲无译轨，sub_text 为空。
+                  value:
+                    code: 0
+                    msg: success
+                    player: sodamusic
+                    data:
+                      index: 27
+                      text: "谁能够代替我 漫步在宽阔的大路"
+                      sub_text: ""
+                      timestamp: 130.93
+                      play_time: 130.73
+                      position: 130.86787
+                      progress: 0.675775
+                      text_detailed:
+                        timestamp: 130.93
+                        play_time: 130.73
+                        duration: 5.69
+                        words:
+                          - { timestamp: 130.93, play_time: 130.73, duration: 0.29, text: "谁" }
+                          - { timestamp: 131.65, play_time: 131.45, duration: 0.29, text: "能" }
+                          - { timestamp: 132.05, play_time: 131.85, duration: 0.29, text: "够" }
                 尚无数据:
                   summary: 服务端还没有该播放器的歌词数据（播放器未启动，或启动后尚未播放）。这不是「本曲无歌词」——那种情况 data 是下面两例的完整对象。
                   value:
@@ -408,10 +489,10 @@ paths:
         **status 可能的值及含义：**
         - `"waiting_process"` - 播放器进程未启动
         - `"waiting_song"` - 播放器已启动但未选择歌曲
-        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余三家不产生），下游可不为它单独处理
-        - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou 为 `歌手 - 歌曲名`），详见 SongInfo.title
+        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余四家不产生），下游可不为它单独处理
+        - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou / sodamusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。同时会收到一条 `playback_pause` 事件
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
+        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
         - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
       responses:
         "200":
@@ -648,10 +729,10 @@ paths:
         status 可能的值及含义：
         - `"waiting_process"` - 播放器进程未启动
         - `"waiting_song"` - 播放器已启动但未选择歌曲
-        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余三家不产生），下游可不为它单独处理
-        - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou 为 `歌手 - 歌曲名`），详见 SongInfo.title
+        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余四家不产生），下游可不为它单独处理
+        - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou / sodamusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。同时会收到一条 `playback_pause` 事件
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
+        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
         - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
 
         ---
@@ -699,7 +780,7 @@ paths:
 
         **5. `lyric_idle` - 歌词空闲通知**
 
-        **仅 wesing 发送此事件**——cloudmusicv3 / qqmusic / kugou 不产生 `lyric_idle`，接这三家的下游不应等待它。
+        **仅 wesing 发送此事件**——cloudmusicv3 / qqmusic / kugou / sodamusic 不产生 `lyric_idle`，接这四家的下游不应等待它。
 
         wesing 在歌曲播放结束、切歌或窗口关闭时发送：
         ```json
@@ -935,9 +1016,9 @@ paths:
 
         - `index` - 歌词行号；`-1` 表示平台未返回可用歌词数据（见下方说明）
         - `text` - 主歌词文本
-        - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
+        - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
         - `timestamp` - 歌词时间戳（秒）
-        - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
+        - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 与 sodamusic 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
         - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量
         - `progress` - 整曲播放进度（0-1），= `position / 歌曲总时长`；与 `play_time`（本行歌词的播出时间）无换算关系
 
@@ -994,10 +1075,10 @@ paths:
         **status 可能的值及含义：**
         - `"waiting_process"` - 播放器进程未启动
         - `"waiting_song"` - 播放器已启动但未选择歌曲
-        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余三家不产生），下游可不为它单独处理
-        - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou 为 `歌手 - 歌曲名`），详见 SongInfo.title
+        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余四家不产生），下游可不为它单独处理
+        - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou / sodamusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。同时会收到一条 `playback_pause` 事件
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
+        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
         - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
       parameters:
         - $ref: "#/components/parameters/PlayerParam"
@@ -1289,7 +1370,7 @@ webhooks:
         歌词行发生变化时推送。连接建立时，若已有缓存的歌词则补发一次，否则不发。
 
         **`index: -1` 纯音乐说明：**
-        当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`，而 **`progress` 照常反映播放进度**；`text` 不保证为空（cloudmusicv3 / kugou 保留平台提示语「纯音乐，请欣赏」，qqmusic 为 `""`）。
+        当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`，而 **`progress` 照常反映播放进度**；`text` 不保证为空（cloudmusicv3 / kugou 保留平台提示语「纯音乐，请欣赏」，qqmusic 与 sodamusic 为 `""`）。
         与此同时会发送一条 `all_lyrics`（`count: 0`，`lyrics: []`）。
         客户端利用 `msg.data.index === -1` 识别纯音乐。
       requestBody:
@@ -1330,7 +1411,7 @@ webhooks:
                   player: wesing
                   data: {}
               无可用歌词:
-                summary: 平台未返回可用歌词。kugou / cloudmusicv3 对纯音乐会返回一行「纯音乐，请欣赏」，服务端把 index 归一为 -1 但保留该文本；qqmusic 返回零行时 text 为 ""。timestamp 恒为 0、play_time 恒为 0（无行可播出），而 position / progress 照常反映整曲播放位置。
+                summary: 平台未返回可用歌词。kugou / cloudmusicv3 对纯音乐会返回一行「纯音乐，请欣赏」，服务端把 index 归一为 -1 但保留该文本；qqmusic 返回零行、sodamusic 平台未给出 KRC 时 text 为 ""。timestamp 恒为 0、play_time 恒为 0（无行可播出），而 position / progress 照常反映整曲播放位置。
                 value:
                   type: lyric_update
                   player: kugou
@@ -1584,6 +1665,7 @@ components:
           - cloudmusicv3
           - qqmusic
           - kugou
+          - sodamusic
         example: wesing
 
   schemas:
@@ -1745,7 +1827,8 @@ components:
               - cloudmusicv3
               - qqmusic
               - kugou
-          example: ["wesing", "cloudmusicv3", "qqmusic", "kugou"]
+              - sodamusic
+          example: ["wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic"]
         player_running:
           type: array
           description: 当前正在运行（非 offline / standby / waiting_process）的播放器列表
@@ -1756,6 +1839,7 @@ components:
               - cloudmusicv3
               - qqmusic
               - kugou
+              - sodamusic
           example: ["wesing"]
         player_status:
           type: object
@@ -1770,6 +1854,7 @@ components:
             cloudmusicv3: waiting_process
             qqmusic: waiting_process
             kugou: waiting_process
+            sodamusic: waiting_process
         endpoints:
           type: object
           description: |
@@ -1806,10 +1891,10 @@ components:
             播放状态。可能的值：
             - `"waiting_process"` - 播放器进程未启动
             - `"waiting_song"` - 播放器已启动但未选择歌曲
-            - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余三家不产生），下游可不为它单独处理
-            - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou 为 `歌手 - 歌曲名`），详见 SongInfo.title
+            - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余四家不产生），下游可不为它单独处理
+            - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou / sodamusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
             - `"paused"` - 暂停中，`detail` 为歌曲标题。同时会收到一条 `playback_pause` 事件
-            - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
+            - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
             - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
           enum:
             - waiting_process
@@ -1841,9 +1926,10 @@ components:
           type: string
           description: |
             歌曲标题。拼接顺序**按播放器而异**：wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，
-            而 **kugou 为 `歌手 - 歌曲名`**（如 `"Taylor Swift - Cruel Summer (伴奏)"`）。
+            而 **kugou / sodamusic 为 `歌手 - 歌曲名`**（如 `"Taylor Swift - Cruel Summer (伴奏)"`）。
             需要歌名与歌手时请直接读 `name` / `singer`，不要解析 `title`。
-            歌手为空时：wesing / kugou 的 `title` 即 `name` 本身（不含分隔符），而 cloudmusicv3 / qqmusic 无条件拼接、会得到带尾随 ` - ` 的 `title`。需要歌名与歌手请直接读 `name` / `singer`。
+            歌手为空时：wesing / kugou / sodamusic 的 `title` 即 `name` 本身（不含分隔符），而 cloudmusicv3 / qqmusic 无条件拼接、会得到带尾随 ` - ` 的 `title`。需要歌名与歌手请直接读 `name` / `singer`。
+            sodamusic 的 `singer` 是平台 `artists[]` 全部艺人名以 ` / ` 连接的结果（多艺人时 `title` 里会出现多个 ` / `）。
           example: "晚风 - 陈婧霏"
         cover:
           type: string
@@ -1864,7 +1950,7 @@ components:
           type: integer
           description: |
             歌词行号。
-            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出），而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 为 `""`）。同时会配套发送一条 `all_lyrics`（`count: 0`、`lyrics: []`）。
+            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出），而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 与 sodamusic 为 `""`）。同时会配套发送一条 `all_lyrics`（`count: 0`、`lyrics: []`）。
             客户端用 `msg.data.index === -1` 判断有无歌词，不要依赖 `msg.data.text` 是否为空。
           example: 1
         text:
@@ -1873,7 +1959,7 @@ components:
           example: "往事就像流星刹那划过心房"
         sub_text:
           type: string
-          description: 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
+          description: 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
           example: ""
         timestamp:
           type: number
@@ -1922,7 +2008,7 @@ components:
           example: "往事就像流星刹那划过心房"
         sub_text:
           type: string
-          description: 翻译歌词文本；cloudmusicv3、qqmusic、kugou 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨，回落行级 LRC、或该行无译文时为空
+          description: 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
           example: ""
         text_detailed:
           $ref: "#/components/schemas/LyricTextDetailed"
@@ -1930,7 +2016,7 @@ components:
     LyricTextDetailed:
       oneOf:
         - type: object
-          description: 逐字歌词，由 cloudmusicv3（YRC）、qqmusic（QRC）、kugou（KRC）、wesing（进程内存卡拉OK字级时间）四家提供，复用同一结构、下游无需按平台分支解析。是否带逐字**逐行**判定：kugou 拿不到 KRC 回落行级 LRC、或 wesing 某行字级时间轴不合法时，该行退回行级、此字段为 `{}`。
+          description: 逐字歌词，由 cloudmusicv3（YRC）、qqmusic（QRC）、kugou（KRC）、sodamusic（平台直接下发的明文 KRC）、wesing（进程内存卡拉OK字级时间）五家提供，复用同一结构、下游无需按平台分支解析。是否带逐字**逐行**判定：kugou 拿不到 KRC 回落行级 LRC、或 wesing 某行字级时间轴不合法时，该行退回行级、此字段为 `{}`。sodamusic 无行级回落——KRC 解不出即整曲按无歌词处理（`index` 归 -1），故它的每一行要么都带逐字，要么根本没有行。
           maxProperties: 0
           example: {}
         - type: object
@@ -2047,7 +2133,7 @@ components:
             $ref: "#/components/schemas/LyricLine"
         lyrics_detailed:
           type: array
-          description: 完整逐字歌词集合，内容仅从逐字源数据派生。cloudmusicv3 / qqmusic / kugou 有逐字源时有内容；kugou 回落行级 LRC 时、以及 wesing（无逐字源）为空数组
+          description: 完整逐字歌词集合，内容仅从逐字源数据派生。cloudmusicv3 / qqmusic / kugou / sodamusic 有逐字源时有内容；kugou 回落行级 LRC 时、以及 wesing（无逐字源）为空数组。sodamusic 无行级回落，它的本数组要么与 lyrics 等长，要么两者同时为空
           items:
             $ref: "#/components/schemas/LyricDetailedLine"
 

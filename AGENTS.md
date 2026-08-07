@@ -135,13 +135,16 @@ Win11 门控（步骤 7）：**绝不删掉 `park.IsWindows11()` 的强制降级
 ├─ player/
 │   ├─ player.go        Player 接口、BaseEmitter、事件常量与载荷类型
 │   ├─ cover.go         封面下载（显式 timeout 参数）
+│   ├─ krc/             公共包：酷狗 KRC 明文解析（ParsePlainKRC，kugou 与 sodamusic 共用单一真源）
 │   ├─ wesing/          模式：进程内存只读扫描（proc/ + lyric/，PE 导出表定位 vtable）
 │   ├─ cloudmusic/      模式：CDP + Redux
 │   │   ├─ cdp/  lyric/  watchdog/   保活标记 + 注册表自启项修补
 │   │   ├─ effect/effect.go   特效捕获器：注入、门控、park 决策
 │   │   └─ park/park.go       屏外泊车（含崩溃落盘兜底、Win11 探测）
 │   ├─ qqmusic/         模式：进程内存只读（mem.go）、QRC 解密、AOB 探针已关停(#39)
-│   └─ kugou/           模式：CDP + libcef.dll patch + 提权 helper
+│   ├─ kugou/           模式：CDP + libcef.dll patch + 提权 helper
+│   └─ sodamusic/       模式：CDP（复刻 _debugProcess 绕原生反调试开 9229）+ 明文 KRC；见 §7.7
+│       └─ cdp/  watchdog/   watchdog=找主进程 pid + _debugProcess 激活 inspector
 ├─ tools/               全部是独立 CLI，不进出货二进制
 │   ├─ genconfig/       ★ CI 在 Linux runner 上原生跑它生成随包 config.yml
 │   ├─ cdpexplore/  devserver/  parktest/  watchdogtest/
@@ -596,7 +599,7 @@ Banner、`server.NewServer`、`NewRouter` 的 normalStates 建表、端点表、
 
 ### 6.2 例外（机制不同，须写明理由）
 
-**四家的能力不一致。** 截至 `447686b`（2026-07-18），逐字与翻译都是 cloudmusicv3 / qqmusic / kugou 三家有、wesing 无——能力上现在确实是「wesing vs 另外三家」。但**这是逐步挖出来的、不是天然分界**：kugou 一度也被归进「都无」（见 §6.1 的写死日志与下文 ①），先后两个 commit 才把它的逐字与翻译从 KRC 挖通。wesing 现在的「无」同样可能只是「还没挖」，别倒果为因（下文 ①②）。以下为代码真源 + WS 录音双证：
+**五家的能力不一致。** 逐字五家全有；翻译 cloudmusicv3 / qqmusic / kugou / sodamusic 四家有，只有 wesing 无来源。**这是逐步挖出来的、不是天然分界**：kugou 一度也被归进「都无」（见 §6.1 的写死日志与下文 ①），先后两个 commit 才把它的逐字与翻译从 KRC 挖通。wesing 现在的翻译「无」同样可能只是「还没挖」，别倒果为因（下文 ①②）。以下为代码真源 + WS 录音双证：
 
 | | `sub_text`（翻译） | `text_detailed`（逐字） | 纯音乐 |
 |---|---|---|---|
@@ -604,11 +607,13 @@ Banner、`server.NewServer`、`NewRouter` 的 normalStates 建表、端点表、
 | **cloudmusicv3** | **有** | **有**（YRC） | 平台返回「纯音乐，请欣赏」→ 归一为 `index:-1` |
 | **qqmusic** | **有** | **有**（QRC） | API 返回零行 → `index:-1` |
 | **kugou** | **有**（KRC 内嵌 `[language:]`） | **有**（KRC，`97f60d8` 起） | 同 cloudmusic（两家文案一字不差） |
+| **sodamusic** | **有**（tlyric 式独立 LRC，取自 `translations.cn`，按绝对时间戳对齐——非酷狗的行号对齐） | **有**（明文 KRC，与 kugou 同格式） | 无歌词 → `index:-1`（同 cloudmusic/kugou） |
 
-**逐字现在四家全有；翻译三家有（cloudmusicv3 / qqmusic / kugou）、只有 wesing 无。** 本节几经订正，两条曾经的「过时」都已翻案：
+**逐字现在五家全有；翻译四家有（cloudmusicv3 / qqmusic / kugou / sodamusic）、只有 wesing 无来源。** 本节几经订正，两条曾经的「过时」都已翻案：
 
 - **kugou 逐字**（`97f60d8`）：从 `krcs.kugou.com` 拿 `fmt=krc` 解出字级时间轴。**kugou 翻译**（`447686b`）：同一份 KRC 里内嵌的 `[language:]` 标签（base64 JSON，`type=1` 中文翻译轨，按 `[start,dur]` 行号对齐，非网易云那种时间戳匹配）→ 赋进 `SubText`。二者同一次 `fmt=krc` 请求、同一次解密，白搭车。kugou 的逐字/翻译都是**条件性**的：拿不到 KRC、回落到行级 `fmt=lrc` 时 `text_detailed`/`sub_text` 都空，由 `detailedFlag()` 如实反映。
 - **wesing 逐字**（内存直读）：**曾断言「机制上不成立」，实测推翻**。全民K歌是卡拉OK，字级时间就在 `CharElement` 里——`+0x04` 字起始秒、`+0x08` 字时长秒（2026-07-18 实测：首字起始 = 行时间，行内严格递增，末字终点≤下一行起点，53/53 行吻合；**跨进程重启一致**，只有模块基址随 ASLR 变、结构体内偏移全不变）。`reader.go` 的 `LoadLyrics` 此前遍历 `CharElement` 只读了文本（`+0x00`→RenderData），这两个时间字段整个略过了——不是「没有逐字源」，是「没去读」。时间轴不合法的行退回行级（`Detailed` 为空 `{}`），由 `detailedFlag()` 如实反映。
+- **sodamusic 逐字**（明文 KRC）：字节的 transport 直接给**已解密的明文 KRC**（`lyrics.type==='krc'`，格式与酷狗字级完全同构 `[行起ms,行长ms]<字偏ms,字长ms,0>字`），故复用 `player/krc` 公共包解析、连解密都省。逐字是**条件性**的：`type` 非 krc / 内容为空时按无歌词处理，由 `detailedFlag()` 如实反映。KRC 解析已抽 `player/krc` 单一真源，kugou 与 sodamusic 共用（`ParsePlainKRC`）。
 
 **只剩 wesing 翻译仍无来源**：`player/wesing/` 包零 HTTP，渲染内存里只有演唱歌词、无翻译轨；它手里的 mid（`songinfo.go` 从内存 JSON 刮的）是**全民K歌曲库 mid，不是 QQ 音乐 songmid**（2026-07-18 实测：拿去 QQ `fcg_query_lyric_new` 返 `retcode=-1901`、`musicu.fcg` 返 `songID=0/qrc=0`），故走不通 QQ 那条翻译源。要上 wesing 翻译得先找到可用的外部翻译源。
 
@@ -634,7 +639,18 @@ wesing 是 K 歌平台，**曲库内所有歌都带词**。所以「纯音乐」
 
 （`initSong` 里 `len(lyrics)==0` 直接返回失败、一个事件都不发——那描述的是「假如出现纯音乐会怎样」，而那个前提不成立。别把实现细节当理由写。）
 
-#### 例外还是 bug
+> sodamusic 与 kugou 都出 KRC 逐字、但翻译机制不同：kugou 的译文内嵌在同一份 KRC 的
+> `[language:]` 轨里、**按行号对齐**；sodamusic 的译文是独立的 tlyric LRC（`translations.cn`）、
+> **按绝对时间戳对齐**（同 cloudmusic 的 `MergeTlyric`）。别把两者的对齐口径搞混
+> （见 `player/sodamusic/translation.go` 与 `player/krc`）。
+>
+> **sodamusic 的时间戳对齐带 ±10ms 容差，不是精确相等——那不是放宽，是补上精度差。**
+> 2026-08-08 真机实测：译轨是厘秒制（`[00:26.56]`），而 KRC 行起始是毫秒制，两者精度不同源。
+> 《We Are The World》105 行**全部整 10ms 对齐**、精确相等 105/105（放宽后结果一字不变）；
+> 但同日《听海》32 行的行起始是 `45519 / 53253 / 60457` 这种毫秒值，**整 10ms 对齐只占 1/32**。
+> 也就是说「KRC 可以是毫秒精度」是真实形态，一旦它与厘秒译轨相遇，精确相等会**整轨静默丢译文**
+> （无日志、无报错，只是 `sub_text` 全空）。现有样本里有译轨的歌恰好都整 10ms 对齐，
+> 那是相关性不是保证。容差取 10 = 一个厘秒格，误配需要两行歌词起始相隔 ≤10ms，不可能。
 
 | | 「无来源」 | 「逐字：否」写死 |
 |---|---|---|
@@ -798,6 +814,102 @@ CharElement +0x08      = float 字时长秒           ← 逐字
 capture 只能 `drawImage` 把源 canvas 拷进**我们自己的**画布池快照（effect.go:119），降采样也只作用于快照（`captureOutMaxW = 1920`，effect.go:58，且仅当源宽超过它才缩）。分辨率由主播的窗口尺寸决定——用户放大窗口即更清晰，我们不强制改渲染分辨率（effect.go:81）。想提画质就调 quality/outw，**不要动源 canvas**。
 
 > 归属 §3.5 的一条事实，暂存于此待并入：`semver.IsValid("v0.0.0")` 为**真**，所以开发版自更新的 kill switch 不是 semver 合法性，而是 `isReleaseVersion` 里 `main.go:587` 的手写特例 `normalized == "v0.0.0"`。
+
+### 7.7 sodamusic：绕原生反调试开 inspector + transport 提取（`player/sodamusic/`）
+
+汽水音乐是 Electron，**有原生反调试**：启动 argv 里带 `--remote-debugging-port` 会被它在 ~2s 内自杀。所以 cloudmusic 那套「杀掉重启 + 加 argv」在这里**不通**；`NODE_OPTIONS=--inspect` 也被打包版 Electron 过滤（实测 app 存活但 inspector 不开、零监听端口）。
+
+**唯一可行且非破坏性的路子 = 复刻 Node 的 `process._debugProcess(pid)`**（`watchdog/watchdog.go`）。Windows 机制：目标 Node/Electron 主进程启动时会建一个命名映射 `node-debug-handler-<pid>`（十进制 pid），内含一个指针 = 目标地址空间里 `StartIoThreadWrapper` 的函数地址。激活 = `OpenFileMappingW` 读出该地址 → `CreateRemoteThread` 到目标 → 目标**自己**拉起 inspector I/O 线程（默认 9229）。这条路不碰 argv，反调试扫不到；实测 inspector 开着后长会话稳定，反调试**不检测 9229**。全程只读映射 + 建一个远程线程跑目标自带的激活函数，**不改汽水任何内存/状态**（§0.1 红线）。映射不存在（禁用了 inspector）→ 返回错误让上层降级重试，绝不盲写。
+
+- `OpenFileMappingW` / `CreateRemoteThread` 提为包级 `var`（syscall 过程句柄不在轮询路径反复建）。读映射里的 8 字节用 `RtlMoveMemory` 拷进 Go 缓冲 + `binary.LittleEndian` 读出——**避开 `unsafe.Pointer(uintptr)` 触发 vet unsafeptr**（addr 作 syscall 源参数是安全的）。
+- node v16 caller 能对 Electron 36(node 22) 目标生效 → 映射名格式跨大版本一致。
+
+**取数**（`cdp/client.go`）：连 9229（主进程 Node inspector，端点 `/json/list`）→ `Runtime.evaluate` **必须带 `includeCommandLineAPI:true`**（Node 经 Command Line API 暴露 `require`，缺了它主进程桥里 `require('electron')` 会 `require is not defined`）→ 在主进程里 `webContents.executeJavaScript(...)` 桥进 rendererMain 主窗口（主进程无 DOM，故一律 `awaitPromise:true`）。桥内探针用「patch `MessagePort.prototype.postMessage` 抓闭包里的 `channel.port1` → 发 `method.invoke` 请求 `sharedState.get('player')` → 截 `method.return`」拿全量播放态。播放态字段：`progressSeconds`（**1Hz 采样**，见下条）、`mediaDetail.playable`（名/歌手/id/时长/`cover_url`）、`mediaDetail.lyrics`（`type:'krc'` 明文 + `translations.cn` 独立 tlyric LRC，按时间戳合并进 SubText）。封面 URL 由 `cover_url={uri,urls[],template_prefix}` 拼 `urls[0]+uri+'~'+template_prefix+'-crop-center:800:800.jpg'`（公网可取、无需鉴权）。
+
+#### 7.7.1 `progressSeconds` 是 1Hz 采样 —— 落锚必须边沿触发 ❌ 靠人
+
+**这是照 kugou 骨架时唯一不能照抄的一处。**
+
+真机实测（2026-08-08，连采 60 次变化）：`progressSeconds` 每 **970~1060ms** 才刷新一次，每次
+`+1.0000±0.01`；而值本身是采样瞬间的**真实位置**（形如 `45.519`，毫秒精度，不是整秒量化）。
+也就是说两次刷新之间它一直是旧值，陈旧程度 0~1s。
+
+对照：酷狗的进度是 100ns 计时器直读（`kugou.go:368` `progressRaw/1e7`），**每轮都是新鲜值**，
+所以它那句「每轮 `anchorProgressSec = progressSec; anchorTime = time.Now()`」落不落锚没差别。
+汽水照抄这句，外推就被清零 —— `position` / `progress` / 歌词行匹配一起退化成 1s 阶梯。
+
+实证指纹（不需要外部基准，看输出本身就够）：`lyric_update.position` 的小数位。
+- 每轮落锚：连续 10 条事件的 position 全是 `142.925 / 144.924 / 147.920 / 150.918 …`
+  ——**小数位恒 `.92`，全落在同一条 1Hz 采样网格上**，说明时钟只在采样落地时前进。
+- 边沿落锚：`193.007 / 195.856 / 199.923 / 201.548 …` ——小数位随行阈值散开，时钟是连续的。
+
+现行实现见 `player/sodamusic/sodamusic.go` 的 `lastRawSec` 与 `livePos`。**别退回每轮落锚。**
+
+> ⚠️ 换个测法会看不见这个缺陷。拿 `position` 与真实位置比对，两个版本的误差都只有 ~100ms
+> ——因为**换行只可能发生在时钟前进的那一刻**，而阶梯时钟前进的那一刻采样恰好是新鲜的。
+> 要看见它，得看「行阈值落在台阶中间时要等多久才跳」，或者直接看上面那个小数位指纹。
+
+#### 7.7.2 窗口最小化久了，进度源掉到 1/60Hz —— 用 `setBackgroundThrottling(false)` 消除 ❌ 靠人
+
+Chromium 对隐藏页面有 intensive wake-up throttling。对照实验（2026-08-08，汽水主窗口全程最小化，
+两轮除了「有没有调那一行」之外条件相同）：
+
+**对照组（不调）**：闲置约 4.8 分钟后节流生效，之后恒为一分钟一次。
+
+```
+[  288.1s] progress= 58.021 dv= +1.001 dt=  1064.6ms   ← 前 4.8 分钟正常
+[  316.2s] progress= 86.021 dv=+28.000 dt= 28027.8ms   ← 节流生效
+[  376.2s] progress=146.022 dv=+60.000 dt= 60031.3ms
+[  436.1s] progress=206.019 dv=+59.997 dt= 59934.0ms
+```
+
+**处理组**：在**已被节流**的状态下调用，300ms 内恢复 1Hz，窗口仍是最小化。
+
+```
+setBackgroundThrottling(false) -> [[1,false]]
+[    0.3s] progress=263.941 dv= +0.200 dt=  303.6ms
+[    1.3s] progress=264.940 dv= +0.998 dt=  915.6ms
+```
+
+随后不再动它、继续最小化观察 8 分钟（远超对照组 4.8 分钟的触发点）：**478 个采样，最大间隔
+1121.5ms，超过 2000ms 的 0 次**——节流没有重新装填。
+
+**「Electron 里 setBackgroundThrottling 加载后再设需 reload 才生效」这条传闻对本版本不成立**
+——上面那两行就是反例。别因为看到那个说法就把这条实现改成「加载前设置」或加 reload：
+reload 汽水的渲染器会打断播放。
+
+症状识别：日志里的「检测到前跳」全部落在整分钟的同一秒、间隔恰好 60s、跳幅恰好等于间隔。
+**那不是 seek，是节流。**
+
+现行实现：`cdp.Client.DisableBackgroundThrottling()`，在每次 CDP 连上后调一次
+（`sodamusic.go` 的 `Start`）。**每次重连都要重设**——它随 webContents 生命周期存在。
+尽力而为：失败只 `log.Warn`，不阻断取数。
+
+**为什么不照网易云加启动参数**：网易云那条路是 watchdog **杀掉进程 + 带 argv 重启**
+（`player/cloudmusic/watchdog/process.go`），对汽水等于**在直播中杀掉主播的播放器**；
+而且汽水有原生反调试，argv 里加东西是否触发自杀未经验证（§7.7 当初正因它自杀才放弃重启加参数）。
+运行时 API 只是对它自己的 webContents 调一个官方 Electron 接口：不写内存、不碰 argv、
+不改注册表，进程退出即失效。
+
+> **这是 §0.1「不改汽水任何内存/状态」的一处刻意例外**，边界写在这里：只允许
+> `setBackgroundThrottling(false)` 这一个调用。要再加别的「顺手也设一下」的 API 之前，
+> 先回来读这一段——例外之所以安全，靠的是它窄。
+
+即使这条失效（旧版 Electron、API 被移除），7.7.1 的边沿落锚仍是兜底，两者不是二选一：
+- 每轮落锚 + 节流 → 进度**整整冻结一分钟**再跳 60s。实测日志 `检测到前跳: 0.00s → 28.01s`，
+  歌词在第 0 行卡了 28 秒。直播里这是事故。
+- 边沿落锚 + 节流 → 歌词照常平滑推进（60s 内音频时钟与墙钟只差 0.4ms），只在会话刚建立时
+  带一个「首个采样有多旧」的固定偏移，下一个采样到达即被 seek 判据纠正。
+
+#### 7.7.3 多个消费者会互相饿死 ❌ 靠人
+
+同时开两个 PlayerCap（或 PlayerCap + `cdpexplore` + 临时探针）连同一个汽水时，实测出现过
+某一路的 `Extract` 连续数十秒拿不到可用数据、而另一路正常。桥内探针会 patch
+`MessagePort.prototype.postMessage` 再还原，两路并发时还原顺序会把对方的 wrapper 永久留在原型链上；
+transport 侧能否并发承载多个 `method.invoke` 也未验证。
+
+**结论：调试时别一边开着正式服务一边开探针**，测出来的数会是假的（本轮就先踩了一次：三路并发
+下量到的「误差」全是并发伪影）。生产只跑一个实例，故未按缺陷处理。
 
 ---
 

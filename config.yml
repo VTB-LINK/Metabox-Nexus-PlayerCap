@@ -29,10 +29,14 @@ cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 100   # 低于 50 会被网易云自身的下限抬到 100，写 30 也是跑 100
 cloudmusicv3-effect-strategy: fadeout # 特效最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
-# QQ音乐 配置
+# QQ 音乐 配置
 qqmusic-offset: 400
 # qqmusic-poll: 50
 
 # 酷狗音乐 配置
 kugou-offset: 430
 # kugou-poll: 30
+
+# 汽水音乐 配置
+sodamusic-offset: 340
+# sodamusic-poll: 30
