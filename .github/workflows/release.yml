@@ -73,6 +73,20 @@ jobs:
             echo "Installed: $(gh --version | head -1)"
           fi
 
+      - name: Set up zip
+        # self-hosted runner 上不保证有 zip：v3.0.0-rc.12 首次打 tag 时，构建全过、
+        # 卡在「Create compressed archive」的 `zip: command not found`（exit 127）——
+        # 产物已经编好却一个 Release draft 都没建出来。装它比换打包方式便宜得多。
+        # 样式同上面的 gh：有就跳过，不重复装。
+        run: |
+          if command -v zip &>/dev/null; then
+            echo "zip already installed: $(zip -v | head -2 | tail -1)"
+          else
+            echo "Installing zip..."
+            sudo apt-get update && sudo apt-get install -y zip
+            echo "Installed: $(zip -v | head -2 | tail -1)"
+          fi
+
       - name: Extract version from tag
         id: vars
         run: |

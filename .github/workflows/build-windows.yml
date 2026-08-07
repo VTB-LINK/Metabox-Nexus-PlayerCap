@@ -24,6 +24,18 @@ jobs:
         with:
           go-version: '1.25'
 
+      - name: Set up zip
+        # 与 release.yml 同因：self-hosted runner 上不保证有 zip，缺了会在
+        # 「Create compressed archive」以 exit 127 挂掉。两条流水线都打 zip，故两边都要装。
+        run: |
+          if command -v zip &>/dev/null; then
+            echo "zip already installed: $(zip -v | head -2 | tail -1)"
+          else
+            echo "Installing zip..."
+            sudo apt-get update && sudo apt-get install -y zip
+            echo "Installed: $(zip -v | head -2 | tail -1)"
+          fi
+
       - name: Generate Windows icon resource (main/dev logo)
         run: |
           # 从开发变体母版(10)生成多尺寸图标 .syso（16..256 每档高质量重采样）。取代旧的
