@@ -21,7 +21,7 @@
   - **歌词与译文合为一个整体**：作为一个单元一起入场 / 退场，不再各自淡入淡出。
   - **溢出「自动缩小」**：长行按字号自适应缩放容纳于一行，缩到下限仍放不下再回退 Ping-Pong；循环滚动 / Ping-Pong 的水平起滚位可跟随九宫格锚点。
   - **译文溢出**：译文也支持滚动 / Ping-Pong / 自动缩小，缺省继承歌词的溢出设置，也可独立指定。
-  - 以上新参数缺省时，旧链接行为逐像素不变。
+  - 以上新参数缺省时，旧链接行为逐像素不变。**例外是单行模式的缺省值变了，见文末破坏性变更。**
 
 #### 歌词与事件契约
 
@@ -59,6 +59,7 @@
 - **歌词字段重命名**：`time` → `timestamp`、`line_index` → `index`、`song_title` → `title`。
 - **整曲位置迁到新字段 `position`，`play_time` 改指本行播出时间**：v2 的 `play_time`（实时播放位置）在 3.0 里改由 `position` 承载（`all_lyrics` 顶层、`lyric_update`、`playback_pause` / `playback_resume` 均带；`progress = position / duration`）；`play_time` 改指「本行歌词的播出时间」（= `timestamp` − offset，`index:-1` 时为 `0`）。`playback_pause` / `playback_resume` 另新增 `progress`。**要整曲位置 / 进度用 `position` / `progress`，不要用 `play_time`。**
 - **纯音乐表示**：从「`index:0` + 提示语当歌词」改为「`index:-1`，提示语保留在 `text`」。
+- **歌词页单行模式改为默认**（影响 OBS 里已存的链接，与 API 无关）：此前不带 `one_line` 的链接是三行（上一行 / 当前行 / 下一行），现在是单行。**要保持三行必须显式加 `one_line=0`**（或 `one_line=off`）；带 `one_line` 的旧链接行为不变，仍是单行。配置编辑器的「单行模式」开关已默认勾上，取消勾选即生成带 `one_line=0` 的链接。
 
 #### 已知限制
 

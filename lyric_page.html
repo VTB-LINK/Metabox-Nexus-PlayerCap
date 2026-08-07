@@ -1396,7 +1396,13 @@
         const purePpPause = parseFloat(urlParams.get('pp_pause') || '1.5');
         const pureScrollEase = urlParams.get('scroll_ease') || 'ease-in-out';
         const pureShrinkMin = Math.max(0.1, Math.min(1, parseFloat(urlParams.get('shrink_min') || '0.5')));
-        const oneLineMode = urlParams.has('one_line');
+        // 单行模式**默认开**：缺省（不带任何参数）与显式带 one_line 都是单行。
+        // 要三行必须显式关：one_line=0 或 one_line=off。写法沿用本页既有的「默认开、0/off 关」
+        // 惯例（对照下面的 word_fx），而不是 urlParams.has() 那种「有才开」。
+        //
+        // ⚠️ 这是对**既有链接**的行为变更：改之前不带 one_line 的 URL 是三行，改之后变单行。
+        // 主播 OBS 里存着的旧链接会在更新后跟着变。这是有意为之，不是缺省兼容失误。
+        const oneLineMode = urlParams.get('one_line') !== '0' && urlParams.get('one_line') !== 'off';
         const showSubText = urlParams.has('sub_text');
         const subPos = urlParams.get('sub_pos') === 'above' ? 'above' : 'below';
         // 译文独立样式覆盖（各自缺省 = 继承歌词；4a 已让 .lyric-sub-text 继承歌词全套样式）
@@ -2892,7 +2898,7 @@
                             <div class="editor-row">
                                 <label>单行模式</label>
                                 <label class="toggle-switch">
-                                    <input type="checkbox" id="cfgOneLine">
+                                    <input type="checkbox" id="cfgOneLine" checked>
                                     <span class="toggle-slider"></span>
                                 </label>
                             </div>
@@ -3495,8 +3501,11 @@
                     params.set('default', '');
                 }
 
-                if (document.getElementById('cfgOneLine').checked) {
-                    params.set('one_line', '');
+                // 单行是默认，故勾上时**不写参数**（链接更短）；取消勾选才显式写 one_line=0。
+                // **别改回「勾上才 set」**：那样不勾就等于不写参数，而不写参数现在就是单行，
+                // 编辑器将永远做不出三行链接。
+                if (!document.getElementById('cfgOneLine').checked) {
+                    params.set('one_line', '0');
                 }
                 if (document.getElementById('cfgSubText').checked) {
                     params.set('sub_text', '');
