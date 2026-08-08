@@ -278,8 +278,39 @@ func Load() Config {
 	}
 
 	clampPolls(&cfg)
+	warnUnknownPriorPlayers(&cfg)
 
 	return cfg
+}
+
+// warnUnknownPriorPlayers 对 prior-player 里不认识的名字发告警。
+//
+// **它只告警，绝不过滤，也绝不让启动失败。** 未知名字本身是无害的：Router 会为它建一个
+// 永远收不到事件的状态条目，状态恒 idle，既不进 priorGroupBlocking 也不抢主输出
+// （server/router.go 的 NewRouter 从 cfg.PriorPlayer 建组，判据全是字符串比较）。
+// 有害的是**静默**：用户把 sodamusic 拼成 sodamusci，配置看着生效了、日志一个字没有，
+// 而 K 歌一开唱照样抢不到优先——排查时几乎不会怀疑到拼写。
+//
+// 判据用 registeredPlayers（各播放器包 init() 注册，Load 被调用时已全部就位）而不是
+// main.go 的 playerNames：后者在 Load 之后才构造，这里拿不到。二者在正常构建下一致；
+// 若某个包注册了却漏进 playerNames，那是 §3.2 单独盯的另一个坑，不由本函数负责。
+func warnUnknownPriorPlayers(cfg *Config) {
+	if len(cfg.PriorPlayer) == 0 {
+		return // 不配优先播放器是合法的，不是错误
+	}
+	known := RegisteredPlayers()
+	for _, name := range cfg.PriorPlayer {
+		found := false
+		for _, k := range known {
+			if k == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			log.Warn("prior-player 里的 %q 不是已知播放器，该项不会生效；可用值：%v", name, known)
+		}
+	}
 }
 
 // 轮询间隔的安全边界。
@@ -439,6 +470,7 @@ prior-player:
 # - cloudmusicv3
 # - qqmusic
 # - kugou
+# - sodamusic
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15

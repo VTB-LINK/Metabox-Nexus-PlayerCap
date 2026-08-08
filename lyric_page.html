@@ -1376,6 +1376,23 @@
     <script>
         // URL 参数解析
         const urlParams = new URLSearchParams(window.location.search);
+
+        // numParam 是本页**唯一**的数值参数取值口：解得出有限数就用它，否则用默认值。
+        //
+        // 它替掉了三种各有漏洞的旧写法：
+        //   · `parseFloat(get(x)) || 默认` —— 把合法的 0 也吞掉（`0 || 1 === 1`）。
+        //     word_fx_lead_max=0（文档写着「关闭提前入场」）与 word_fx_anim=0（硬切）
+        //     都因此静默失效；sub_gap=0（译文紧贴歌词）同理被兜成默认的 1。
+        //   · `parseFloat(get(x) || '字面量')` —— 0 是安全的（'0' 非空字符串为真），
+        //     但值非数字时 parseFloat 返回 NaN 一路漏下去。
+        //   · `has(k) ? parseFloat(get(k)) : d` —— 同上，只挡缺席不挡垃圾值。
+        //
+        // NaN 漏下去不会报错，只会让后续比较**全部为 false**、Math.min/max 一路传染，
+        // 症状离成因很远（实测：lead 为 NaN 时 tickPreRoll 的两道时间闸同时失效、当场抢跑入场）。
+        const numParam = (key, def) => {
+            const v = parseFloat(urlParams.get(key));
+            return Number.isFinite(v) ? v : def;
+        };
         const pureMode = urlParams.has('pure');
         const titleMode = urlParams.has('title');
         const titleFormat = urlParams.get('title_format') || 'name';
@@ -1383,19 +1400,19 @@
 
         // 歌名溢出模式参数
         const stOverflow = urlParams.get('st_overflow') || 'wrap';
-        const stScrollSpeed = parseFloat(urlParams.get('st_scroll_speed') || '50');
-        const stPpTime = parseFloat(urlParams.get('st_pp_time') || '3');
-        const stPpPause = parseFloat(urlParams.get('st_pp_pause') || '1.5');
+        const stScrollSpeed = numParam('st_scroll_speed', 50);
+        const stPpTime = numParam('st_pp_time', 3);
+        const stPpPause = numParam('st_pp_pause', 1.5);
         const stScrollEase = urlParams.get('st_scroll_ease') || 'ease-in-out';
-        const stShrinkMin = Math.max(0.1, Math.min(1, parseFloat(urlParams.get('st_shrink_min') || '0.5')));
+        const stShrinkMin = Math.max(0.1, Math.min(1, numParam('st_shrink_min', 0.5)));
 
         // 歌词（纯）溢出模式参数
         const pureOverflow = urlParams.get('overflow') || 'wrap';
-        const pureScrollSpeed = parseFloat(urlParams.get('scroll_speed') || '50');
-        const purePpTime = parseFloat(urlParams.get('pp_time') || '3');
-        const purePpPause = parseFloat(urlParams.get('pp_pause') || '1.5');
+        const pureScrollSpeed = numParam('scroll_speed', 50);
+        const purePpTime = numParam('pp_time', 3);
+        const purePpPause = numParam('pp_pause', 1.5);
         const pureScrollEase = urlParams.get('scroll_ease') || 'ease-in-out';
-        const pureShrinkMin = Math.max(0.1, Math.min(1, parseFloat(urlParams.get('shrink_min') || '0.5')));
+        const pureShrinkMin = Math.max(0.1, Math.min(1, numParam('shrink_min', 0.5)));
         // 单行模式**默认开**：缺省（不带任何参数）与显式带 one_line 都是单行。
         // 要三行必须显式关：one_line=0 或 one_line=off。写法沿用本页既有的「默认开、0/off 关」
         // 惯例（对照下面的 word_fx），而不是 urlParams.has() 那种「有才开」。
@@ -1407,7 +1424,7 @@
         const subPos = urlParams.get('sub_pos') === 'above' ? 'above' : 'below';
         // 译文独立样式覆盖（各自缺省 = 继承歌词；4a 已让 .lyric-sub-text 继承歌词全套样式）
         const subColor = urlParams.get('sub_color') || null;
-        const subFontScale = Math.max(0.2, Math.min(3, parseFloat(urlParams.get('sub_font_scale')) || 1)); // 相对歌词，1=同大
+        const subFontScale = Math.max(0.2, Math.min(3, numParam('sub_font_scale', 1))); // 相对歌词，1=同大
         const subFont = urlParams.get('sub_font') || null;
         const subGlowRaw = urlParams.get('sub_glow');               // null=继承歌词, 'off'/'0'=强制关, 其它/空=强制开
         const subGlowColor = urlParams.get('sub_glow_color') || null;
@@ -1415,17 +1432,16 @@
         const subStrokeWidth = urlParams.get('sub_stroke_width') || '1';
         const subStrokeColor = urlParams.get('sub_stroke_color') || '#000';
         // 译文与歌词之间的空白间距倍率（作用于 zone 的 gap，默认 1 = 现状 6px），最小 0.05
-        const subGap = Math.max(0.05, Math.min(10, parseFloat(urlParams.get('sub_gap')) || 1));
+        const subGap = Math.max(0.05, Math.min(10, numParam('sub_gap', 1)));
         // 译文溢出：缺省 wrap（向后兼容，旧带 sub_text 的 URL 译文仍换行）。
         // 编辑器「继承歌词」会在 collect 时把歌词的溢出模式显式写入 sub_overflow。
         // scroll/pingpong/shrink 的时序参数缺省继承歌词对应值。
-        const _subNum = (k, d) => urlParams.has(k) ? parseFloat(urlParams.get(k)) : d;
         const subOverflow = urlParams.get('sub_overflow') || 'wrap';
-        const subScrollSpeed = _subNum('sub_scroll_speed', pureScrollSpeed);
-        const subPpTime = _subNum('sub_pp_time', purePpTime);
-        const subPpPause = _subNum('sub_pp_pause', purePpPause);
+        const subScrollSpeed = numParam('sub_scroll_speed', pureScrollSpeed);
+        const subPpTime = numParam('sub_pp_time', purePpTime);
+        const subPpPause = numParam('sub_pp_pause', purePpPause);
         const subScrollEase = urlParams.get('sub_scroll_ease') || pureScrollEase;
-        const subShrinkMin = Math.max(0.1, Math.min(1, _subNum('sub_shrink_min', pureShrinkMin)));
+        const subShrinkMin = Math.max(0.1, Math.min(1, numParam('sub_shrink_min', pureShrinkMin)));
         const wordFxEnabled = urlParams.get('word_fx') !== '0' && urlParams.get('word_fx') !== 'off';
         const wordFxMode = (function() {
             const v = urlParams.get('word_fx');
@@ -1459,14 +1475,16 @@
         //                   给 0 则密集歌下本行与第一个字同时出现。
         // word_fx_anim：动画总时长（触发 → 入场放完），毫秒。**不给则跟随 lead**（= 入场最后一帧
         //                   正好落在第一个字上，本参数引入前的行为）。给了就固定成这个值。
+        // 这三个参数**都以 0 为合法值**（lead_max=0 关闭提前入场、anim=0 硬切），
+        // 故必须走 numParam 而不是 `|| 默认` —— 理由见文件开头 numParam 的注释。
         const preRollLeadFull = 0.8; // 秒，与 EXIT_HANDOFF_MS + APPEAR_DUR_MS 对应，改动画时长要一起改
-        const wordFxLeadMax = Math.max(0, Math.min(preRollLeadFull,
-            (parseFloat(urlParams.get('word_fx_lead_max')) || 500) / 1000));
-        const wordFxLeadMin = Math.max(0, Math.min(wordFxLeadMax,
-            (urlParams.has('word_fx_lead_min') ? parseFloat(urlParams.get('word_fx_lead_min')) : 430) / 1000));
-        // null = 跟随 lead。上限 2000ms：再长的入场会盖住整行，已经不是「入场」了。
+        const wordFxLeadMax = Math.max(0, Math.min(preRollLeadFull, numParam('word_fx_lead_max', 500) / 1000));
+        const wordFxLeadMin = Math.max(0, Math.min(wordFxLeadMax, numParam('word_fx_lead_min', 430) / 1000));
+        // 不给该参数 = null = 跟随 lead；给了才固定。上限 2000ms：再长的入场会盖住整行，
+        // 已经不是「入场」了。这里保留 has() 是**语义需要**（区分「没给」与「给了 0」），
+        // 与上面被修掉的 || 兜底不是一回事。
         const wordFxAnim = urlParams.has('word_fx_anim')
-            ? Math.max(0, Math.min(2, (parseFloat(urlParams.get('word_fx_anim')) || 800) / 1000))
+            ? Math.max(0, Math.min(2, numParam('word_fx_anim', 800) / 1000))
             : null;
         const fontColor = urlParams.get('color') || null;
         const customFont = urlParams.get('font') || null;
@@ -1481,18 +1499,18 @@
         const coverOnly = urlParams.has('cover_only');
         const coverStyle = urlParams.get('cover_style') || 'disc';
         const coverRotate = urlParams.get('cover_rotate') || 'playback';
-        const coverSpinSpeed = parseFloat(urlParams.get('cover_spin_speed') || '12');
-        const coverSize = parseInt(urlParams.get('cover_size') || '80');
+        const coverSpinSpeed = numParam('cover_spin_speed', 12);
+        const coverSize = numParam('cover_size', 80);
 
         // 封面暂停行为参数
         // cover_pause: 'none'(默认，不处理) | 'hold'(暂停后等待N秒隐藏) | 'shrink'(缩小到角落，永不隐藏)
         const coverPauseMode = urlParams.get('cover_pause') || 'none';
-        const coverPauseHold = parseFloat(urlParams.get('cover_pause_hold') ?? '-1'); // -1=永不隐藏, 0+=秒数
+        const coverPauseHold = numParam('cover_pause_hold', -1); // -1=永不隐藏, 0+=秒数
         let coverPauseDir = urlParams.get('cover_pause_dir') || 'bl';
-        let coverPauseScale = Math.max(0, Math.min(1, parseFloat(urlParams.get('cover_pause_scale') || '0.25')));
+        let coverPauseScale = Math.max(0, Math.min(1, numParam('cover_pause_scale', 0.25)));
 
         // 字号缩放 & 文本对齐
-        const fontScale = Math.max(0.5, Math.min(3, parseFloat(urlParams.get('font_scale')) || 1));
+        const fontScale = Math.max(0.5, Math.min(3, numParam('font_scale', 1)));
         const textAlignRaw = urlParams.get('text_align') || 'center';
         const textAlign = ['left', 'center', 'right'].includes(textAlignRaw) ? textAlignRaw : 'center';
         // 九宫格锚定 lyric_anchor（tl/t/tr/l/c/r/bl/b/br）：拆成水平(hAlign)+垂直(vAlign)。

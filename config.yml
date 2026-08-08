@@ -16,6 +16,7 @@ prior-player:
 # - cloudmusicv3
 # - qqmusic
 # - kugou
+# - sodamusic
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
