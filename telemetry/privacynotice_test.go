@@ -124,23 +124,67 @@ func TestPrivacyNoticeStatesPurposeAndRecipient(t *testing.T) {
 	}
 }
 
-// TestPrivacyNoticeSkippedWhenDisabled 钉死**未启用时不打印、不等待**。
+// TestPrivacyNoticeSkippedWhenDisabled 钉死**两段都不适用时不打印、不等待**。
 //
-// 这条是给开发者的：本地 go build 一个字节都不会外发，这时候摆一段「我们会上报…」的告示
+// 这条是给开发者的：本地 go build 既不上报遥测、也不查版本（非 semver 版本号会让
+// checkAndUpdate 直接返回），一个字节都不会外发。这时候摆一段「我们会上报…」的告示
 // 是在撒谎，还要白等 10 秒 —— 每次调试都等。
 //
-// 变异自证：删掉 PrintPrivacyNotice 开头的 `if !Enabled() { return }` 即红（会真等 10 秒）。
+// 变异自证：删掉 PrintPrivacyNotice 里的 `if text == "" { return }` 即红（会真等 10 秒）。
 func TestPrivacyNoticeSkippedWhenDisabled(t *testing.T) {
 	orig := dsn
 	t.Cleanup(func() { dsn = orig })
 	dsn = ""
 
 	start := time.Now()
-	PrintPrivacyNotice(10 * time.Second)
+	PrintPrivacyNotice(10*time.Second, false)
 
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Errorf("未启用遥测时 PrintPrivacyNotice 等了 %v（应当立即返回）—— "+
+		t.Errorf("遥测未启用、也不查版本时 PrintPrivacyNotice 等了 %v（应当立即返回）—— "+
 			"本地每次调试都要白等这么久", elapsed)
+	}
+}
+
+// TestNoticeSectionsFollowTheirOwnSwitch 钉死两段各归各的开关。
+//
+// 这是加入版本检查上报时**两个方向的谎**：印多了（遥测关着却说会上报崩溃栈到
+// sentry.io）与印少了（发布版把设备标识发出去却只字不提）。整块文案共用一个开关时
+// 两种都会发生，而且都不会有人发现——没人会去核对一段没打印出来的文字。
+func TestNoticeSectionsFollowTheirOwnSwitch(t *testing.T) {
+	cases := []struct {
+		name                      string
+		telemetryOn, versionCheck bool
+		wantTelemetry, wantUpdate bool
+	}{
+		{"两个都开：正式发布版的常态", true, true, true, true},
+		{"只有遥测：注入了 DSN 的本地构建", true, false, true, false},
+		{"只查版本：未注入 DSN 的发布版", false, true, false, true},
+		{"两个都关：本地 go build 的常态", false, false, false, false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			text := noticeFor(c.telemetryOn, c.versionCheck)
+
+			if !c.wantTelemetry && !c.wantUpdate {
+				if text != "" {
+					t.Fatalf("两段都不适用时仍拼出了文案：\n%s", text)
+				}
+				return
+			}
+			if text == "" {
+				t.Fatal("有段落适用，却拼出了空文案")
+			}
+
+			// 用各段独有的关键词判在不在，别拿整段做子串比较——那样改一个字就红，
+			// 门禁会变成「谁也不敢动文案」而不是「文案不许落后于代码」。
+			if got := strings.Contains(text, "sentry.io"); got != c.wantTelemetry {
+				t.Errorf("遥测段出现=%v，期望 %v", got, c.wantTelemetry)
+			}
+			if got := strings.Contains(text, "gateway.vtb.link"); got != c.wantUpdate {
+				t.Errorf("更新段出现=%v，期望 %v", got, c.wantUpdate)
+			}
+		})
 	}
 }
 

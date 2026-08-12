@@ -14,7 +14,7 @@
 
 | 播放器 | 标识名 | 提取方式 |
 |--------|--------|----------|
-| 全民K歌 (WeSing) | `wesing` | 进程内存读取（PE 导出表 + vtable + AOB 扫描） |
+| 全民K歌 | `wesing` | 进程内存读取（PE 导出表 + vtable + AOB 扫描） |
 | 网易云音乐 | `cloudmusicv3` | CDP 远程调试 |
 | QQ 音乐 | `qqmusic` | 进程内存读取 + AOB Hook 注入（双源融合插值） |
 | 酷狗音乐 | `kugou` | CDP 远程调试 |
@@ -150,6 +150,7 @@ prior-player:
 # - cloudmusicv3
 # - qqmusic
 # - kugou
+# - sodamusic
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
@@ -172,15 +173,15 @@ kugou-offset: 430
 # kugou-poll: 30
 
 # 汽水音乐 配置
-sodamusic-offset: 200
-# sodamusic-poll: 30
+sodamusic-offset: 340
+# sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
 ```
 
 ### 预期输出
 
 ```
 ===========================================================
-   Metabox-Nexus-PlayerCap 多播放器歌词实时推送服务
+VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 ===========================================================
    版本: v0.0.0
    监听: 0.0.0.0:8765

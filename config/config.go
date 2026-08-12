@@ -494,7 +494,7 @@ kugou-offset: 430
 
 # 汽水音乐 配置
 sodamusic-offset: 340
-# sodamusic-poll: 30
+# sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
 `
 
 // DefaultConfigContent 返回内置默认配置模板（唯一权威来源）。

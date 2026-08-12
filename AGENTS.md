@@ -62,8 +62,10 @@ main()
 │     ← 播放器的真开关，见 §4.1
 ├─ 4. Banner（按 playerNames 循环生成）
 ├─ 5. telemetry.Init(Version, isReleaseVersion(Version))   ← 空 DSN 自动禁用；★ 早于 7
-├─ 6. telemetry.PrintPrivacyNotice(10s)       ★ 必须早于任何联网动作；未启用遥测时立即返回
+├─ 6. telemetry.PrintPrivacyNotice(10s, isReleaseVersion)  ★ 必须早于任何联网动作
+│     两段文案各归各的开关：遥测段看 DSN，更新段看 isReleaseVersion。两段都不适用即立即返回
 ├─ 7. checkAndUpdate()                        ★ 阻塞，在服务起来之前
+├─ 7.5 startDailyHeartbeat()                  ★ 必须晚于 7；只发请求、绝不做更新动作
 ├─ 8. server.NewServer(playerNames)
 ├─ 9. effectStrategy: Win11 强制降级 park → fadeout
 ├─ 10. go srv.Start(cfg.Addr, readyCh); <-readyCh   ★ 等端口就绪
@@ -89,6 +91,7 @@ Guard 捕获 → 上报 → Flush → **原样 re-panic**，进程照常死—�
 | **`telemetry.Init()` 必须早于 `checkAndUpdate()`** | 自动更新本身就是故障点：下载/校验失败会 `os.Exit(1)` 结束进程。Init 在它之前，那条路上的崩溃才在上报范围内。（未注入 DSN 时 Init 自动禁用，本地构建无副作用。） |
 | **`PrintPrivacyNotice()` 必须早于 `checkAndUpdate()`** | 那一步会联网、可能替换 exe 并重启进程。告示得出现在**任何联网动作之前**，否则就是先斩后奏。未启用遥测时它立即返回——不打印也不等待，本地调试不受影响（`telemetry/privacy.go`）。 |
 | **`checkAndUpdate()` 必须早于 `srv.Start()`** | 它可能替换自身 exe 并调用 `restartSelf()` → `os.Exit(0)`。端口先绑上，重启的新进程会撞端口冲突。 |
+| **`startDailyHeartbeat()` 必须晚于 `checkAndUpdate()`** | 同上那条的推论：`checkAndUpdate` 可能 `os.Exit(0)`，在它之前起心跳等于给一个马上要死的进程挂后台 goroutine。**心跳只发请求、不解析响应、不做任何更新动作**——运行期换 exe 就是直播事故。✅ 有门禁：`heartbeatinert_test.go` |
 | **播放器必须等 `<-readyCh` 之后再起** | 端口未就绪时，网易云注入脚本回连 `ws://127.0.0.1:<port>/cloudmusicv3/effect-ingest` 会失败；采集侧也会对着一个还没监听的服务发事件。 |
 | **`park.RestoreOrphaned()` 必须早于 `effect.New()`** | 上次崩溃可能把网易云窗口遗留在屏外泊车位。捕获器一旦开始跑 park 状态机（80ms 一 tick），会在一个未知的遗留状态上做决策。先还原，再交给捕获器。 |
 
@@ -123,9 +126,11 @@ Win11 门控（步骤 7）：**绝不删掉 `park.IsWindows11()` 的强制降级
 ### 1.4 目录结构
 
 ```
-├─ main.go              启动编排、自动更新、ensureCanonicalName、提权 helper 入口
+├─ main.go              启动编排、自动更新、每日在线心跳、ensureCanonicalName、提权 helper 入口
 ├─ config/config.go     ★ 必须 GOOS=linux 可构建（CI 依赖，见 §0）
 ├─ logger/logger.go     ★ 同上
+├─ clientid/            匿名客户端标识 + 版本检查请求头（供网关统计 DAU/MAU）
+│                       ★ 绝不依赖 telemetry —— 反过来依赖会让隐私提示门禁成环，见 §3.5
 ├─ server/
 │   ├─ server.go        HTTP/WS/SSE、声明式路由表、PlayerState 缓存、订阅者
 │   ├─ router.go        优先级路由 + 超时状态机（★ 无 HandleFunc，不管端点注册）
@@ -317,6 +322,12 @@ default: // "standby", "waiting_process", "waiting_song", 以及未来任何未�
 - **发版必须发布 dotcom（VTB-LINK）那个 draft。** ❌ — client-version 与两个 CDN **全部指向 dotcom 的 release**，vlink.dev 不对外暴露。漏发 = 版本号出去了但下载 404。vlink.dev 的 draft 是内部留档。清缓存由镜像过去的 workflow 在 dotcom 侧触发（`.github` 被 sync-source-to-dotcom 全量镜像，无排除）。 — `.github/workflows/release.yml:21,192,195`
 - **更新下载 SHA256 校验失败必须删除损坏文件并终止更新流程。** ❌ — updater 会用下载物替换自身 exe，放过一个损坏或被篡改的二进制 = 把客户端刷成砖。注意仅当 digest 非空才校验，依赖网关下发。 — `main.go:403,414`
 - **dev 构建刻意不用 canonical 名，不要把它「修」成 canonical。** ❌ — 那会让开发构建带上被自动更新识别的身份，破坏「开发构建跳过更新」的既有设计。 — `main.go:581`
+- **每日在线心跳只发请求，绝不解析响应、绝不做更新动作。** ✅ `heartbeatinert_test.go` — 心跳与启动时的版本检查打的是同一个端点、组装的是同一个请求，响应体里就是完整的 `releaseInfo`。「顺手解析一下、有新版就更新」离得只有几行远且看起来完全合理，后果是**直播进行到一半进程替换自身 exe 并重启**。自动更新只允许发生在启动时，那时 OBS 还没在拉流。门禁只查直接调用，跨函数的间接路径它看不见。 — `main.go` 的 `sendHeartbeat`
+- **客户端标识走请求头，绝不拼进 query。** ❌ — proxy-cache 的默认缓存键是「方法 + URI + query」，**不含请求头**；标识拼进 query 会让缓存键按客户端打散，缓存等于没开。⚠️ **这是面向将来的约束，不是对现状的描述**：2026-08-10 实测这条 route 上**没有** proxy-cache（连发三次条条带 `X-Kong-Upstream-Latency`、无 `X-Cache-Status`、无 `Age`；`Via: kong/3.4.1.0-enterprise-edition`）。§12 那条 purge workflow 的存在很容易让人推断出「这里挂着缓存」——**那是推论不是事实**，且它本身还是 disabled 的。别拿它当缓存存在的证据（§3.0）。 — `main.go` 的 `newVersionCheckRequest`、`doc/gateway-client-metrics.md` §3
+- **`clientid` 绝不依赖 `telemetry`。** ✅ 编译器 — 依赖方向是 `telemetry` 的**测试**引用 `clientid`（`telemetry/gatewaynotice_test.go` 拿 `clientid.HeaderNames()` 核对隐私提示）。反过来加一条 `clientid → telemetry` 就会成环，那条门禁直接编译不出来。系统信息经 `telemetry.OSSummary()` 由 `main` 取好再传进 `clientid.Env`，就是为了保持这个方向。
+- **心跳判「今天报过没有」用本地日历日，不是 24h ticker。** ✅ `pingdate_test.go` — ticker 走单调时钟，机器休眠期间是否推进依系统而定；一台每天休眠十小时的播控机会让 24 小时周期不断后漂，漂满一天就整天不上报。而这种漏报**只表现为 DAU 曲线偏低**，无报错、无日志，不会有人去查。
+- **新增版本检查请求头必须同时改隐私提示。** ✅ `telemetry/gatewaynotice_test.go` — 登记在 `clientid.HeaderNames()` 的每一项都要在 `noticeUpdateSection` 里有对应那句话，反向也查（登记了却不再发的要清掉）。这是 `privacynotice_test.go` 那条门禁在版本检查这条通路上的同位物。
+- 请求头清单、标识粒度的取舍、以及网关侧算 DAU/MAU 与启动次数的口径，见 `doc/gateway-client-metrics.md`。**那份是下游描述，与代码分叉时以代码为准。**
 - **`doc/openapi.yaml` 是 API 文档的唯一真源；线上 apifox 是它的手动导入产物（下游副本，不是权威）。** ❌ — 加端点必须先改 openapi.yaml。（此前记的两处缺口——player enum 缺 kugou、effect 端点未进文档——已在 issue #43 补齐。）
 - **`RELEASE_BODY.md` 与 `README.md` 写下的每一句能力 / 版本描述，都必须反映当下代码——新增或修改时逐句回代码核，打 tag 发版前再通篇对一遍。** ❌（靠人守，无门禁）— **过时是这两份文书的头号敌人，也是最难自查的一种错：动手的人往往照脑子里的旧印象写，而代码早已变了。本条就是为防这个而立的。** 它们没有 `tools/docsample` 那样的门禁盯着，只能靠动手时逐句核代码，不能凭记忆。实例：3.0 rc 阶段 `RELEASE_BODY.md` 仍停在 `beta.14`（落后十几个 tag，「逐字仅网易云」早已不成立），`README.md` 功能特性写着「各播放器支持逐字/翻译」「输出音译」「支持所有语言」——全是旧印象，而代码是逐字/翻译三家有、wesing 无，音译（KRC `type=0` 罗马音）被**显式丢弃**，UTF-8 也不该当卖点吹。**文风等同 `doc/`：严肃、准确、简洁，不写营销话术（「极大提升」「完美」「强大」「毫秒级」）或 AI 腔的形容词堆砌；能力按播放器如实列，别用「各播放器」抹平差异。**
 
@@ -396,6 +407,10 @@ default: // "standby", "waiting_process", "waiting_song", 以及未来任何未�
 | Sentry 的 ClientOptions 接线（含配额闸门） | `telemetry/initwiring_test.go` | ✅ 7 个字段逐个变异必红（读 sentry 实际生效的 `Client().Options()`，非我方副本） |
 | 系统版本必须读免疫兼容层的 `RtlGetNtVersionNumbers` | `telemetry/compatshim_test.go` | ✅ 两个 API 可注入，四种 shim 形状必红。**`RtlGetVersion` 受兼容层影响，`park.IsWindows11()` 正建立在它之上——那是条现存缺陷线索，见该文件头** |
 | 时区必须用非本地化的 `TimeZoneKeyName` | `telemetry/timezonekey_test.go` | ⚠️ **有条件**：靠「值含非 ASCII」判断，中文机上有效，**英文机器上抓不到**（两个字段恰好相同），CI 跑不了 |
+| 每日在线心跳绝不做更新动作 | `heartbeatinert_test.go`（AST 扫心跳函数体） | ✅ 心跳里塞一句 `restartSelf()` 立刻红。**只查直接调用**——套一层中间函数它看不见，这是刻意的取舍 |
+| 版本检查请求真的带着客户端标注 | `clientwiring_test.go` | ✅ 删掉 `clientid.Apply` 那行、或把 `client.Do(req)` 退回 `client.Get(url)`，两种都红。**这几条专打接线**：clientid 包自己那二十来条用例全部直接调 `Apply`/`derive`，接线断了它们照样绿 |
+| 新增请求头必须同时改隐私提示 | `telemetry/gatewaynotice_test.go` | ✅ 往 `HeaderNames()` 加一项而不改文案即红；反向（登记了却不再发）也红 |
+| 心跳跨日判据 | `pingdate_test.go` | ✅ 判据改成恒 false 即红；含一条 UTC+8 用例钉死走本地日历日而非 UTC |
 
 ### 靠人守 ❌
 
@@ -662,13 +677,14 @@ wesing 是 K 歌平台，**曲库内所有歌都带词**。所以「纯音乐」
 
 **方括号走私是故意约定，别当 typo 修。** 6 处 `logger.New("CloudMusic] [CDP")` 这类写法，靠把 `] [` 塞进模块名伪造二级标签，渲染成 `[CloudMusic] [CDP]`。6 处全部带 `// 渲染为 [X] [Y]` 注释。logger 只认单个模块名（logger.go:11-13），这是在不改 logger 的前提下拿到层级前缀的唯一办法。
 
-**当前 16 个模块名：**
+**当前 17 个模块名：**
 
 | 模块名 | 声明处 |
 |---|---|
 | `Main` | main.go:35 |
 | `Config` | config/config.go:15 |
 | `Telemetry` | telemetry/telemetry.go:31 |
+| `ClientID` | clientid/clientid.go:44 |
 | `Server` / `Router` | server/server.go:18 / server/router.go:12 |
 | `Cover` | player/cover.go:14 |
 | `Wesing` | player/wesing/wesing.go:20、player/wesing/lyric/finder.go:11 |
@@ -1268,8 +1284,33 @@ LOW 三段常对同一处代码给出不同的、逐级更准的判断——只�
 - dotcom 未配 `RELEASE_CACHE_PURGE_URL` 或 `KONG_ADMIN_TOKEN`（purge:80-88 缺任一即 `::error::` 退出）
 - dotcom Actions 关着
 
-失败发生在 dotcom 的 Actions 里，vlink.dev 这边看不到。**发版后要去 dotcom 确认 purge job 绿了**，
-不能只看本仓库。
+失败发生在 dotcom 的 Actions 里，vlink.dev 这边看不到。
+
+> ⚠️ **现状：网关侧的响应缓存关着，purge 因此也一并停用。发版时不必查它。**
+>
+> **因果是「缓存关 → purge 关」，两者是配对的**（2026-08-10 仓库所有者原话：「因为我把缓存关了，
+> 所以同步关闭 purge 的」）。缓存不在，purge 无事可做，留着它跑只会每次发版留一条无意义的记录。
+>
+> 2026-08-08 实测：dotcom 的四个 workflow 全是 `disabled_manually`
+> （`gh workflow list --repo VTB-LINK/Metabox-Nexus-PlayerCap --all`），最近一次 purge 运行停在
+> 2026-04-10 的 v2.0.3；两个 secret 仍在。网关侧 `proxy-cache-advanced` 插件挂在
+> `Metabox-Nexus-PlayerCap` 这条 route 上、`enabled: false`。
+>
+> ⚠️ 本节此前把停用理由写成「`release.yml` / `build-windows.yml` / `sync-source-to-dotcom.yml`
+> 被镜像过去后不该在 dotcom 重跑，purge 随那一批一起关了」——**那是从「四个都 disabled」倒推的，
+> 是错的**（§3.0：别把推论写成事实）。那三个确实不该在 dotcom 重跑，但 purge 关掉与它们无关。
+>
+> **要重开就必须两件一起开：**先启用网关的 `proxy-cache-advanced`，再单独启用
+> `Purge Release Cache On Latest Change`（**别把另外三个一起打开**）。单开任何一件都是坏组合：
+>
+> - 只开缓存 → `cache_ttl: 43200`（12 小时）+ 无 purge = **发版后最长 12 小时客户端才看得到新版**。
+>   而且发版流程里「CI 建 draft → 人工发布」那段窗口，`/releases/latest` 返回的是**上一个版本**、
+>   200 且完全合法，一旦被缓存就冻结 12 小时——客户端安静地判定「已是最新」，任何监控都看不出异常。
+> - 只开 purge → 它无事可做。
+>
+> 上面那条依赖链与三种断裂形态是重开时的检查表，照旧成立。但**现在别再照着「发版后去 dotcom
+> 确认 purge job 绿了」去查**——它不会有新记录，会被当成故障白查一轮（本文档没写这条之前，
+> 已经发生过一次）。
 
 ---
 
@@ -1303,10 +1344,16 @@ LOW 三段常对同一处代码给出不同的、逐级更准的判断——只�
 ### 13.3 目录树（对 HEAD `0654b41` 核实）
 
 ```
-├── main.go                     # 入口：启动、自动更新、播放器调度、事件路由主循环
+├── main.go                     # 入口：启动、自动更新、每日在线心跳、播放器调度、事件路由主循环
 ├── main_test.go
+├── heartbeatinert_test.go      # ✅ AST 门禁：心跳函数体内禁止出现更新/退出调用
+├── clientwiring_test.go        # ✅ 接线门禁：版本检查请求真的带着客户端标注
+├── pingdate_test.go            # 心跳跨日判据（含 UTC+8 用例）
 ├── config/config.go            # YAML + CLI flag + 默认值三层合并；RegisterPlayer 注册表
 ├── logger/logger.go            # 统一日志包（5 级别）；无文件 sink，全部走 stderr
+├── clientid/                   # 匿名客户端标识（MachineGuid 单向哈希）+ 版本检查请求头
+│   ├── clientid.go             # ID()/derive()；★ 只读注册表，不写任何键
+│   └── headers.go              # HeaderNames() —— 隐私提示门禁的真源
 ├── player/
 │   ├── player.go               # Player 接口、BaseEmitter、公共类型、ClampFloat32
 │   ├── cover.go                # 公共封面下载（HTTP → base64）

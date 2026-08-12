@@ -134,6 +134,31 @@ func collectOSInfo() osInfo {
 	return o
 }
 
+// OSSummary 返回出网请求要标注的三项系统信息：真实版本号、edition、CPU 架构。
+//
+// # 为什么它在这儿，而不在调用方自己采
+//
+// 唯一的调用方是版本检查请求（main.go 的 clientEnvFor）。让它自己去调 RtlGetNtVersionNumbers
+// 就是把 sysinfo.go 里那一坨实测结论复制第二份——文件头写得很清楚，这些 API 每一个都有
+// 「按直觉换就错」的坑（GetVersionEx 恒返回 Win8、StandardName 是本地化的）。复制出去的那份
+// 迟早跟这里分叉，而分叉的表现是报表里悄悄多出一种 OS 版本。
+//
+// # 与 Enabled() 无关
+//
+// **本函数不看 DSN。** 版本检查是发布版一定会做的事，与遥测启不启用是两条独立的线；
+// 拿 Enabled() 门控它会让未注入 DSN 的发布版报上去的系统信息全空。
+//
+// # 为什么不缓存
+//
+// 这几个值在进程内不变，缓存看似白赚。但 rtlGetVersion / rtlGetNtVersionNumbers 是可注入的
+// 包级变量（见文件头「做成变量是为了可注入」），一缓存就会让先跑到的用例把结果钉死给后面
+// 所有用例——sysinfo 的 shim 检测测试正是靠注入这两个变量做的。一次调用六个 syscall，
+// 而它一个进程里只被调一次，省这个没意义。
+func OSSummary() (version, edition, arch string) {
+	o := collectOSInfo()
+	return o.version(), o.Edition, o.Arch
+}
+
 // version 返回 "10.0.19045" 形态的真实版本号。
 func (o osInfo) version() string {
 	return fmt.Sprintf("%d.%d.%d", o.Major, o.Minor, o.Build)

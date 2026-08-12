@@ -1,6 +1,7 @@
 package main
 
 import (
+	"Metabox-Nexus-PlayerCap/clientid"
 	"Metabox-Nexus-PlayerCap/config"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic"
@@ -25,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -68,8 +70,15 @@ func main() {
 	// 播放器注册表（新增播放器只需在此追加）
 	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName}
 
+	fmt.Println()
+	fmt.Println(`___    __________________         ______ ___________    ____________`)
+	fmt.Println(`__ |  / /___  __/___  __ )        ___  / ____  _/__ |  / /___  ____/`)
+	fmt.Println(`__ | / / __  /   __  __  |__________  /   __  /  __ | / / __  __/   `)
+	fmt.Println(`__ |/ /  _  /    _  /_/ / _/_____/_  /_____/ /   __ |/ /  _  /___   `)
+	fmt.Println(`_____/   /_/     /_____/          /_____//___/   _____/   /_____/   `)
+	fmt.Println()
 	fmt.Println("===========================================================")
-	fmt.Println("   Metabox-Nexus-PlayerCap 多播放器歌词实时推送服务          ")
+	fmt.Println("VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务 ")
 	fmt.Println("===========================================================")
 	fmt.Printf("   版本: v%s\n", displayVersion(Version))
 	fmt.Printf("   监听: %s\n", cfg.Addr)
@@ -97,12 +106,20 @@ func main() {
 	// 位置是刻意的 —— **在 checkAndUpdate 之前**：那一步会联网、可能替换 exe 并重启进程。
 	// 提示必须出现在任何联网动作之前，否则「先斩后奏」。
 	//
-	// 未注入 DSN 时它立即返回（不打印也不等待）：那种构建一个字节都不外发，摆告示是撒谎，
-	// 而且本地每次调试都白等 10 秒。见 telemetry/privacy.go。
-	telemetry.PrintPrivacyNotice(privacyNoticeWait)
+	// 两段文案各归各的开关：遥测段看 DSN 有没有注入，更新段看 isReleaseVersion —— 也就是
+	// 这次启动到底会不会去查版本。两段都不适用时它立即返回（不打印也不等待），那正是本地
+	// go build 的常态：一个字节都不外发，摆告示是撒谎，而且每次调试都白等 10 秒。
+	// 见 telemetry/privacy.go。
+	telemetry.PrintPrivacyNotice(privacyNoticeWait, isReleaseVersion(Version))
 
 	// 强制版本检查与自动更新
 	checkAndUpdate()
+
+	// 每日在线心跳。**必须在 checkAndUpdate 之后起** —— 那一步可能替换 exe 并
+	// restartSelf() → os.Exit(0)，在它之前起等于给一个马上要死的进程挂后台 goroutine。
+	// 它只发请求、绝不做任何更新动作，见 sendHeartbeat。
+	startDailyHeartbeat()
+
 	srv := server.NewServer(playerNames)
 	// 网易云特效最小化策略（config 静态读取）。Win11 下 park 屏外保活失效（DWM 停止合成不可见窗口），
 	// 故无论 config 配什么，Win11 一律强制 fadeout。
@@ -252,6 +269,56 @@ func main() {
 
 const versionCheckURL = "https://gateway.vtb.link/vtb-tools/metabox/nexus/playercap/v2/client-version"
 
+// ---------------------------------------------------------------------------
+// 版本检查请求的客户端标注
+// ---------------------------------------------------------------------------
+//
+// 这个请求过去不带任何身份，网关侧只能按源 IP 计数 —— 主播基本都在 NAT / 动态 IP 后面，
+// 同一台机器换 IP 算成多台、同一出口的多台算成一台，DAU/MAU 两头都不准。
+// 现在带上匿名设备标识与客户端环境，让网关能去重、能按版本切分。见 clientid 包注释。
+//
+// **标识走请求头，绝不走 query。** 这个端点后面挂着网关的响应缓存（有一条专门的
+// purge workflow，AGENTS.md §12），把客户端标识拼进 query 会让缓存键按客户端打散，
+// 缓存当场失效 —— 每台机器每天都回源。头不参与默认缓存键，没有这个副作用。
+
+var (
+	clientEnvOnce sync.Once
+	clientEnvBase clientid.Env
+)
+
+// clientEnvFor 返回本次请求要带的客户端环境；ping 区分「启动」与「每日在线」。
+//
+// 系统信息采一次就够 —— 它在进程生命周期内不变，而心跳会按天反复取它。
+func clientEnvFor(ping string) clientid.Env {
+	clientEnvOnce.Do(func() {
+		osVersion, edition, arch := telemetry.OSSummary()
+		clientEnvBase = clientid.Env{
+			Version:   Version,
+			OSVersion: osVersion,
+			OSEdition: edition,
+			Arch:      arch,
+		}
+	})
+
+	env := clientEnvBase
+	env.Ping = ping
+	return env
+}
+
+// newVersionCheckRequest 组装版本检查请求（启动与心跳共用同一个 URL 与同一套头）。
+//
+// 共用 URL 是有意的：网关侧不需要为心跳单独配一条 route 就能开始统计，
+// 「今天在线」= 两种时机去重，「今天启动了多少次」= 只数 X-Client-Ping: start。
+// 将来真要分开看，再在网关侧按这个头拆，客户端不用动。
+func newVersionCheckRequest(ping string) (*http.Request, error) {
+	req, err := http.NewRequest(http.MethodGet, versionCheckURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	clientid.Apply(req, clientEnvFor(ping))
+	return req, nil
+}
+
 type releaseInfo struct {
 	TagName   string `json:"tag_name"`
 	Name      string `json:"name"`
@@ -273,13 +340,24 @@ func checkAndUpdate() {
 	cleanupOldExe()
 	mainLog.Info("正在检查版本更新...")
 
+	req, err := newVersionCheckRequest(clientid.PingStart)
+	if err != nil {
+		mainLog.Warn("版本检查请求组装失败: %v，继续运行", err)
+		return
+	}
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(versionCheckURL)
+	resp, err := client.Do(req)
 	if err != nil {
 		mainLog.Warn("版本检查失败: %v，继续运行", err)
 		return
 	}
 	defer resp.Body.Close()
+
+	// 拿到响应就算「今天已经报过一次在线」，与状态码无关 —— 网关那边这条请求已经落进
+	// 访问日志、已经被计数了。只有连都没连上（上面那个 return）才算今天还没报过，
+	// 那种情况下留给心跳去补。
+	markPinged(time.Now())
 
 	if resp.StatusCode != http.StatusOK {
 		mainLog.Warn("版本检查返回 %d，继续运行", resp.StatusCode)
@@ -364,6 +442,107 @@ func checkAndUpdate() {
 	mainLog.Success("全部更新完成！程序将自动重启...")
 	time.Sleep(1 * time.Second)
 	restartSelf()
+}
+
+// ============================================================================
+// 每日在线心跳
+// ============================================================================
+//
+// 版本检查只在启动时发一次。网关按它计 DAU 会漏掉长期挂机的机器 —— 主播连播三天，
+// 只有第一天算活跃。心跳补上这个缺口。
+//
+// # 它绝不做更新动作
+//
+// 心跳只发请求、丢弃响应体，**不解析 release、不下载、不替换 exe、不 restartSelf**。
+// 自动更新只允许发生在启动时，那时 OBS 还没在拉流；直播进行到一半把 exe 换掉并重启进程
+// 就是直播事故（AGENTS.md §0.1）。
+// ✅ 有门禁：heartbeatinert_test.go（AST 扫心跳函数体，禁止出现更新/退出相关调用）
+//
+// # 为什么按日历日判据，而不是 24h ticker
+//
+// ticker 走单调时钟。机器休眠/挂起期间它是否推进依系统而定，一台每天休眠十小时的播控机
+// 会让 24 小时周期不断向后漂，漂满一天就会整天不发 —— 而这种漏报只体现为 DAU 曲线偏低，
+// 没有任何报错，不会有人去查。跨日判据只看本地日期，休眠多久都不会跳过下一天。
+//
+// 唤醒间隔 1 小时是两头折中：它把「跨过零点后多久才报到」的延迟压在 1 小时内，
+// 同时让各台机器按各自的启动时刻分散在这一小时里，而不是全体在 00:00 撞上去。
+
+const (
+	// heartbeatWakeInterval 是**唤醒**间隔，不是发送间隔。见上文。
+	heartbeatWakeInterval = time.Hour
+
+	// heartbeatTimeout 与启动时那次版本检查取同一个值：它打的是同一个端点。
+	heartbeatTimeout = 10 * time.Second
+
+	// pingDateLayout 是判「今天报过没有」用的本地日历日。
+	pingDateLayout = "2006-01-02"
+)
+
+var (
+	pingMu sync.Mutex
+	// lastPingDate 是最近一次**成功发出**请求的本地日期。空串表示本次运行还一次都没发出去
+	// （例如启动时断网），此时下一个唤醒点就会补发。
+	lastPingDate string
+)
+
+func markPinged(now time.Time) {
+	pingMu.Lock()
+	defer pingMu.Unlock()
+	lastPingDate = now.Format(pingDateLayout)
+}
+
+// shouldPing 报告「今天还没报过」。
+func shouldPing(now time.Time) bool {
+	pingMu.Lock()
+	defer pingMu.Unlock()
+	return lastPingDate != now.Format(pingDateLayout)
+}
+
+// startDailyHeartbeat 起后台心跳。非发布版本直接不起 —— 判据与 checkAndUpdate 一致，
+// 否则开发机上每跑一次调试都会往网关灌一条假的「在线」。
+func startDailyHeartbeat() {
+	if !isReleaseVersion(Version) {
+		return
+	}
+
+	go func() {
+		defer telemetry.Guard()
+
+		ticker := time.NewTicker(heartbeatWakeInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			if shouldPing(time.Now()) {
+				sendHeartbeat()
+			}
+		}
+	}()
+}
+
+// sendHeartbeat 发一次在线心跳，**只发不做**。见本节开头。
+//
+// 失败只记 Detail 不记 Warn：这条路径对主播没有任何价值，网关不通也不影响任何功能，
+// 用 [!] 刷屏只会淹没真正要看的东西。
+func sendHeartbeat() {
+	req, err := newVersionCheckRequest(clientid.PingDaily)
+	if err != nil {
+		mainLog.Detail("在线心跳组装失败: %v", err)
+		return
+	}
+
+	client := &http.Client{Timeout: heartbeatTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		mainLog.Detail("在线心跳发送失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 读干净才能让连接回到池里复用。响应内容本身**故意不解析**。
+	io.Copy(io.Discard, resp.Body)
+
+	markPinged(time.Now())
+	mainLog.Detail("在线心跳已发送")
 }
 
 func performUpdateAll(cdnPrefix, tagName string, assets []struct {
