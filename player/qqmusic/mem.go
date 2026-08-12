@@ -241,6 +241,19 @@ var knownVersions = map[string]dllOffsets{
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
 	},
+	"22.52": {
+		// CE 实测（32-bit x86，2026-08-13）：字段布局与 22.41 一致，仅静态地址迁移。
+		Struct1:           0xC58BD0,
+		NameOff:           0x00,
+		SingerOff:         0x04,
+		AlbumOff:          0x08,
+		ProgressOff:       0x0C,
+		DurationOff:       0x10,
+		SongIDOff:         0x726C0,
+		SongIDDurCheckOff: 0x726C8,
+		UseWideStrings:    true,
+		SongMidFromHeap:   true,
+	},
 }
 
 // parseVer 把 "22.21" 解析成可比较的整数（major*1000+minor）。detectVersion 用
