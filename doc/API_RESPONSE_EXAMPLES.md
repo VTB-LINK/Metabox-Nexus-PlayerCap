@@ -48,6 +48,7 @@
         "wesing"
       ],
       "prior-player-expire": 15,
+      "per-player-idle-hide": 0,
       "cloudmusicv3-effect-strategy": "fadeout",
       "wesing-offset": 200,
       "wesing-poll": 30,
@@ -1054,7 +1055,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 - 当 `to` 非空时，紧随其后会收到新播放器的**已缓存**状态事件（`status_update` + `song_info_update` + `all_lyrics` + `lyric_update` 中已有的部分）。如果新播放器刚启动、缓存尚未建立（如正处于 loading 阶段），则只会收到已有的事件（可能仅 `status_update`），其余事件在播放器实际上报后才会到达
 - 切换后随 FullState 推送过的事件类型不会立即重复推送第二遍；FullState 未包含的类型，其首次数据仍会正常到达
 
-#### 9. `player_clear` - 活跃播放器清除（仅根订阅者收到）
+#### 9. `player_clear` - 活跃播放器清除（根订阅者；per-player 通道在无活跃自动隐藏时也会收到）
 
 当所有播放器均无活动、活跃播放器被清空时发送。始终在 `player_switch`（`to=""`）之后紧跟发送：
 ```json
@@ -1066,11 +1067,11 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 ```
 
 **说明：**
-- `player` 字段为空字符串（无活跃播放器）
+- 根订阅者收到时 `player` 字段为空字符串（无活跃播放器）；per-player 通道收到时 `player` 为该播放器名
 - `data` 始终为 `{}`（纯通知事件）
 - 前端收到后应清空所有歌词、歌曲信息、进度等显示
 - 常见触发场景：优先播放器唱完后释放给普通组，但普通组所有播放器也都处于暂停/空闲状态
-- Per-player 订阅者**不会**收到此事件
+- **Per-player 通道默认不收到此事件**；仅当为该播放器开启「无活跃自动隐藏」（`per-player-idle-hide` 或 `<player>-idle-hide` > 0）、静默超过阈值时会收到一条（`player` 为该播放器名），用于隐藏歌停后停留的末行歌词。此时类型过滤的 SSE 端点改发等价的 in-band 清除（`lyric_update` index:-1 / 空 `song_info_update`），per-player HTTP 端点返回 `data:{}`
 
 ---
 

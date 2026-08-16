@@ -94,7 +94,7 @@ func TestClearSongDataStillClearsCache(t *testing.T) {
 	seedSongData(s, "wesing")
 
 	// 前提自检：不先证明缓存里真有东西，下面的「清空了」就可能是从来没进去过
-	if init := s.buildInitEvents("wesing"); !hasType(init, player.EventSongInfoUpdate) {
+	if init := s.buildInitEvents("wesing", true); !hasType(init, player.EventSongInfoUpdate) {
 		t.Fatalf("前提不成立：灌入后 buildInitEvents 里没有 song_info_update，实得 %d 条", len(init))
 	}
 
@@ -104,7 +104,7 @@ func TestClearSongDataStillClearsCache(t *testing.T) {
 	})
 
 	for _, unwanted := range []string{player.EventSongInfoUpdate, player.EventAllLyrics} {
-		if init := s.buildInitEvents("wesing"); hasType(init, unwanted) {
+		if init := s.buildInitEvents("wesing", true); hasType(init, unwanted) {
 			t.Errorf("clear_song_data 之后 buildInitEvents 仍吐 %q —— 缓存没被清空，"+
 				"后续连入的客户端会收到上一首的残留", unwanted)
 		}

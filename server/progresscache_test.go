@@ -54,7 +54,7 @@ func seedSongAt(s *Server, name string) {
 // 用 buildInitEvents 而非直接读 ps 字段：它是缓存对外的出口之一，测它才是测接线。
 func initAllLyrics(t *testing.T, s *Server, name string) *AllLyrics {
 	t.Helper()
-	for _, e := range s.buildInitEvents(name) {
+	for _, e := range s.buildInitEvents(name, true) {
 		if e.Type == player.EventAllLyrics {
 			al, ok := e.Data.(*AllLyrics)
 			if !ok {

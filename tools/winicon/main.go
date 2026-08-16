@@ -241,12 +241,12 @@ func buildICO(imgs []image.Image) []byte {
 		if d >= 256 {
 			wh = 0
 		}
-		buf.WriteByte(wh)                       // width
-		buf.WriteByte(wh)                       // height（正方形）
-		buf.WriteByte(0)                        // color count
-		buf.WriteByte(0)                        // reserved
-		binary.Write(&buf, le, uint16(1))       // color planes
-		binary.Write(&buf, le, uint16(32))      // bits per pixel
+		buf.WriteByte(wh)                            // width
+		buf.WriteByte(wh)                            // height（正方形）
+		buf.WriteByte(0)                             // color count
+		buf.WriteByte(0)                             // reserved
+		binary.Write(&buf, le, uint16(1))            // color planes
+		binary.Write(&buf, le, uint16(32))           // bits per pixel
 		binary.Write(&buf, le, uint32(len(pngs[i]))) // bytes in resource
 		binary.Write(&buf, le, uint32(offset))       // image offset
 		offset += len(pngs[i])

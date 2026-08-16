@@ -482,7 +482,7 @@ Banner、`server.NewServer`、`NewRouter` 的 normalStates 建表、端点表、
 **`player/` 下绝不 panic。** 内存读取/CDP 失败 → 跳过本轮、下轮重试。轮询循环跑在直播全程，一次 panic 带崩整个采集进程 = 歌词直接断供。
 ✅ `grep -rn "panic(" player/` 当前零命中（非自动门禁，但可一行自查）
 
-**`EventPlayerSwitch` / `EventPlayerClear` 不是播放器事件**，由 Server 在根订阅者流上直接构造，Router 只负责触发。新播放器不需要、也不应该 Emit 这两个。 — `player/player.go:149-150` 定义，发射在 `server/`
+**`EventPlayerSwitch` / `EventPlayerClear` 不是播放器事件**，由 Server 直接构造、Router 或 Server 自身巡检触发；新播放器不需要、也不应该 Emit 这两个。（`EventPlayerSwitch` 只走根订阅者流；`EventPlayerClear` 除根流外，per-player 通道的无活跃自动隐藏也会单发，见 `notifyPerPlayerIdleClear`。） — `player/player.go:149-150` 定义，发射在 `server/`
 
 ---
 

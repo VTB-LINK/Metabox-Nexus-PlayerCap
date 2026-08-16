@@ -17,8 +17,9 @@ var log = logger.New("Config")
 
 // PlayerConfig 单播放器配置覆盖（nil 表示沿用全局值）
 type PlayerConfig struct {
-	Offset *int
-	Poll   *int
+	Offset   *int
+	Poll     *int
+	IdleHide *int // per-player 通道无活跃自动隐藏阈值（秒，0=显式关）；nil=跟随全局 PerPlayerIdleHide
 }
 
 // 播放器自动注册（播放器包在 init() 中调用 RegisterPlayer）
@@ -46,15 +47,16 @@ func RegisteredPlayers() []string {
 
 // Config 应用配置
 type Config struct {
-	Addr              string                   `yaml:"addr"`                // WebSocket 监听地址
-	Offset            int                      `yaml:"offset"`              // 全局时间偏移（毫秒）
-	Poll              int                      `yaml:"poll"`                // 全局轮询间隔（毫秒）
-	PriorPlayer       []string                 `yaml:"prior-player"`        // 优先播放器列表
-	PriorPlayerExpire int                      `yaml:"prior-player-expire"` // 优先播放器暂停超时（秒）
-	EffectStrategy    string                   `yaml:"-"`                   // 网易云特效最小化策略：park | fadeout（键 cloudmusicv3-effect-strategy）
-	Players           map[string]*PlayerConfig `yaml:"-"`                   // 各播放器专属配置
-	Sources           []string                 `yaml:"-"`                   // 配置来源列表（内部字段）
-	ExplicitKeys      map[string]bool          `yaml:"-"`                   // 被显式设置（非默认）的字段集合
+	Addr              string                   `yaml:"addr"`                 // WebSocket 监听地址
+	Offset            int                      `yaml:"offset"`               // 全局时间偏移（毫秒）
+	Poll              int                      `yaml:"poll"`                 // 全局轮询间隔（毫秒）
+	PriorPlayer       []string                 `yaml:"prior-player"`         // 优先播放器列表
+	PriorPlayerExpire int                      `yaml:"prior-player-expire"`  // 优先播放器暂停超时（秒）
+	PerPlayerIdleHide int                      `yaml:"per-player-idle-hide"` // 指定播放器通道无活跃自动隐藏（秒，0=关）
+	EffectStrategy    string                   `yaml:"-"`                    // 网易云特效最小化策略：park | fadeout（键 cloudmusicv3-effect-strategy）
+	Players           map[string]*PlayerConfig `yaml:"-"`                    // 各播放器专属配置
+	Sources           []string                 `yaml:"-"`                    // 配置来源列表（内部字段）
+	ExplicitKeys      map[string]bool          `yaml:"-"`                    // 被显式设置（非默认）的字段集合
 }
 
 // DefaultConfig 返回内置默认配置
@@ -65,6 +67,7 @@ func DefaultConfig() Config {
 		Poll:              30,
 		PriorPlayer:       []string{"wesing"},
 		PriorPlayerExpire: 15,
+		PerPlayerIdleHide: 0,
 		EffectStrategy:    "fadeout",
 		Players:           make(map[string]*PlayerConfig),
 		ExplicitKeys:      make(map[string]bool),
@@ -85,6 +88,15 @@ func (c *Config) GetPlayerPoll(playerName string) int {
 		return *pc.Poll
 	}
 	return c.Poll
+}
+
+// GetPlayerIdleHide 获取播放器 per-player 通道无活跃自动隐藏阈值（秒，0=关）。
+// 未设置（nil）则回退全局 PerPlayerIdleHide，语义同 GetPlayerOffset / GetPlayerPoll。
+func (c *Config) GetPlayerIdleHide(playerName string) int {
+	if pc, ok := c.Players[playerName]; ok && pc.IdleHide != nil {
+		return *pc.IdleHide
+	}
+	return c.PerPlayerIdleHide
 }
 
 // IsPriorPlayer 检查播放器是否为优先播放器
@@ -200,26 +212,30 @@ func Load() Config {
 
 	// 命令行参数覆盖
 	var cliAddr string
-	var cliOffset, cliPoll int
+	var cliOffset, cliPoll, cliIdleHide, cliPriorExpire int
 	flag.StringVar(&cliAddr, "addr", "", "WebSocket 监听地址")
 	flag.IntVar(&cliOffset, "offset", 0, "歌词时间偏移（毫秒）")
 	flag.IntVar(&cliPoll, "poll", 0, "轮询间隔（毫秒）")
+	flag.IntVar(&cliPriorExpire, "prior-player-expire", 0, "优先播放器暂停超时（秒）；0=关闭全部超时（含普通组），慎用")
+	flag.IntVar(&cliIdleHide, "per-player-idle-hide", 0, "指定播放器通道无活跃自动隐藏（秒，0=关）")
 
 	// 为已注册的播放器动态创建 CLI flag
 	type playerCLI struct {
-		offset *int
-		poll   *int
+		offset   *int
+		poll     *int
+		idleHide *int
 	}
 	cliPlayers := make(map[string]*playerCLI)
 	for _, name := range registeredPlayers {
 		cliPlayers[name] = &playerCLI{
-			offset: flag.Int(name+"-offset", 0, fmt.Sprintf("%s 歌词时间偏移（毫秒）", name)),
-			poll:   flag.Int(name+"-poll", 0, fmt.Sprintf("%s 轮询间隔（毫秒）", name)),
+			offset:   flag.Int(name+"-offset", 0, fmt.Sprintf("%s 歌词时间偏移（毫秒）", name)),
+			poll:     flag.Int(name+"-poll", 0, fmt.Sprintf("%s 轮询间隔（毫秒）", name)),
+			idleHide: flag.Int(name+"-idle-hide", 0, fmt.Sprintf("%s 无活跃自动隐藏（秒，0=关，不传=跟随全局）", name)),
 		}
 	}
 
 	// 自定义 Usage：全局 flag 在前，播放器 flag 按字母排序在后
-	globalFlags := []string{"addr", "offset", "poll"}
+	globalFlags := []string{"addr", "offset", "poll", "prior-player-expire", "per-player-idle-hide"}
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		// 先输出全局 flag
@@ -261,6 +277,10 @@ func Load() Config {
 			cfg.Offset = cliOffset
 		case "poll":
 			cfg.Poll = cliPoll
+		case "prior-player-expire":
+			cfg.PriorPlayerExpire = cliPriorExpire
+		case "per-player-idle-hide":
+			cfg.PerPlayerIdleHide = cliIdleHide
 		default:
 			for _, name := range registeredPlayers {
 				if f.Name == name+"-offset" {
@@ -269,6 +289,9 @@ func Load() Config {
 				} else if f.Name == name+"-poll" {
 					v := *cliPlayers[name].poll
 					cfg.Players[name].Poll = &v
+				} else if f.Name == name+"-idle-hide" {
+					v := *cliPlayers[name].idleHide
+					cfg.Players[name].IdleHide = &v
 				}
 			}
 		}
@@ -407,6 +430,16 @@ func mergeYAML(dst *Config, m map[string]interface{}) {
 			mark("prior-player-expire")
 		}
 	}
+	if v, ok := m["per-player-idle-hide"]; ok {
+		if i, ok := v.(int); ok {
+			dst.PerPlayerIdleHide = i
+			mark("per-player-idle-hide")
+		} else {
+			// §3.3：类型断言失败必须报出键名与实际类型，否则 per-player-idle-hide: "15"
+			// 这类误写会被静默丢弃、零日志。现存分支都欠这一步，新分支不再欠。
+			log.Warn("per-player-idle-hide 期望整数，实际 %T（%v），已忽略", v, v)
+		}
+	}
 	if v, ok := m["cloudmusicv3-effect-strategy"]; ok {
 		if s, ok := v.(string); ok && (s == "park" || s == "fadeout") {
 			dst.EffectStrategy = s
@@ -431,6 +464,14 @@ func mergeYAML(dst *Config, m map[string]interface{}) {
 			if i, ok := v.(int); ok {
 				pc.Poll = &i
 				mark(name + "-poll")
+			}
+		}
+		if v, ok := m[name+"-idle-hide"]; ok {
+			if i, ok := v.(int); ok {
+				pc.IdleHide = &i
+				mark(name + "-idle-hide")
+			} else {
+				log.Warn("%s-idle-hide 期望整数，实际 %T（%v），已忽略", name, v, v)
 			}
 		}
 	}
@@ -475,26 +516,37 @@ prior-player:
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
 
+# 「指定播放器」通道（/<player>/ws 等）无活跃自动隐藏：静默超过 n 秒后向该通道推一次清屏，
+# 隐藏停留的末行歌词。0 = 关闭（默认）。仅作用于 per-player 端点，不影响跟随活跃播放器的根路径
+# （根路径的自动隐藏另由 prior-player-expire 控制）。每个播放器可用 <name>-idle-hide 单独覆盖：
+# 不写=跟随此全局值，0=该播放器关闭，n=该播放器用 n 秒（示例见下方 cloudmusicv3 段）。
+per-player-idle-hide: 0
+
 # 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
+# wesing-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 
 # 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 100   # 低于 50 会被网易云自身的下限抬到 100，写 30 也是跑 100
+# cloudmusicv3-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 cloudmusicv3-effect-strategy: fadeout # 特效最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
 # QQ 音乐 配置
 qqmusic-offset: 400
 # qqmusic-poll: 50
+# qqmusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 
 # 酷狗音乐 配置
 kugou-offset: 430
 # kugou-poll: 30
+# kugou-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 
 # 汽水音乐 配置
 sodamusic-offset: 340
 # sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
+# sodamusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 `
 
 // DefaultConfigContent 返回内置默认配置模板（唯一权威来源）。

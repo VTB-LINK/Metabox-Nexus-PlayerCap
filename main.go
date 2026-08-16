@@ -86,6 +86,19 @@ func main() {
 		fmt.Printf("   播放器: %s (offset=%dms poll=%dms)\n", pn, cfg.GetPlayerOffset(pn), cfg.GetPlayerPoll(pn))
 	}
 	fmt.Printf("   优先播放器: %v (超时: %ds)\n", cfg.PriorPlayer, cfg.PriorPlayerExpire)
+	idleHideParts := []string{}
+	if cfg.PerPlayerIdleHide > 0 {
+		idleHideParts = append(idleHideParts, fmt.Sprintf("全局 %ds", cfg.PerPlayerIdleHide))
+	} else {
+		idleHideParts = append(idleHideParts, "全局关")
+	}
+	for _, pn := range playerNames {
+		// 只列与全局不同的显式覆盖（IdleHide != nil）
+		if pc := cfg.Players[pn]; pc != nil && pc.IdleHide != nil && *pc.IdleHide != cfg.PerPlayerIdleHide {
+			idleHideParts = append(idleHideParts, fmt.Sprintf("%s=%ds", pn, *pc.IdleHide))
+		}
+	}
+	fmt.Printf("   per-player 无活跃自动隐藏: %s\n", strings.Join(idleHideParts, "，"))
 	fmt.Println("===========================================================")
 
 	// 遥测（Sentry）。放在 Banner 之后、checkAndUpdate 之前：自动更新本身就是个故障点
@@ -129,6 +142,9 @@ func main() {
 		effectStrategy = "fadeout"
 	}
 	srv.SetDefaultEffectStrategy(effectStrategy)
+	// per-player 通道无活跃自动隐藏阈值解析器（issue #47）。Server 不持有 config，按既有单值注入
+	// 的思路把 cfg.GetPlayerIdleHide 喂进去（nil=全关；此处恒非 nil，全局默认 0 即全关）。
+	srv.SetIdleHideResolver(cfg.GetPlayerIdleHide)
 
 	// 构建接口地址
 	scheme := "http"
@@ -169,21 +185,23 @@ func main() {
 	configOM.Set("poll", cfg.Poll)
 	configOM.Set("prior-player", cfg.PriorPlayer)
 	configOM.Set("prior-player-expire", cfg.PriorPlayerExpire)
+	configOM.Set("per-player-idle-hide", cfg.PerPlayerIdleHide)
 	configOM.Set("cloudmusicv3-effect-strategy", cfg.EffectStrategy)
 	for _, name := range playerNames {
 		configOM.Set(name+"-offset", cfg.GetPlayerOffset(name))
 		configOM.Set(name+"-poll", cfg.GetPlayerPoll(name))
+		configOM.Set(name+"-idle-hide", cfg.GetPlayerIdleHide(name))
 	}
 
 	// config_overwritten：按 config 的键顺序筛选出显式设置的条目
 	configOverwritten := []string{}
-	for _, k := range []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "cloudmusicv3-effect-strategy"} {
+	for _, k := range []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "cloudmusicv3-effect-strategy"} {
 		if cfg.ExplicitKeys[k] {
 			configOverwritten = append(configOverwritten, k)
 		}
 	}
 	for _, name := range playerNames {
-		for _, k := range []string{name + "-offset", name + "-poll"} {
+		for _, k := range []string{name + "-offset", name + "-poll", name + "-idle-hide"} {
 			if cfg.ExplicitKeys[k] {
 				configOverwritten = append(configOverwritten, k)
 			}

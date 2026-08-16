@@ -136,7 +136,7 @@ func TestRootHTTPMatchesWSWhenNoActive(t *testing.T) {
 	})
 
 	// WS 侧的答案
-	evts := s.buildInitEvents("")
+	evts := s.buildInitEvents("", true)
 	if len(evts) != 1 || evts[0].Type != player.EventPlayerClear {
 		t.Fatalf("前置条件：WS 在无 activePlayer 时应收到单条 player_clear，实得 %+v", evts)
 	}

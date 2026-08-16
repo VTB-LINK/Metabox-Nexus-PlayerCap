@@ -1486,6 +1486,12 @@
         const wordFxAnim = urlParams.has('word_fx_anim')
             ? Math.max(0, Math.min(2, numParam('word_fx_anim', 800) / 1000))
             : null;
+        // 关闭换行动画（issue #48）：0 / off 时进入/退场过渡即时化（硬切）——实现是 transitionOut 里
+        // 强制 scale=0。拆成两个独立参数：line_anim 管歌词行（逐字/非逐字/首行/seek 全覆盖），
+        // title_anim 管 title 模式的歌名入场。页面同一时刻只显示歌词或歌名其一，故 transitionOut 按
+        // titleMode 二选一。默认（不带参数）保留动画，沿用本页「默认开、0/off 关」的惯例。
+        const lineAnimDisabled = urlParams.get('line_anim') === '0' || urlParams.get('line_anim') === 'off';
+        const titleAnimDisabled = urlParams.get('title_anim') === '0' || urlParams.get('title_anim') === 'off';
         const fontColor = urlParams.get('color') || null;
         const customFont = urlParams.get('font') || null;
         const glowEnabled = urlParams.has('glow');
@@ -2366,8 +2372,20 @@
             // 取消上一次未完成的退场
             if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
             // scale 缺省（走服务端 lyric_update 那条原路径）= 1，即原时长。
-            const s = (typeof scale === 'number' && scale >= 0) ? scale : 1;
+            // 关闭换行动画时强制 scale=0：applyFxScale 把 --fx-appear/--fx-exit 置 0ms（进入/退场即时），
+            // 且交接点 EXIT_HANDOFF_MS*0=0（内容立即交换）。title 模式看 title_anim、否则看 line_anim
+            // （页面同一时刻只显示歌名或歌词其一）。
+            const animDisabled = titleMode ? titleAnimDisabled : lineAnimDisabled;
+            const s = animDisabled ? 0 : ((typeof scale === 'number' && scale >= 0) ? scale : 1);
             applyFxScale(container, s);
+
+            // 硬切（s=0）：同步替换内容，避免退场类以 0ms 置 opacity:0 后、宏任务 setTimeout(_,0) 触发前
+            // 事件循环渲染出一帧空白（三行模式无 handoff 重叠时尤明显）。同步 afterExit 使旧内容加类后
+            // 立即被覆盖、不被绘制，做到无缝同帧硬切。
+            if (s === 0) {
+                afterExit();
+                return;
+            }
 
             const zones = container.querySelectorAll('.lyric-zone');
             const lines = container.querySelectorAll('.lyric-line, .lyric-sub-text, .idle-text');
@@ -2962,6 +2980,13 @@
                                 </div>
                                 <input type="hidden" id="cfgLyricAnchor" value="c">
                             </div>
+                            <div class="editor-row">
+                                <label>关闭换行动画</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="cfgNoLineAnim">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
                         </div>
 
                         <!-- 溢出设置（歌词模式，单行时生效） -->
@@ -3022,6 +3047,13 @@
                                     <option value="left">靠左</option>
                                     <option value="right">靠右</option>
                                 </select>
+                            </div>
+                            <div class="editor-row">
+                                <label>关闭换行动画</label>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="cfgTitleNoAnim">
+                                    <span class="toggle-slider"></span>
+                                </label>
                             </div>
                         </div>
 
@@ -3574,6 +3606,10 @@
                     if (wfx === 'off') params.set('word_fx', '0');
                     else params.set('word_fx', wfx);
                 }
+                // 关闭换行动画（歌词）：仅非 title 模式、勾选才写 line_anim=0（默认不写=保留动画）。
+                if (mode !== 'title' && document.getElementById('cfgNoLineAnim').checked) {
+                    params.set('line_anim', '0');
+                }
 
                 // 歌词溢出设置（pure 模式 one_line 时生效）
                 const pOv = document.getElementById('cfgPureOverflow').value;
@@ -3653,6 +3689,11 @@
                     // 歌词：九宫格锚点（默认 c=居中，缺省不写入=旧行为）
                     const anchor = document.getElementById('cfgLyricAnchor').value;
                     if (anchor && anchor !== 'c') params.set('lyric_anchor', anchor);
+                }
+
+                // 关闭换行动画（歌名）：仅 title 模式、勾选才写 title_anim=0。
+                if (mode === 'title' && document.getElementById('cfgTitleNoAnim').checked) {
+                    params.set('title_anim', '0');
                 }
 
                 // 歌名溢出参数
@@ -3839,7 +3880,7 @@
             const controls = ['cfgOneLine', 'cfgSubText', 'cfgSubPos', 'cfgSubOverflow',
                 'cfgSubGap', 'cfgSubFontScale', 'cfgSubColorMode', 'cfgSubColor', 'cfgSubGlow', 'cfgSubGlowColor',
                 'cfgSubStroke', 'cfgSubStrokeWidth', 'cfgSubStrokeColor',
-                'cfgWordFx', 'cfgFontScale', 'cfgLyricAnchor', 'cfgPlayer', 'cfgColor',
+                'cfgWordFx', 'cfgNoLineAnim', 'cfgTitleNoAnim', 'cfgFontScale', 'cfgLyricAnchor', 'cfgPlayer', 'cfgColor',
                 'cfgGlow', 'cfgGlowColor', 'cfgStroke', 'cfgStrokeWidth', 'cfgStrokeColor',
                 'cfgBg', 'cfgBgTransparent',
                 'cfgCoverStyle', 'cfgCoverRotate', 'cfgSpinSpeed', 'cfgCoverSize',

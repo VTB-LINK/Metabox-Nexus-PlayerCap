@@ -59,6 +59,13 @@ type PlayerState struct {
 	Duration    float32
 	Position    float32 // 整曲实时播放位置（秒）；喂 all_lyrics 的 position
 	Progress    float32
+
+	// per-player 通道无活跃自动隐藏（issue #47）。IdleHidden 是叠加在缓存之上的「视图隐藏」标志，
+	// 只影响 per-player 传输（/{player}/*），绝不影响根路径（§3.4）；缓存本身照常保持新鲜（§2.7）。
+	// 播放器一恢复，UpdatePlayerState 即解除隐藏：HTTP/重连立刻取回缓存；已在线的 WS/SSE 则由恢复后的
+	// 实时事件自然复原（下一条 lyric_update 到达前可能仍空白）。
+	LastEventAt time.Time // 最近一次非内部事件的时刻，供无活跃巡检计时
+	IdleHidden  bool      // 该 per-player 通道当前是否处于无活跃隐藏态
 }
 
 // ServiceInfo 服务配置信息
@@ -90,6 +97,10 @@ type Server struct {
 
 	// 网易云特效镜像帧分发（独立于 JSON 事件通道）
 	effectHub *effectHub
+
+	// per-player 通道无活跃自动隐藏阈值解析器（秒，0=关），由 main 注入 cfg.GetPlayerIdleHide。
+	// 受 s.mu 保护；nil=未注入=全关（本地/测试零副作用）。
+	idleHideResolver func(playerName string) int
 }
 
 // NewServer 创建统一服务器
@@ -210,7 +221,7 @@ func (s *Server) NotifySubscribersFullState(oldPlayer, newPlayer string) map[str
 		Data:   &player.PlayerSwitchInfo{From: oldPlayer, To: newPlayer},
 	}
 
-	events := s.buildInitEvents(newPlayer)
+	events := s.buildInitEvents(newPlayer, false) // 根切换：不看 per-player 隐藏态（§3.4）
 
 	// 收集实际包含的事件类型及其内容哈希
 	sentHashes := make(map[string]uint64, len(events))
@@ -247,7 +258,7 @@ func (s *Server) NotifySubscribersFullState(oldPlayer, newPlayer string) map[str
 
 // buildInitEvents 构建指定播放器的完整缓存事件列表
 // playerName="" 时使用 activePlayer
-func (s *Server) buildInitEvents(playerName string) []WSEvent {
+func (s *Server) buildInitEvents(playerName string, honorHidden bool) []WSEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -257,6 +268,22 @@ func (s *Server) buildInitEvents(playerName string) []WSEvent {
 			Player: "",
 			Data:   struct{}{},
 		}}
+	}
+
+	// per-player 通道处于无活跃隐藏态：per-player 连接重连时给出与根清除一致的「已清空」初始态，
+	// 而不是缓存里停留的末行歌词。
+	// honorHidden 必须由调用方区分意图：per-player 连接的初始化(handleWS/handleSSE)传 true；而
+	// NotifySubscribersFullState 用**非空的新 activePlayer 名**调本函数、结果推给**根订阅者**，必须传
+	// false——否则根切到一个恰处于 per-player 隐藏态的播放器时会被清空，让 per-player 的视图标志泄漏进
+	// 根路径(违反 §3.4)。
+	if honorHidden && playerName != "" {
+		if ps, ok := s.playerStates[playerName]; ok && ps != nil && ps.IdleHidden {
+			return []WSEvent{{
+				Type:   player.EventPlayerClear,
+				Player: playerName,
+				Data:   struct{}{},
+			}}
+		}
 	}
 
 	target := playerName
@@ -315,6 +342,15 @@ func (s *Server) SetActivePlayer(name string) {
 	}
 }
 
+// SetIdleHideResolver 注入 per-player 通道无活跃自动隐藏阈值解析器（秒，0=关）。
+// Server 刻意不持有 config（见 §3.4 边界），由 main 在启动时把 cfg.GetPlayerIdleHide 喂进来，
+// 与 effect 策略等单值注入同一思路。
+func (s *Server) SetIdleHideResolver(fn func(playerName string) int) {
+	s.mu.Lock()
+	s.idleHideResolver = fn
+	s.mu.Unlock()
+}
+
 // NotifySubscribersClear 向根订阅者推送活跃播放器清除通知
 // 发送 player_switch(to="") + player_clear 双重事件
 func (s *Server) NotifySubscribersClear(oldPlayer string) {
@@ -350,6 +386,109 @@ func (s *Server) NotifySubscribersClear(oldPlayer string) {
 	}
 }
 
+// watchIdleHide 每秒巡检各 per-player 通道的无活跃隐藏（issue #47）。它只影响 per-player 视图
+// （/{player}/* 的 HTTP 快照、WS/SSE 重连初始态、以及 live 推送），绝不读或改 activePlayer /
+// skipRoot / 根路径（§3.4）；IdleHidden 只是叠加在缓存之上的一层「视图隐藏」，缓存保持新鲜（§2.7）。
+func (s *Server) watchIdleHide() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.sweepIdleHide(time.Now())
+	}
+}
+
+// idleClearTarget 是一次巡检里需要清除的 per-player 通道及其停下那一刻的整曲进度。
+type idleClearTarget struct {
+	name     string
+	progress float32
+}
+
+// sweepIdleHide 把「无活跃达阈值」的 per-player 通道标记为隐藏，并向其 live 订阅者推一次清除。
+// 只有开启了自动隐藏（阈值 > 0）、曾经活跃过、当前不在播放、且静默达阈值的通道才会被隐藏。
+func (s *Server) sweepIdleHide(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn := s.idleHideResolver // 纯配置读闭包（cfg.GetPlayerIdleHide），不回锁 s.mu，可在锁内直接调
+	var toClear []idleClearTarget
+	if fn != nil {
+		for name, ps := range s.playerStates {
+			if ps == nil || ps.IdleHidden || ps.LastEventAt.IsZero() {
+				continue // 已隐藏、或从未出过事件的通道不处理（后者保持其自然待机态）
+			}
+			thr := fn(name)
+			if thr <= 0 {
+				continue // 该通道未开启自动隐藏
+			}
+			status := "offline"
+			if ps.Status != nil {
+				status = ps.Status.Status
+			}
+			if status == "playing" {
+				continue // 正在放（含长间奏）不隐，对齐 issue #47「不播放时才隐藏」
+			}
+			if now.Sub(ps.LastEventAt) >= time.Duration(thr)*time.Second {
+				ps.IdleHidden = true
+				// 与根路径「清除活跃播放器」日志对齐：清屏是可见输出变化，需留现场证据（§1.2）。
+				serverLog.Info("per-player [%s] 无活跃达 %ds，推送清屏隐藏", name, thr)
+				// 带上停下那一刻的整曲进度：SSE 清行的 lyric_update(index:-1) 需要它，
+				// 且它与最后一条 all_lyrics.progress 一致、不制造自相矛盾的事件（见 player/lyricupdate_lint_test.go）。
+				toClear = append(toClear, idleClearTarget{name: name, progress: ps.Progress})
+			}
+		}
+	}
+	// 仍持 s.mu 时推送清除：使「置 IdleHidden=true + 推 clear」对 UpdatePlayerState 原子。否则解锁后、
+	// 推送前播放器恰好恢复（UpdatePlayerState 置 IdleHidden=false 并经 NotifySubscribers 推新歌词）会造成
+	// sub.ch=[歌词, clear]，迟到的 clear 把已恢复画面清成空白。发送均 select-default 非阻塞、无网络 I/O；
+	// 锁序 s.mu→subMu 与既有 NotifySubscribers* 一致，无死锁。
+	for _, tc := range toClear {
+		s.notifyPerPlayerIdleClear(tc.name, tc.progress)
+	}
+}
+
+// notifyPerPlayerIdleClear 向某 per-player 通道的 live 订阅者推一次「清除」，按传输/类型过滤裁剪，
+// 使 WS/SSE/HTTP 三种传输的可见结果与根路径的清除一致：
+//   - WS / 全类型订阅者：一条 player_clear（Player=name）即整体清屏（歌词+封面+标题）。
+//   - 类型过滤的 SSE：player_clear 会被自身过滤挡掉，改发 in-band——lyric_update-SSE 发
+//     lyric_update(index:-1)（文档已定义的「无歌词」清行），song_info-SSE 发空 song_info_update。
+//
+// 只投递给 sub.player==name 的订阅者，不碰根订阅者、不读 activePlayer/skipRoot（§3.4）；全部非阻塞（§2.1）。
+func (s *Server) notifyPerPlayerIdleClear(name string, progress float32) {
+	clearEvt := WSEvent{Type: player.EventPlayerClear, Player: name, Data: struct{}{}}
+	// index:-1 是文档已定义的「无歌词」清行形式；Progress 带上停下那一刻的整曲进度，
+	// 既满足 lyricupdate 门禁、又与最后一条 all_lyrics.progress 一致（不糊零值假契约）。
+	lyricClear := WSEvent{Type: player.EventLyricUpdate, Player: name, Data: &LyricUpdate{Index: -1, Progress: progress}}
+	songClear := WSEvent{Type: player.EventSongInfoUpdate, Player: name, Data: struct{}{}}
+
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+	for sub := range s.subscribers {
+		if sub.player != name {
+			continue
+		}
+		if sub.matchesType(player.EventPlayerClear) {
+			// WS / 全类型：一条 player_clear 即整体清屏
+			select {
+			case sub.ch <- clearEvt:
+			default:
+			}
+			continue
+		}
+		// 类型过滤的 SSE：按其过滤类型发对应的 in-band 清除
+		if sub.matchesType(player.EventLyricUpdate) {
+			select {
+			case sub.ch <- lyricClear:
+			default:
+			}
+		}
+		if sub.matchesType(player.EventSongInfoUpdate) {
+			select {
+			case sub.ch <- songClear:
+			default:
+			}
+		}
+	}
+}
+
 // getPlayerState 获取/创建播放器状态
 func (s *Server) getPlayerState(playerName string) *PlayerState {
 	if ps, ok := s.playerStates[playerName]; ok {
@@ -364,6 +503,13 @@ func (s *Server) getPlayerState(playerName string) *PlayerState {
 func (s *Server) UpdatePlayerState(evt player.Event) {
 	s.mu.Lock()
 	ps := s.getPlayerState(evt.PlayerName)
+
+	// 任何对外真实事件都视为该 per-player 通道的一次活跃：刷新计时锚点、解除无活跃隐藏态。
+	// 内部事件（clear_song_data）是「停止/清缓存」信号、不算活跃，不重置计时（否则会推迟隐藏）。
+	if !internalEvents[evt.Type] {
+		ps.LastEventAt = time.Now()
+		ps.IdleHidden = false
+	}
 
 	switch evt.Type {
 	case player.EventStatusUpdate:
@@ -494,6 +640,8 @@ func (s *Server) Start(addr string, readyCh chan struct{}) error {
 	if readyCh != nil {
 		close(readyCh)
 	}
+	// per-player 通道无活跃自动隐藏的巡检（读 SetIdleHideResolver 注入的阈值；未注入即全空转）
+	go s.watchIdleHide()
 	return http.Serve(ln, corsMiddleware(mux))
 }
 
@@ -522,7 +670,7 @@ func (s *Server) handleWS(playerName string) http.HandlerFunc {
 		serverLog.Info("WS 连接: %s player=%q (total: %d)", conn.RemoteAddr(), playerName, s.wsCount())
 
 		// 发送初始缓存状态
-		for _, evt := range s.buildInitEvents(playerName) {
+		for _, evt := range s.buildInitEvents(playerName, true) {
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			conn.WriteJSON(evt)
 		}
@@ -659,6 +807,19 @@ func (s *Server) resolvePlayer(playerName string) string {
 	return s.activePlayer
 }
 
+// perPlayerHidden 报告某 per-player 请求当前是否处于无活跃隐藏态（issue #47）。
+// 仅对 per-player 请求（requestPlayer != ""）生效；根请求恒返回 false——根路径绝不看 per-player
+// 的 IdleHidden（§3.4：per-player 状态不得影响根，哪怕 activePlayer 恰好就是它）。
+func (s *Server) perPlayerHidden(requestPlayer string) bool {
+	if requestPlayer == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ps, ok := s.playerStates[requestPlayer]
+	return ok && ps != nil && ps.IdleHidden
+}
+
 // --- HTTP 读取端点：锁内取快照，锁外序列化 ---
 //
 // 这四个 handler 的既有写法是「RLock → 取 *PlayerState → RUnlock → 读它的字段」，
@@ -690,6 +851,10 @@ func (s *Server) resolvePlayer(playerName string) string {
 func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
+		if s.perPlayerHidden(playerName) {
+			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
+			return
+		}
 
 		s.mu.RLock()
 		var data *AllLyrics
@@ -716,6 +881,10 @@ func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 func (s *Server) handleLyricUpdate(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
+		if s.perPlayerHidden(playerName) {
+			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
+			return
+		}
 
 		s.mu.RLock()
 		var data *LyricUpdate
@@ -735,6 +904,10 @@ func (s *Server) handleLyricUpdate(playerName string) http.HandlerFunc {
 func (s *Server) handleStatusUpdate(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
+		if s.perPlayerHidden(playerName) {
+			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
+			return
+		}
 
 		s.mu.RLock()
 		var data *StatusMessage
@@ -754,6 +927,10 @@ func (s *Server) handleStatusUpdate(playerName string) http.HandlerFunc {
 func (s *Server) handleSongInfo(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
+		if s.perPlayerHidden(playerName) {
+			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
+			return
+		}
 
 		s.mu.RLock()
 		var data *SongInfoUpdate
@@ -790,7 +967,7 @@ func (s *Server) handleSSE(playerName string, eventTypes ...string) http.Handler
 		serverLog.Info("SSE 订阅: path=%s player=%q eventTypes=%v", r.URL.Path, playerName, eventTypes)
 
 		// 发送初始缓存（仅匹配 eventTypes 的事件）
-		for _, evt := range s.buildInitEvents(playerName) {
+		for _, evt := range s.buildInitEvents(playerName, true) {
 			if !sub.matchesType(evt.Type) {
 				continue
 			}
