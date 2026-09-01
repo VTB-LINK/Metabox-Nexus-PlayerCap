@@ -197,7 +197,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		applyDetailedOffset(lyrics, offsetSec)
 		lyricItems := make([]player.LyricLine, len(lyrics))
 		for i, l := range lyrics {
-			lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", l.Detailed, offsetSec)
+			lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, "", "", l.Detailed, offsetSec)
 		}
 
 		// 歌曲总时长
@@ -519,7 +519,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			// 按歌词时间轴算。KRC 源无关——wesing 逐字直接来自 CharElement 内存（l.Detailed），
 			// words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传；无逐字的行为零值 {}。
 			p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-				l.Index, l.Time, l.Text, "", l.Detailed,
+				l.Index, l.Time, l.Text, "", "", l.Detailed,
 				offsetSec, playTime, songDuration,
 			))
 		}

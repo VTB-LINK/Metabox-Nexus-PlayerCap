@@ -1346,18 +1346,25 @@ LOW 三段常对同一处代码给出不同的、逐级更准的判断——只�
 | 出货二进制 | `Metabox-Nexus-PlayerCap.exe`（Windows/amd64） | canonical 名，自动更新链路依赖 |
 | CI 构建命令 | `go build -ldflags "-X 'main.Version=${VERSION}'" -o "${EXE_NAME}"` | `release.yml:74`、`build-windows.yml:61`（`main.Version` 外层有单引号） |
 
-### 13.2 直接依赖（5 项）
+### 13.2 直接依赖（9 项）
 
 | 依赖 | 用途 |
 |---|---|
+| `github.com/getsentry/sentry-go v0.48.0` | 遥测与崩溃上报（`telemetry`；空 DSN 自动禁用） |
+| `github.com/go-ole/go-ole v1.2.6` | ITaskbarList3 COM 调用（`taskbar`，conhost 任务栏进度） |
 | `github.com/gorilla/websocket v1.5.3` | WS 订阅端、CDP 客户端、effect 帧通道 |
+| `github.com/josephspurrier/goversioninfo v1.7.0` | 生成带版本信息的多尺寸 Windows 图标 .syso（`tools/winicon`） |
 | `github.com/shirou/gopsutil/v3 v3.24.2` | 进程发现 |
-| `golang.org/x/mod v0.25.0` | `semver` 版本比较，自动更新用（`main.go` 的 `decideUpdate` / `isReleaseVersion`） |
-| `golang.org/x/sys v0.17.0` | Windows API |
+| `golang.org/x/image v0.44.0` | 图标缩放（Lanczos3，`tools/winicon`） |
+| `golang.org/x/mod v0.37.0` | `semver` 版本比较，自动更新用（`main.go` 的 `decideUpdate` / `isReleaseVersion`） |
+| `golang.org/x/sys v0.45.0` | Windows API |
 | `gopkg.in/yaml.v3 v3.0.1` | 配置解析 |
 
-`golang.org/x/sys/windows` 全仓仅 3 处：`player/cloudmusic/park/park.go`、
-`player/cloudmusic/watchdog/registry.go`、`player/kugou/watchdog/watchdog.go`。
+`golang.org/x/sys/windows` 主包直接用于 7 个源文件：`taskbar/taskbar_windows.go`、`telemetry/sysinfo.go`、
+`i18n/detect_windows.go`、`player/cloudmusic/park/park.go`、`player/cloudmusic/watchdog/version.go`、
+`player/sodamusic/watchdog/watchdog.go`、`player/kugou/watchdog/watchdog.go`；`registry` 子包另 3 处：
+`clientid/clientid.go`、`player/cloudmusic/watchdog/registry.go`、`player/kugou/watchdog/watchdog.go`
+（测试另见 `telemetry/compatshim_test.go`）。
 **`config/` 与 `logger/` 内禁止出现**（见「最高约束」§0）。
 
 ### 13.3 目录树（对 HEAD `0654b41` 核实）
@@ -1403,6 +1410,9 @@ LOW 三段常对同一处代码给出不同的、逐级更准的判断——只�
 │   ├── dedup.go                # ★ hashEventData：FNV-1a 内容比对去重（取代时间窗口抑制）
 │   ├── effect.go               # ★ effectHub：特效帧广播、策略、参数、状态 JSON
 │   └── race_test.go            # ✅ HTTP 端点锁内取快照的竞态门禁
+├── taskbar/                    # 控制台任务栏进度条子系统
+│   ├── taskbar.go              # 跨平台抽象；OSC 9;4 + conhost 后端注入点（非 Windows 空实现）
+│   └── taskbar_windows.go      # ITaskbarList3 COM + FlashWindowEx（//go:build windows）
 ├── tools/                      # ★ 全部为本地开发/CI 工具，非出货路径
 ├── doc/                        # 三份文档，均已确定滞后（见 13.6）
 ├── build-assets/winicon/masters/{metabox5,metabox10}-sqr.png # 图标母版（5=发版/默认紫，10=dev）

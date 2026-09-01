@@ -219,6 +219,7 @@
         "play_time": 3.1100001,
         "text": "Cold enough to chill my bones",
         "sub_text": "冷得足以冻到我的骨头",
+        "roma_text": "",
         "text_detailed": {
           "timestamp": 4.44,
           "play_time": 3.94,
@@ -235,6 +236,7 @@
         "play_time": 7.07,
         "text": "It feels like I don't know you anymore",
         "sub_text": "感觉就像我已经不再认识你了",
+        "roma_text": "",
         "text_detailed": {
           "timestamp": 7.92,
           "play_time": 7.42,
@@ -276,6 +278,7 @@
 - `lyrics[].timestamp` - 该歌词行的起始时间戳（秒）
 - `lyrics[].play_time` - 该歌词行应用 offset 后的展示时间（秒）
 - `lyrics[].sub_text` - 副歌词文本（翻译，无时为空字符串）——**并非所有平台都有**，见下方能力矩阵
+- `lyrics[].roma_text` - 音译歌词文本（逐行发音标注，无时为空字符串）——**cloudmusicv3、qqmusic 与 kugou 有**（cloudmusicv3 是网易云 romalrc 罗马音，qqmusic 是 QQ QRC 逐字罗马音，kugou 是 KRC 内嵌 type=0、形态因语言而异：日文罗马音、韩文汉语谐音；均与 `sub_text` 翻译相互独立、互不覆盖），见下方能力矩阵
 - `lyrics[].text_detailed` - 该行的逐字扩展；无逐字时为空对象 `{}`。**同一首歌里可以逐行不同**（空行、纯人声段落常常没有）
 - `lyrics_detailed` - 逐字歌词集合，**仅含有逐字数据的行**；无逐字时为空数组 `[]`
   - `lyric_index` - **对应 `lyrics[].index`**，用它关联回歌词行
@@ -291,19 +294,19 @@
 
 #### 平台能力矩阵（实测）
 
-| | `sub_text`（翻译） | `text_detailed`（逐字） |
-|---|---|---|
-| **cloudmusicv3** | 有 | 有（YRC） |
-| **qqmusic** | 有 | 有（QRC） |
-| **wesing** | 恒 `""` | 有（内存字级）\* |
-| **kugou** | 有（KRC 内嵌译轨，按行号对齐）\* | 有（KRC）\* |
-| **sodamusic** | 有（独立 tlyric LRC，按时间戳对齐）\*\* | 有（平台下发的明文 KRC）\*\* |
+| | `sub_text`（翻译） | `roma_text`（音译） | `text_detailed`（逐字） |
+|---|---|---|---|
+| **cloudmusicv3** | 有 | 有（romalrc） | 有（YRC） |
+| **qqmusic** | 有 | 有（QRC 逐字罗马音） | 有（QRC） |
+| **wesing** | 恒 `""` | 恒 `""` | 有（内存字级）\* |
+| **kugou** | 有（KRC 内嵌译轨，按行号对齐）\* | 有（KRC 内嵌 type=0，按行号对齐；实测日文罗马音 / 韩文汉语谐音）\* | 有（KRC）\* |
+| **sodamusic** | 有（独立 tlyric LRC，按时间戳对齐）\*\* | 实测平台无音译源、恒空\*\* | 有（平台下发的明文 KRC）\*\* |
 
-**逐字**五家都有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC / sodamusic 明文 KRC / wesing 内存字级）；**翻译**四家有（cloudmusicv3 / qqmusic / kugou / sodamusic）、wesing 无。字段一律存在（值可能为空），下游不必按平台分支取值。
+**逐字**五家都有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC / sodamusic 明文 KRC / wesing 内存字级）；**翻译**四家有（cloudmusicv3 / qqmusic / kugou / sodamusic）、wesing 无；**音译**cloudmusicv3、qqmusic 与 kugou 有（cloudmusicv3 是网易云 romalrc 逐行罗马音，qqmusic 是 QQ QRC 逐字罗马音，kugou 是 KRC 内嵌 type=0 逐行发音标注、形态因语言而异：日文罗马音、韩文汉语谐音；sodamusic 实测平台无音译源、恒空），均与翻译 `sub_text` 是相互独立、互不覆盖的两条轨。字段一律存在（值可能为空），下游不必按平台分支取值。
 
-\* 逐字均**逐行**判定：kugou 拿不到 KRC、回落行级 LRC 时该行 `text_detailed` 为 `{}`；wesing 的逐字来自进程内存的卡拉OK字级时间，某行字级时间轴不合法（NaN / 越界 / 非单调）时该行退回行级、为 `{}`。kugou 翻译另需 KRC 头部含中文译轨（无译轨时 `sub_text` 为空，逐字不受影响）。
+\* 逐字均**逐行**判定：kugou 拿不到 KRC、回落行级 LRC 时该行 `text_detailed` 为 `{}`；wesing 的逐字来自进程内存的卡拉OK字级时间，某行字级时间轴不合法（NaN / 越界 / 非单调）时该行退回行级、为 `{}`。kugou 翻译另需 KRC 头部含中文译轨（无译轨时 `sub_text` 为空，逐字不受影响）；音译同理取自 KRC（头部含 type=0 轨才有，无轨或回落行级 LRC 时 `roma_text` 为空），与翻译、逐字各走各的轨、互不影响。
 
-\*\* sodamusic **不逐行判定**：平台给不出 KRC 时整曲按无歌词处理（`index: -1`、`lyrics: []`），所以它的每一行要么都带逐字、要么根本没有行——`lyrics_detailed` 与 `lyrics` 恒等长或同时为空。它的翻译是平台单独下发的一份 LRC（`translations.cn`），按绝对时间戳与主歌词行对齐，与 kugou 内嵌译轨的行号对齐**不是同一种机制**；该曲无译轨、或某行未被译轨覆盖（间奏）时 `sub_text` 为空。
+\*\* sodamusic **不逐行判定**：平台给不出 KRC 时整曲按无歌词处理（`index: -1`、`lyrics: []`），所以它的每一行要么都带逐字、要么根本没有行——`lyrics_detailed` 与 `lyrics` 恒等长或同时为空。它的翻译是平台单独下发的一份 LRC（`translations.cn`），按绝对时间戳与主歌词行对齐，与 kugou 内嵌译轨的行号对齐**不是同一种机制**；该曲无译轨、或某行未被译轨覆盖（间奏）时 `sub_text` 为空。音译则取自同一份内嵌 KRC 的 type=0 轨（与 kugou 同一套行号对齐解析）：但实测汽水的 KRC 不含内嵌轨、sharedState 也无独立音译字段，故 `roma_text` 恒空；代码共用 kugou 解析、防御性就绪。
 
 #### 歌词数组前几行可能是元数据
 
@@ -410,6 +413,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
     "index": 37,
     "text": "There's plenty of time to sleep when we die",
     "sub_text": "死后自会长眠。",
+    "roma_text": "",
     "timestamp": 157.22,
     "play_time": 156.46,
     "position": 156.4659,
@@ -431,6 +435,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 - `index` - 歌词行号（`-1` = 平台没有歌词，见下方）
 - `text` - 主歌词文本
 - `sub_text` - 副歌词文本（翻译，无时为空字符串）。**cloudmusicv3 / qqmusic / kugou / sodamusic 有，wesing 恒为空**（kugou 仅 KRC 含中文译轨时有值；sodamusic 仅平台下发了 `translations.cn` 译轨且该行被覆盖时有值）
+- `roma_text` - 音译歌词文本（逐行发音标注，无时为空字符串）。**cloudmusicv3、qqmusic 与 kugou 有**：cloudmusicv3 取自网易云 romalrc（罗马音），qqmusic 是 QQ QRC 逐字罗马音，kugou 取自 KRC 内嵌 type=0 轨（按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音，如 `이유 넌 이해 못 해` → `一哟 弄 一嘿 莫 嘿`）；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；均与 `sub_text` 翻译相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；wesing 恒为空
 - `timestamp` - 该行的原始时间戳（秒）
 - `play_time` - **本行的播出时间**（秒）= `timestamp − offset`，**恒小于 `timestamp`**（逐字长引子行取首字时刻，会更小）
 - `position` - **整曲实时播放位置**（秒），= `progress × duration`，做插值锚点用它；与 `play_time`（本行播出时间）是两个量
@@ -457,6 +462,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
   "index": -1,
   "text": "",
   "sub_text": "",
+  "roma_text": "",
   "timestamp": 0,
   "play_time": 0,
   "position": 28.151,
@@ -468,7 +474,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 **`index: -1` 说明：**
 
 - 含义是**平台完全没有返回歌词数据**，不是「这是纯音乐」——两者不等价，见下
-- `text` / `sub_text` 为空字符串，`timestamp` 为 `0`
+- `text` / `sub_text` / `roma_text` 为空字符串，`timestamp` 为 `0`
 - **`position` 与 `progress` 照常跟着歌走**（示例：`28.151` / `0.125` = `28.151/225`），`play_time` 为 `0`（无行可播出）。歌没有歌词，但它还在播
 - 与它同时，服务端会发一条 `all_lyrics`，其 `count: 0`、`lyrics: []`
 - **判断有无歌词用 `msg.data.index === -1`**，而非 `msg.data.text`
@@ -641,14 +647,14 @@ data: {"type":"lyric_update","player":"wesing","data":{}}
 
 **初始发送（有歌词时）：**
 ```
-data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"更不应舍弃","sub_text":"","timestamp":30.429,"play_time":30.229,"position":30.229,"progress":0.10236486,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":5,"text":"更不应舍弃","sub_text":"","roma_text":"","timestamp":30.429,"play_time":30.229,"position":30.229,"progress":0.10236486,"text_detailed":{}}}
 ```
 
 **播放过程中，每当歌词更新时接收：**
 ```
-data: {"type":"lyric_update","player":"wesing","data":{"index":3,"text":"手を伸ばしても届かない","sub_text":"","timestamp":3.8,"play_time":3.85,"position":3.85,"progress":0.25,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":3,"text":"手を伸ばしても届かない","sub_text":"","roma_text":"","timestamp":3.8,"play_time":3.85,"position":3.85,"progress":0.25,"text_detailed":{}}}
 
-data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い森の奥へ迷い込む","sub_text":"","timestamp":5.5,"play_time":5.6,"position":5.6,"progress":0.3333,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い森の奥へ迷い込む","sub_text":"","roma_text":"","timestamp":5.5,"play_time":5.6,"position":5.6,"progress":0.3333,"text_detailed":{}}}
 ```
 
 **完整生命周期示例：**
@@ -657,11 +663,11 @@ data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い�
 data: {"type":"lyric_update","player":"wesing","data":{}}
 
 （用户开始播放歌曲）
-data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"position":18.15,"progress":0.05,"text_detailed":{}}}
-data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"position":20.05,"progress":0.1,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","roma_text":"","timestamp":18.326,"play_time":18.15,"position":18.15,"progress":0.05,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","roma_text":"","timestamp":20.198,"play_time":20.05,"position":20.05,"progress":0.1,"text_detailed":{}}}
 
 （切歌 — 服务端不发送清空消息，前端自行根据新歌数据重置显示）
-data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"新歌第一行歌词","sub_text":"","timestamp":15.0,"play_time":15.1,"position":15.1,"progress":0.04,"text_detailed":{}}}
+data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"新歌第一行歌词","sub_text":"","roma_text":"","timestamp":15.0,"play_time":15.1,"position":15.1,"progress":0.04,"text_detailed":{}}}
 ```
 
 **特性：**
@@ -863,6 +869,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
     "index": 5,
     "text": "更不应舍弃",
     "sub_text": "",
+    "roma_text": "",
     "timestamp": 30.429,
     "play_time": 30.229,
     "position": 30.229,
@@ -881,6 +888,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
     "index": 27,
     "text": "谁能够代替我 漫步在宽阔的大路",
     "sub_text": "",
+    "roma_text": "",
     "timestamp": 130.93,
     "play_time": 130.73,
     "position": 130.86787,
@@ -927,6 +935,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
     "index": -1,
     "text": "",
     "sub_text": "",
+    "roma_text": "",
     "timestamp": 0,
     "play_time": 0,
     "position": 28.151,
@@ -952,9 +961,9 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
     "progress": 0,
     "count": 38,
     "lyrics": [
-      {"index": 0, "timestamp": 25.44, "play_time": 25.24, "text": "是冰冻的时分 已过夜深的夜晚", "sub_text": "", "text_detailed": {}},
-      {"index": 1, "timestamp": 31.483, "play_time": 31.282999, "text": "往事就像流星刹那划过心房", "sub_text": "", "text_detailed": {}},
-      {"index": 2, "timestamp": 37.716, "play_time": 37.516, "text": "灰暗的深夜 是寂寞的世界", "sub_text": "", "text_detailed": {}}
+      {"index": 0, "timestamp": 25.44, "play_time": 25.24, "text": "是冰冻的时分 已过夜深的夜晚", "sub_text": "", "roma_text": "", "text_detailed": {}},
+      {"index": 1, "timestamp": 31.483, "play_time": 31.282999, "text": "往事就像流星刹那划过心房", "sub_text": "", "roma_text": "", "text_detailed": {}},
+      {"index": 2, "timestamp": 37.716, "play_time": 37.516, "text": "灰暗的深夜 是寂寞的世界", "sub_text": "", "roma_text": "", "text_detailed": {}}
     ],
     "lyrics_detailed": []
   }
@@ -1089,8 +1098,8 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 ← {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"有点甜 - 汪苏泷/BY2"}}
 ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":""}}
 ← {"type":"all_lyrics","player":"wesing","data":{"title":"有点甜 - 汪苏泷/BY2","duration":236.0,"position":0.5,"progress":0.0021,"count":28,"lyrics":[...],"lyrics_detailed":[...]}}
-← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","timestamp":18.326,"play_time":18.15,"position":18.15,"progress":0.05,"text_detailed":{}}}
-← {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","timestamp":20.198,"play_time":20.05,"position":20.05,"progress":0.1,"text_detailed":{}}}
+← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","roma_text":"","timestamp":18.326,"play_time":18.15,"position":18.15,"progress":0.05,"text_detailed":{}}}
+← {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"男：等你从门前经过","sub_text":"","roma_text":"","timestamp":20.198,"play_time":20.05,"position":20.05,"progress":0.1,"text_detailed":{}}}
 ...
 ← {"type":"song_info_update","player":"wesing","data":{"name":"有点甜","singer":"汪苏泷/BY2","title":"有点甜 - 汪苏泷/BY2","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}  ← 异步封面下载完成后补发
 ...
@@ -1100,7 +1109,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 ← {"type":"status_update","player":"cloudmusicv3","data":{"status":"playing","detail":"如愿 - 王菲"}}
 ← {"type":"song_info_update","player":"cloudmusicv3","data":{"name":"如愿","singer":"王菲","title":"如愿 - 王菲","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}
 ← {"type":"all_lyrics","player":"cloudmusicv3","data":{"title":"如愿 - 王菲","duration":280.0,"position":0.3,"progress":0.0011,"count":35,"lyrics":[...],"lyrics_detailed":[...]}}
-← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":0,"text":"我在时间尽头等你","sub_text":"","timestamp":25.5,"play_time":25.3,"position":25.3,"progress":0.03,"text_detailed":{}}}
+← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":0,"text":"我在时间尽头等你","sub_text":"","roma_text":"","timestamp":25.5,"play_time":25.3,"position":25.3,"progress":0.03,"text_detailed":{}}}
 ...
 
 （用户暂停播放）
@@ -1108,7 +1117,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 
 （用户恢复播放）
 ← {"type":"playback_resume","player":"cloudmusicv3","data":{"position":31.282999,"progress":0.105743244}}
-← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":5,"text":"在时间里等你","sub_text":"","timestamp":46.0,"play_time":46.1,"position":46.1,"progress":0.16,"text_detailed":{}}}
+← {"type":"lyric_update","player":"cloudmusicv3","data":{"index":5,"text":"在时间里等你","sub_text":"","roma_text":"","timestamp":46.0,"play_time":46.1,"position":46.1,"progress":0.16,"text_detailed":{}}}
 ...
 
 （歌曲播放完毕 —— **仅 wesing 会发 lyric_idle**，网易云/QQ/酷狗不发此事件）
@@ -1265,7 +1274,7 @@ curl http://localhost:8765/service-status
 | `status_update` | `{"status":"...","detail":"..."}` | `{}` | `msg.data && msg.data.status` |
 | `song_info_update` | `{"name":"...","singer":"...","title":"...","cover":"...","cover_base64":"..."}` | `{}` | `msg.data && msg.data.title` |
 | `all_lyrics` | `{"title":"...","duration":N,"position":N,"progress":N,"count":N,"lyrics":[...],"lyrics_detailed":[...]}` | `{}` | `msg.data && msg.data.lyrics` |
-| `lyric_update` | `{"index":N,"text":"...","sub_text":"...","timestamp":N,...}` | `{}`（无缓存）或 `{"index":-1,"text":"",... }`（纯音乐） | `msg.data && msg.data.index !== undefined && msg.data.index !== -1` |
+| `lyric_update` | `{"index":N,"text":"...","sub_text":"...","roma_text":"...","timestamp":N,...}` | `{}`（无缓存）或 `{"index":-1,"text":"",... }`（纯音乐） | `msg.data && msg.data.index !== undefined && msg.data.index !== -1` |
 | `lyric_idle` | — | `{}`（始终） | 收到即为空闲通知（前端自行决定是否响应） |
 | `playback_pause` | `{"position":N,"progress":N}` | — | 收到即为暂停 |
 | `playback_resume` | `{"position":N,"progress":N}` | — | 收到即为恢复 |

@@ -526,7 +526,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 	case player.EventLyricUpdate:
 		if msg, ok := evt.Data.(*player.LyricUpdate); ok {
 			ps.LyricUpdate = &LyricUpdate{
-				Index: msg.Index, Text: msg.Text, SubText: msg.SubText,
+				Index: msg.Index, Text: msg.Text, SubText: msg.SubText, RomaText: msg.RomaText,
 				Timestamp: msg.Timestamp, PlayTime: msg.PlayTime,
 				Position: msg.Position, Progress: msg.Progress, TextDetailed: msg.TextDetailed,
 			}

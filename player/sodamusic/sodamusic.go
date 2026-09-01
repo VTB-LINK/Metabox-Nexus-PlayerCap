@@ -480,7 +480,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 				// interpSec 进 Position/算 Progress；play_time 由 BuildLyricUpdate 按歌词时间轴算。
 				// words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传。
 				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-					trueIdx, line.Time, line.Text, line.SubText, line.Detailed,
+					trueIdx, line.Time, line.Text, line.SubText, line.RomaText, line.Detailed,
 					offsetSec, interpSec, currentDurationSec,
 				))
 			}
@@ -547,7 +547,9 @@ func parseSodaLyrics(data *cdp.ExtractionData, offsetSec float32) []krc.Line {
 	if len(lines) == 0 {
 		return nil
 	}
-	applySodaTranslations(lines, data.TranslationLRC) // 独立翻译轨（tlyric）按时间戳合并进 SubText
+	// 音译轨（KRC 内嵌 type=0）已由 ParsePlainKRC 写进 RomaText；此处只把独立翻译轨（tlyric）
+	// 按时间戳合并进 SubText。applySodaTranslations 只碰 SubText、绝不动 RomaText，两轨互不干扰。
+	applySodaTranslations(lines, data.TranslationLRC)
 	applyDetailedOffset(lines, offsetSec)
 	return lines
 }
@@ -578,14 +580,16 @@ func isProgressValid(progressSec, durationSec float32) bool {
 	return true
 }
 
-// toLyricLines 把解析结果映射成对外 LyricLine（subText/detailed 透传给 BuildLyricLine）。
+// toLyricLines 把解析结果映射成对外 LyricLine（subText/romaText/detailed 透传给 BuildLyricLine）。
+// RomaText 是内嵌 KRC type=0 音译轨（平台下发则由 ParsePlainKRC 填、无则空），与 SubText（独立
+// tlyric 翻译）是两条独立轨、互不覆盖。
 func toLyricLines(lines []krc.Line, offsetSec float32) []player.LyricLine {
 	if len(lines) == 0 {
 		return []player.LyricLine{}
 	}
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
-		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.Detailed, offsetSec)
+		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec)
 	}
 	return out
 }

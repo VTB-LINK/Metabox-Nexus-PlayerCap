@@ -1,4 +1,4 @@
-package main
+package taskbar
 
 import (
 	"fmt"
@@ -47,11 +47,11 @@ var (
 	consoleBackendDetach = func() {}                    // 释放 COM/线程，保留当前颜色
 )
 
-// taskbarInit 探测终端并选定后端。多次调用只有第一次生效：下载路径在下载前调，
+// Init 探测终端并选定后端。多次调用只有第一次生效：下载路径在下载前调，
 // 「连不上网关」路径也调，两条互斥执行，guard 只是防御性幂等。
 var tbInited bool
 
-func taskbarInit() {
+func Init() {
 	if tbInited {
 		return
 	}
@@ -71,10 +71,10 @@ func supportsOSC() bool {
 	return os.Getenv("WT_SESSION") != "" || os.Getenv("ConEmuANSI") == "ON"
 }
 
-func taskbarProgress(pct int) { taskbarSet(tbStateNormal, pct) }
-func taskbarError()           { taskbarSet(tbStateError, 100) }   // 满格红，否则长度 0 看不出颜色
-func taskbarWarning()         { taskbarSet(tbStateWarning, 100) } // 满格黄，同上
-func taskbarClear()           { taskbarSet(tbStateClear, 0) }
+func Progress(pct int) { taskbarSet(tbStateNormal, pct) }
+func Error()           { taskbarSet(tbStateError, 100) }   // 满格红，否则长度 0 看不出颜色
+func Warning()         { taskbarSet(tbStateWarning, 100) } // 满格黄，同上
+func Clear()           { taskbarSet(tbStateClear, 0) }
 
 func taskbarSet(state, pct int) {
 	switch tbMode {
@@ -86,20 +86,20 @@ func taskbarSet(state, pct int) {
 	}
 }
 
-// taskbarFlash 闪烁任务栏图标提示更新完成。仅传统 conhost 有效（FlashWindowEx 作用于
+// Flash 闪烁任务栏图标提示更新完成。仅传统 conhost 有效（FlashWindowEx 作用于
 // GetConsoleWindow 的真窗口）；Windows Terminal 下是伪窗口，调用无害但无视觉效果，
-// 此时任务栏停在 taskbarWarning 的黄色。
-func taskbarFlash() {
+// 此时任务栏停在 Warning 的黄色。
+func Flash() {
 	if tbMode != tbNop {
 		consoleBackendFlash()
 	}
 }
 
-// taskbarDetach 释放 conhost 后端占用的 COM 与被锁定的 OS 线程，但保留任务栏当前颜色
+// Detach 释放 conhost 后端占用的 COM 与被锁定的 OS 线程，但保留任务栏当前颜色
 // （进度状态绑定窗口句柄、由 shell 维持，释放 COM 对象不影响显示）。用于「连不上网关→标红」
 // 这类设完终态还要继续跑服务的路径，避免 consoleInit 的 LockOSThread 泄漏到 server 阶段。
 // 下载成功/失败路径不需要它——那两条都直接 os.Exit。
-func taskbarDetach() {
+func Detach() {
 	if tbMode == tbConsole {
 		consoleBackendDetach()
 	}

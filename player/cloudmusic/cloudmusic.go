@@ -365,7 +365,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						log.Info("API 二次确认(ID=%s)有 %d 行歌词，使用 API 歌词；逐字：%s", activeSongID, len(apiLyrics), lyricDetailedFlag(apiLyrics))
 						for _, l := range apiLyrics {
 							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
-								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, TextDetailed: l.TextDetailed,
+								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, RomaText: l.RomaText, TextDetailed: l.TextDetailed,
 							})
 						}
 						cdpLyricsOK = true
@@ -386,13 +386,13 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						})
 					}
 				} else {
-					parsed, ok := resolveCDPLyrics(lrcResult.Lrc, lrcResult.Tlyric, lrcResult.Yrc, offsetSec)
+					parsed, ok := resolveCDPLyrics(lrcResult.Lrc, lrcResult.Tlyric, lrcResult.Romalrc, lrcResult.Yrc, offsetSec)
 					if ok {
 						cdpLyricsOK = true
 						log.Info("歌词加载完成(CDP): %d 行 (ID=%s)；逐字：%s", len(parsed), activeSongID, lyricDetailedFlag(parsed))
 						for _, l := range parsed {
 							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
-								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, TextDetailed: l.TextDetailed,
+								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, RomaText: l.RomaText, TextDetailed: l.TextDetailed,
 							})
 						}
 					} else {
@@ -420,7 +420,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if len(activeLyrics) > 0 {
 				lyricItems := make([]player.LyricLine, len(activeLyrics))
 				for i, l := range activeLyrics {
-					lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.TextDetailed, offsetSec)
+					lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.TextDetailed, offsetSec)
 				}
 
 				if songDuration == 0 && matchedRedux && data.CurPlaying.Track.Duration > 0 {
@@ -480,7 +480,9 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				// 补发全量歌词给前端
 				lyricItems := make([]player.LyricLine, len(activeLyrics))
 				for i, l := range activeLyrics {
-					lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.TextDetailed, offsetSec)
+					// Redux fallback 路径不产音译：l.RomaText 恒空（Redux 提取的 ExtractedLyric
+					// 不含 romaText），这里透传即空串，roma_text 契约上仍在、不污染 sub_text。
+					lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.TextDetailed, offsetSec)
 				}
 				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
@@ -606,7 +608,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				// clock.GetCurrent() 是插值出的实时位置，进 Position、并据它算 Progress；play_time 由
 				// BuildLyricUpdate 按歌词时间轴算（原先为取它而构造了整个 LyricLine）。
 				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-					trueLineIdx, currentLine.Time, currentLine.Text, currentLine.SubText,
+					trueLineIdx, currentLine.Time, currentLine.Text, currentLine.SubText, currentLine.RomaText,
 					currentLine.TextDetailed, offsetSec, clock.GetCurrent(), songDuration,
 				))
 			}
@@ -636,7 +638,7 @@ func getArtists(artists []struct {
 // 注：这里原先写着「与那条『len(apiLyrics)>0 才置真』保持一致」——那句话是反的，
 // d63a67d 把 ParseLRC 的契约从「行数即歌词数」改成「行数含 blank」之后，len() 判据就失效了，
 // 而当时只改了本函数、漏了 :304。别再把 len() 当参照系。
-func resolveCDPLyrics(lrc, tlyric, yrc string, offsetSec float32) (parsed []lyric.LyricLine, ok bool) {
+func resolveCDPLyrics(lrc, tlyric, romalrc, yrc string, offsetSec float32) (parsed []lyric.LyricLine, ok bool) {
 	parsed = lyric.ParseLRC(lrc)
 	// 判据是「有没有**实词**行」，不是「有没有行」：ParseLRC 会保留 intentional blank
 	// （正文为空、表示此刻清空歌词的行），一首只有 blank 的 lrc 解析出的行数 > 0 却一个字
@@ -645,6 +647,7 @@ func resolveCDPLyrics(lrc, tlyric, yrc string, offsetSec float32) (parsed []lyri
 		return nil, false
 	}
 	lyric.MergeTlyric(parsed, tlyric)
+	lyric.MergeRomalrc(parsed, romalrc)
 	lyric.MergeYRC(parsed, yrc, offsetSec)
 	return parsed, true
 }

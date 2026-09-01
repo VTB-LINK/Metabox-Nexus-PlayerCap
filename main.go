@@ -14,6 +14,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/sodamusic"
 	"Metabox-Nexus-PlayerCap/player/wesing"
 	"Metabox-Nexus-PlayerCap/server"
+	"Metabox-Nexus-PlayerCap/taskbar"
 	"Metabox-Nexus-PlayerCap/telemetry"
 	"crypto/sha256"
 	"encoding/hex"
@@ -376,11 +377,11 @@ func checkAndUpdate() {
 		// 连不上网关：标红提示几秒后清除，避免永久卡红。这条路径不重启、要继续跑服务，故
 		// clear 后 detach 释放 COM 与被锁的 OS 线程，不让 consoleInit 的 LockOSThread 泄漏进
 		// server 阶段。sleep 阻塞启动几秒只发生在连不上这一异常路径，OBS 此刻还没在拉流。
-		taskbarInit()
-		taskbarError()
+		taskbar.Init()
+		taskbar.Error()
 		time.Sleep(4 * time.Second)
-		taskbarClear()
-		taskbarDetach()
+		taskbar.Clear()
+		taskbar.Detach()
 		mainLog.Warn("版本检查失败: %v，继续运行", err)
 		return
 	}
@@ -461,10 +462,10 @@ func checkAndUpdate() {
 
 	cdnPrefix := pickFastestCDNPrefix(release.GlobalCDN, release.ChinaCDN, release.TagName, exeTestFile)
 
-	taskbarInit() // 确定要下载后再探测终端；老 conhost 会锁定当前 OS 线程并建立 COM
+	taskbar.Init() // 确定要下载后再探测终端；老 conhost 会锁定当前 OS 线程并建立 COM
 
 	if err := performUpdateAll(cdnPrefix, release.TagName, sortedAssets); err != nil {
-		taskbarError()
+		taskbar.Error()
 		manualURL := release.ChinaCDN + release.TagName + "/"
 		mainLog.Error("自动更新失败: %v", err)
 		mainLog.Warn("当前版本已过期，请手动下载最新版本:")
@@ -474,12 +475,12 @@ func checkAndUpdate() {
 		os.Exit(1)
 	}
 
-	taskbarWarning()
-	taskbarFlash()
+	taskbar.Warning()
+	taskbar.Flash()
 	mainLog.Success("全部更新完成！程序将自动重启...")
 	// 金色醒目显示几秒后清除再重启：既不像 1s 那样一闪而过，也不会永久卡在金色。
 	time.Sleep(4 * time.Second)
-	taskbarClear()
+	taskbar.Clear()
 	restartSelf()
 }
 
@@ -659,7 +660,7 @@ func downloadFile(client *http.Client, url, destPath string, expectedSize int64,
 	hasher := sha256.New()
 	pr := &progressWriter{total: totalSize}
 	if totalSize > 0 {
-		taskbarProgress(0) // 每个文件从 0 重新起跑（文件数不固定，逐个跑满进度条）
+		taskbar.Progress(0) // 每个文件从 0 重新起跑（文件数不固定，逐个跑满进度条）
 	}
 	written, err := io.Copy(out, io.TeeReader(resp.Body, io.MultiWriter(hasher, pr)))
 	out.Sync()
@@ -709,7 +710,7 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 		if pct != pw.lastPct {
 			fmt.Printf(i18n.T("\r[*] 下载进度: %d%% (%.1f/%.1f MB)"), pct,
 				float64(pw.written)/1024/1024, float64(pw.total)/1024/1024)
-			taskbarProgress(pct)
+			taskbar.Progress(pct)
 			pw.lastPct = pct
 		}
 	}

@@ -1,6 +1,6 @@
 <div align="center">
 
-![Banner](title.png)
+![Banner](doc/title.png)
 
 # VTB-TOOLS Metabox-Nexus-PlayerCap
 
@@ -19,6 +19,24 @@
 | QQ 音乐 | `qqmusic` | 进程内存读取 + AOB Hook 注入（双源融合插值） |
 | 酷狗音乐 | `kugou` | CDP 远程调试 |
 | 汽水音乐 | `sodamusic` | CDP 远程调试 |
+
+### 能力对照
+
+`✔` 完整支持 · `⚠` 部分/受限支持 · `🚫` 不支持
+
+| 播放器 | 逐字歌词 | 逐行歌词 | 翻译歌词 | 音译歌词 | 歌名 | 歌手 | 封面 | 播放状态 | 进度/跳转 |
+|--------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| 全民K歌 `wesing` | ✔ | ✔ | 🚫 | 🚫 | ✔ | ✔ | ✔ | ✔ | ⚠ |
+| 网易云音乐 `cloudmusicv3` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| QQ 音乐 `qqmusic` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| 酷狗音乐 `kugou` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| 汽水音乐 `sodamusic` | ✔ | ✔ | ✔ | 🚫 | ✔ | ✔ | ✔ | ✔ | ✔ |
+
+- **翻译歌词** — wesing 无翻译轨（进程内存不含译文）；其余四家分别解析网易云 YRC 译轨、QQ trans、酷狗 KRC 内嵌轨、汽水独立 tlyric 轨。
+- **音译歌词** — cloudmusicv3（网易云 romalrc，逐行罗马音）、qqmusic（QQ QRC 逐字罗马音）、kugou（KRC 内嵌 type=0，形态因语言而异：日文罗马音 / 韩文汉语谐音）提供，与翻译各自独立、互不覆盖；wesing（音译系客户端运行时转写、不落内存，见 issue #34）、sodamusic（平台无音译源）无。
+- **播放状态** — 五家均检测暂停 / 恢复；wesing、qqmusic 按播放时间停滞间接判定，cloudmusicv3、kugou、sodamusic 直读平台上报状态。
+- **进度跳转** — cloudmusicv3、qqmusic、kugou、sodamusic 为回跳 + 前跳双向检测；wesing 仅回跳 / 重播，无任意跳转。
+- **逐字 / 翻译** 标 `✔` 指具备解析能力；单曲是否有逐字 / 翻译取决于平台是否提供该数据，缺失时自动回落逐行 / 无译文。
 
 ## 功能特性
 
@@ -155,32 +173,37 @@ prior-player:
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
 
-# 「指定播放器」通道（/<player>/ws 等）无活跃自动隐藏：静默超过 n 秒后清屏，隐藏停留的末行歌词。
-# 0 = 关闭（默认）。仅作用于 per-player 端点，不影响跟随活跃播放器的根路径。
-# 每个播放器可用 <player>-idle-hide 覆盖（不写=跟随全局，0=该播放器关闭）。
+# 「指定播放器」通道（/<player>/ws 等）无活跃自动隐藏：静默超过 n 秒后向该通道推一次清屏，
+# 隐藏停留的末行歌词。0 = 关闭（默认）。仅作用于 per-player 端点，不影响跟随活跃播放器的根路径
+# （根路径的自动隐藏另由 prior-player-expire 控制）。每个播放器可用 <name>-idle-hide 单独覆盖：
+# 不写=跟随此全局值，0=该播放器关闭，n=该播放器用 n 秒（示例见下方 cloudmusicv3 段）。
 per-player-idle-hide: 0
 
 # 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
-# wesing-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=该播放器关闭
+# wesing-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 
 # 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 100   # 低于 50 会被网易云自身的下限抬到 100，写 30 也是跑 100
+# cloudmusicv3-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 cloudmusicv3-effect-strategy: fadeout # 特效最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
 # QQ 音乐 配置
 qqmusic-offset: 400
 # qqmusic-poll: 50
+# qqmusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 
 # 酷狗音乐 配置
 kugou-offset: 430
 # kugou-poll: 30
+# kugou-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 
 # 汽水音乐 配置
 sodamusic-offset: 340
 # sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
+# sodamusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 ```
 
 ### 预期输出
@@ -290,72 +313,6 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 - 全部 URL 参数（quality / fit / opacity / offmode / fadein·fadeout·resume / bg / header·footer_clickable 等）详见 [API 响应示例文档](./doc/API_RESPONSE_EXAMPLES.md#网易云特效歌词镜像)。
 
 ---
-
-## 项目结构
-
-```
-Metabox-Nexus-PlayerCap/
-├── main.go                # 入口：启动、自动更新、播放器调度、事件路由主循环
-├── config/
-│   └── config.go          # 配置加载（YAML + CLI flag + 默认值三层合并）
-├── logger/
-│   └── logger.go          # 统一日志包（5 级别）
-├── player/
-│   ├── player.go          # Player 接口、BaseEmitter、公共类型（Event / LyricLine / SongInfo 等）、ClampFloat32
-│   ├── cover.go           # 公共封面下载（HTTP → base64，含大小校验与截断检测）
-│   ├── wesing/            # 全民K歌 —— 基于内存读取
-│   │   ├── wesing.go      # 主轮询循环、状态机、暂停/恢复检测
-│   │   ├── proc/
-│   │   │   └── memory.go  # Windows API 封装：进程发现、内存读写、AOB 扫描、窗口枚举
-│   │   └── lyric/
-│   │       ├── finder.go  # PE 导出表解析 → vtable → 堆扫描定位 LyricHost
-│   │       ├── reader.go  # 歌词数据结构解码（UTF-16LE → []LyricLine）
-│   │       ├── timer.go   # 播放时间地址定位（结构体签名扫描）+ 歌曲时长提取
-│   │       └── songinfo.go# 歌曲元信息提取（歌名/歌手/MID/封面 URL 定位）
-│   ├── cloudmusic/        # 网易云音乐 —— 基于 CDP
-│   │   ├── cloudmusic.go  # 主轮询循环、本地时钟同步、seek 检测
-│   │   ├── cdp/
-│   │   │   └── client.go  # WebSocket CDP 客户端：连接、JS 求值、React Fiber 遍历
-│   │   ├── lyric/
-│   │   │   └── fetch.go   # 网易云 API 调用（歌词/搜索/详情）、LRC 格式解析
-│   │   └── watchdog/
-│   │       ├── process.go # 确保 cloudmusic.exe 带 --remote-debugging-port=9222 启动
-│   │       └── registry.go# 注册表自启项注入调试端口参数
-│   ├── qqmusic/           # QQ 音乐 —— 基于内存读取 + AOB Hook
-│   │   ├── qqmusic.go     # 主轮询循环、双源融合插值、暂停/恢复/seek 检测
-│   │   ├── mem.go         # 进程连接、内存读写、AOB Hook 注入（滑块 + 进度 + KUSER）
-│   │   ├── api.go         # QQ 音乐 API 调用（歌词/封面）、QRC 解析
-│   │   └── qrc_decrypt.go # QRC 3DES 自定义解密算法
-│   ├── krc/               # 公共包：酷狗 KRC 明文解析（kugou 与 sodamusic 共用单一真源）
-│   │   └── krc.go         # ParsePlainKRC：字级时间轴 + 内嵌 [language:] 中文译轨
-│   ├── kugou/             # 酷狗音乐 —— 基于 CDP + libcef patch
-│   │   ├── kugou.go       # 主轮询循环、本地时钟同步、歌词/封面获取、seek 检测
-│   │   ├── cdp/
-│   │   │   └── client.go  # WebSocket CDP 客户端：连接、JS 求值、SuperCall 播放信息
-│   │   ├── lyric/
-│   │   │   └── lyric.go   # 酷狗歌词 API 调用（hash/canonical hash）、KRC 解密、LRC 解析
-│   │   └── watchdog/
-│   │       └── watchdog.go# 酷狗安装定位、libcef.dll patch、提权 helper、重启与端口检测
-│   └── sodamusic/         # 汽水音乐 —— 基于 CDP（绕原生反调试开 Node inspector）
-│       ├── sodamusic.go   # 主轮询循环、mediaId 切歌检测、1Hz 采样的边沿落锚外推、seek 检测
-│       ├── translation.go # translations.cn 独立 tlyric 译轨按绝对时间戳（±10ms）合并
-│       ├── cdp/
-│       │   └── client.go  # 连 9229 主进程 inspector，桥进 rendererMain 取 sharedState
-│       └── watchdog/
-│           └── watchdog.go# 找主进程 pid + 复刻 process._debugProcess 激活 inspector
-├── server/
-│   ├── server.go          # HTTP/WS/SSE 统一服务器：订阅者管理、状态缓存、广播
-│   ├── router.go          # 多播放器优先级路由 + 超时状态机
-│   └── types.go           # WSEvent / HTTPResponse 传输层类型
-├── lyric_display.html     # 歌词显示引导页（Loader，OBS 浏览器源添加此文件）
-├── lyric_page.html        # 歌词显示内容页（Content，由 Loader 自动加载）
-├── config.yml             # 默认配置文件（首次运行自动生成）
-├── doc/
-│   ├── API_RESPONSE_EXAMPLES.md  # API 响应示例（离线参考）
-│   ├── openapi.yaml              # OpenAPI 格式响应示例
-└── build-assets/
-    └── winicon/           # Windows .exe 图标资源 (.syso)
-```
 
 ## 依赖
 

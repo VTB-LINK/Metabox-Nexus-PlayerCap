@@ -28,6 +28,12 @@ type Line struct {
 	// 纯文本、无独立时间轴——继承本行时间，applyDetailedOffset 不碰它。
 	// 汽水音乐的译文是独立字段（不在 KRC 里），由调用方解析后自行写回 SubText。
 	SubText string
+	// RomaText 逐行音译（发音标注）。KRC 内嵌 [language:] type=0 轨才有；无轨回落为空。
+	// 纯文本、无独立时间轴——继承本行时间，applyDetailedOffset 不碰它。
+	// 与 SubText（翻译）是两条独立轨、互不覆盖：任一轨解析失败绝不波及另一轨或主歌词。
+	// 「音译」的形式因来源而异（酷狗 KRC type=0 实测为汉语谐音，网易云同槽位为罗马音）；
+	// 字段沿用 wire 既有的 roma_text 名，不随内容形态改名。
+	RomaText string
 	// Detailed 逐字时间轴。PlayTime 此处不填，由调用方按 offset 统一套
 	// （见 kugou.go / sodamusic 的 applyDetailedOffset）。
 	Detailed player.LyricTextDetailed
@@ -52,8 +58,9 @@ var (
 // 非 KRC 内容（普通 LRC / 空串）→ 返回 0 行，让调用方回落到 LRC 解析。
 func ParsePlainKRC(krc string) []Line {
 	trans := parseTranslation(krc) // 按 [start,dur] 行序号对齐的译文（nil=无翻译轨）
+	roma := parseRomanization(krc) // 同一行号口径对齐的音译（nil=无音译轨），与 trans 各自独立
 	var lines []Line
-	rawIdx := -1 // 第几个 [start,dur] 行（含被跳过的 0 词行），与 trans 索引严格对齐
+	rawIdx := -1 // 第几个 [start,dur] 行（含被跳过的 0 词行），与 trans/roma 索引严格对齐
 	for _, raw := range strings.Split(krc, "\n") {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -97,11 +104,18 @@ func ParsePlainKRC(krc string) []Line {
 		if rawIdx < len(trans) {
 			sub = trans[rawIdx]
 		}
+		// 音译与翻译共用同一 rawIdx 口径（含被跳过的 0 词行），故 type=0 与 type=1 的对齐
+		// 严格一致、绝不错位；两者各查各的轨，互不覆盖。
+		var romaText string
+		if rawIdx < len(roma) {
+			romaText = roma[rawIdx]
+		}
 		lines = append(lines, Line{
-			Index:   len(lines),
-			Time:    lineTimestamp,
-			Text:    plain,
-			SubText: sub,
+			Index:    len(lines),
+			Time:     lineTimestamp,
+			Text:     plain,
+			SubText:  sub,
+			RomaText: romaText,
 			Detailed: player.LyricTextDetailed{
 				Timestamp: lineTimestamp,
 				Duration:  lineDuration,
@@ -163,25 +177,51 @@ func parseWords(body string, lineStartMs int) []player.LyricTextDetailedWord {
 	return words
 }
 
-// parseTranslation 从 KRC 头部的 [language:] 标签解出**中文翻译轨**，返回按主歌词
+// parseTranslation 从 KRC 头部 [language:] 标签解出**中文翻译轨**（type=1），返回按主歌词
 // [start,dur] 行序号对齐的 []string（第 i 项 = 第 i 个 [start,dur] 行的译文，缺则空串）。
-// 无 [language:] 标签 / 解不开 / 无翻译轨时返回 nil。
+// 无 [language:] 标签 / 解不开 / 无翻译轨时返回 nil。对齐口径见 parseLanguageTrack。
+//
+// 抽取自 parseLanguageTrack 后**行为逐字节不变**：仍是「取首条 type==1、按行号对齐、
+// TrimSpace(Join(frags,""))」，只是把 type 参数化。守卫见 romanization_test.go。
+func parseTranslation(krc string) []string {
+	return parseLanguageTrack(krc, 1)
+}
+
+// parseRomanization 从 KRC 头部 [language:] 标签解出**逐行音译轨**（type=0），返回口径与
+// parseTranslation 完全一致（同一 parseLanguageTrack、同一 [start,dur] 行号对齐）——这是
+// 两轨绝不错位的前提。无 [language:] 标签 / 解不开 / 无音译轨时返回 nil。
+//
+// type=0 的 lyricContent 是逐字音译片段（如 [["ro","ma"],...]），Join("") 即整行音译，与
+// type=1 每行单串走同一条 Join 路径，两轨口径天然一致。**只取 type=0，绝不触碰 type=1**，
+// 与 SubText（翻译）互不污染。
+//
+// 「音译」的形式因来源而异：酷狗 KRC type=0 实测为汉语谐音（如 이유 넌 → 一哟 弄），
+// 网易云同槽位为罗马音——本函数不区分内容形态，照取、照对齐、照写 RomaText。
+func parseRomanization(krc string) []string {
+	return parseLanguageTrack(krc, 0)
+}
+
+// parseLanguageTrack 从 KRC 头部 [language:] 标签解出指定 type 的一条轨，返回按主歌词
+// [start,dur] 行序号对齐的 []string（第 i 项 = 第 i 个 [start,dur] 行的文本，缺则空串）。
+// 无 [language:] 标签 / 解不开 / 无该 type 轨时返回 nil；有多条同 type 块时取首条。
 //
 // [language:] 是 base64 编码的 JSON：
 //
 //	{"content":[
-//	   {"lyricContent":[["译文行"],...], "type":1},   // type=1 中文翻译 ← 本函数只取它
-//	   {"lyricContent":[["ro","ma"],...],"type":0}    // type=0 罗马音（wire 无第三行字段，不做）
+//	   {"lyricContent":[["译文行"],...], "type":1},   // type=1 中文翻译（parseTranslation 取）
+//	   {"lyricContent":[["ro","ma"],...],"type":0}    // type=0 逐行音译（parseRomanization 取）
 //	 ], "version":1}
 //
-// **与网易云的机制根本不同，别照抄 MergeTlyric**：网易云是独立 tlyric LRC、按**毫秒时间戳**
-// 匹配；酷狗是同一份 KRC 内嵌、**按行号位置对齐**——lyricContent[i] 就是第 i 个 [start,dur]
-// 行的译文，本身无时间戳。故调用方必须数「每个 [start,dur] 行」（含被跳过的 0 词行）来对齐，
-// 一旦按「产出的 Line 数」对齐，遇到被跳过的行就整轨错位。
+// **与网易云的机制根本不同，别照抄 MergeTlyric/MergeRomalrc**：网易云是独立 tlyric/romalrc
+// LRC、按**毫秒时间戳**匹配；酷狗是同一份 KRC 内嵌、**按行号位置对齐**——lyricContent[i]
+// 就是第 i 个 [start,dur] 行的文本，本身无时间戳。故调用方必须数「每个 [start,dur] 行」
+// （含被跳过的 0 词行）来对齐，一旦按「产出的 Line 数」对齐，遇到被跳过的行就整轨错位。
+// 翻译（type=1）与音译（type=0）共用这套口径，两轨对齐严格一致、绝不互相污染。
 //
-// 注：汽水音乐的翻译不走这条内嵌轨（它是独立字段），故对汽水明文本函数恒返回 nil，
-// SubText 由汽水侧自行写回——这是有意的：本包只认 KRC 内嵌轨这一种真源。
-func parseTranslation(krc string) []string {
+// 注：汽水音乐的翻译不走这条内嵌轨（它是独立字段），故对汽水明文 type=1 恒返回 nil，
+// SubText 由汽水侧自行写回；type=0 若平台 KRC 内嵌则照常解出、无则 nil——这是有意的：
+// 本包只认 KRC 内嵌轨这一种真源。
+func parseLanguageTrack(krc string, wantType int) []string {
 	m := langTagRegex.FindStringSubmatch(krc)
 	if m == nil {
 		return nil
@@ -200,8 +240,8 @@ func parseTranslation(krc string) []string {
 		return nil
 	}
 	for _, blk := range doc.Content {
-		if blk.Type != 1 {
-			continue // 只取中文翻译；type=0 是罗马音
+		if blk.Type != wantType {
+			continue
 		}
 		out := make([]string, len(blk.LyricContent))
 		for i, frags := range blk.LyricContent {

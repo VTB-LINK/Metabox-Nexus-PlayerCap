@@ -31,6 +31,7 @@ type LyricLine struct {
 	Time         float32
 	Text         string
 	SubText      string
+	RomaText     string
 	TextDetailed player.LyricTextDetailed
 }
 
@@ -49,6 +50,9 @@ type apiResponse struct {
 	Tlyric struct {
 		Lyric string `json:"lyric"`
 	} `json:"tlyric"`
+	Romalrc struct {
+		Lyric string `json:"lyric"`
+	} `json:"romalrc"`
 	Yrc struct {
 		Lyric string `json:"lyric"`
 	} `json:"yrc"`
@@ -154,6 +158,7 @@ func FetchLyrics(songID string, offsetSec float32) ([]LyricLine, error) {
 
 	lines := ParseLRC(apiResp.Lrc.Lyric)
 	MergeTlyric(lines, apiResp.Tlyric.Lyric)
+	MergeRomalrc(lines, apiResp.Romalrc.Lyric)
 	MergeYRC(lines, apiResp.Yrc.Lyric, offsetSec)
 	log.Info("歌词加载完成(API): %d 行 (ID=%s)；逐字：%s", len(lines), songID, detailedFlag(lines))
 	return lines, nil
@@ -320,6 +325,30 @@ func MergeTlyric(lyrics []LyricLine, tlyricLRC string) {
 	for i := range lyrics {
 		if text, ok := tmap[int(lyrics[i].Time*1000+0.5)]; ok {
 			lyrics[i].SubText = text
+		}
+	}
+}
+
+// MergeRomalrc merges romanized lyrics (romalrc LRC) into main lyrics as RomaText.
+//
+// 与 MergeTlyric 完全同构：网易云的 romalrc 是逐行罗马音（音译），格式与 tlyric（翻译）一样
+// 是标准 LRC，按毫秒时间戳就近对齐。唯一区别是写入 RomaText 而非 SubText——音译与翻译是两条
+// 独立的轨，绝不能互相覆盖。romalrc 为空、或某行匹配不上时 RomaText 留空，不强塞。
+func MergeRomalrc(lyrics []LyricLine, romalrcLRC string) {
+	if romalrcLRC == "" || len(lyrics) == 0 {
+		return
+	}
+	rLines := ParseLRC(romalrcLRC)
+	if len(rLines) == 0 {
+		return
+	}
+	rmap := make(map[int]string, len(rLines))
+	for _, rl := range rLines {
+		rmap[int(rl.Time*1000+0.5)] = rl.Text
+	}
+	for i := range lyrics {
+		if text, ok := rmap[int(lyrics[i].Time*1000+0.5)]; ok {
+			lyrics[i].RomaText = text
 		}
 	}
 }

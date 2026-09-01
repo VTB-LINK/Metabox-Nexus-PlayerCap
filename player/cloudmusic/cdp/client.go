@@ -124,6 +124,7 @@ type ExtractedLyric struct {
 	Time         float32                  `json:"time"`
 	Text         string                   `json:"text"`
 	SubText      string                   `json:"subText"`
+	RomaText     string                   `json:"romaText"`
 	TextDetailed player.LyricTextDetailed `json:"textDetailed"`
 }
 
@@ -502,6 +503,7 @@ type LyricFetchResult struct {
 	NoLyric   bool
 	Lrc       string
 	Tlyric    string
+	Romalrc   string
 	Yrc       string
 }
 
@@ -513,7 +515,7 @@ func (c *Client) FetchLyricsViaCDP(songID string) (*LyricFetchResult, error) {
 			const d = await r.json();
 			if (d.pureMusic) return '[PURE_MUSIC]';
 			if (d.nolyric) return '[NO_LYRIC]';
-			if (d.lrc && d.lrc.lyric) return JSON.stringify({lrc: d.lrc.lyric, tlyric: (d.tlyric && d.tlyric.lyric) || '', yrc: (d.yrc && d.yrc.lyric) || ''});
+			if (d.lrc && d.lrc.lyric) return JSON.stringify({lrc: d.lrc.lyric, tlyric: (d.tlyric && d.tlyric.lyric) || '', romalrc: (d.romalrc && d.romalrc.lyric) || '', yrc: (d.yrc && d.yrc.lyric) || ''});
 			return '';
 		} catch(e) { return 'err:' + e.message; }
 	})()`, songID)
@@ -535,14 +537,15 @@ func (c *Client) FetchLyricsViaCDP(songID string) (*LyricFetchResult, error) {
 		return &LyricFetchResult{NoLyric: true}, nil
 	}
 	var parsed struct {
-		Lrc    string `json:"lrc"`
-		Tlyric string `json:"tlyric"`
-		Yrc    string `json:"yrc"`
+		Lrc     string `json:"lrc"`
+		Tlyric  string `json:"tlyric"`
+		Romalrc string `json:"romalrc"`
+		Yrc     string `json:"yrc"`
 	}
 	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
 		return nil, fmt.Errorf("lyrics JSON parse error: %v", err)
 	}
-	return &LyricFetchResult{Lrc: parsed.Lrc, Tlyric: parsed.Tlyric, Yrc: parsed.Yrc}, nil
+	return &LyricFetchResult{Lrc: parsed.Lrc, Tlyric: parsed.Tlyric, Romalrc: parsed.Romalrc, Yrc: parsed.Yrc}, nil
 }
 
 // FetchCoverViaCDP uses the app's own fetch to get album cover URL by song ID

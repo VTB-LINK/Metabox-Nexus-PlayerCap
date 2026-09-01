@@ -568,10 +568,11 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				lastLineIdx = trueIdx
 				line := currentLyrics[trueIdx]
 				// interpSec 是插值出的实时位置，进 Position、并据它算 Progress；play_time 由 BuildLyricUpdate
-				// 按歌词时间轴算。KRC 源有逐字（line.Detailed）与翻译（line.SubText），LRC 回落
-				// 二者皆空。words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传。
+				// 按歌词时间轴算。KRC 源有逐字（line.Detailed）、翻译（line.SubText）与音译
+				// （line.RomaText，type=0 轨），LRC 回落三者皆空。音译与翻译各自透传、互不覆盖。
+				// words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传。
 				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-					trueIdx, line.Time, line.Text, line.SubText, line.Detailed,
+					trueIdx, line.Time, line.Text, line.SubText, line.RomaText, line.Detailed,
 					offsetSec, interpSec, currentDurationSec,
 				))
 			}
@@ -627,7 +628,9 @@ func toLyricLines(lines []klyric.Line, offsetSec float32) []player.LyricLine {
 	}
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
-		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.Detailed, offsetSec)
+		// SubText（翻译）与 RomaText（音译，KRC type=0 轨）各自透传给 BuildLyricLine，互不覆盖；
+		// LRC 回落时二者皆空。
+		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec)
 	}
 	return out
 }

@@ -435,7 +435,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			// progressSec 是实时插值位置，进 Position、并据它算 Progress；play_time 由 BuildLyricUpdate 按
 			// 歌词时间轴算。逐字（TextDetailed）的 offset 已在 applyDetailedOffset 里套过。
 			p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-				trueIdx, line.Time, line.Text, line.SubText, line.Detailed,
+				trueIdx, line.Time, line.Text, line.SubText, line.RomaText, line.Detailed,
 				offsetSec, progressSec, currentDurationSec,
 			))
 		}
@@ -491,7 +491,7 @@ func (g *midWaitGate) reset() { g.name = "" }
 func toLyricLines(lines []lyricLine, offsetSec float32) []player.LyricLine {
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
-		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.Detailed, offsetSec)
+		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec)
 	}
 	return out
 }

@@ -21,8 +21,8 @@ func hashEventData(evtType string, data interface{}) uint64 {
 		if msg, ok := data.(*player.AllLyricsData); ok {
 			fmt.Fprintf(h, "%s\x00%d\x00%.3f", msg.Title, msg.Count, msg.Duration)
 			for _, line := range msg.Lyrics {
-				fmt.Fprintf(h, "\x00%d\x00%.3f\x00%.3f\x00%s\x00%s\x00%.3f\x00%d",
-					line.Index, line.Timestamp, line.PlayTime, line.Text, line.SubText,
+				fmt.Fprintf(h, "\x00%d\x00%.3f\x00%.3f\x00%s\x00%s\x00%s\x00%.3f\x00%d",
+					line.Index, line.Timestamp, line.PlayTime, line.Text, line.SubText, line.RomaText,
 					line.TextDetailed.Duration, len(line.TextDetailed.Words))
 				for _, word := range line.TextDetailed.Words {
 					fmt.Fprintf(h, "\x00%.3f\x00%.3f\x00%.3f\x00%s", word.Timestamp, word.PlayTime, word.Duration, word.Text)
@@ -31,8 +31,8 @@ func hashEventData(evtType string, data interface{}) uint64 {
 		}
 	case player.EventLyricUpdate:
 		if msg, ok := data.(*player.LyricUpdate); ok {
-			fmt.Fprintf(h, "%d\x00%s\x00%s\x00%.3f\x00%.3f\x00%.3f\x00%d",
-				msg.Index, msg.Text, msg.SubText, msg.Timestamp, msg.PlayTime,
+			fmt.Fprintf(h, "%d\x00%s\x00%s\x00%s\x00%.3f\x00%.3f\x00%.3f\x00%d",
+				msg.Index, msg.Text, msg.SubText, msg.RomaText, msg.Timestamp, msg.PlayTime,
 				msg.TextDetailed.Duration, len(msg.TextDetailed.Words))
 			for _, word := range msg.TextDetailed.Words {
 				fmt.Fprintf(h, "\x00%.3f\x00%.3f\x00%.3f\x00%s", word.Timestamp, word.PlayTime, word.Duration, word.Text)

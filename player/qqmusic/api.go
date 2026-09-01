@@ -49,6 +49,9 @@ type lyricLine struct {
 	// SubText 翻译（QQ 的 trans 字段，与主歌词同一次响应返回；无翻译时为空）。
 	// 由 mergeTrans 按时间就近填入。
 	SubText string
+	// RomaText 音译/罗马音（QQ 的 roma 字段，与主歌词同一次响应返回；无音译时为空）。
+	// 由 mergeRoma 按时间就近填入。**与 SubText 是相互独立的两条轨，绝不互相覆盖**。
+	RomaText string
 	// Detailed 逐字时间轴（QRC 才有；LRC 源为零值，序列化成 {}）。
 	// 此处 PlayTime 尚未套 offset，由 applyDetailedOffset 统一处理。
 	Detailed player.LyricTextDetailed
@@ -348,7 +351,7 @@ func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) (
 				"lrc_t":   0,
 				"qrc":     1,
 				"qrc_t":   0,
-				"roma":    0,
+				"roma":    1, // 请求逐字罗马音（音译）；解析见 attachRoma
 				"roma_t":  0,
 				"trans":   1,
 				"trans_t": 0,
@@ -423,6 +426,7 @@ func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) (
 	lines, name, singer := parseLRC(rawLyric, durationMs)
 
 	attachTrans(lines, data.Trans, data.Crypt)
+	attachRoma(lines, data.Roma, data.Crypt)
 
 	return lines, name, singer, nil
 }
@@ -455,6 +459,112 @@ func attachTrans(lines []lyricLine, rawTrans string, crypt int) {
 		return
 	}
 	mergeTrans(lines, html.UnescapeString(transPlain))
+}
+
+// romaToleranceMs 是音译行（roma）与主歌词行的时间匹配容差（毫秒）。
+//
+// **不与 transToleranceMs 合用一个常量**：两者数值恰好相同，成因却不同。翻译 trans 是标准
+// LRC（把 QRC 毫秒时间截断到 10ms），必须靠 ±20ms 覆盖那段截断误差；roma 与主歌词 lyric
+// **同源同为 QRC 毫秒精度**（同一次 musicu.fcg 响应、共用 crypt），行首时间戳理论上逐毫秒
+// 相等，正确匹配的时间差本就 ≈0，容差在这里只是「防意外抖动」的安全网，不覆盖任何系统性误差。
+//
+// 为什么取 20 而不「更严」：既然同源、正确匹配 diff≈0，收紧容差没有收益（正确那行照样命中），
+// 反而在 roma 与 lyric 万一有个位数毫秒抖动时把该行音译静默丢掉——与「稳定 > 功能完整度」
+// 相悖。为什么不取更大：QRC 相邻行间隔以秒计，20ms 远低于误配到相邻行的阈值，放宽只是白扩
+// 风险窗口。故与 trans 取同一稳妥值。（真机核对由主会话 qqromaprobe 端到端做，见 attachRoma
+// 的临时日志。）
+const romaToleranceMs = 20
+
+// mergeRoma 把 QQ 的音译歌词按时间就近合并进主歌词的 RomaText。
+//
+// 与 mergeTrans 同构（切片顺序扫描、平局取先出现者、容差就近匹配），唯二区别：
+//   - 写 RomaText 而非 SubText —— 音译与翻译是两条独立轨，任一条的失败/缺失绝不能波及另一条
+//     或主歌词（roma_text 与 sub_text 互不污染，AGENTS 硬约束）。
+//   - 用 romaToleranceMs（同源，理由见其注释）。
+//
+// 复用 parseLRC 天然做到「格式兼容」：QQ 的 roma 实测为 QRC 逐字（`[start,dur]文字(ts,dur)…`，
+// 与主歌词 lyric 同格式），parseLRC 的 qqRe 分支解析它、剥掉字级时间戳得每行罗马音文本；
+// 万一某版本回普通 LRC，则走 re 分支。两种都不必在此分叉判断。
+//
+// 匹配不上或音译缺失一律保持 RomaText 为空：音译是纯增量，任何情况下都不能反过来影响主歌词。
+func mergeRoma(lines []lyricLine, romaLRC string) {
+	if romaLRC == "" || len(lines) == 0 {
+		return
+	}
+	romaLines, _, _ := parseLRC(romaLRC, 0)
+	if len(romaLines) == 0 {
+		return
+	}
+	for i := range lines {
+		lineMs := int(lines[i].Time*1000 + 0.5)
+		best := -1
+		bestDiff := romaToleranceMs + 1
+		for j := range romaLines {
+			diff := int(romaLines[j].Time*1000+0.5) - lineMs
+			if diff < 0 {
+				diff = -diff
+			}
+			// 严格 < ：平局保留先出现的那条，结果不依赖遍历起点（同 mergeTrans）。
+			if diff < bestDiff {
+				best = j
+				bestDiff = diff
+			}
+		}
+		// 复用 transIsDroppable：`//` 不发音占位对两条轨同样适用；QQ 的版权/来源文案是中文，
+		// 音译轨是罗马音（拉丁/拼音）几乎不可能命中那几个词根，套上零误伤、还多一层防护
+		// （万一 QQ 也往 roma 轨塞声明）。
+		if best < 0 || transIsDroppable(romaLines[best].Text) {
+			continue
+		}
+		lines[i].RomaText = romaLines[best].Text
+	}
+}
+
+// attachRoma 解密并合并音译歌词。音译与主歌词同一次响应返回，共用 crypt 标志。
+//
+// 失败**只跳过音译、绝不阻断主歌词或翻译**：roma_text 缺失是少一行音译，主歌词/翻译断供才是
+// 直播事故（稳定 > 功能完整度），故本函数不返回 error、也绝不触碰 sub_text。特别地，解不开的
+// 密文绝不能放行给 parseLRC——整串 hex 无时间戳，会命中它末尾「无时间戳按时长均分」的兜底，
+// 凭空造出一批假音译行乱配 RomaText；这与 attachTrans 注释里那条是同一形状的坑。decryptIfNeeded
+// 已把「是密文但解不开」挡在 error 分支（见其两类语义），到不了 mergeRoma。
+func attachRoma(lines []lyricLine, rawRoma string, crypt int) {
+	if rawRoma == "" {
+		return
+	}
+	romaPlain, _, err := decryptIfNeeded(rawRoma, crypt)
+	if err != nil {
+		log.Warn("音译歌词解密失败，本首无 roma_text（不影响主歌词/翻译）: %v", err)
+
+		// 「预期之外」，与 trans 同级：只少一行音译。单独一个 key 而不与 trans/主歌词合并——
+		// roma 与主歌词共用同一 crypt、同一次响应返回，「主歌词解开了、roma 没解开」比「都失败」
+		// 更奇怪（前者指向 roma 数据本身有问题，后者才指向算法/密钥变更），合并就分不出这两种、
+		// 而它们要采取的行动不同。
+		telemetry.ReportOnce("qqmusic.roma_decrypt_failed",
+			"QQ 音乐音译歌词解密失败（是密文但解不开）—— 本首无 roma_text",
+			nil,
+			map[string]any{"error": err.Error()})
+		return
+	}
+	romaPlain = html.UnescapeString(romaPlain)
+
+	// 临时诊断日志（主会话 qqromaprobe 端到端核对用）：解密后 roma 明文前 120 字符，供确认
+	// 「roma 确为 QRC 逐字、格式假设成立」。rune 安全截断，避免切断多字节字符。核对通过后可删。
+	if head := []rune(romaPlain); len(head) > 120 {
+		log.Detail("roma 明文(前120字符): %s", string(head[:120]))
+	} else {
+		log.Detail("roma 明文(前120字符): %s", romaPlain)
+	}
+
+	mergeRoma(lines, romaPlain)
+
+	// 临时诊断日志（同上）：attachRoma 后有 roma_text 的行数 / 总行数，供与屏幕逐字比对。
+	withRoma := 0
+	for i := range lines {
+		if lines[i].RomaText != "" {
+			withRoma++
+		}
+	}
+	log.Detail("attachRoma: %d/%d 行有 roma_text", withRoma, len(lines))
 }
 
 func parseLRC(lrc string, durationMs uint32) ([]lyricLine, string, string) {

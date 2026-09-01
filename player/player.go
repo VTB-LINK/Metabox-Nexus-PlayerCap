@@ -48,6 +48,7 @@ type LyricLine struct {
 	PlayTime     float32           `json:"play_time"`
 	Text         string            `json:"text"`
 	SubText      string            `json:"sub_text"`
+	RomaText     string            `json:"roma_text"`
 	TextDetailed LyricTextDetailed `json:"text_detailed"`
 }
 
@@ -92,6 +93,7 @@ type LyricUpdate struct {
 	Index        int               `json:"index"`
 	Text         string            `json:"text"`
 	SubText      string            `json:"sub_text"`
+	RomaText     string            `json:"roma_text"`
 	Timestamp    float32           `json:"timestamp"`
 	PlayTime     float32           `json:"play_time"`
 	Position     float32           `json:"position"`
@@ -377,11 +379,12 @@ func IsPureMusicOnly(lyrics []LyricLine) bool {
 // 正是这种「看不出差别」的分叉。
 //
 // playPos 传当前实时播放位置（各家的内存直读值或插值时钟），进 Position、并据它算 Progress。
-func BuildLyricUpdate(index int, lineTime float32, text, subText string, detailed LyricTextDetailed, offsetSec, playPos, duration float32) *LyricUpdate {
+func BuildLyricUpdate(index int, lineTime float32, text, subText, romaText string, detailed LyricTextDetailed, offsetSec, playPos, duration float32) *LyricUpdate {
 	return &LyricUpdate{
 		Index:        index,
 		Text:         text,
 		SubText:      subText,
+		RomaText:     romaText,
 		Timestamp:    lineTime,
 		PlayTime:     LyricPlayTime(lineTime, detailed, offsetSec),
 		Position:     playPos,
@@ -392,13 +395,14 @@ func BuildLyricUpdate(index int, lineTime float32, text, subText string, detaile
 
 // BuildLyricLine constructs a LyricLine with displayStart-aware PlayTime.
 // All players should use this to ensure consistent play_time semantics.
-func BuildLyricLine(index int, lineTime float32, text, subText string, detailed LyricTextDetailed, offsetSec float32) LyricLine {
+func BuildLyricLine(index int, lineTime float32, text, subText, romaText string, detailed LyricTextDetailed, offsetSec float32) LyricLine {
 	return LyricLine{
 		Index:        index,
 		Timestamp:    lineTime,
 		PlayTime:     LyricPlayTime(lineTime, detailed, offsetSec),
 		Text:         text,
 		SubText:      subText,
+		RomaText:     romaText,
 		TextDetailed: detailed,
 	}
 }

@@ -236,6 +236,7 @@ paths:
         - `lyrics[].timestamp` - 该歌词行的原始起始时间（秒）
         - `lyrics[].play_time` - 该歌词行应用 offset 后的展示时间（秒）
         - `lyrics[].sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
+        - `lyrics[].roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
         - `lyrics[].text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
         - `lyrics_detailed` - 完整逐字歌词集合（仅包含有逐字数据的行）。cloudmusicv3（YRC）/ qqmusic（QRC）/ kugou（KRC）/ sodamusic（明文 KRC）提供逐字时有内容；kugou 回落到行级 LRC 时、以及 wesing（无逐字源），恒为 `[]`。sodamusic 无行级回落，故它的 `lyrics_detailed` 要么与 `lyrics` 等长，要么两者同时为空
       responses:
@@ -271,6 +272,7 @@ paths:
                           play_time: 3.1100001
                           text: "Cold enough to chill my bones"
                           sub_text: "冷得足以冻到我的骨头"
+                          roma_text: ""
                           text_detailed:
                             timestamp: 4.44
                             play_time: 3.94
@@ -283,6 +285,7 @@ paths:
                           play_time: 7.07
                           text: "It feels like I don't know you anymore"
                           sub_text: "感觉就像我已经不再认识你了"
+                          roma_text: ""
                           text_detailed:
                             timestamp: 7.92
                             play_time: 7.42
@@ -317,6 +320,7 @@ paths:
                           play_time: 0
                           text: "谁能够代替我"
                           sub_text: ""
+                          roma_text: ""
                           text_detailed:
                             timestamp: 0.09
                             play_time: 0
@@ -361,6 +365,7 @@ paths:
         - `index` - 歌词行号；`-1` 表示平台未返回可用歌词数据（见下方说明）
         - `text` - 主歌词文本
         - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
+        - `roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
         - `timestamp` - 歌词时间戳（秒）
         - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 与 sodamusic 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
         - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量
@@ -368,7 +373,7 @@ paths:
         - `text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
 
         **`index: -1` 纯音乐说明：**
-        当平台未返回任何歌词数据时，发送 `index: -1` 而非空对象 `{}`。此时 `timestamp` 为 `0`，`sub_text` 为空字符串，`text_detailed` 为 `{}`；**`progress` 照常反映整曲播放进度，不为 `0`**（歌没有歌词，但它还在播）。
+        当平台未返回任何歌词数据时，发送 `index: -1` 而非空对象 `{}`。此时 `timestamp` 为 `0`，`sub_text` 与 `roma_text` 均为空字符串，`text_detailed` 为 `{}`；**`progress` 照常反映整曲播放进度，不为 `0`**（歌没有歌词，但它还在播）。
         **`text` 不保证为空**：cloudmusicv3 与 kugou 对纯音乐返回一行「纯音乐，请欣赏」，服务端已把 `index` 归一为 `-1`，但该提示语原样保留在 `text` 里；qqmusic 的 API 返回零行、以及 sodamusic 的平台未给出 KRC（`lyrics.type` 非 `krc` 或内容为空）时，`text` 为 `""`。提示语归一逻辑对五家统一生效，只是尚未观测到汽水发出这一行。
         判断有无歌词一律用 `index !== -1`，不要看 `text`。
         与此同时会发送一条 `all_lyrics`（`count: 0`，`lyrics: []`）。
@@ -398,6 +403,7 @@ paths:
                       index: 1
                       text: "往事就像流星刹那划过心房"
                       sub_text: ""
+                      roma_text: ""
                       timestamp: 31.483
                       play_time: 31.282999
                       position: 31.282999
@@ -413,6 +419,7 @@ paths:
                       index: 37
                       text: "There's plenty of time to sleep when we die"
                       sub_text: "死后自会长眠。"
+                      roma_text: ""
                       timestamp: 157.22
                       play_time: 156.46
                       position: 156.4659
@@ -434,6 +441,7 @@ paths:
                       index: 27
                       text: "谁能够代替我 漫步在宽阔的大路"
                       sub_text: ""
+                      roma_text: ""
                       timestamp: 130.93
                       play_time: 130.73
                       position: 130.86787
@@ -463,6 +471,7 @@ paths:
                       index: -1
                       text: ""
                       sub_text: ""
+                      roma_text: ""
                       timestamp: 0
                       play_time: 0
                       position: 28.151
@@ -478,6 +487,7 @@ paths:
                       index: -1
                       text: "纯音乐，请欣赏"
                       sub_text: ""
+                      roma_text: ""
                       timestamp: 0
                       play_time: 0
                       position: 197.18834
@@ -590,12 +600,12 @@ paths:
 
         **初始补发（连接时已有缓存歌词，含逐字 `text_detailed`）：**
         ```
-        data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]}}}
+        data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]}}}
         ```
 
         **播放过程中，每当歌词更新时接收（本例该行无逐字，`text_detailed` 为 `{}`）：**
         ```
-        data: {"type":"lyric_update","player":"wesing","data":{"index":2,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","timestamp":37.716,"play_time":37.516,"position":37.516,"progress":0.1268581,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":2,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","roma_text":"","timestamp":37.716,"play_time":37.516,"position":37.516,"progress":0.1268581,"text_detailed":{}}}
         ```
 
         **完整生命周期示例：**
@@ -604,11 +614,11 @@ paths:
         data: {"type":"lyric_update","player":"wesing","data":{}}
 
         （用户开始播放歌曲）
-        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","timestamp":25.44,"play_time":25.24,"position":25.24,"progress":0.08530405,"text_detailed":{}}}
-        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","roma_text":"","timestamp":25.44,"play_time":25.24,"position":25.24,"progress":0.08530405,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","roma_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
 
         （切歌 — 服务端不发送清空消息，前端自行根据新歌数据重置显示）
-        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"啊","sub_text":"","timestamp":3.012,"play_time":2.812,"position":2.812,"progress":0.009628378,"text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"啊","sub_text":"","roma_text":"","timestamp":3.012,"play_time":2.812,"position":2.812,"progress":0.009628378,"text_detailed":{}}}
         ```
 
         **约束：**
@@ -638,7 +648,7 @@ paths:
                 有歌词时:
                   summary: 有歌词时（含逐字 text_detailed；无逐字的行该字段为 {}）
                   value: |
-                    data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]}}}
+                    data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]}}}
                 无歌词时:
                   summary: 无歌词时
                   value: |
@@ -764,7 +774,7 @@ paths:
 
         播放中（有歌词时）：
         ```json
-        {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
+        {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"往事就像流星刹那划过心房","sub_text":"","roma_text":"","timestamp":31.483,"play_time":31.282999,"position":31.282999,"progress":0.105743244,"text_detailed":{}}}
         ```
         无歌词时：
         ```json
@@ -777,7 +787,7 @@ paths:
 
         有歌词时：
         ```json
-        {"type":"all_lyrics","player":"wesing","data":{"title":"都是夜归人 - 许美静","duration":296,"position":1.75,"progress":0.0059121624,"count":38,"lyrics":[{"index":0,"timestamp":25.44,"play_time":25.24,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","text_detailed":{}},{"index":1,"timestamp":31.483,"play_time":31.282999,"text":"往事就像流星刹那划过心房","sub_text":"","text_detailed":{}},{"index":2,"timestamp":37.716,"play_time":37.516,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","text_detailed":{}}],"lyrics_detailed":[]}}（lyrics 已裁剪至 3 行，实际 38 行）
+        {"type":"all_lyrics","player":"wesing","data":{"title":"都是夜归人 - 许美静","duration":296,"position":1.75,"progress":0.0059121624,"count":38,"lyrics":[{"index":0,"timestamp":25.44,"play_time":25.24,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","roma_text":"","text_detailed":{}},{"index":1,"timestamp":31.483,"play_time":31.282999,"text":"往事就像流星刹那划过心房","sub_text":"","roma_text":"","text_detailed":{}},{"index":2,"timestamp":37.716,"play_time":37.516,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","roma_text":"","text_detailed":{}}],"lyrics_detailed":[]}}（lyrics 已裁剪至 3 行，实际 38 行）
         ```
         无歌词时：
         ```json
@@ -970,6 +980,7 @@ paths:
                           play_time: 3.1100001
                           text: "Cold enough to chill my bones"
                           sub_text: "冷得足以冻到我的骨头"
+                          roma_text: ""
                           text_detailed:
                             timestamp: 4.44
                             play_time: 3.94
@@ -982,6 +993,7 @@ paths:
                           play_time: 7.07
                           text: "It feels like I don't know you anymore"
                           sub_text: "感觉就像我已经不再认识你了"
+                          roma_text: ""
                           text_detailed:
                             timestamp: 7.92
                             play_time: 7.42
@@ -1025,6 +1037,7 @@ paths:
         - `index` - 歌词行号；`-1` 表示平台未返回可用歌词数据（见下方说明）
         - `text` - 主歌词文本
         - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
+        - `roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
         - `timestamp` - 歌词时间戳（秒）
         - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 与 sodamusic 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
         - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量
@@ -1058,6 +1071,7 @@ paths:
                       index: 1
                       text: "往事就像流星刹那划过心房"
                       sub_text: ""
+                      roma_text: ""
                       timestamp: 31.483
                       play_time: 31.282999
                       position: 31.282999
@@ -1182,7 +1196,7 @@ paths:
 
         **事件格式（含逐字 `text_detailed`；无逐字的行该字段为 `{}`）：**
         ```
-        data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]}}}
+        data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]}}}
         ```
 
         **约束：**
@@ -1202,7 +1216,7 @@ paths:
                 有歌词时:
                   summary: 有歌词时（含逐字 text_detailed；无逐字的行该字段为 {}）
                   value: |
-                    data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]}}}
+                    data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]}}}
                 无歌词时:
                   summary: 无歌词时
                   value: |
@@ -1379,7 +1393,7 @@ webhooks:
         歌词行发生变化时推送。连接建立时，若已有缓存的歌词则补发一次，否则不发。
 
         **`index: -1` 纯音乐说明：**
-        当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`，而 **`progress` 照常反映播放进度**；`text` 不保证为空（cloudmusicv3 / kugou 保留平台提示语「纯音乐，请欣赏」，qqmusic 与 sodamusic 为 `""`）。
+        当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`、`roma_text: ""`，而 **`progress` 照常反映播放进度**；`text` 不保证为空（cloudmusicv3 / kugou 保留平台提示语「纯音乐，请欣赏」，qqmusic 与 sodamusic 为 `""`）。
         与此同时会发送一条 `all_lyrics`（`count: 0`，`lyrics: []`）。
         客户端利用 `msg.data.index === -1` 识别纯音乐。
       requestBody:
@@ -1409,6 +1423,7 @@ webhooks:
                     index: 1
                     text: "往事就像流星刹那划过心房"
                     sub_text: ""
+                    roma_text: ""
                     timestamp: 31.483
                     play_time: 31.282999
                     position: 31.282999
@@ -1428,6 +1443,7 @@ webhooks:
                     index: -1
                     text: "纯音乐，请欣赏"
                     sub_text: ""
+                    roma_text: ""
                     timestamp: 0
                     play_time: 0
                     position: 197.18834
@@ -1474,9 +1490,9 @@ webhooks:
                     progress: 0.0059121624
                     count: 38
                     lyrics:
-                      - { index: 0, timestamp: 25.44, play_time: 25.24, text: "是冰冻的时分 已过夜深的夜晚", sub_text: "", text_detailed: {} }
-                      - { index: 1, timestamp: 31.483, play_time: 31.282999, text: "往事就像流星刹那划过心房", sub_text: "", text_detailed: {} }
-                      - { index: 2, timestamp: 37.716, play_time: 37.516, text: "灰暗的深夜 是寂寞的世界", sub_text: "", text_detailed: {} }
+                      - { index: 0, timestamp: 25.44, play_time: 25.24, text: "是冰冻的时分 已过夜深的夜晚", sub_text: "", roma_text: "", text_detailed: {} }
+                      - { index: 1, timestamp: 31.483, play_time: 31.282999, text: "往事就像流星刹那划过心房", sub_text: "", roma_text: "", text_detailed: {} }
+                      - { index: 2, timestamp: 37.716, play_time: 37.516, text: "灰暗的深夜 是寂寞的世界", sub_text: "", roma_text: "", text_detailed: {} }
                     lyrics_detailed: []
               无歌词时:
                 value:
@@ -1974,13 +1990,13 @@ components:
 
     LyricUpdateData:
       type: object
-      required: [index, text, sub_text, timestamp, play_time, position, progress, text_detailed]
+      required: [index, text, sub_text, roma_text, timestamp, play_time, position, progress, text_detailed]
       properties:
         index:
           type: integer
           description: |
             歌词行号。
-            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出），而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 与 sodamusic 为 `""`）。同时会配套发送一条 `all_lyrics`（`count: 0`、`lyrics: []`）。
+            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 与 `roma_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出），而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 与 sodamusic 为 `""`）。同时会配套发送一条 `all_lyrics`（`count: 0`、`lyrics: []`）。
             客户端用 `msg.data.index === -1` 判断有无歌词，不要依赖 `msg.data.text` 是否为空。
           example: 1
         text:
@@ -1990,6 +2006,10 @@ components:
         sub_text:
           type: string
           description: 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
+          example: ""
+        roma_text:
+          type: string
+          description: 逐行音译（发音标注）歌词文本；cloudmusicv3（取自网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（取自 KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与 sub_text 的翻译轨相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
           example: ""
         timestamp:
           type: number
@@ -2016,7 +2036,7 @@ components:
 
     LyricLine:
       type: object
-      required: [index, timestamp, play_time, text, sub_text, text_detailed]
+      required: [index, timestamp, play_time, text, sub_text, roma_text, text_detailed]
       properties:
         index:
           type: integer
@@ -2039,6 +2059,10 @@ components:
         sub_text:
           type: string
           description: 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
+          example: ""
+        roma_text:
+          type: string
+          description: 逐行音译（发音标注）歌词文本；cloudmusicv3（取自网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（取自 KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与 sub_text 的翻译轨相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
           example: ""
         text_detailed:
           $ref: "#/components/schemas/LyricTextDetailed"

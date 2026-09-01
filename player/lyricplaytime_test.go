@@ -78,7 +78,7 @@ func TestLyricPlayTimeNeverNegative(t *testing.T) {
 // 变异自证：把 BuildLyricUpdate 里的 PlayTime 改成 playPos、删掉 Position: playPos、
 // 或把 Progress 改成 ClampProgress(lineTime, duration)，本例分别变红。
 func TestBuildLyricUpdateKeepsPlayTimeAndProgressIndependent(t *testing.T) {
-	u := BuildLyricUpdate(3, 170.0, "text", "sub", LyricTextDetailed{}, 0.5, 100.0, 200.0)
+	u := BuildLyricUpdate(3, 170.0, "text", "sub", "roma", LyricTextDetailed{}, 0.5, 100.0, 200.0)
 
 	if u.PlayTime != 169.5 {
 		t.Fatalf("PlayTime = %v, want 169.5；play_time 是「本行何时该播出」"+
@@ -98,6 +98,10 @@ func TestBuildLyricUpdateKeepsPlayTimeAndProgressIndependent(t *testing.T) {
 	if u.Text != "text" || u.SubText != "sub" {
 		t.Fatalf("Text/SubText 透传错误: %q / %q", u.Text, u.SubText)
 	}
+	// roma_text（音译）与 sub_text（翻译）是两条独立的轨，各自原样透传、互不串。
+	if u.RomaText != "roma" {
+		t.Fatalf("RomaText = %q, want \"roma\"；音译必须原样透传、且不与 sub_text 混用", u.RomaText)
+	}
 }
 
 // lyric_update 与 all_lyrics 里同一行的 play_time 必须逐字节一致（含逐字早于行的情形）。
@@ -106,8 +110,8 @@ func TestBuildLyricUpdateAgreesWithBuildLyricLine(t *testing.T) {
 		Timestamp: 10.92,
 		Words:     []LyricTextDetailedWord{{Timestamp: 10.92, Text: "A"}},
 	}
-	line := BuildLyricLine(1, 14.58, "t", "s", detailed, 0.5)
-	upd := BuildLyricUpdate(1, 14.58, "t", "s", detailed, 0.5, 99.0, 200.0)
+	line := BuildLyricLine(1, 14.58, "t", "s", "", detailed, 0.5)
+	upd := BuildLyricUpdate(1, 14.58, "t", "s", "", detailed, 0.5, 99.0, 200.0)
 	if line.PlayTime != upd.PlayTime {
 		t.Fatalf("all_lyrics 的 play_time (%v) != lyric_update 的 play_time (%v)",
 			line.PlayTime, upd.PlayTime)
@@ -137,7 +141,7 @@ func TestBuildLyricLineAndLyricPlayTimeAgree(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			built := BuildLyricLine(0, c.lineTime, "t", "s", c.detailed, 0.5)
+			built := BuildLyricLine(0, c.lineTime, "t", "s", "", c.detailed, 0.5)
 			direct := LyricPlayTime(c.lineTime, c.detailed, 0.5)
 			if built.PlayTime != direct {
 				t.Fatalf("all_lyrics 的 play_time (%v) != lyric_update 的 play_time (%v)；"+
