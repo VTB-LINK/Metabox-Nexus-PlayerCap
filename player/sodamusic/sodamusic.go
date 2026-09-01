@@ -157,6 +157,11 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 	// 保持 coverCancel 的显式调用（别包 defer/helper），让 go vet 的 lostcancel 看得见（对照 kugou.go）。
 	var coverCancel context.CancelFunc
 
+	// romaCh 是「从酷狗借音译」的 goroutine → 主循环回传通道，每首歌一个、容量 1（见 roma.go）。
+	// 换歌时重建，旧 channel 连同其上迟到的结果一起弃置——故无需 ctx/代次淘汰。nil（换歌前）时
+	// 下面的非阻塞 select 走 default，安全。
+	var romaCh chan []krc.Line
+
 	// 本地时钟外推：锚点进度 + 自锚点起的墙钟流逝，平滑两次轮询间的进度。
 	var anchorProgressSec float32
 	var anchorTime time.Time
@@ -370,6 +375,38 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 					Index: -1, Text: pureHint, Timestamp: 0, Position: initPlay, Progress: progress,
 				})
 			}
+
+			// 音译异步补发：汽水平台无音译源，事后从酷狗按歌名/时长借一份、按主歌词文本对齐补进
+			// RomaText（详见 roma.go）。只在**有主歌词可对齐**时起（纯音乐/无词无从对齐）。每首歌一个
+			// 通道，传 currentLyrics 的快照给 goroutine 独占改写，避免与本循环抢 currentLyrics。
+			romaCh = make(chan []krc.Line, 1)
+			if len(currentLyrics) > 0 {
+				snapshot := append([]krc.Line(nil), currentLyrics...)
+				go p.fetchKugouRoma(romaCh, snapshot, name, singer, int(currentDurationSec*1000))
+			}
+		}
+
+		// 音译补发落地：goroutine 借酷狗对齐后把整份歌词经 romaCh 交回，本循环（currentLyrics 的
+		// 单写者）换掉它并重发一次 all_lyrics，随后 lastLineIdx 归 -1 逼下一轮按含音译的当前行重发
+		// lyric_update——如此 all_lyrics 与其后每条 lyric_update 都带音译，与其余四家同源一致。
+		// 非阻塞收：没到就跳过；对齐 0 行时 goroutine 根本不送，这里恒空转（不重发）。
+		// 重发一次 all_lyrics 是既有受支持的动作（对照下面「时长晚到」补发）。
+		select {
+		case merged := <-romaCh:
+			currentLyrics = merged
+			currentLyricItems = toLyricLines(merged, offsetSec)
+			lastLineIdx = -1
+			pos := livePos()
+			log.Info("音译已补入，重发 all_lyrics（%d 行）", len(currentLyricItems))
+			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+				Title:    currentTitle,
+				Duration: currentDurationSec,
+				Position: pos,
+				Progress: player.ClampProgress(pos, currentDurationSec),
+				Lyrics:   currentLyricItems,
+				Count:    len(currentLyricItems),
+			})
+		default:
 		}
 
 		// 时长补取：换歌那一轮已经等过 durationGrace，绝大多数情况这里是空转。它是宽限超时那条
@@ -547,8 +584,10 @@ func parseSodaLyrics(data *cdp.ExtractionData, offsetSec float32) []krc.Line {
 	if len(lines) == 0 {
 		return nil
 	}
-	// 音译轨（KRC 内嵌 type=0）已由 ParsePlainKRC 写进 RomaText；此处只把独立翻译轨（tlyric）
-	// 按时间戳合并进 SubText。applySodaTranslations 只碰 SubText、绝不动 RomaText，两轨互不干扰。
+	// 音译轨（KRC 内嵌 type=0）本应由 ParsePlainKRC 写进 RomaText，但汽水平台的 KRC 实测不含
+	// 内嵌轨，故此处 RomaText 恒空——音译改由 fetchKugouRoma 事后从酷狗借来补入（见 roma.go），
+	// 不在本同步路径里。此处只把独立翻译轨（tlyric）按时间戳合并进 SubText。applySodaTranslations
+	// 只碰 SubText、绝不动 RomaText，两轨互不干扰。
 	applySodaTranslations(lines, data.TranslationLRC)
 	applyDetailedOffset(lines, offsetSec)
 	return lines

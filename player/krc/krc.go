@@ -34,6 +34,18 @@ type Line struct {
 	// 「音译」的形式因来源而异（酷狗 KRC type=0 实测为汉语谐音，网易云同槽位为罗马音）；
 	// 字段沿用 wire 既有的 roma_text 名，不随内容形态改名。
 	RomaText string
+	// RomaWords 是本行音译的**逐字片段**（type=0 的 lyricContent[i] 原样、未 Join、未 Trim），
+	// 语义上 RomaWords[j] 对应 Detailed.Words[j] 那个字的音译（酷狗 KRC「按行号+字级位置对齐」，
+	// 见 parseRomanizationWords）。**纯内部字段、不进 wire**：krc.Line 从不被直接序列化（下游一律
+	// 经 player.BuildLyricLine 显式搬字段进 player.LyricLine），故新增它对 kugou/sodamusic/all
+	// 的 wire 零影响；对外产物仍只有行级 RomaText。它与 RomaText 同源（都来自 type=0 轨）、
+	// 只是一个未 Join、一个 Join，互不影响：kugou 只读行级 RomaText，字级供汽水借音译用。
+	//
+	// 它只为一件事存在：汽水借酷狗音译时按**字序**对齐、跨断行差异重拼行级 RomaText（见
+	// sodamusic/roma.go）。是否可用由调用方按 len(RomaWords)==len(Detailed.Words) 自行判定——
+	// 相等才逐字配对，不等（老 KRC / 异常轨 / 片段数与字数不符）则该行不参与字级、回落行级或
+	// 留空，绝不臆测配对。
+	RomaWords []string
 	// Detailed 逐字时间轴。PlayTime 此处不填，由调用方按 offset 统一套
 	// （见 kugou.go / sodamusic 的 applyDetailedOffset）。
 	Detailed player.LyricTextDetailed
@@ -59,6 +71,9 @@ var (
 func ParsePlainKRC(krc string) []Line {
 	trans := parseTranslation(krc) // 按 [start,dur] 行序号对齐的译文（nil=无翻译轨）
 	roma := parseRomanization(krc) // 同一行号口径对齐的音译（nil=无音译轨），与 trans 各自独立
+	// romaWords 是同一 type=0 轨的**逐字片段**（未 Join），口径与 roma 完全一致（同一 rawIdx
+	// 行号对齐）。与 roma 各取所需、互不影响：roma 走 Join 供行级 RomaText，romaWords 供字级对齐。
+	romaWords := parseRomanizationWords(krc)
 	var lines []Line
 	rawIdx := -1 // 第几个 [start,dur] 行（含被跳过的 0 词行），与 trans/roma 索引严格对齐
 	for _, raw := range strings.Split(krc, "\n") {
@@ -110,12 +125,19 @@ func ParsePlainKRC(krc string) []Line {
 		if rawIdx < len(roma) {
 			romaText = roma[rawIdx]
 		}
+		// 同一 rawIdx 口径取本行的逐字音译片段。行级 romaText 与字级 romaWords 同源不同形，
+		// 各存各的：kugou 只用 romaText，汽水字级对齐用 romaWords。缺轨则为 nil，安全。
+		var romaWordFrags []string
+		if rawIdx < len(romaWords) {
+			romaWordFrags = romaWords[rawIdx]
+		}
 		lines = append(lines, Line{
-			Index:    len(lines),
-			Time:     lineTimestamp,
-			Text:     plain,
-			SubText:  sub,
-			RomaText: romaText,
+			Index:     len(lines),
+			Time:      lineTimestamp,
+			Text:      plain,
+			SubText:   sub,
+			RomaText:  romaText,
+			RomaWords: romaWordFrags,
 			Detailed: player.LyricTextDetailed{
 				Timestamp: lineTimestamp,
 				Duration:  lineDuration,
@@ -199,6 +221,45 @@ func parseTranslation(krc string) []string {
 // 网易云同槽位为罗马音——本函数不区分内容形态，照取、照对齐、照写 RomaText。
 func parseRomanization(krc string) []string {
 	return parseLanguageTrack(krc, 0)
+}
+
+// parseRomanizationWords 解出 type=0 音译轨的**逐字片段**（不 Join、不 Trim），返回按主歌词
+// [start,dur] 行序号对齐的 [][]string：第 i 项 = 第 i 行的逐字音译片段序列，即 type=0 块的
+// lyricContent[i]（`["ro","ma"]` 这种，每片段对应该行一个字）。无 [language:] / 解不开 /
+// 无 type=0 轨 → nil；某行无片段则该项为空/ nil 切片。
+//
+// 与 parseRomanization（行级 Join）**同源、同 [start,dur] 行号口径、互不影响**：行级那条
+// 给 kugou 直接显示，字级这条给汽水借音译按字序对齐用（见 sodamusic/roma.go）。刻意**不复用**
+// parseLanguageTrack——那个函数把每行 Join 成单串是行级路径的承重语义（kugou 依赖、有门禁钉死），
+// 这里恰恰要的是 Join 之前的原始片段，故单开一份只多一次 base64+json（每首歌一次，非热路径）。
+//
+// 不 Trim 片段：片段内/间的空格是音译排版的一部分（如 "kimi " + "dake " Join 后再整体 TrimSpace
+// = "kimi dake"，与行级 RomaText 的 TrimSpace(Join) 口径一致）。留给对齐侧聚合后统一 Trim。
+func parseRomanizationWords(krc string) [][]string {
+	m := langTagRegex.FindStringSubmatch(krc)
+	if m == nil {
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(m[1])
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Content []struct {
+			LyricContent [][]string `json:"lyricContent"`
+			Type         int        `json:"type"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	for _, blk := range doc.Content {
+		if blk.Type != 0 {
+			continue
+		}
+		return blk.LyricContent // 原样返回逐字片段，绝不 Join/Trim（对照 parseLanguageTrack 的 out[i]）
+	}
+	return nil
 }
 
 // parseLanguageTrack 从 KRC 头部 [language:] 标签解出指定 type 的一条轨，返回按主歌词

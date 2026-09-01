@@ -212,11 +212,20 @@ func singerMatches(candidateSinger, target string) bool {
 	return false
 }
 
+// escapeKeyword 编码搜索关键词。**空格必须编成 %20、不能是 +**：酷狗 catalog（mobilecdn）与
+// krcs 服务端不把 + 当空格（按字面加号处理），而 url.QueryEscape 默认把空格编成 +，会让多词
+// keyword（“歌手 歌名”）退化成搜字面“歌手+歌名”——实测搜出一堆 UGC 翻唱、正主被挤掉。
+// 实测 “BoA Only One”：+ 编码时 catalog 首条是翻唱（nameOK=false），%20 编码时首条才是正主
+// Only One - BoA。kugou 播放器走 hash（空 keyword）不受影响，汽水借音译走 keyword 搜索才暴露。
+func escapeKeyword(kw string) string {
+	return strings.ReplaceAll(url.QueryEscape(kw), "+", "%20")
+}
+
 // callSearch hits krcs.kugou.com/search and returns the parsed response.
 func callSearch(keyword string, durationMs int, hash string) (*searchResponse, error) {
 	searchURL := fmt.Sprintf(
 		"https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=%s&duration=%d&hash=%s",
-		url.QueryEscape(keyword), durationMs, hash,
+		escapeKeyword(keyword), durationMs, hash,
 	)
 	resp, err := httpClient.Get(searchURL)
 	if err != nil {
@@ -336,7 +345,7 @@ func resolveCanonicalHash(normName, normSinger string, targetDurationMs int) (st
 	}
 	searchURL := fmt.Sprintf(
 		"http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword=%s&page=1&pagesize=10",
-		url.QueryEscape(keyword),
+		escapeKeyword(keyword),
 	)
 	resp, err := httpClient.Get(searchURL)
 	if err != nil {

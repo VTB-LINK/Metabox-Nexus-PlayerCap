@@ -236,7 +236,7 @@ paths:
         - `lyrics[].timestamp` - 该歌词行的原始起始时间（秒）
         - `lyrics[].play_time` - 该歌词行应用 offset 后的展示时间（秒）
         - `lyrics[].sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
-        - `lyrics[].roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
+        - `lyrics[].roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；sodamusic 平台自身无音译源，改由酷狗歌词接口按歌名 + 时长匹配「借」音译补全（非平台原生、不保证稳定：跨平台歌名搜索可能搜不到对应曲、或匹配到不同版本 / 母带 / 翻唱，匹配失败、无对应曲或该行主歌词文本对不上时留空）；wesing 恒为空字符串
         - `lyrics[].text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
         - `lyrics_detailed` - 完整逐字歌词集合（仅包含有逐字数据的行）。cloudmusicv3（YRC）/ qqmusic（QRC）/ kugou（KRC）/ sodamusic（明文 KRC）提供逐字时有内容；kugou 回落到行级 LRC 时、以及 wesing（无逐字源），恒为 `[]`。sodamusic 无行级回落，故它的 `lyrics_detailed` 要么与 `lyrics` 等长，要么两者同时为空
       responses:
@@ -365,7 +365,7 @@ paths:
         - `index` - 歌词行号；`-1` 表示平台未返回可用歌词数据（见下方说明）
         - `text` - 主歌词文本
         - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
-        - `roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
+        - `roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；sodamusic 平台自身无音译源，改由酷狗歌词接口按歌名 + 时长匹配「借」音译补全（非平台原生、不保证稳定：跨平台歌名搜索可能搜不到对应曲、或匹配到不同版本 / 母带 / 翻唱，匹配失败、无对应曲或该行主歌词文本对不上时留空）；wesing 恒为空字符串
         - `timestamp` - 歌词时间戳（秒）
         - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 与 sodamusic 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
         - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量
@@ -1037,7 +1037,7 @@ paths:
         - `index` - 歌词行号；`-1` 表示平台未返回可用歌词数据（见下方说明）
         - `text` - 主歌词文本
         - `sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic 提供，wesing 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空
-        - `roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
+        - `roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；sodamusic 平台自身无音译源，改由酷狗歌词接口按歌名 + 时长匹配「借」音译补全（非平台原生、不保证稳定：跨平台歌名搜索可能搜不到对应曲、或匹配到不同版本 / 母带 / 翻唱，匹配失败、无对应曲或该行主歌词文本对不上时留空）；wesing 恒为空字符串
         - `timestamp` - 歌词时间戳（秒）
         - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` - offset；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 与 sodamusic 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
         - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量
@@ -2009,7 +2009,7 @@ components:
           example: ""
         roma_text:
           type: string
-          description: 逐行音译（发音标注）歌词文本；cloudmusicv3（取自网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（取自 KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与 sub_text 的翻译轨相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
+          description: 逐行音译（发音标注）歌词文本；cloudmusicv3（取自网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（取自 KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与 sub_text 的翻译轨相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；sodamusic 平台自身无音译源，改由酷狗歌词接口按歌名 + 时长匹配「借」音译补全（非平台原生、不保证稳定：跨平台歌名搜索可能搜不到对应曲、或匹配到不同版本 / 母带 / 翻唱，匹配失败、无对应曲或该行主歌词文本对不上时留空）；wesing 恒为空字符串
           example: ""
         timestamp:
           type: number
@@ -2062,7 +2062,7 @@ components:
           example: ""
         roma_text:
           type: string
-          description: 逐行音译（发音标注）歌词文本；cloudmusicv3（取自网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（取自 KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与 sub_text 的翻译轨相互独立、互不覆盖；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；该曲无音译轨或该行未被覆盖时为空；wesing 恒为空字符串
+          description: 逐行音译（发音标注）歌词文本；cloudmusicv3（取自网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（取自 KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与 sub_text 的翻译轨相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；sodamusic 平台自身无音译源，改由酷狗歌词接口按歌名 + 时长匹配「借」音译补全（非平台原生、不保证稳定：跨平台歌名搜索可能搜不到对应曲、或匹配到不同版本 / 母带 / 翻唱，匹配失败、无对应曲或该行主歌词文本对不上时留空）；wesing 恒为空字符串
           example: ""
         text_detailed:
           $ref: "#/components/schemas/LyricTextDetailed"

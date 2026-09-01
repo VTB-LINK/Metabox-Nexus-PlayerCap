@@ -4,10 +4,15 @@
 // 解析，打印每行 text/sub_text/roma_text，用于验证汽水 KRC 是否内嵌 type=0 音译轨。
 // 只读、仅本地调试。复用生产的 watchdog（激活 inspector）+ cdp（Connect/Extract）。
 //
-// 验证结论（2026-09）：汽水无音译源——实测 KRC 不含 [language:] 内嵌轨，sharedState 的
-// ExtractionData 也无独立音译字段（只有 TranslationLRC 翻译），前端亦不渲染音译。故
-// sodamusic 的 roma_text 恒空；代码共用 kugou 的 KRC 解析、防御性就绪（平台日后若在 KRC
-// 内嵌 type=0 会自动生效）。本工具为该结论的可复现证据留档。
+// 验证结论（2026-09）：汽水**平台自身**无音译源——实测 KRC 不含 [language:] 内嵌轨，
+// sharedState 的 ExtractionData 也无独立音译字段（只有 TranslationLRC 翻译），前端亦不渲染
+// 音译。故 parseSodaLyrics 走内嵌轨解出的 roma_text 恒空；代码共用 kugou 的 KRC 解析、
+// 防御性就绪（平台日后若在 KRC 内嵌 type=0 会自动生效）。本工具为「平台无内嵌轨」这一结论
+// 的可复现证据留档。
+//
+// 注：平台无内嵌轨的结论不变，但 sodamusic 的 roma_text 已不再恒空——fetchKugouRoma 会事后
+// 从酷狗按歌名/时长「借」音译、按主歌词文本对齐补入（非平台原生，见 player/sodamusic/roma.go）。
+// 本工具只探测平台内嵌轨、不含借来的音译。
 package main
 
 import (

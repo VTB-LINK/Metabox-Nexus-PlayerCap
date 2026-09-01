@@ -300,13 +300,13 @@
 | **qqmusic** | 有 | 有（QRC 逐字罗马音） | 有（QRC） |
 | **wesing** | 恒 `""` | 恒 `""` | 有（内存字级）\* |
 | **kugou** | 有（KRC 内嵌译轨，按行号对齐）\* | 有（KRC 内嵌 type=0，按行号对齐；实测日文罗马音 / 韩文汉语谐音）\* | 有（KRC）\* |
-| **sodamusic** | 有（独立 tlyric LRC，按时间戳对齐）\*\* | 实测平台无音译源、恒空\*\* | 有（平台下发的明文 KRC）\*\* |
+| **sodamusic** | 有（独立 tlyric LRC，按时间戳对齐）\*\* | ⚠ 借酷狗按歌名 + 时长匹配补全、非平台原生\*\* | 有（平台下发的明文 KRC）\*\* |
 
-**逐字**五家都有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC / sodamusic 明文 KRC / wesing 内存字级）；**翻译**四家有（cloudmusicv3 / qqmusic / kugou / sodamusic）、wesing 无；**音译**cloudmusicv3、qqmusic 与 kugou 有（cloudmusicv3 是网易云 romalrc 逐行罗马音，qqmusic 是 QQ QRC 逐字罗马音，kugou 是 KRC 内嵌 type=0 逐行发音标注、形态因语言而异：日文罗马音、韩文汉语谐音；sodamusic 实测平台无音译源、恒空），均与翻译 `sub_text` 是相互独立、互不覆盖的两条轨。字段一律存在（值可能为空），下游不必按平台分支取值。
+**逐字**五家都有（cloudmusicv3 YRC / qqmusic QRC / kugou KRC / sodamusic 明文 KRC / wesing 内存字级）；**翻译**四家有（cloudmusicv3 / qqmusic / kugou / sodamusic）、wesing 无；**音译**cloudmusicv3、qqmusic 与 kugou 有（cloudmusicv3 是网易云 romalrc 逐行罗马音，qqmusic 是 QQ QRC 逐字罗马音，kugou 是 KRC 内嵌 type=0 逐行发音标注、形态因语言而异：日文罗马音、韩文汉语谐音；sodamusic 平台自身无音译源，改由酷狗按歌名 + 时长匹配「借」补全、非平台原生、不保证命中，对不上留空），均与翻译 `sub_text` 是相互独立、互不覆盖的两条轨。字段一律存在（值可能为空），下游不必按平台分支取值。
 
 \* 逐字均**逐行**判定：kugou 拿不到 KRC、回落行级 LRC 时该行 `text_detailed` 为 `{}`；wesing 的逐字来自进程内存的卡拉OK字级时间，某行字级时间轴不合法（NaN / 越界 / 非单调）时该行退回行级、为 `{}`。kugou 翻译另需 KRC 头部含中文译轨（无译轨时 `sub_text` 为空，逐字不受影响）；音译同理取自 KRC（头部含 type=0 轨才有，无轨或回落行级 LRC 时 `roma_text` 为空），与翻译、逐字各走各的轨、互不影响。
 
-\*\* sodamusic **不逐行判定**：平台给不出 KRC 时整曲按无歌词处理（`index: -1`、`lyrics: []`），所以它的每一行要么都带逐字、要么根本没有行——`lyrics_detailed` 与 `lyrics` 恒等长或同时为空。它的翻译是平台单独下发的一份 LRC（`translations.cn`），按绝对时间戳与主歌词行对齐，与 kugou 内嵌译轨的行号对齐**不是同一种机制**；该曲无译轨、或某行未被译轨覆盖（间奏）时 `sub_text` 为空。音译则取自同一份内嵌 KRC 的 type=0 轨（与 kugou 同一套行号对齐解析）：但实测汽水的 KRC 不含内嵌轨、sharedState 也无独立音译字段，故 `roma_text` 恒空；代码共用 kugou 解析、防御性就绪。
+\*\* sodamusic **不逐行判定**：平台给不出 KRC 时整曲按无歌词处理（`index: -1`、`lyrics: []`），所以它的每一行要么都带逐字、要么根本没有行——`lyrics_detailed` 与 `lyrics` 恒等长或同时为空。它的翻译是平台单独下发的一份 LRC（`translations.cn`），按绝对时间戳与主歌词行对齐，与 kugou 内嵌译轨的行号对齐**不是同一种机制**；该曲无译轨、或某行未被译轨覆盖（间奏）时 `sub_text` 为空。音译则是另一套机制：汽水的 KRC 不含内嵌 type=0 轨、sharedState 也无独立音译字段，平台自身给不出音译，故改由酷狗歌词接口按歌名 + 时长匹配「借」一份带 type=0 轨的歌词，再按主歌词文本对齐把音译搬进 `roma_text`（异步补发，不阻塞主歌词与翻译）。这是**借来的、非平台原生**的能力：跨平台歌名搜索无法保证命中（搜不到对应曲、或匹配到不同版本 / 母带 / 翻唱），匹配失败、无对应曲或某行文本对不上时该行 `roma_text` 留空——故能力表标 ⚠ 而非 ✔。
 
 #### 歌词数组前几行可能是元数据
 
@@ -435,7 +435,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 - `index` - 歌词行号（`-1` = 平台没有歌词，见下方）
 - `text` - 主歌词文本
 - `sub_text` - 副歌词文本（翻译，无时为空字符串）。**cloudmusicv3 / qqmusic / kugou / sodamusic 有，wesing 恒为空**（kugou 仅 KRC 含中文译轨时有值；sodamusic 仅平台下发了 `translations.cn` 译轨且该行被覆盖时有值）
-- `roma_text` - 音译歌词文本（逐行发音标注，无时为空字符串）。**cloudmusicv3、qqmusic 与 kugou 有**：cloudmusicv3 取自网易云 romalrc（罗马音），qqmusic 是 QQ QRC 逐字罗马音，kugou 取自 KRC 内嵌 type=0 轨（按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音，如 `이유 넌 이해 못 해` → `一哟 弄 一嘿 莫 嘿`）；sodamusic 实测平台无音译源（KRC 不含内嵌轨、无独立音译字段），恒为空；均与 `sub_text` 翻译相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；wesing 恒为空
+- `roma_text` - 音译歌词文本（逐行发音标注，无时为空字符串）。**cloudmusicv3、qqmusic 与 kugou 有**：cloudmusicv3 取自网易云 romalrc（罗马音），qqmusic 是 QQ QRC 逐字罗马音，kugou 取自 KRC 内嵌 type=0 轨（按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音，如 `이유 넌 이해 못 해` → `一哟 弄 一嘿 莫 嘿`）；sodamusic 平台自身无音译源（KRC 不含内嵌轨、无独立音译字段），改由酷狗按歌名 + 时长匹配「借」补全（非平台原生、不保证命中，匹配失败或某行文本对不上时留空）；均与 `sub_text` 翻译相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；wesing 恒为空
 - `timestamp` - 该行的原始时间戳（秒）
 - `play_time` - **本行的播出时间**（秒）= `timestamp − offset`，**恒小于 `timestamp`**（逐字长引子行取首字时刻，会更小）
 - `position` - **整曲实时播放位置**（秒），= `progress × duration`，做插值锚点用它；与 `play_time`（本行播出时间）是两个量
