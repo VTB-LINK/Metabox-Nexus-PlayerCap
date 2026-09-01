@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/krc"
 )
@@ -393,7 +394,7 @@ func krcDecrypt(contentB64 string) (string, error) {
 		return "", fmt.Errorf("krc base64: %w", err)
 	}
 	if len(blob) <= 4 || string(blob[:4]) != "krc1" {
-		return "", fmt.Errorf("krc 魔数不符（前 4 字节非 krc1）")
+		return "", i18n.Errorf("krc 魔数不符（前 4 字节非 krc1）")
 	}
 	body := blob[4:]
 	dec := make([]byte, len(body))

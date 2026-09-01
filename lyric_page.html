@@ -1374,6 +1374,197 @@
     </div>
 
     <script>
+        // ── i18n 前端脚手架（自动生成的字典 + 运行时）──
+        // 语言只看浏览器 navigator.language（等价于系统显示语言）；?lang=en / ?lang=zh 可覆盖。
+        // 中文变体 → 中文，其余一律英文（与 Go 侧规则一致）。中文时 t() 恒等、DOM 不扫，零改动。
+        const I18N_LANG = (function () {
+            const q = new URLSearchParams(location.search).get('lang');
+            if (q === 'en' || q === 'zh') return q;
+            return /^zh\b/i.test(navigator.language || '') ? 'zh' : 'en';
+        })();
+        // 中文原文 → 英文。key 必须与渲染出的确切文本一致。
+        const I18N = {
+            "-1永不 0+秒": "-1 never / 0+ sec",
+            "Metabox Nexus PlayerCap - 歌词编辑器": "Metabox Nexus PlayerCap - Lyrics Editor",
+            "QQ音乐": "QQ Music",
+            "♪ 实时歌词 ♪": "♪ Live Lyrics ♪",
+            "⚠️ file:// 协议受限": "⚠️ file:// protocol restricted",
+            "✓ 已复制": "✓ Copied",
+            "不处理": "None",
+            "不旋转": "No rotation",
+            "不透明度": "Opacity",
+            "仅歌名": "Name only",
+            "全民K歌": "WeSing",
+            "关闭": "Off",
+            "关闭换行动画": "Disable line-break animation",
+            "分隔符": "Separator",
+            "前奏中": "Intro playing",
+            "副歌词": "Secondary lyrics",
+            "加载中": "Loading",
+            "匀速 (linear)": "Linear (linear)",
+            "单程时间": "One-way duration",
+            "单行模式": "Single-line mode",
+            "发光效果": "Glow effect",
+            "发光颜色": "Glow color",
+            "圆形": "Circle",
+            "复制时背景透明": "Transparent background when copying",
+            "字体": "Font",
+            "字体名": "Font name",
+            "字体来源": "Font source",
+            "字号缩放": "Font size scale",
+            "定格特效": "Freeze effect",
+            "对齐锚点": "Alignment anchor",
+            "封面": "Cover",
+            "封面尺寸": "Cover size",
+            "封面样式": "Cover style",
+            "居中": "Center",
+            "已断开 · 重连中...": "Disconnected · Reconnecting...",
+            "已连接": "Connected",
+            "平滑 (ease-in-out)": "Smooth (ease-in-out)",
+            "底栏可点": "Bottom bar clickable",
+            "开启": "On",
+            "待机": "Standby",
+            "循环滚动": "Loop scroll",
+            "恢复淡入": "Resume fade-in",
+            "手动输入": "Manual input",
+            "拉伸": "Stretch",
+            "持续旋转": "Always rotate",
+            "描边厚度": "Stroke width",
+            "描边效果": "Stroke effect",
+            "描边颜色": "Stroke color",
+            "播放中": "Playing",
+            "播放器": "Player",
+            "擦除（Reveal）": "Wipe (Reveal)",
+            "文本对齐": "Text align",
+            "方形": "Square",
+            "旋转模式": "Rotation mode",
+            "旋转速度": "Rotation speed",
+            "显示": "Display",
+            "显示格式": "Display format",
+            "暂停中": "Paused",
+            "暂停行为": "Pause behavior",
+            "最小缩放": "Min scale",
+            "本地字体": "Local fonts",
+            "歌名": "Title",
+            "歌名 + 歌手": "Name + Artist",
+            "歌名样式": "Title style",
+            "歌名设置": "Title settings",
+            "歌名颜色": "Title color",
+            "歌词": "Lyrics",
+            "歌词上方": "Above lyrics",
+            "歌词下方": "Below lyrics",
+            "歌词样式": "Lyrics style",
+            "歌词配置编辑器": "Lyrics Config Editor",
+            "歌词颜色": "Lyrics color",
+            "汽水音乐": "Soda Music",
+            "淡入": "Fade in",
+            "淡出": "Fade out",
+            "渐入 (ease-in)": "Ease in (ease-in)",
+            "渐出 (ease-out)": "Ease out (ease-out)",
+            "渐显（Fade）": "Fade-in (Fade)",
+            "溢出模式": "Overflow mode",
+            "溢出设置": "Overflow settings",
+            "滚动速度": "Scroll speed",
+            "点击选择或搜索字体...": "Click to pick or search fonts...",
+            "特效": "Effect",
+            "特效消失时": "When effect disappears",
+            "画质": "Quality",
+            "留边": "Letterbox",
+            "碟片（圆形+中心孔）": "Disc (circle + center hole)",
+            "端点停顿": "Endpoint pause",
+            "等待播放器启动": "Waiting for player",
+            "等待歌曲播放": "Waiting for playback",
+            "系统字体名": "System font name",
+            "纯净歌词": "Pure lyrics",
+            "纯色": "Solid color",
+            "继承歌词": "Inherit lyrics",
+            "继承歌词 / 点击选择或搜索本地字体...": "Inherit lyrics / click to pick or search local fonts...",
+            "缓动效果": "Easing",
+            "缩小倍率": "Shrink ratio",
+            "缩小到角落": "Shrink to corner",
+            "缩小方向": "Shrink direction",
+            "网易云特效 · 交互": "NetEase effect · Interaction",
+            "网易云特效 · 画质": "NetEase effect · Quality",
+            "网易云特效 · 背景": "NetEase effect · Background",
+            "网易云特效 · 过渡": "NetEase effect · Transition",
+            "网易云特效歌词镜像": "NetEase Effect Lyrics Mirror",
+            "网易云音乐": "NetEase Cloud Music",
+            "背景": "Background",
+            "背景透明": "Transparent background",
+            "背景颜色": "Background color",
+            "自动换行": "Wrap",
+            "自动缩小": "Auto shrink",
+            "自定义": "Custom",
+            "自定义隐藏": "Custom hide",
+            "裁切填满": "Crop to fill",
+            "译文位置": "Translation position",
+            "译文字体": "Translation font",
+            "译文字号": "Translation font size",
+            "译文样式": "Translation style",
+            "译文溢出": "Translation overflow",
+            "译文间距": "Translation spacing",
+            "译文颜色": "Translation color",
+            "跟随播放": "Follow playback",
+            "跟随活跃": "Follow active",
+            "进场延迟": "Entrance delay",
+            "连接中...": "Connecting...",
+            "适配": "Fit",
+            "透明": "Transparent",
+            "逐字特效": "Per-character effect",
+            "酷狗音乐": "Kugou Music",
+            "重置": "Reset",
+            "隐藏延迟": "Hide delay",
+            "非活跃过渡": "Inactive transition",
+            "靠右": "Right",
+            "靠左": "Left",
+            "顶栏可点": "Top bar clickable",
+            "预览文字 AaBbCc 歌词": "Preview text AaBbCc Lyrics",
+            "颜色": "Color",
+            "默认": "Default",
+            "💤 无活跃播放器": "💤 No active player",
+            "📋 复制封面": "📋 Copy cover",
+            "📋 复制歌名": "📋 Copy title",
+            "📋 复制歌词": "📋 Copy lyrics",
+            "📋 复制特效": "📋 Copy effect",
+            "📋 复制默认": "📋 Copy default",
+            "🔄 切换至: ": "🔄 Switched to: ",
+            "🔤 获取本地字体": "🔤 Get local fonts",
+        };
+        // t(zh)：中文恒等；英文查表命中返回译文、未命中回退原文。用于 JS 直接 set 的运行期文案。
+        function t(zh) {
+            if (I18N_LANG === 'zh') return zh;
+            return Object.prototype.hasOwnProperty.call(I18N, zh) ? I18N[zh] : zh;
+        }
+        // 行号标签：中文「第 a / b 行」，英文「a / b」。
+        function lineLabel(a, b) {
+            return I18N_LANG === 'zh' ? '第 ' + a + ' / ' + b + ' 行' : a + ' / ' + b;
+        }
+        // 翻译已渲染的 DOM 子树（文本节点 + title/placeholder），按字典精确匹配。仅英文时执行；
+        // 跳过 <script>/<style>。设置台在编辑器模式（无歌词内容）整体扫；OBS 模式只扫 header/idle。
+        function translateTree(root) {
+            if (I18N_LANG === 'zh' || !root) return;
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+                acceptNode(n) {
+                    const p = n.parentNode && n.parentNode.nodeName;
+                    return (p === 'SCRIPT' || p === 'STYLE') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+                }
+            });
+            const nodes = [];
+            for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+            for (const node of nodes) {
+                const k = node.nodeValue.trim();
+                if (k && Object.prototype.hasOwnProperty.call(I18N, k)) node.nodeValue = node.nodeValue.replace(k, I18N[k]);
+            }
+            if (root.querySelectorAll) root.querySelectorAll('[title],[placeholder]').forEach(el => {
+                ['title', 'placeholder'].forEach(a => {
+                    const v = el.getAttribute(a);
+                    if (v) { const k = v.trim(); if (Object.prototype.hasOwnProperty.call(I18N, k)) el.setAttribute(a, I18N[k]); }
+                });
+            });
+        }
+        document.documentElement.lang = I18N_LANG;
+    </script>
+    <script>
         // URL 参数解析
         const urlParams = new URLSearchParams(window.location.search);
 
@@ -1471,21 +1662,33 @@
         // 上下限钳制。
         //
         // word_fx_lead_max：间隙充足时的提前量上限。0 = 关闭提前入场，回到原行为。
-        // word_fx_lead_min：间隙为 0（上一行唱完即接本行）时仍要提前的量，也就是能接受的最大入侵。
-        //                   给 0 则密集歌下本行与第一个字同时出现。
+        // word_fx_lead_min：间隙为 0（上一行唱完即接本行）时仍要提前的量，也就是能接受的最大入侵
+        //                   （= 最多切掉上一行末字多少）。默认 100ms：快歌里上一行几乎唱满，末字的
+        //                   逐字淡入基本走完才切（旧默认 430ms 会在末字开唱前就退场，末字整个消失）。
+        //                   给 0 则密集歌下本行与第一个字同时出现（不切上一行，但下一行入场也被压到 0）。
+        //                   注意 anim 跟随 lead 时，间隙为 0 的行入场时长 ≈ 本值，压得很短是有意的；
+        //                   嫌生硬就用 word_fx_anim 固定入场（代价：入场改为盖住本行开头而非侵入上一行）。
         // word_fx_anim：动画总时长（触发 → 入场放完），毫秒。**不给则跟随 lead**（= 入场最后一帧
         //                   正好落在第一个字上，本参数引入前的行为）。给了就固定成这个值。
         // 这三个参数**都以 0 为合法值**（lead_max=0 关闭提前入场、anim=0 硬切），
         // 故必须走 numParam 而不是 `|| 默认` —— 理由见文件开头 numParam 的注释。
         const preRollLeadFull = 0.8; // 秒，与 EXIT_HANDOFF_MS + APPEAR_DUR_MS 对应，改动画时长要一起改
         const wordFxLeadMax = Math.max(0, Math.min(preRollLeadFull, numParam('word_fx_lead_max', 500) / 1000));
-        const wordFxLeadMin = Math.max(0, Math.min(wordFxLeadMax, numParam('word_fx_lead_min', 430) / 1000));
+        const wordFxLeadMin = Math.max(0, Math.min(wordFxLeadMax, numParam('word_fx_lead_min', 100) / 1000));
         // 不给该参数 = null = 跟随 lead；给了才固定。上限 2000ms：再长的入场会盖住整行，
         // 已经不是「入场」了。这里保留 has() 是**语义需要**（区分「没给」与「给了 0」），
         // 与上面被修掉的 || 兜底不是一回事。
         const wordFxAnim = urlParams.has('word_fx_anim')
             ? Math.max(0, Math.min(2, numParam('word_fx_anim', 800) / 1000))
             : null;
+        // word_fx_min_dur：逐字的最短行时长（秒）。演唱时长短于它的行不做逐字、整行一起淡入。
+        // 快句（如「奶茶加糖」1.5s）逐字还没扫完就切了，逐字反而添乱；整行淡入更干净，还顺带
+        // 免掉「末字淡入被切」——短句根本没有逐字末字。时长按**末字结束 − 首字开始**算（真实演唱
+        // 时长），不用 text_detailed.duration（那含行尾留白/间奏拖尾，会把 20s 空行误判成长行）。
+        // 默认 2.0s：只把碎句/对白（如「奶茶加糖」1.5s、「同步心跳」0.8s）整行淡入，2.5s+ 的
+        // 正常歌词句保留逐字。给 0 关闭本特性（所有有逐字数据的行都逐字）。
+        // ⚠️ 改既有链接默认行为：更新后旧链接里 <2.0s 的行会从逐字变整行淡入。word_fx_min_dur=0 恢复。
+        const wordFxMinDur = Math.max(0, numParam('word_fx_min_dur', 2.0));
         // 关闭换行动画（issue #48）：0 / off 时进入/退场过渡即时化（硬切）——实现是 transitionOut 里
         // 强制 scale=0。拆成两个独立参数：line_anim 管歌词行（逐字/非逐字/首行/seek 全覆盖），
         // title_anim 管 title 模式的歌名入场。页面同一时刻只显示歌词或歌名其一，故 transitionOut 按
@@ -1548,9 +1751,21 @@
         }
 
         // === 编辑器模式检测 ===
-        const isEditorMode = urlParams.toString() === '';
+        // 编辑器模式 = 没有任何 OBS 参数；lang 只是语言覆盖、不计入（故 ?lang=en 仍进编辑器）。
+        const isEditorMode = [...urlParams.keys()].every(k => k === 'lang');
         if (isEditorMode) {
             initEditor();
+        }
+
+        // i18n 应用：编辑器模式无歌词内容，整页扫；OBS 模式只翻 header 与初始 idle 占位，
+        // 绝不扫歌词内容区（lyricsDisplay 的歌词由 song 数据填充，扫了会误译歌词）。
+        if (I18N_LANG !== 'zh') {
+            document.title = t(document.title);
+            if (isEditorMode) {
+                translateTree(document.body);
+            } else {
+                document.querySelectorAll('.header, #lyricsDisplay .idle-text').forEach(translateTree);
+            }
         }
 
         // 加载自定义字体（Google Fonts）
@@ -1949,7 +2164,7 @@
 
             ws.onopen = () => {
                 document.getElementById('statusDot').classList.add('connected');
-                document.getElementById('statusText').textContent = '已连接';
+                document.getElementById('statusText').textContent = t('已连接');
                 if (reconnectTimer) {
                     clearTimeout(reconnectTimer);
                     reconnectTimer = null;
@@ -1958,7 +2173,7 @@
 
             ws.onclose = () => {
                 document.getElementById('statusDot').classList.remove('connected');
-                document.getElementById('statusText').textContent = '已断开 · 重连中...';
+                document.getElementById('statusText').textContent = t('已断开 · 重连中...');
                 reconnectTimer = setTimeout(connect, 3000);
             };
 
@@ -2044,7 +2259,7 @@
                                 display.innerHTML = `
                                     <div class="idle-text">
                                         <span class="music-note">♪</span>
-                                        <span>前奏中</span>
+                                        <span>${t('前奏中')}</span>
                                         <span class="music-note">♫</span>
                                     </div>`;
                             }
@@ -2086,7 +2301,7 @@
                             currentIndex = data.data.index;
                             updateDisplay(data.data);
                             updateAllLyricsHighlight(data.data.index);
-                            document.getElementById('lineInfo').textContent = `第 ${data.data.index + 1} / ${allLyrics.length} 行`;
+                            document.getElementById('lineInfo').textContent = lineLabel(data.data.index + 1, allLyrics.length);
                         } else if (targetPos === _shownPos) {
                             _preRolledPos = -1; // 这一行的事件已到，它不再算「提前」的了
                         }
@@ -2163,14 +2378,14 @@
                     const to = (data.data && data.data.to) || '';
                     const statusText = document.getElementById('statusText');
                     if (to) {
-                        statusText.textContent = '🔄 切换至: ' + to;
+                        statusText.textContent = t('🔄 切换至: ') + to;
                     } else {
-                        statusText.textContent = '💤 无活跃播放器';
+                        statusText.textContent = t('💤 无活跃播放器');
                     }
                     clearTimeout(window._switchTimer);
                     window._switchTimer = setTimeout(() => {
                         if (statusText.textContent.startsWith('🔄') || statusText.textContent.startsWith('💤')) {
-                            statusText.textContent = '已连接';
+                            statusText.textContent = t('已连接');
                         }
                     }, 3000);
                 }
@@ -2218,11 +2433,11 @@
                     const clearDisplay = document.getElementById('lyricsDisplay');
                     transitionOut(clearDisplay, () => { clearDisplay.innerHTML = ''; });
                     const clearStatus = document.getElementById('statusText');
-                    clearStatus.textContent = '💤 无活跃播放器';
+                    clearStatus.textContent = t('💤 无活跃播放器');
                     clearTimeout(window._switchTimer);
                     window._switchTimer = setTimeout(() => {
                         if (clearStatus.textContent.startsWith('💤')) {
-                            clearStatus.textContent = '已连接';
+                            clearStatus.textContent = t('已连接');
                         }
                     }, 3000);
                 }
@@ -2430,7 +2645,17 @@
         }
 
         function hasWordData(data) {
-            return wordFxEnabled && data.text_detailed && data.text_detailed.words && data.text_detailed.words.length > 0;
+            const w = data.text_detailed && data.text_detailed.words;
+            if (!wordFxEnabled || !w || !w.length) return false;
+            // 短行整行淡入：演唱时长（末字结束 − 首字开始）短于 word_fx_min_dur 的行回落到非逐字
+            // 路径（整行 .appear 淡入）。提前入场不受影响——tickPreRoll 只看 words 的时间轴、不看这里
+            // 的选择，所以短行照样按真实间隙提前，只是整行一起淡入而非逐字扫描。
+            if (wordFxMinDur > 0) {
+                const last = w[w.length - 1];
+                const sung = (last.play_time + (last.duration || 0)) - w[0].play_time;
+                if (sung < wordFxMinDur) return false;
+            }
+            return true;
         }
 
         function startWordFxTick() {
@@ -2641,7 +2866,7 @@
             updateDisplay(line, anim / preRollLeadFull);
             updateAllLyricsHighlight(line.index);
             const li = document.getElementById('lineInfo');
-            if (li) li.textContent = `第 ${line.index + 1} / ${allLyrics.length} 行`;
+            if (li) li.textContent = lineLabel(line.index + 1, allLyrics.length);
         }
 
         function updateStatus(status, detail, title) {
@@ -2687,7 +2912,7 @@
                 text: status,
                 color: '#888'
             };
-            statusText.textContent = cfg.text;
+            statusText.textContent = t(cfg.text);
             statusDot.style.background = cfg.color;
             statusDot.style.boxShadow = `0 0 8px ${cfg.color}`;
 
@@ -3511,7 +3736,7 @@
                 const copyBtn = document.getElementById('btnCopyUrl');
                 if (copyBtn && !copyBtn.classList.contains('copied')) {
                     const labels = { default: '📋 复制默认', pure: '📋 复制歌词', title: '📋 复制歌名', cover: '📋 复制封面', effect: '📋 复制特效' };
-                    copyBtn.textContent = labels[mode] || labels.default;
+                    copyBtn.textContent = t(labels[mode] || labels.default);
                 }
                 // 特效模式背景由三选显式决定，「复制时背景透明」对其无意义 → 隐藏
                 const copyBgLabel = document.getElementById('copyBgTransparentLabel');
@@ -4300,7 +4525,7 @@
             function copyToClipboard(text, btn) {
                 navigator.clipboard.writeText(text).then(() => {
                     const original = btn.textContent;
-                    btn.textContent = '✓ 已复制';
+                    btn.textContent = t('✓ 已复制');
                     btn.classList.add('copied');
                     setTimeout(() => {
                         btn.textContent = original;

@@ -1,9 +1,9 @@
 package lyric
 
 import (
-	"fmt"
 	"syscall"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
@@ -22,28 +22,28 @@ func FindLyricHost(handle syscall.Handle, modules []proc.Module) (hostAddr uint3
 		}
 	}
 	if lyricMod == nil {
-		return 0, 0, fmt.Errorf("未找到 KSongsLyric.dll，请确保 WeSing 正在显示歌词")
+		return 0, 0, i18n.Errorf("未找到 KSongsLyric.dll，请确保 WeSing 正在显示歌词")
 	}
 	log.Detail("KSongsLyric.dll 基址: 0x%08X (大小: 0x%X)", lyricMod.Base, lyricMod.Size)
 
 	// 2. 解析 PE 导出表，找到 CreateLyricHost
 	createAddr, err := findExportFunction(handle, lyricMod.Base, "CreateLyricHost")
 	if err != nil {
-		return 0, 0, fmt.Errorf("查找 CreateLyricHost 失败: %v", err)
+		return 0, 0, i18n.Errorf("查找 CreateLyricHost 失败: %v", err)
 	}
 	log.Detail("CreateLyricHost: 0x%08X", createAddr)
 
 	// 3. 在 CreateLyricHost 函数体中搜索第一条 CALL 指令 → 构造函数
 	constructorAddr, err := findFirstCall(handle, createAddr, 128)
 	if err != nil {
-		return 0, 0, fmt.Errorf("查找构造函数失败: %v", err)
+		return 0, 0, i18n.Errorf("查找构造函数失败: %v", err)
 	}
 	log.Detail("构造函数: 0x%08X", constructorAddr)
 
 	// 4. 在构造函数中搜索 mov [edi], imm32 → vtable 地址
 	vtableAddr, err := findVtableAssignment(handle, constructorAddr, 200)
 	if err != nil {
-		return 0, 0, fmt.Errorf("查找 vtable 失败: %v", err)
+		return 0, 0, i18n.Errorf("查找 vtable 失败: %v", err)
 	}
 	log.Detail("vtable: 0x%08X", vtableAddr)
 
@@ -53,7 +53,7 @@ func FindLyricHost(handle syscall.Handle, modules []proc.Module) (hostAddr uint3
 	results := proc.AOBScan(handle, pattern, mask, regions)
 
 	if len(results) == 0 {
-		return 0, 0, fmt.Errorf("未找到 LyricHost 实例（vtable 0x%08X 无匹配）", vtableAddr)
+		return 0, 0, i18n.Errorf("未找到 LyricHost 实例（vtable 0x%08X 无匹配）", vtableAddr)
 	}
 
 	hostAddr = results[0]
@@ -68,13 +68,13 @@ func findExportFunction(handle syscall.Handle, moduleBase uint32, funcName strin
 	// 读取 PE 签名偏移
 	peOff, err := proc.ReadUint32(handle, moduleBase+0x3C)
 	if err != nil {
-		return 0, fmt.Errorf("读取 PE 偏移失败: %v", err)
+		return 0, i18n.Errorf("读取 PE 偏移失败: %v", err)
 	}
 
 	// 读取导出表 RVA（PE Optional Header 的 DataDirectory[0]）
 	exportRVA, err := proc.ReadUint32(handle, moduleBase+peOff+0x78)
 	if err != nil || exportRVA == 0 {
-		return 0, fmt.Errorf("无导出表")
+		return 0, i18n.Errorf("无导出表")
 	}
 
 	exportDir := moduleBase + exportRVA
@@ -99,7 +99,7 @@ func findExportFunction(handle syscall.Handle, moduleBase uint32, funcName strin
 			return moduleBase + funcRVA, nil
 		}
 	}
-	return 0, fmt.Errorf("导出函数 %s 不存在", funcName)
+	return 0, i18n.Errorf("导出函数 %s 不存在", funcName)
 }
 
 // findFirstCall 在指定地址开始的 maxBytes 字节内搜索第一条 CALL rel32 (E8 xx xx xx xx)
@@ -122,7 +122,7 @@ func findFirstCall(handle syscall.Handle, startAddr uint32, maxBytes int) (uint3
 			}
 		}
 	}
-	return 0, fmt.Errorf("在 0x%X 起始的 %d 字节内未找到 CALL 指令", startAddr, maxBytes)
+	return 0, i18n.Errorf("在 0x%X 起始的 %d 字节内未找到 CALL 指令", startAddr, maxBytes)
 }
 
 // findVtableAssignment 在构造函数中搜索 mov [edi], imm32 (C7 07 xx xx xx xx)
@@ -143,5 +143,5 @@ func findVtableAssignment(handle syscall.Handle, startAddr uint32, maxBytes int)
 			}
 		}
 	}
-	return 0, fmt.Errorf("在构造函数中未找到 vtable 赋值")
+	return 0, i18n.Errorf("在构造函数中未找到 vtable 赋值")
 }

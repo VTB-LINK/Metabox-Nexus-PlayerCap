@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/krc"
@@ -84,7 +85,7 @@ func (p *SodaMusicPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "汽水音乐未启动或未连上"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("汽水音乐未启动或未连上"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		pid, err := watchdog.FindMainPID()
@@ -117,7 +118,7 @@ func (p *SodaMusicPlayer) Start() {
 		p.runSession(client)
 		client.Close()
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "汽水音乐 CDP 已断开"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("汽水音乐 CDP 已断开"), Reason: player.ReasonCDPDisconnected})
 		p.Emit(player.EventClearSongData, nil)
 		if p.sleepOrStop(2 * time.Second) {
 			return
@@ -611,8 +612,8 @@ func applyDetailedOffset(lines []krc.Line, offsetSec float32) {
 func detailedFlag(lines []krc.Line) string {
 	for _, l := range lines {
 		if len(l.Detailed.Words) > 0 {
-			return "是"
+			return i18n.T("是")
 		}
 	}
-	return "否"
+	return i18n.T("否")
 }

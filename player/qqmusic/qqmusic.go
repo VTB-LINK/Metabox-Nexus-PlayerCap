@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 )
@@ -47,7 +48,7 @@ func (p *QQMusicPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "QQ音乐未启动"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("QQ音乐未启动"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		mem, err := ConnectQQMusic()
@@ -60,7 +61,7 @@ func (p *QQMusicPlayer) Start() {
 		p.runSession(mem, offsetSec)
 
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "QQ音乐已退出"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("QQ音乐已退出"), Reason: player.ReasonProcessExited})
 		p.Emit(player.EventClearSongData, nil)
 		log.Info("会话结束，等待新的 QQMusic 进程...")
 		time.Sleep(2 * time.Second)
@@ -522,8 +523,8 @@ func applyDetailedOffset(lines []lyricLine, offsetSec float32) {
 func detailedFlag(lines []lyricLine) string {
 	for _, l := range lines {
 		if len(l.Detailed.Words) > 0 {
-			return "是"
+			return i18n.T("是")
 		}
 	}
-	return "否"
+	return i18n.T("否")
 }

@@ -1,11 +1,11 @@
 package lyric
 
 import (
-	"fmt"
 	"strings"
 	"syscall"
 	"unicode/utf16"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
 
@@ -28,7 +28,7 @@ func FindSongInfo(handle syscall.Handle, expectedName string) (SongInfo, error) 
 	results := proc.AOBScan(handle, pattern, mask, regions)
 
 	if len(results) == 0 {
-		return SongInfo{}, fmt.Errorf("未找到 songname 字段")
+		return SongInfo{}, i18n.Errorf("未找到 songname 字段")
 	}
 
 	// 优先匹配窗口标题对应的歌名（如果有多个匹配，取最高地址的）
@@ -55,7 +55,7 @@ func FindSongInfo(handle syscall.Handle, expectedName string) (SongInfo, error) 
 		}
 	}
 
-	return SongInfo{}, fmt.Errorf("找到 %d 个 songname 匹配但无有效歌曲信息", len(results))
+	return SongInfo{}, i18n.Errorf("找到 %d 个 songname 匹配但无有效歌曲信息", len(results))
 }
 
 func tryParseFromSongNameAddr(handle syscall.Handle, addr uint32) (SongInfo, bool) {

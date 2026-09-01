@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/getsentry/sentry-go v0.48.0
+	github.com/go-ole/go-ole v1.2.6
 	github.com/gorilla/websocket v1.5.3
 	github.com/josephspurrier/goversioninfo v1.7.0
 	github.com/shirou/gopsutil/v3 v3.24.2
@@ -15,7 +16,6 @@ require (
 
 require (
 	github.com/akavel/rsrc v0.10.2 // indirect
-	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect

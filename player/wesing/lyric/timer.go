@@ -1,9 +1,9 @@
 package lyric
 
 import (
-	"fmt"
 	"syscall"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
 
@@ -24,8 +24,8 @@ func FindPlayTimeAddr(handle syscall.Handle) (uint32, error) {
 		name    string
 		pattern string
 	}{
-		{"单行(30/45)", "?? ?? ?? ?? ?? ?? ?? ?? 1E 00 00 00 2D 00 00 00"},
-		{"双行(28/42)", "?? ?? ?? ?? ?? ?? ?? ?? 1C 00 00 00 2A 00 00 00"},
+		{i18n.T("单行(30/45)"), "?? ?? ?? ?? ?? ?? ?? ?? 1E 00 00 00 2D 00 00 00"},
+		{i18n.T("双行(28/42)"), "?? ?? ?? ?? ?? ?? ?? ?? 1C 00 00 00 2A 00 00 00"},
 	}
 
 	regions := proc.EnumWritableRegions(handle)
@@ -46,7 +46,7 @@ func FindPlayTimeAddr(handle syscall.Handle) (uint32, error) {
 		}
 	}
 
-	return 0, fmt.Errorf("未找到播放时间地址")
+	return 0, i18n.Errorf("未找到播放时间地址")
 }
 
 // FindSongDuration 从 UI 字符串 "mm:ss | mm:ss" 中提取歌曲总时长（秒）
@@ -109,7 +109,7 @@ func FindSongDuration(handle syscall.Handle) (float32, error) {
 		}
 	}
 
-	return 0, fmt.Errorf("未找到歌曲时长字符串")
+	return 0, i18n.Errorf("未找到歌曲时长字符串")
 }
 
 func isDigit(b byte) bool {

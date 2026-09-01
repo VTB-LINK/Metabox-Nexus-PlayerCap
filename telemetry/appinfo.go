@@ -17,6 +17,7 @@ import (
 	"github.com/getsentry/sentry-go"
 
 	"Metabox-Nexus-PlayerCap/config"
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 // appInfo 是 PlayerCap 自身的一份快照。
@@ -108,7 +109,7 @@ func boolTag(b bool) string {
 
 // logAppInfo 打一行自身信息。exe 路径对主播自己也有用（他可能不知道自己开的是哪个副本）。
 func logAppInfo(a appInfo) {
-	log.Info("程序: v%s @ %s", a.Version, nonEmpty(a.ExePath, "路径未知"))
+	log.Info("程序: v%s @ %s", a.Version, nonEmpty(a.ExePath, i18n.T("路径未知")))
 	if len(a.Overwritten) > 0 {
 		log.Info("配置: 已改动 %d 项 %v（来源 %v）", len(a.Overwritten), a.Overwritten, a.Sources)
 	}

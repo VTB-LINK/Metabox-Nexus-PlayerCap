@@ -3,6 +3,7 @@ package main
 import (
 	"Metabox-Nexus-PlayerCap/clientid"
 	"Metabox-Nexus-PlayerCap/config"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/effect"
@@ -59,6 +60,11 @@ func main() {
 	// 设置日志格式
 	log.SetFlags(log.Ldate | log.Ltime)
 
+	// 界面语言：只看 Windows 显示语言，中文系统用中文、其余一律英文（规则见 i18n 包）。
+	// 必须早于任何用户可见输出（Banner / config 告警 / mainLog）。探测是 Windows-only，
+	// 结果注入纯 Go 的 i18n 包，使 logger/ 与 config/ 保持 GOOS=linux 可构建（AGENTS.md §0.3）。
+	i18n.SetLanguage(i18n.DetectSystemLanguage())
+
 	// 确保以标准文件名运行
 	ensureCanonicalName()
 
@@ -78,19 +84,19 @@ func main() {
 	fmt.Println(`_____/   /_/     /_____/          /_____//___/   _____/   /_____/   `)
 	fmt.Println()
 	fmt.Println("===========================================================")
-	fmt.Println("VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务 ")
+	fmt.Println(i18n.T("VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务 "))
 	fmt.Println("===========================================================")
-	fmt.Printf("   版本: v%s\n", displayVersion(Version))
-	fmt.Printf("   监听: %s\n", cfg.Addr)
+	fmt.Printf(i18n.T("   版本: v%s\n"), displayVersion(Version))
+	fmt.Printf(i18n.T("   监听: %s\n"), cfg.Addr)
 	for _, pn := range playerNames {
-		fmt.Printf("   播放器: %s (offset=%dms poll=%dms)\n", pn, cfg.GetPlayerOffset(pn), cfg.GetPlayerPoll(pn))
+		fmt.Printf(i18n.T("   播放器: %s (offset=%dms poll=%dms)\n"), pn, cfg.GetPlayerOffset(pn), cfg.GetPlayerPoll(pn))
 	}
-	fmt.Printf("   优先播放器: %v (超时: %ds)\n", cfg.PriorPlayer, cfg.PriorPlayerExpire)
+	fmt.Printf(i18n.T("   优先播放器: %v (超时: %ds)\n"), cfg.PriorPlayer, cfg.PriorPlayerExpire)
 	idleHideParts := []string{}
 	if cfg.PerPlayerIdleHide > 0 {
-		idleHideParts = append(idleHideParts, fmt.Sprintf("全局 %ds", cfg.PerPlayerIdleHide))
+		idleHideParts = append(idleHideParts, fmt.Sprintf(i18n.T("全局 %ds"), cfg.PerPlayerIdleHide))
 	} else {
-		idleHideParts = append(idleHideParts, "全局关")
+		idleHideParts = append(idleHideParts, i18n.T("全局关"))
 	}
 	for _, pn := range playerNames {
 		// 只列与全局不同的显式覆盖（IdleHide != nil）
@@ -98,7 +104,7 @@ func main() {
 			idleHideParts = append(idleHideParts, fmt.Sprintf("%s=%ds", pn, *pc.IdleHide))
 		}
 	}
-	fmt.Printf("   per-player 无活跃自动隐藏: %s\n", strings.Join(idleHideParts, "，"))
+	fmt.Printf(i18n.T("   per-player 无活跃自动隐藏: %s\n"), strings.Join(idleHideParts, i18n.ListSep()))
 	fmt.Println("===========================================================")
 
 	// 遥测（Sentry）。放在 Banner 之后、checkAndUpdate 之前：自动更新本身就是个故障点
@@ -367,6 +373,14 @@ func checkAndUpdate() {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		// 连不上网关：标红提示几秒后清除，避免永久卡红。这条路径不重启、要继续跑服务，故
+		// clear 后 detach 释放 COM 与被锁的 OS 线程，不让 consoleInit 的 LockOSThread 泄漏进
+		// server 阶段。sleep 阻塞启动几秒只发生在连不上这一异常路径，OBS 此刻还没在拉流。
+		taskbarInit()
+		taskbarError()
+		time.Sleep(4 * time.Second)
+		taskbarClear()
+		taskbarDetach()
 		mainLog.Warn("版本检查失败: %v，继续运行", err)
 		return
 	}
@@ -417,9 +431,9 @@ func checkAndUpdate() {
 
 	fmt.Println()
 	fmt.Println("╔═════════════════════════════════════════════════════════╗")
-	fmt.Printf("║  🆕 发现新版本: v%s → v%s\n", displayVersion(Version), displayVersion(release.TagName))
-	fmt.Printf("║  📦 共 %d 个文件需要更新\n", len(release.Assets))
-	fmt.Println("║  正在自动更新...")
+	fmt.Printf(i18n.T("║  🆕 发现新版本: v%s → v%s\n"), displayVersion(Version), displayVersion(release.TagName))
+	fmt.Printf(i18n.T("║  📦 共 %d 个文件需要更新\n"), len(release.Assets))
+	fmt.Println(i18n.T("║  正在自动更新..."))
 	fmt.Println("╚═════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
@@ -447,18 +461,25 @@ func checkAndUpdate() {
 
 	cdnPrefix := pickFastestCDNPrefix(release.GlobalCDN, release.ChinaCDN, release.TagName, exeTestFile)
 
+	taskbarInit() // 确定要下载后再探测终端；老 conhost 会锁定当前 OS 线程并建立 COM
+
 	if err := performUpdateAll(cdnPrefix, release.TagName, sortedAssets); err != nil {
+		taskbarError()
 		manualURL := release.ChinaCDN + release.TagName + "/"
 		mainLog.Error("自动更新失败: %v", err)
 		mainLog.Warn("当前版本已过期，请手动下载最新版本:")
 		mainLog.Warn("%s", manualURL)
-		fmt.Println("\n按回车键退出...")
+		fmt.Println(i18n.T("\n按回车键退出..."))
 		fmt.Scanln()
 		os.Exit(1)
 	}
 
+	taskbarWarning()
+	taskbarFlash()
 	mainLog.Success("全部更新完成！程序将自动重启...")
-	time.Sleep(1 * time.Second)
+	// 金色醒目显示几秒后清除再重启：既不像 1s 那样一闪而过，也不会永久卡在金色。
+	time.Sleep(4 * time.Second)
+	taskbarClear()
 	restartSelf()
 }
 
@@ -570,7 +591,7 @@ func performUpdateAll(cdnPrefix, tagName string, assets []struct {
 }) error {
 	exePath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("获取程序路径失败: %v", err)
+		return i18n.Errorf("获取程序路径失败: %v", err)
 	}
 	exeDir := filepath.Dir(exePath)
 	exeBase := filepath.Base(exePath)
@@ -587,7 +608,7 @@ func performUpdateAll(cdnPrefix, tagName string, assets []struct {
 
 		tmpPath := targetPath + ".new"
 		if err := downloadFile(client, downloadURL, tmpPath, asset.Size, asset.Digest); err != nil {
-			return fmt.Errorf("下载 %s 失败: %v", asset.Name, err)
+			return i18n.Errorf("下载 %s 失败: %v", asset.Name, err)
 		}
 
 		if isExe {
@@ -595,18 +616,18 @@ func performUpdateAll(cdnPrefix, tagName string, assets []struct {
 			os.Remove(oldPath)
 			if err := os.Rename(exePath, oldPath); err != nil {
 				os.Remove(tmpPath)
-				return fmt.Errorf("替换 %s 失败 (重命名): %v", asset.Name, err)
+				return i18n.Errorf("替换 %s 失败 (重命名): %v", asset.Name, err)
 			}
 			if err := renameWithRetry(tmpPath, exePath); err != nil {
 				os.Rename(oldPath, exePath)
-				return fmt.Errorf("替换 %s 失败: %v", asset.Name, err)
+				return i18n.Errorf("替换 %s 失败: %v", asset.Name, err)
 			}
 			mainLog.Success("已替换: %s", asset.Name)
 		} else {
 			os.Remove(targetPath)
 			if err := renameWithRetry(tmpPath, targetPath); err != nil {
 				os.Remove(tmpPath)
-				return fmt.Errorf("放置 %s 失败: %v", asset.Name, err)
+				return i18n.Errorf("放置 %s 失败: %v", asset.Name, err)
 			}
 			mainLog.Success("已更新: %s", asset.Name)
 		}
@@ -617,7 +638,7 @@ func performUpdateAll(cdnPrefix, tagName string, assets []struct {
 func downloadFile(client *http.Client, url, destPath string, expectedSize int64, expectedDigest string) error {
 	resp, err := client.Get(url)
 	if err != nil {
-		return fmt.Errorf("连接失败: %v", err)
+		return i18n.Errorf("连接失败: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -632,24 +653,27 @@ func downloadFile(client *http.Client, url, destPath string, expectedSize int64,
 
 	out, err := os.Create(destPath)
 	if err != nil {
-		return fmt.Errorf("创建文件失败: %v", err)
+		return i18n.Errorf("创建文件失败: %v", err)
 	}
 
 	hasher := sha256.New()
 	pr := &progressWriter{total: totalSize}
+	if totalSize > 0 {
+		taskbarProgress(0) // 每个文件从 0 重新起跑（文件数不固定，逐个跑满进度条）
+	}
 	written, err := io.Copy(out, io.TeeReader(resp.Body, io.MultiWriter(hasher, pr)))
 	out.Sync()
 	out.Close()
 	if err != nil {
 		os.Remove(destPath)
-		return fmt.Errorf("下载中断: %v", err)
+		return i18n.Errorf("下载中断: %v", err)
 	}
 
 	if expectedDigest != "" {
 		actualHash := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 		if actualHash != expectedDigest {
 			os.Remove(destPath)
-			return fmt.Errorf("SHA256 验证失败: 期望 %s，实际 %s", expectedDigest, actualHash)
+			return i18n.Errorf("SHA256 验证失败: 期望 %s，实际 %s", expectedDigest, actualHash)
 		}
 		mainLog.Success("SHA256 验证成功")
 	}
@@ -683,8 +707,9 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	if pw.total > 0 {
 		pct := int(pw.written * 100 / pw.total)
 		if pct != pw.lastPct {
-			fmt.Printf("\r[*] 下载进度: %d%% (%.1f/%.1f MB)", pct,
+			fmt.Printf(i18n.T("\r[*] 下载进度: %d%% (%.1f/%.1f MB)"), pct,
 				float64(pw.written)/1024/1024, float64(pw.total)/1024/1024)
+			taskbarProgress(pct)
 			pw.lastPct = pct
 		}
 	}
@@ -833,12 +858,12 @@ func isForceReleaseName(name string) bool {
 func decideUpdate(currentVersion, targetVersion, releaseName string) (bool, string, error) {
 	current := normalizeSemver(currentVersion)
 	if !isReleaseVersion(currentVersion) {
-		return false, "", fmt.Errorf("当前版本不是有效 semver 发布版本: %s", currentVersion)
+		return false, "", i18n.Errorf("当前版本不是有效 semver 发布版本: %s", currentVersion)
 	}
 
 	target := normalizeSemver(targetVersion)
 	if !isReleaseVersion(targetVersion) {
-		return false, "", fmt.Errorf("目标版本不是有效 semver 发布版本: %s", targetVersion)
+		return false, "", i18n.Errorf("目标版本不是有效 semver 发布版本: %s", targetVersion)
 	}
 
 	cmp := semver.Compare(target, current)

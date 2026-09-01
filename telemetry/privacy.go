@@ -34,6 +34,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 // 提示正文分段。
@@ -84,11 +86,51 @@ const (
 	noticeFooter = `===========================================================`
 )
 
+// 英文对照段落：面向非中文分发时由 noticeFor 选用。**它们是同一份采集契约的两种语言**，
+// 内容必须与上面的中文段落逐条一致 —— privacynotice_en_test.go 核对英文覆盖面，
+// 与中文侧的 privacynotice_test.go / gatewaynotice_test.go 同构。
+// 分隔线（noticeDivider）与页脚（noticeFooter）是语言中立的，两语共用。
+const (
+	noticeHeaderEN = `===========================================================
+   Privacy Notice
+===========================================================
+`
+
+	noticeTelemetrySectionEN = `   This program reports telemetry diagnostics on a crash, or when it detects an unexpected state.
+
+   Reported:
+     · System: Windows version and edition, language, time zone, CPU architecture and core count, device name
+     · Program: version, install path (includes the Windows user name), all config.yml settings
+     · Player: version and anomaly type (unsupported version, lyric decryption failure, etc.)
+     · Network: this machine's public IP (recorded by the telemetry server)
+     · Call stack at the moment of a crash
+
+   Not reported: lyric content, song information, account credentials.
+
+   Purpose: diagnosing live-stream incidents and understanding player-version distribution. Nothing else.
+   Recipient: telemetry server (sentry.io), data retained for 30 days.
+`
+
+	noticeUpdateSectionEN = `   On startup, and once a day while running, this program queries the update server for the latest version.
+
+   This request carries:
+     · An anonymous device ID: a one-way hash of a machine identifier, not reversible and not linked to any other use
+     · Program version, Windows version and edition, CPU architecture
+     · Whether this request is a "startup" or a "daily online" check
+
+   Purpose: counting how many devices run the software and which versions are in use. Nothing else.
+   Recipient: update server (gateway.vtb.link).
+`
+)
+
 // privacyNotice 是**全部**段落拼起来的完整文案，供门禁核对采集面。
 //
 // 它不一定等于主播看到的那一份 —— 实际打印的内容由 PrintPrivacyNotice 按开关拼装。
 // 门禁要核的是「所有可能发出去的东西都在文案里有交代」，所以这里必须是全集。
 const privacyNotice = noticeHeader + noticeTelemetrySection + noticeDivider + noticeUpdateSection + noticeFooter
+
+// privacyNoticeEN 是英文全集，供英文门禁核对采集面（同 privacyNotice 之于中文）。
+const privacyNoticeEN = noticeHeaderEN + noticeTelemetrySectionEN + noticeDivider + noticeUpdateSectionEN + noticeFooter
 
 // PrintPrivacyNotice 打印隐私提示，然后倒计时 wait 后自动继续。
 //
@@ -114,17 +156,21 @@ func PrintPrivacyNotice(wait time.Duration, versionCheckActive bool) {
 // 拆出来是为了可测：拼装逻辑（哪段该出现、哪段不该出现）才是这里唯一会出错的地方，
 // 而它一旦藏在 PrintPrivacyNotice 里就只能靠抓 stdout 来验，那种测试脆且读不出意图。
 func noticeFor(telemetryOn, versionCheckOn bool) string {
+	header, telemetrySec, updateSec := noticeHeader, noticeTelemetrySection, noticeUpdateSection
+	if i18n.Language() == i18n.English {
+		header, telemetrySec, updateSec = noticeHeaderEN, noticeTelemetrySectionEN, noticeUpdateSectionEN
+	}
 	sections := make([]string, 0, 2)
 	if telemetryOn {
-		sections = append(sections, noticeTelemetrySection)
+		sections = append(sections, telemetrySec)
 	}
 	if versionCheckOn {
-		sections = append(sections, noticeUpdateSection)
+		sections = append(sections, updateSec)
 	}
 	if len(sections) == 0 {
 		return ""
 	}
-	return noticeHeader + strings.Join(sections, noticeDivider) + noticeFooter
+	return header + strings.Join(sections, noticeDivider) + noticeFooter
 }
 
 // countdown 原地倒计时，结束后把那行擦掉，免得它留在日志里碍眼。
@@ -132,7 +178,7 @@ func noticeFor(telemetryOn, versionCheckOn bool) string {
 // 用 `\r` 覆写 —— 与更新进度条同属 AGENTS.md §6.2 允许 fmt 的例外。
 func countdown(wait time.Duration) {
 	for i := int(wait.Seconds()); i > 0; i-- {
-		fmt.Printf("\r   %2d 秒后自动继续...", i)
+		fmt.Printf(i18n.T("\r   %2d 秒后自动继续..."), i)
 		time.Sleep(time.Second)
 	}
 	// 用空格盖掉整行再回到行首：直接打 \n 会在日志里留下一行倒计时残迹。

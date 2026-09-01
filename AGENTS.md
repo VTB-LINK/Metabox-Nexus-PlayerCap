@@ -484,6 +484,8 @@ Banner、`server.NewServer`、`NewRouter` 的 normalStates 建表、端点表、
 
 **`EventPlayerSwitch` / `EventPlayerClear` 不是播放器事件**，由 Server 直接构造、Router 或 Server 自身巡检触发；新播放器不需要、也不应该 Emit 这两个。（`EventPlayerSwitch` 只走根订阅者流；`EventPlayerClear` 除根流外，per-player 通道的无活跃自动隐藏也会单发，见 `notifyPerPlayerIdleClear`。） — `player/player.go:149-150` 定义，发射在 `server/`
 
+**新播放器的用户可见文案要中英双语，详见 §6.4。** 最低限度：状态 `Detail` 非歌名态必带 `Reason` 码且 `Detail` 过 `i18n.T`；错误用 `i18n.Errorf`（不是 `fmt.Errorf`）；新日志把中文 format 串补进 `i18n/messages*.go` 的 `english` 表（调用点不改，logger 边界已过 `i18n.T`）；注入 `%s` 的中文值（如 detailedFlag「是/否」）在源头包 `i18n.T`。 ✅ `i18n/placeholders_test.go`（校验占位符），❌ 覆盖漏译靠人。
+
 ---
 
 ### 5.2 加配置项
@@ -717,6 +719,23 @@ wesing 是 K 歌平台，**曲库内所有歌都带词**。所以「纯音乐」
 | 进程等待 | `等待 <进程名> 启动...` | wesing.go:65、kugou/watchdog/watchdog.go:530 |
 
 **已知不一致（属 6.1 的「靠人」缺口，不是机制例外）**：wesing 发 `EventPlaybackPause`/`Resume`（wesing.go:436/443）却**不打任何 `暂停 @`/`恢复 @` 日志**，也没有前跳检测（只有 wesing.go:393 的回跳）。wesing 手里有 playTime，做得到——这是漏的，不是机制决定的。
+
+---
+
+### 6.4 i18n（中英双语）：新增用户可见文案的约定
+
+运行期输出按 **Windows 显示语言**中/英切换：`main` 启动早期 `i18n.SetLanguage(i18n.DetectSystemLanguage())` 一次性设定（主语言是中文即中文、否则英文；**只看显示语言，不看区域/时区**）。中文是源语言，`i18n/messages*.go` 的 `english` 表是「中文原文 → 英文」。**新增任何用户可见的中文都要按下面接线，否则英文系统上那条就漏成中文**（安全回退、但不完整，且不报错）。
+✅ 有门禁：`i18n/placeholders_test.go`（逐条校验译文的 `%`-占位符多重集与原文一致，防漏写/错写导致 `%!s(MISSING)`）。
+
+- **① logger 调用（`.Info/.Warn/...`）：只补表，不改调用点。** logger 五方法在边界已对 format 串过 `i18n.T`。新增一条日志 → 把它的中文 format 串**逐字**加进 `english` 表即可（`messages_p4_log.go` 或 `messages.go`），调用点不动。英文语序不同时用带序号的 `%[n]` 重排，由 fmt 处理。
+- **② 错误文案：用 `i18n.Errorf`，别用 `fmt.Errorf`。** ❌ — `fmt.Errorf(i18n.T(...), ...)` 过不了 `go vet`（「non-constant format string」）。改用 `i18n.Errorf("中文%w", err)`（`i18n/errorf.go`，写成 vet 认得的 printf wrapper：`format = T(format); fmt.Errorf(format, a...)`，于是 vet 转去校验**调用点常量 format** 的占位符）。`errors.New("中文")` → `errors.New(i18n.T("中文"))`。补对应英文进表。
+- **③ 包级 sentinel 错误（`var Err = errors.New("中文")`）：保持中文，别包 i18n.T。** ❌ — 包级 var 在 **init 求值、早于 SetLanguage**，包了会冻结成中文；且它们靠 `errors.Is` 按**身份**比较、文本只是附带。用户可见的呈现要在别处（如 StatusInfo）本地化，不在 sentinel 上。现存 5 个（kugou watchdog 3 + qqmusic 2），别新增会外显的。
+- **④ `StatusInfo`：非歌名状态必带 `Reason` 稳定码 + 本地化 `Detail`。** ❌ — playing/paused 时 `Detail`=歌名、无 `Reason`；其余状态一律 `Detail: i18n.T("中文"), Reason: player.ReasonXxx`。`Reason` 是**播放器无关的稳定机器码**（`player.Reason*`，7 个），消费方与 `openapi.yaml` 按它判断，**取代对中文 Detail 的字面量匹配**。没有合适现成码就在 `player/player.go` 加一个并同步补 openapi 的 `reason` 枚举。
+- **⑤ 被当数据注入日志的中文值：在源头包 i18n.T。** 翻 format 串对**注入进 `%s` 的中文值**无效——如 `detailedFlag` 返回的「是/否」、组名「优先/普通」、`nonEmpty(x, "未知")` 的回退值。在**返回/传入处**包 `i18n.T` 并补表。
+- **⑥ 不该翻译的中文（翻了反而出错）**：用于**匹配/比较**的中文常量（窗口名如「全民K歌」、歌词过滤词「著作权/版权」、平台提示查找集「纯音乐，请欣赏」、歌名后缀「(伴奏)」）是数据不是 UI；注入 OBS 的 JS 里的中文注释；**仅上报 Sentry** 的 dev-only 文案（`telemetry.ReportOnce(...)`、Sentry scope payload）按项目决策不译。
+- **⑦ §0.3 边界**：语言探测走 kernel32（`GetUserDefaultUILanguage`），Windows-only，隔离在 `i18n/detect_windows.go`（`!windows` 侧是桩）。`i18n` 包主体纯 Go，故 `logger`/`config` 可安全依赖它、仍 `GOOS=linux` 可构建。**绝不把语言探测塞进 logger/config；locale 只能由 main 注入。**
+
+**自检（❌ 无门禁，靠人）**：新增中文后扫一遍「有没有中文字符串字面量落进用户输出却不在译表」。上一轮用一个一次性 AST 覆盖检查器（遍历出货 `.go`，收集含汉字的 `BasicLit`/字符串相加，减去译表 key）做过；剩下的应全部落在 ⑥ 的有意保留类。漏一条只表现为**英文系统上那一行/那个值仍是中文**，不报错。
 
 ---
 

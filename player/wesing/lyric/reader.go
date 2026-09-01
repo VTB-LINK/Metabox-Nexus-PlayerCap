@@ -1,9 +1,9 @@
 package lyric
 
 import (
-	"fmt"
 	"syscall"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
@@ -27,20 +27,20 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 	// 读取歌词条目向量的 begin 和 end 指针
 	beginPtr, err := proc.ReadUint32(handle, subStructAddr+0x48)
 	if err != nil {
-		return nil, fmt.Errorf("读取歌词向量 begin 失败: %v", err)
+		return nil, i18n.Errorf("读取歌词向量 begin 失败: %v", err)
 	}
 	endPtr, err := proc.ReadUint32(handle, subStructAddr+0x50)
 	if err != nil {
-		return nil, fmt.Errorf("读取歌词向量 end 失败: %v", err)
+		return nil, i18n.Errorf("读取歌词向量 end 失败: %v", err)
 	}
 
 	if endPtr <= beginPtr || beginPtr == 0 {
-		return nil, fmt.Errorf("歌词向量为空 (begin=0x%X, end=0x%X)", beginPtr, endPtr)
+		return nil, i18n.Errorf("歌词向量为空 (begin=0x%X, end=0x%X)", beginPtr, endPtr)
 	}
 
 	numEntries := (endPtr - beginPtr) / 4
 	if numEntries > 1000 {
-		return nil, fmt.Errorf("歌词数量异常: %d", numEntries)
+		return nil, i18n.Errorf("歌词数量异常: %d", numEntries)
 	}
 
 	var lyrics []LyricLine

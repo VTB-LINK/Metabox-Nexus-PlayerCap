@@ -23,6 +23,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/logger"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/sys/windows"
 )
@@ -59,7 +60,7 @@ const procAccess = windows.PROCESS_CREATE_THREAD |
 func FindMainPID() (int, error) {
 	procs, err := process.Processes()
 	if err != nil {
-		return 0, fmt.Errorf("枚举进程失败: %w", err)
+		return 0, i18n.Errorf("枚举进程失败: %w", err)
 	}
 	for _, p := range procs {
 		name, err := p.Name()
@@ -75,7 +76,7 @@ func FindMainPID() (int, error) {
 			return int(p.Pid), nil
 		}
 	}
-	return 0, fmt.Errorf("未找到汽水音乐主进程（%s 未运行？）", TargetProcessName)
+	return 0, i18n.Errorf("未找到汽水音乐主进程（%s 未运行？）", TargetProcessName)
 }
 
 // InspectorUp 报告 9229 是否已可用（能取到 /json/list）。
@@ -109,7 +110,7 @@ func EnsureInspector(pid int) error {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	return fmt.Errorf("已激活 inspector 但 9229 迟迟未就绪（pid=%d）", pid)
+	return i18n.Errorf("已激活 inspector 但 9229 迟迟未就绪（pid=%d）", pid)
 }
 
 // activateInspector 复刻 process._debugProcess(pid) 的 Windows 机制。
@@ -117,13 +118,13 @@ func activateInspector(pid int) error {
 	name := fmt.Sprintf("node-debug-handler-%d", pid)
 	namePtr, err := windows.UTF16PtrFromString(name)
 	if err != nil {
-		return fmt.Errorf("映射名编码失败: %w", err)
+		return i18n.Errorf("映射名编码失败: %w", err)
 	}
 
 	// OpenFileMappingW(FILE_MAP_READ, FALSE, name)：目标启动时建的命名映射。
 	r, _, callErr := procOpenFileMappingW.Call(uintptr(fileMapRead), 0, uintptr(unsafe.Pointer(namePtr)))
 	if r == 0 {
-		return fmt.Errorf("打开命名映射 %q 失败（目标非 Node/Electron 或禁用了 inspector）: %v", name, callErr)
+		return i18n.Errorf("打开命名映射 %q 失败（目标非 Node/Electron 或禁用了 inspector）: %v", name, callErr)
 	}
 	mapping := windows.Handle(r)
 	defer windows.CloseHandle(mapping)
@@ -131,7 +132,7 @@ func activateInspector(pid int) error {
 	// MapViewOfFile → 读出 handler 函数地址（目标地址空间内的 StartIoThreadWrapper）。
 	addr, err := windows.MapViewOfFile(mapping, fileMapRead, 0, 0, 0)
 	if err != nil || addr == 0 {
-		return fmt.Errorf("映射视图失败: %v", err)
+		return i18n.Errorf("映射视图失败: %v", err)
 	}
 	defer windows.UnmapViewOfFile(addr)
 	// 用 RtlMoveMemory 把 8 字节指针拷进 Go 缓冲再读——避免 unsafe.Pointer(uintptr) 触发 vet
@@ -140,13 +141,13 @@ func activateInspector(pid int) error {
 	procRtlMoveMemory.Call(uintptr(unsafe.Pointer(&buf[0])), addr, unsafe.Sizeof(buf))
 	handlerAddr := uintptr(binary.LittleEndian.Uint64(buf[:]))
 	if handlerAddr == 0 {
-		return fmt.Errorf("handler 地址为空（映射内容异常）")
+		return i18n.Errorf("handler 地址为空（映射内容异常）")
 	}
 
 	// OpenProcess + CreateRemoteThread(handler)：让目标自己跑激活函数。
 	proc, err := windows.OpenProcess(procAccess, false, uint32(pid))
 	if err != nil {
-		return fmt.Errorf("打开目标进程失败: %w", err)
+		return i18n.Errorf("打开目标进程失败: %w", err)
 	}
 	defer windows.CloseHandle(proc)
 
@@ -154,7 +155,7 @@ func activateInspector(pid int) error {
 	th, _, callErr2 := procCreateRemoteThread.Call(
 		uintptr(proc), 0, 0, handlerAddr, 0, 0, uintptr(unsafe.Pointer(&tid)))
 	if th == 0 {
-		return fmt.Errorf("CreateRemoteThread 失败: %v", callErr2)
+		return i18n.Errorf("CreateRemoteThread 失败: %v", callErr2)
 	}
 	windows.CloseHandle(windows.Handle(th))
 	log.Info("已对汽水音乐主进程(pid=%d)激活 Node inspector", pid)

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 )
@@ -232,12 +233,12 @@ func (r *Router) updateRouting(evt player.Event) bool {
 			normalized := normalizeStatus(msg.Status)
 			if isPrior {
 				ps := r.priorStates[evt.PlayerName]
-				r.updatePlayerState(ps, normalized, evt.PlayerName, "优先", &r.priorLastPlaying)
+				r.updatePlayerState(ps, normalized, evt.PlayerName, i18n.T("优先"), &r.priorLastPlaying)
 				switched = r.evaluatePriorGroup()
 			} else {
 				ns := r.normalStates[evt.PlayerName]
 				if ns != nil {
-					r.updatePlayerState(ns, normalized, evt.PlayerName, "普通", &r.normalLastPlaying)
+					r.updatePlayerState(ns, normalized, evt.PlayerName, i18n.T("普通"), &r.normalLastPlaying)
 				}
 				if !r.priorGroupBlocking() {
 					switched = r.evaluateNormalGroup()
@@ -448,7 +449,7 @@ func (r *Router) watchExpire() {
 			expire := time.Duration(r.cfg.PriorPlayerExpire) * time.Second
 
 			// === 优先组 per-player 超时 ===
-			if expireGroupPlayers(r.priorStates, expire, r.cfg.PriorPlayerExpire, "优先") {
+			if expireGroupPlayers(r.priorStates, expire, r.cfg.PriorPlayerExpire, i18n.T("优先")) {
 				r.evaluatePriorGroup()
 			}
 
@@ -464,7 +465,7 @@ func (r *Router) watchExpire() {
 			}
 
 			// === 普通组 per-player 超时（仅在 prior 不阻挡时评估切换）===
-			if expireGroupPlayers(r.normalStates, expire, r.cfg.PriorPlayerExpire, "普通") {
+			if expireGroupPlayers(r.normalStates, expire, r.cfg.PriorPlayerExpire, i18n.T("普通")) {
 				if !r.priorGroupBlocking() {
 					r.evaluateNormalGroup()
 				}

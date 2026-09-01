@@ -105,23 +105,22 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 
 ### 命令行参数
 
+格式 `-参数 值`（如 `-offset 500`），优先级最高（> config.yml > 内置默认）；`-h` 打印全部参数。
+
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-addr` | `0.0.0.0:8765` | HTTP/WebSocket/SSE 监听地址 |
 | `-offset` | `200` | 全局时间偏移（毫秒），正值=歌词提前，负值=延后 |
 | `-poll` | `30` | 全局轮询间隔（毫秒），范围 10~2000 |
-| `-wesing-offset` | *(沿用全局)* | 全民K歌专属时间偏移 |
-| `-wesing-poll` | *(沿用全局)* | 全民K歌专属轮询间隔 |
-| `-cloudmusicv3-offset` | *(沿用全局)* | 网易云音乐专属时间偏移 |
-| `-cloudmusicv3-poll` | *(沿用全局)* | 网易云音乐专属轮询间隔 |
-| `-qqmusic-offset` | *(沿用全局)* | QQ 音乐专属时间偏移 |
-| `-qqmusic-poll` | *(沿用全局)* | QQ 音乐专属轮询间隔 |
-| `-kugou-offset` | *(沿用全局)* | 酷狗音乐专属时间偏移 |
-| `-kugou-poll` | *(沿用全局)* | 酷狗音乐专属轮询间隔 |
-| `-sodamusic-offset` | *(沿用全局)* | 汽水音乐专属时间偏移 |
-| `-sodamusic-poll` | *(沿用全局)* | 汽水音乐专属轮询间隔 |
+| `-prior-player` | `wesing` | 优先播放器列表，逗号分隔（如 `wesing,kugou`），一开唱立即抢占主输出；传空串=无优先播放器 |
+| `-prior-player-expire` | `15` | 优先播放器暂停超过 N 秒后释放主输出；`0`=关闭全部超时（含普通组），慎用 |
+| `-per-player-idle-hide` | `0` | 「指定播放器」通道无活跃 N 秒后自动清屏隐藏末行；`0`=关。仅作用于 per-player 端点，不影响根路径 |
+| `-cloudmusicv3-effect-strategy` | `fadeout` | 网易云特效最小化策略：`park`（屏外渲染保活）/ `fadeout`（自动淡出） |
+| `-<player>-offset` | *(沿用 `-offset`)* | 指定播放器专属时间偏移（毫秒） |
+| `-<player>-poll` | *(沿用 `-poll`)* | 指定播放器专属轮询间隔（毫秒） |
+| `-<player>-idle-hide` | *(沿用 `-per-player-idle-hide`)* | 指定播放器专属无活跃自动隐藏（秒，`0`=该播放器关闭） |
 
-> 播放器专属参数由 `config.RegisterPlayer()` 动态生成，未设置时自动沿用全局值。
+> `<player>` ∈ `wesing` / `cloudmusicv3` / `qqmusic` / `kugou` / `sodamusic`，专属参数由 `config.RegisterPlayer()` 动态生成，未设置时自动沿用全局值。例：`-cloudmusicv3-offset 300`、`-wesing-idle-hide 15`。
 >
 > 各播放器另有自己的轮询下限，低于它的取值会被静默抬高：cloudmusicv3 低于 50 抬到 100、
 > qqmusic 低于 30 抬到 50、sodamusic 低于 200 抬到 200。
@@ -164,6 +163,7 @@ per-player-idle-hide: 0
 # 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
+# wesing-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=该播放器关闭
 
 # 网易云音乐 v3 配置
 cloudmusicv3-offset: 500

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 )
@@ -161,10 +162,10 @@ func FetchLyrics(songID string, offsetSec float32) ([]LyricLine, error) {
 func detailedFlag(lines []LyricLine) string {
 	for _, line := range lines {
 		if len(line.TextDetailed.Words) > 0 {
-			return "是"
+			return i18n.T("是")
 		}
 	}
-	return "否"
+	return i18n.T("否")
 }
 
 // SearchSongID searches NetEase API by song name (+ optional artist) and returns the song ID.

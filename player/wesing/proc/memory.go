@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"Metabox-Nexus-PlayerCap/i18n"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -288,7 +289,7 @@ func FindProcess(name string) (uint32, error) {
 	snapshot, _, err := procCreateToolhelp32Snapshot.Call(
 		uintptr(TH32CS_SNAPPROCESS), 0)
 	if snapshot == uintptr(^uintptr(0)) {
-		return 0, fmt.Errorf("CreateToolhelp32Snapshot 失败: %v", err)
+		return 0, i18n.Errorf("CreateToolhelp32Snapshot 失败: %v", err)
 	}
 	defer procCloseHandle.Call(snapshot)
 
@@ -297,7 +298,7 @@ func FindProcess(name string) (uint32, error) {
 
 	ret, _, _ := procProcess32FirstW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
 	if ret == 0 {
-		return 0, fmt.Errorf("Process32FirstW 失败")
+		return 0, i18n.Errorf("Process32FirstW 失败")
 	}
 
 	nameLower := strings.ToLower(name)
@@ -311,7 +312,7 @@ func FindProcess(name string) (uint32, error) {
 			break
 		}
 	}
-	return 0, fmt.Errorf("未找到进程: %s", name)
+	return 0, i18n.Errorf("未找到进程: %s", name)
 }
 
 // OpenProc 打开进程并返回句柄
@@ -320,7 +321,7 @@ func OpenProc(pid uint32) (syscall.Handle, error) {
 		uintptr(PROCESS_VM_READ|PROCESS_QUERY_INFORMATION),
 		0, uintptr(pid))
 	if handle == 0 {
-		return 0, fmt.Errorf("OpenProcess 失败: %v", err)
+		return 0, i18n.Errorf("OpenProcess 失败: %v", err)
 	}
 	return syscall.Handle(handle), nil
 }
@@ -335,7 +336,7 @@ func EnumModules(pid uint32) ([]Module, error) {
 	snapshot, _, err := procCreateToolhelp32Snapshot.Call(
 		uintptr(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32), uintptr(pid))
 	if snapshot == uintptr(^uintptr(0)) {
-		return nil, fmt.Errorf("CreateToolhelp32Snapshot(MODULE) 失败: %v", err)
+		return nil, i18n.Errorf("CreateToolhelp32Snapshot(MODULE) 失败: %v", err)
 	}
 	defer procCloseHandle.Call(snapshot)
 
@@ -344,7 +345,7 @@ func EnumModules(pid uint32) ([]Module, error) {
 
 	ret, _, _ := procModule32FirstW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
 	if ret == 0 {
-		return nil, fmt.Errorf("Module32FirstW 失败")
+		return nil, i18n.Errorf("Module32FirstW 失败")
 	}
 
 	var modules []Module
@@ -378,7 +379,7 @@ func ReadBytes(handle syscall.Handle, addr uint32, size uint32) ([]byte, error) 
 		uintptr(size),
 		uintptr(unsafe.Pointer(&bytesRead)))
 	if ret == 0 {
-		return nil, fmt.Errorf("ReadProcessMemory(0x%X, %d) 失败: %v", addr, size, err)
+		return nil, i18n.Errorf("ReadProcessMemory(0x%X, %d) 失败: %v", addr, size, err)
 	}
 	return buf[:bytesRead], nil
 }

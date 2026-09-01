@@ -4,7 +4,7 @@ package qqmusic
 // 这三个是纯函数（不碰内存），能本机跑；qqmusic 整包 Windows-only、CI 跑不了（§8），
 // 而 fallback 选错会让整台机器的 QQ 音乐读到垃圾，值得有测试钉住选择逻辑。
 //
-// 版本表（knownVersions）当前：20.05 / 21.81 / 22.16 / 22.22 / 22.31 / 22.41 / 22.52。
+// 版本表（knownVersions）当前：20.05 / 21.81 / 22.16 / 22.22 / 22.31 / 22.41 / 22.52 / 22.60。
 // 加新版本后，标了「依赖最新版本」的用例需要跟着更新——这是刻意的，它钉的就是当前表。
 
 import "testing"
@@ -42,9 +42,9 @@ func TestNearestKnownVersion(t *testing.T) {
 }
 
 func TestLatestKnownVersion(t *testing.T) {
-	// 当前表最新是 22.52。加新版本后此用例应跟着改——它钉的就是「表里最大的那个」。
-	if got := latestKnownVersion(); got != "22.52" {
-		t.Errorf("latestKnownVersion() = %q, 期望 22.52", got)
+	// 当前表最新是 22.60。加新版本后此用例应跟着改——它钉的就是「表里最大的那个」。
+	if got := latestKnownVersion(); got != "22.60" {
+		t.Errorf("latestKnownVersion() = %q, 期望 22.60", got)
 	}
 }
 
@@ -58,6 +58,7 @@ func TestParseVer(t *testing.T) {
 		{"20.05", 20005, true},
 		{"22.41", 22041, true},
 		{"22.52", 22052, true},
+		{"22.60", 22060, true},
 		{"22", 0, false},     // 无小数点
 		{"22.x", 0, false},   // minor 非数字
 		{"x.16", 0, false},   // major 非数字

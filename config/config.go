@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 
 	"gopkg.in/yaml.v3"
@@ -174,7 +176,7 @@ func configPath() string {
 // Load 加载配置，优先级：命令行参数 > config.yml > 内置默认
 func Load() Config {
 	cfg := DefaultConfig()
-	cfg.Sources = []string{"内置默认"}
+	cfg.Sources = []string{i18n.T("内置默认")}
 
 	// 为已注册的播放器初始化配置
 	for _, name := range registeredPlayers {
@@ -211,13 +213,15 @@ func Load() Config {
 	}
 
 	// 命令行参数覆盖
-	var cliAddr string
+	var cliAddr, cliPriorPlayer, cliEffectStrategy string
 	var cliOffset, cliPoll, cliIdleHide, cliPriorExpire int
-	flag.StringVar(&cliAddr, "addr", "", "WebSocket 监听地址")
-	flag.IntVar(&cliOffset, "offset", 0, "歌词时间偏移（毫秒）")
-	flag.IntVar(&cliPoll, "poll", 0, "轮询间隔（毫秒）")
-	flag.IntVar(&cliPriorExpire, "prior-player-expire", 0, "优先播放器暂停超时（秒）；0=关闭全部超时（含普通组），慎用")
-	flag.IntVar(&cliIdleHide, "per-player-idle-hide", 0, "指定播放器通道无活跃自动隐藏（秒，0=关）")
+	flag.StringVar(&cliAddr, "addr", "", i18n.T("WebSocket 监听地址"))
+	flag.IntVar(&cliOffset, "offset", 0, i18n.T("歌词时间偏移（毫秒）"))
+	flag.IntVar(&cliPoll, "poll", 0, i18n.T("轮询间隔（毫秒）"))
+	flag.IntVar(&cliPriorExpire, "prior-player-expire", 0, i18n.T("优先播放器暂停超时（秒）；0=关闭全部超时（含普通组），慎用"))
+	flag.IntVar(&cliIdleHide, "per-player-idle-hide", 0, i18n.T("指定播放器通道无活跃自动隐藏（秒，0=关）"))
+	flag.StringVar(&cliPriorPlayer, "prior-player", "", i18n.T("优先播放器列表，逗号分隔（如 wesing,kugou）；传空串=无优先播放器"))
+	flag.StringVar(&cliEffectStrategy, "cloudmusicv3-effect-strategy", "", i18n.T("网易云特效最小化策略：park（屏外保活）| fadeout（淡出）"))
 
 	// 为已注册的播放器动态创建 CLI flag
 	type playerCLI struct {
@@ -228,14 +232,14 @@ func Load() Config {
 	cliPlayers := make(map[string]*playerCLI)
 	for _, name := range registeredPlayers {
 		cliPlayers[name] = &playerCLI{
-			offset:   flag.Int(name+"-offset", 0, fmt.Sprintf("%s 歌词时间偏移（毫秒）", name)),
-			poll:     flag.Int(name+"-poll", 0, fmt.Sprintf("%s 轮询间隔（毫秒）", name)),
-			idleHide: flag.Int(name+"-idle-hide", 0, fmt.Sprintf("%s 无活跃自动隐藏（秒，0=关，不传=跟随全局）", name)),
+			offset:   flag.Int(name+"-offset", 0, fmt.Sprintf(i18n.T("%s 歌词时间偏移（毫秒）"), name)),
+			poll:     flag.Int(name+"-poll", 0, fmt.Sprintf(i18n.T("%s 轮询间隔（毫秒）"), name)),
+			idleHide: flag.Int(name+"-idle-hide", 0, fmt.Sprintf(i18n.T("%s 无活跃自动隐藏（秒，0=关，不传=跟随全局）"), name)),
 		}
 	}
 
 	// 自定义 Usage：全局 flag 在前，播放器 flag 按字母排序在后
-	globalFlags := []string{"addr", "offset", "poll", "prior-player-expire", "per-player-idle-hide"}
+	globalFlags := []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "cloudmusicv3-effect-strategy"}
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		// 先输出全局 flag
@@ -281,6 +285,10 @@ func Load() Config {
 			cfg.PriorPlayerExpire = cliPriorExpire
 		case "per-player-idle-hide":
 			cfg.PerPlayerIdleHide = cliIdleHide
+		case "prior-player":
+			cfg.PriorPlayer = splitCommaList(cliPriorPlayer)
+		case "cloudmusicv3-effect-strategy":
+			cfg.EffectStrategy = cliEffectStrategy
 		default:
 			for _, name := range registeredPlayers {
 				if f.Name == name+"-offset" {
@@ -297,13 +305,25 @@ func Load() Config {
 		}
 	})
 	if hasCliArgs {
-		cfg.Sources = append(cfg.Sources, "命令行参数")
+		cfg.Sources = append(cfg.Sources, i18n.T("命令行参数"))
 	}
 
 	clampPolls(&cfg)
 	warnUnknownPriorPlayers(&cfg)
 
 	return cfg
+}
+
+// splitCommaList 把逗号分隔的 CLI 值切成去空白、去空项的字符串切片。传空串得到空切片
+// （语义：显式清空，如 -prior-player "" 表示无优先播放器），与 mergeYAML 读 yaml 列表殊途同归。
+func splitCommaList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // warnUnknownPriorPlayers 对 prior-player 里不认识的名字发告警。

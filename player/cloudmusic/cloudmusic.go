@@ -2,11 +2,13 @@ package cloudmusic
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/cdp"
@@ -102,7 +104,7 @@ func (p *CloudMusicPlayer) Start() {
 	// 0. Patch Windows registry auto-start
 	watchdog.PatchRegistryAutoStart()
 
-	p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "网易云音乐未启动"})
+	p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("网易云音乐未启动"), Reason: player.ReasonProcessNotRunning})
 
 	warnedUnsupported := false // v2 警告只打一次（它是永久状态，每轮打就是新的刷屏）
 
@@ -146,7 +148,7 @@ func (p *CloudMusicPlayer) Start() {
 				warnedUnsupported = true
 			}
 			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
-				Status: "standby", Detail: "网易云音乐 v" + unsupported.Version + " 不支持（需 v3+）",
+				Status: "standby", Detail: fmt.Sprintf(i18n.T("网易云音乐 v%s 不支持（需 v3+）"), unsupported.Version), Reason: player.ReasonVersionUnsupported,
 			})
 			time.Sleep(unsupportedRecheck)
 			continue
@@ -172,7 +174,7 @@ func (p *CloudMusicPlayer) Start() {
 		atomic.StoreInt32(&p.connected, 0)
 		log.Info("会话结束，等待网易云音乐重新启动...")
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "网易云音乐已退出"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("网易云音乐已退出"), Reason: player.ReasonProcessExited})
 		p.Emit(player.EventClearSongData, nil)
 	}
 }
@@ -707,10 +709,10 @@ func hasRealText(lines []lyric.LyricLine) bool {
 func lyricDetailedFlag(lines []lyric.LyricLine) string {
 	for _, line := range lines {
 		if len(line.TextDetailed.Words) > 0 {
-			return "是"
+			return i18n.T("是")
 		}
 	}
-	return "否"
+	return i18n.T("否")
 }
 
 // applyTlyricMap applies a tlyric timestamp map (ms -> text) to extracted lyrics.

@@ -498,8 +498,10 @@ paths:
         - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余四家不产生），下游可不为它单独处理
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou / sodamusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。同时会收到一条 `playback_pause` 事件
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
+        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用「是否带 `reason`」来区分（真待机态带 `reason`，此缺陷态不带）
         - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+
+        **`reason`（稳定机器码，仅非歌名状态出现、永不本地化）**：下游应按它做逻辑判断，取代对 `detail` 中文的字面量匹配。取值：`process_not_running`（进程未启动/未连上）、`process_exited`（已退出）、`cdp_disconnected`（CDP 断开）、`window_not_open`（窗口未打开）、`version_unsupported`（版本不受支持）、`install_not_found`（未找到安装）、`no_admin`（无管理员权限）。playing/paused 时 `detail` 是歌名、不带 `reason`（`reason` 非空 ⟺ 非歌名状态）。另注：`detail` 现按系统显示语言本地化（中文系统中文、其余英文），供人读；机器判断一律用 `reason`。
       responses:
         "200":
           description: 200 成功
@@ -738,7 +740,7 @@ paths:
         - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余四家不产生），下游可不为它单独处理
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou / sodamusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。同时会收到一条 `playback_pause` 事件
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
+        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用「是否带 `reason`」来区分（真待机态带 `reason`，此缺陷态不带）
         - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
 
         ---
@@ -1084,7 +1086,7 @@ paths:
         - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余四家不产生），下游可不为它单独处理
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou / sodamusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。同时会收到一条 `playback_pause` 事件
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
+        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用「是否带 `reason`」来区分（真待机态带 `reason`，此缺陷态不带）
         - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
       parameters:
         - $ref: "#/components/parameters/PlayerParam"
@@ -1905,7 +1907,7 @@ components:
             - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余四家不产生），下游可不为它单独处理
             - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic 为 `歌曲名 - 歌手`，kugou / sodamusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
             - `"paused"` - 暂停中，`detail` 为歌曲标题。同时会收到一条 `playback_pause` 事件
-            - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用 `detail` 是否匹配上述固定文案来区分
+            - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`。**kugou 例外**：切歌瞬间还会多发一条 `standby`、`detail` 是新歌标题，约 200 毫秒后即被 `song_info_update` 覆盖——这是当前实现的缺陷、不属契约，下游不应据此进入待机界面，可用「是否带 `reason`」来区分（真待机态带 `reason`，此缺陷态不带）
             - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
           enum:
             - waiting_process
@@ -1918,8 +1920,25 @@ components:
           example: playing
         detail:
           type: string
-          description: 状态详情（歌曲标题或状态说明）
+          description: |
+            状态详情，给人读、**按系统显示语言本地化**（中文系统中文、其余英文）。
+            playing/paused 时为歌曲标题；非歌名状态时为原因描述。
+            **下游做逻辑判断请用 `reason`，不要匹配 `detail` 文本。**
           example: "晚风 - 陈婧霏"
+        reason:
+          type: string
+          description: |
+            稳定的机器可读状态码，**仅非歌名状态出现、永不本地化**。消费方按它做逻辑判断，
+            取代对 `detail` 中文的字面量匹配。playing/paused 时省略（`reason` 非空 ⟺ 非歌名状态）。
+          enum:
+            - process_not_running
+            - process_exited
+            - cdp_disconnected
+            - window_not_open
+            - version_unsupported
+            - install_not_found
+            - no_admin
+          example: process_exited
 
     SongInfo:
       type: object

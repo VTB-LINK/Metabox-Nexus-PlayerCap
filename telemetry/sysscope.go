@@ -6,6 +6,8 @@ import (
 	"strconv"
 
 	"github.com/getsentry/sentry-go"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 // applyOSInfo 把一次系统快照写进 scope。
@@ -68,8 +70,8 @@ func setTagIfNotEmpty(scope *sentry.Scope, key, value string) {
 // 这里先把已经采到的信息用起来，别浪费。
 func logOSInfo(o osInfo) {
 	log.Info("系统: Windows %s (%s) %s / %s / %s / %d 核",
-		o.version(), nonEmpty(o.Edition, "edition 未知"), o.Arch,
-		nonEmpty(o.Locale, "locale 未知"), nonEmpty(o.TimeZone, "时区未知"), o.CPUCores)
+		o.version(), nonEmpty(o.Edition, i18n.T("edition 未知")), o.Arch,
+		nonEmpty(o.Locale, i18n.T("locale 未知")), nonEmpty(o.TimeZone, i18n.T("时区未知")), o.CPUCores)
 
 	if o.Shimmed {
 		log.Warn("检测到兼容性 shim：系统真实版本 %s，但 RtlGetVersion 报的是 %s。"+

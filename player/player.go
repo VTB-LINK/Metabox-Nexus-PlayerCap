@@ -64,7 +64,23 @@ type SongInfo struct {
 type StatusInfo struct {
 	Status string `json:"status"`
 	Detail string `json:"detail"`
+	// Reason 是稳定的机器可读状态码，仅在非歌名状态（非 playing/paused）出现，**永不本地化**。
+	// 消费方按它做逻辑判断，取代对中文 Detail 的字面量匹配；Detail 则按系统语言本地化供人读。
+	// playing/paused 时 Detail 是歌名、Reason 省略，故「Reason 非空 ⟺ 非歌名状态」。
+	Reason string `json:"reason,omitempty"`
 }
+
+// StatusInfo.Reason 的取值。播放器无关（WSEvent.player 已标明是哪个播放器），
+// 各播放器同义状态共用同一码，便于消费方与运营按码聚合。
+const (
+	ReasonProcessNotRunning  = "process_not_running" // 进程未启动或未连上
+	ReasonProcessExited      = "process_exited"      // 进程曾在跑、现已退出
+	ReasonCDPDisconnected    = "cdp_disconnected"    // CDP 调试通道已断开
+	ReasonWindowNotOpen      = "window_not_open"     // 进程在跑但目标窗口/页面未打开
+	ReasonVersionUnsupported = "version_unsupported" // 播放器版本不受支持
+	ReasonInstallNotFound    = "install_not_found"   // 未找到安装
+	ReasonNoAdmin            = "no_admin"            // 未取得管理员权限
+)
 
 // LyricUpdate 歌词更新。
 //

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/kugou/cdp"
@@ -187,7 +188,7 @@ func (p *KuGouPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "酷狗音乐未启动或 CDP 未就绪"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("酷狗音乐未启动或 CDP 未就绪"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		// 自动检测并修复：若 libcef.dll 未 patch 则 kill → patch → 重启酷狗
@@ -199,13 +200,13 @@ func (p *KuGouPlayer) Start() {
 			}
 			if errors.Is(err, watchdog.ErrInstallNotFound) {
 				log.Error("自动修复失败: %v（请手动运行酷狗启动工具或检查安装路径）", err)
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: "未找到酷狗安装，已停止"})
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("未找到酷狗安装，已停止"), Reason: player.ReasonInstallNotFound})
 				return
 			}
 			if errors.Is(err, watchdog.ErrVersionUnsupported) {
 				// 版本指纹不认识：重试也只会反复弹 UAC 打错版本，终态停止。
 				log.Error("自动修复失败: %v（请降级到受支持的酷狗版本，或等待适配后重试）", err)
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: "酷狗 libcef.dll 版本不受支持，已停止"})
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("酷狗 libcef.dll 版本不受支持，已停止"), Reason: player.ReasonVersionUnsupported})
 				return
 			}
 			if errors.Is(err, watchdog.ErrElevationFailed) {
@@ -215,7 +216,7 @@ func (p *KuGouPlayer) Start() {
 				if giveUp {
 					log.Error("连续 %d 次未取得管理员权限，停止自动修复（再试只会让 UAC 安全桌面反复夺焦）。"+
 						"如需启用酷狗，请重启本程序并在 UAC 弹窗点「是」", len(elevationBackoffs)+1)
-					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: "未取得管理员权限，已停止自动修复"})
+					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("未取得管理员权限，已停止自动修复"), Reason: player.ReasonNoAdmin})
 					return
 				}
 				log.Warn("未取得管理员权限（第 %d/%d 次）: %v —— %v 后重试",
@@ -248,7 +249,7 @@ func (p *KuGouPlayer) Start() {
 		p.runSession(client)
 		client.Close()
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "酷狗音乐 CDP 已断开"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("酷狗音乐 CDP 已断开"), Reason: player.ReasonCDPDisconnected})
 		p.Emit(player.EventClearSongData, nil)
 		log.Info("会话结束，等待酷狗重新启动...")
 		time.Sleep(2 * time.Second)
@@ -274,7 +275,7 @@ func (p *KuGouPlayer) waitForCDP() (*cdp.Client, error) {
 
 		// 进程已退出则立即返回，不再等待 90s
 		if !watchdog.IsKuGouRunning() {
-			return nil, fmt.Errorf("酷狗进程已退出")
+			return nil, i18n.Errorf("酷狗进程已退出")
 		}
 
 		now := time.Now()
@@ -283,7 +284,7 @@ func (p *KuGouPlayer) waitForCDP() (*cdp.Client, error) {
 			nextLog = now.Add(10 * time.Second)
 		}
 		if now.After(deadline) {
-			return nil, fmt.Errorf("CDP 90s 内未就绪: %w", err)
+			return nil, i18n.Errorf("CDP 90s 内未就绪: %w", err)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -660,10 +661,10 @@ func applyDetailedOffset(lines []klyric.Line, offsetSec float32) {
 func detailedFlag(lines []klyric.Line) string {
 	for _, l := range lines {
 		if len(l.Detailed.Words) > 0 {
-			return "是"
+			return i18n.T("是")
 		}
 	}
-	return "否"
+	return i18n.T("否")
 }
 
 // ── 酷狗 API 封面兜底 ────────────────────────────────────────────────────────

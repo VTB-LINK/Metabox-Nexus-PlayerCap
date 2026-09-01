@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
@@ -213,7 +214,7 @@ func qrcDecrypt(encrypted string) (string, error) {
 	}
 
 	if len(ciphertext)%8 != 0 {
-		return "", fmt.Errorf("%w: 密文长度 %d 不是 8 的倍数", errNotCiphertext, len(ciphertext))
+		return "", i18n.Errorf("%w: 密文长度 %d 不是 8 的倍数", errNotCiphertext, len(ciphertext))
 	}
 
 	// Use the ported QQ Music 3DES implementation (in qrc_decrypt.go)
@@ -271,7 +272,7 @@ func decryptIfNeeded(rawLyric string, crypt int) (string, bool, error) {
 			log.Warn("crypt=%d 但内容不是 QRC 密文，按明文处理: %v", crypt, err)
 			return rawLyric, false, nil
 		}
-		return "", false, fmt.Errorf("QRC 解密失败 (crypt=%d, len=%d): %w", crypt, len(rawLyric), err)
+		return "", false, i18n.Errorf("QRC 解密失败 (crypt=%d, len=%d): %w", crypt, len(rawLyric), err)
 	}
 	return decrypted, true, nil
 }

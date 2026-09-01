@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/wesing/lyric"
@@ -47,14 +48,14 @@ func (p *WesingPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: "K歌客户端未启动"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("K歌客户端未启动"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		handle, pid := p.waitForProcess()
 		p.runSession(handle, pid, offsetSec, pollInterval)
 		proc.CloseProc(handle)
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: "K歌客户端已退出"})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("K歌客户端已退出"), Reason: player.ReasonProcessExited})
 		p.Emit(player.EventClearSongData, nil)
 		log.Info("会话结束，等待新的 WeSing 进程...")
 		time.Sleep(2 * time.Second)
@@ -141,7 +142,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		switch state.Phase {
 		case proc.PhaseStandby:
 			if lastPhase != proc.PhaseStandby {
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: "K歌窗口未打开"})
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: i18n.T("K歌窗口未打开"), Reason: player.ReasonWindowNotOpen})
 				p.Emit(player.EventClearSongData, nil)
 				// lyric_idle 是**对外**事件，载荷必须是 {} 而非 null（「空数据一律 {}」，
 				// openapi.yaml:10）。传 nil 会序列化成 null——实测就是这么破的。
@@ -554,8 +555,8 @@ func applyDetailedOffset(lyrics []lyric.LyricLine, offsetSec float32) {
 func detailedFlag(lyrics []lyric.LyricLine) string {
 	for _, l := range lyrics {
 		if len(l.Detailed.Words) > 0 {
-			return "是"
+			return i18n.T("是")
 		}
 	}
-	return "否"
+	return i18n.T("否")
 }
