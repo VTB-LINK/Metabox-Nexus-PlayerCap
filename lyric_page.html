@@ -1934,8 +1934,10 @@
         }
 
         // Per-player 端点支持：?player=wesing → /wesing/ws
+        // 播放器名走白名单，非法值（含空）回退根端点 /ws，避免把可控 path 拼进 WS 目标。
+        const ALLOWED_PLAYERS = ['wesing', 'cloudmusicv3', 'qqmusic', 'kugou'];
         const playerParam = urlParams.get('player') || '';
-        const wsPath = playerParam ? `/${playerParam}/ws` : '/ws';
+        const wsPath = ALLOWED_PLAYERS.includes(playerParam) ? `/${playerParam}/ws` : '/ws';
         const WS_URL = `ws://localhost:8765${wsPath}`;
         let ws = null;
         let allLyrics = [];
@@ -2203,7 +2205,7 @@
                             }
                             _lastSongInfoKey = nextSongInfoKey;
 
-                            const displayText = buildTitleDisplayText(data.data);
+                            const displayText = escapeHtml(buildTitleDisplayText(data.data));
                             const display = document.getElementById('lyricsDisplay');
                             cleanupScrollAnim();
                             transitionOut(display, () => {
@@ -2644,6 +2646,19 @@
             return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
+        // 属性值转义：在 escapeHtml 基础上补转双引号，用于写入双引号包裹的 HTML 属性。
+        // & 由 escapeHtml 最先转义，避免二次转义已生成的实体；浏览器解码后可原样还原，
+        // 供 dataset 读回与原始值比对（字体列表点击匹配依赖此往返一致性）。
+        function escapeAttr(text) {
+            return escapeHtml(String(text)).replace(/"/g, '&quot;');
+        }
+
+        // 封面来源 scheme 白名单：仅接受 data:image/ 与 http(s)。异常/污染 scheme 跳过赋值，
+        // 保持既有封面不变，避免非图片 scheme 进入 img.src。
+        function isSafeImageSrc(src) {
+            return typeof src === 'string' && (/^data:image\//i.test(src) || /^https?:\/\//i.test(src));
+        }
+
         function hasWordData(data) {
             const w = data.text_detailed && data.text_detailed.words;
             if (!wordFxEnabled || !w || !w.length) return false;
@@ -2939,7 +2954,7 @@
         function renderAllLyrics() {
             const container = document.getElementById('allLyrics');
             container.innerHTML = allLyrics.map((l, i) =>
-                `<div class="line" id="lyric-${l.index}">${l.text}</div>`
+                `<div class="line" id="lyric-${l.index}">${escapeHtml(l.text)}</div>`
             ).join('');
         }
 
@@ -3060,7 +3075,7 @@
                     coverCurrentSpd = 0;
                     if (spinnerEl) spinnerEl.style.transform = 'rotate(0deg)';
                     // 新图在 old 层下面加载
-                    coverImg.src = coverSrc;
+                    if (isSafeImageSrc(coverSrc)) coverImg.src = coverSrc;
                     // 启动旋转
                     if (coverRotate === 'always') {
                         setCoverPlaying(true, true);
@@ -3089,7 +3104,7 @@
                 } else {
                     // 首次显示 / 同封面 / base64 升级：静默更新，不触发动效
                     clearTimeout(_coverTransitionTimer);
-                    if (!isSameSrc) coverImg.src = coverSrc;
+                    if (!isSameSrc && isSafeImageSrc(coverSrc)) coverImg.src = coverSrc;
                     coverArt.classList.add('visible');
                     if (coverRotate === 'always') {
                         setCoverPlaying(true);
@@ -4363,7 +4378,7 @@
                 list.innerHTML = fonts.map(f => {
                     const family = typeof f === 'string' ? f : f.family;
                     const display = typeof f === 'string' ? f : f.display;
-                    return `<div class="font-item" data-font="${family.replace(/"/g, '&quot;')}" style="font-family:'${family.replace(/'/g, "\\'")}'">${display}</div>`;
+                    return `<div class="font-item" data-font="${escapeAttr(family)}" style="font-family:'${escapeAttr(family.replace(/\\/g, '\\\\').replace(/'/g, "\\'"))}'">${escapeHtml(display)}</div>`;
                 }).join('');
                 list.querySelectorAll('.font-item').forEach(el => {
                     el.addEventListener('click', () => selectLocalFont(el.dataset.font));
@@ -4455,7 +4470,7 @@
                 list.innerHTML = fonts.map(f => {
                     const family = typeof f === 'string' ? f : f.family;
                     const display = typeof f === 'string' ? f : f.display;
-                    return `<div class="font-item" data-font="${family.replace(/"/g, '&quot;')}" style="font-family:'${family.replace(/'/g, "\\'")}'">${display}</div>`;
+                    return `<div class="font-item" data-font="${escapeAttr(family)}" style="font-family:'${escapeAttr(family.replace(/\\/g, '\\\\').replace(/'/g, "\\'"))}'">${escapeHtml(display)}</div>`;
                 }).join('');
                 list.querySelectorAll('.font-item').forEach(el => {
                     el.addEventListener('click', () => selectSubFont(el.dataset.font));

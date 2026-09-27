@@ -79,6 +79,12 @@ const glShimJS = `(function(){
 //     画布池 + 并发 toBlob 提帧率（toBlob 异步不阻塞主线程）。抓的是 canvas backing store，永不含工具栏/
 //     顶栏/进度条（DOM 合成层）→ 主播可常开 chrome，OBS 仍得纯特效层。无订阅者时 __mbxCapPaused 暂停省 CPU。
 //     分辨率 = 网易云窗口尺寸（用户放大窗口即更清晰，我们不强制改渲染分辨率以免崩溃/变形）。
+//  3. 热接管（进程重启后 token 会变）：ingest WS URL 存进可重写的闭包变量，并把切换函数挂到
+//     window.__mbxCapSetIngest(url)（关旧 ws、改 url、ensureWS 重连）；用带版本的 window.__mbxCapV2
+//     标识本版脚本已就位。重复注入时：本版已在跑 → 只切地址、不新起 rAF 循环（防双 loop 双发帧）；
+//     只见旧标志 __mbxCapStarted 而无 __mbxCapV2（升级前注入的旧脚本、无切换函数）→ 无法热接管，
+//     安全返回（不硬调不存在的函数以免抛错），网易云 reload/切歌重建 canvas 即恢复——一次性升级过渡
+//     瑕疵，不为它引双 loop 或 reload 网易云。
 //
 // %q=ingest WS 地址；%f=初始 q(0-1)；%d=初始 fps；%d=输出最大宽。
 const captureInjectJS = `(function(){
@@ -90,14 +96,27 @@ const captureInjectJS = `(function(){
       return orig.call(this,type,attrs);
     };
   }
-  if(window.__mbxCapStarted)return; window.__mbxCapStarted=true;
-  var SEL='#lyric-effect-canvas-id', WS_URL=%q;
+  var WS_URL=%q;
+  // 热接管：本版脚本(__mbxCapV2)已在跑 → 只把 ingest 地址切到新 token、不新起循环（防双 loop 双发帧）。
+  if(window.__mbxCapV2&&window.__mbxCapSetIngest){window.__mbxCapSetIngest(WS_URL);return;}
+  // 升级过渡：页面里只有上一版脚本(有 __mbxCapStarted、无 __mbxCapV2、无切换函数) → 无法热接管，
+  // 直接返回（不硬调不存在的函数以免抛错）；网易云 reload/切歌重建 canvas 即恢复。
+  if(window.__mbxCapStarted)return;
+  window.__mbxCapStarted=true; window.__mbxCapV2=true;
+  var SEL='#lyric-effect-canvas-id';
   if(!window.__mbxCapCfg)window.__mbxCapCfg={q:%f,fps:%d,outw:%d};
   var ws=null, inflight=0, lastSend=0;
   function ensureWS(){
     if(ws&&(ws.readyState===0||ws.readyState===1))return;
     try{ws=new WebSocket(WS_URL);ws.binaryType='arraybuffer';}catch(e){ws=null;}
   }
+  // 切 ingest 地址（进程重启后带新 token）：地址没变且连接健在则免抖动；否则关旧 ws、改 url、下一帧 ensureWS 重连。
+  window.__mbxCapSetIngest=function(u){
+    if(u===WS_URL&&ws&&(ws.readyState===0||ws.readyState===1))return;
+    WS_URL=u;
+    if(ws){try{ws.close();}catch(e){}ws=null;}
+    ensureWS();
+  };
   // 编码画布池：每个在飞帧用独立 2D 画布快照，允许并发 toBlob（toBlob 异步、编码不阻塞主线程）
   var POOL=3, cans=[];
   for(var i=0;i<POOL;i++){var o=document.createElement('canvas');var cx=o.getContext('2d',{alpha:false});cx.imageSmoothingEnabled=true;cx.imageSmoothingQuality='high';cans.push({o:o,x:cx,busy:false});}

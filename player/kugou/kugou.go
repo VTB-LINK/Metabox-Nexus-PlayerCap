@@ -60,6 +60,11 @@ const (
 	coverAPIFallbackTimeout = 5 * time.Second
 )
 
+// fetchCoverBase64 是 player.FetchCoverBase64 的可替换 seam：仅供 runCoverFetch 的取消时序测试
+// 注入可阻塞的桩。封面下载现带 SSRF 拨号校验（拒回环/内网），httptest 的 127.0.0.1 mock 已不可用，
+// 故测试改注入桩而非起真实回环服务。生产恒为 player.FetchCoverBase64，不导出、外部无法改动。
+var fetchCoverBase64 = player.FetchCoverBase64
+
 // runCoverFetch 取封面并发出 song_info_update；每首歌一个，换歌时由 ctx 取消。
 //
 //	阶段1: 等 coverEarlyWait 取封面 URL（**常见情况下 URL 已预置在缓冲 channel 里，立即命中**）
@@ -127,7 +132,7 @@ func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name,
 	}
 	var b64 string
 	if b64Timeout > 0 {
-		b64 = player.FetchCoverBase64("Kugou", coverURL, b64Timeout)
+		b64 = fetchCoverBase64("Kugou", coverURL, b64Timeout)
 	}
 
 	select {

@@ -184,7 +184,6 @@ paths:
                           lyric_update-SSE: "http://0.0.0.0:8765/cloudmusicv3/lyric_update-SSE"
                           song_info-SSE: "http://0.0.0.0:8765/cloudmusicv3/song_info-SSE"
                           effect-ws: "ws://0.0.0.0:8765/cloudmusicv3/effect-ws"
-                          effect-ingest: "ws://0.0.0.0:8765/cloudmusicv3/effect-ingest"
                         qqmusic:
                           ws: "ws://0.0.0.0:8765/qqmusic/ws"
                           all_lyrics: "http://0.0.0.0:8765/qqmusic/all_lyrics"

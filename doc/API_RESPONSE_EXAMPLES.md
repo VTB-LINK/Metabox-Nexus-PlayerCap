@@ -110,8 +110,7 @@
         "song_info": "http://0.0.0.0:8765/cloudmusicv3/song_info",
         "lyric_update-SSE": "http://0.0.0.0:8765/cloudmusicv3/lyric_update-SSE",
         "song_info-SSE": "http://0.0.0.0:8765/cloudmusicv3/song_info-SSE",
-        "effect-ws": "ws://0.0.0.0:8765/cloudmusicv3/effect-ws",
-        "effect-ingest": "ws://0.0.0.0:8765/cloudmusicv3/effect-ingest"
+        "effect-ws": "ws://0.0.0.0:8765/cloudmusicv3/effect-ws"
       },
       "qqmusic": {
         "ws": "ws://0.0.0.0:8765/qqmusic/ws",
@@ -1231,7 +1230,7 @@ OBS/前端连接此端点，收到两类消息：
 
 ### `/cloudmusicv3/effect-ingest` — 帧回传（WebSocket，内部）
 
-注入网易云页面的抓帧脚本把特效 canvas 的 JPEG 字节推到此端点，后端门控后再广播给 `effect-ws` 订阅者。**非用户接口**，仅供注入脚本使用。
+注入网易云页面的抓帧脚本把特效 canvas 的 JPEG 字节推到此端点，后端门控后再广播给 `effect-ws` 订阅者。**非用户接口**，仅供注入脚本使用：写端需携带进程内一次性随机 token（`?t=...`，仅注入脚本经内部取址获得），校验不通过即 `403`；该端点不出现在 `/service-status` 广告表中。
 
 ### 前端页面 URL 参数（`effect_display.html` / `effect_page.html`）
 

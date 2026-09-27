@@ -121,7 +121,7 @@ Win11 门控（步骤 7）：**绝不删掉 `park.IsWindows11()` 的强制降级
    「我就要盯这个播放器」，调试与镜像通道靠它。
 ```
 
-关于 ②：入口是 `/cloudmusicv3/effect-ingest`，它**无认证、共用恒真的 `CheckOrigin`（server.go:104）、默认绑 `0.0.0.0:8765`**，且 `main.go:114` 还把这个地址主动塞进 `/service-status` 广告出去。**这是有意接受的现状**，边界与未保障的假设记在 §11 —— 改它之前先读那一节。特别是：**不要「去掉 CheckOrigin」，那会把 ingest 和 OBS 浏览器源一起打断**。
+关于 ②：入口是 `/cloudmusicv3/effect-ingest`，写端有**进程内一次性随机 token 鉴权**（`?t=`，注入脚本经 `EffectIngestWSURL()` 内部取址获得，`handleEffectIngest` 在 Upgrade 前常量时间比较、不匹配即 403），但**仍共用恒真的 `CheckOrigin`（server.go:104）、无 Origin/回环校验、默认绑 `0.0.0.0:8765`**——写端安全靠 token，不靠 Origin。`/service-status` **不再广告 ingest 地址**（端点仍在，注入脚本内部取址）。边界与未保障的假设记在 §14 —— 改它之前先读那一节。特别是：**不要「去掉 CheckOrigin」，那会把 ingest 和 OBS 浏览器源一起打断**。
 
 ### 1.4 目录结构
 
@@ -310,8 +310,8 @@ default: // "standby", "waiting_process", "waiting_song", 以及未来任何未�
 - **HTTP handler 必须锁内取快照、锁外序列化；绝不在持锁期间 `writeJSON`。** ✅`server/race_test.go` — 四个读端点曾在锁外读 `PlayerState`，构成真实数据竞争。 — commit `0f83220`
 - **SSE 的类型过滤必须在 `routes` 表里用 `sseTypes` 声明出来。** ❌ — `eventTypes` 为空 = 全通。新增 SSE 端点漏填不会报错，只会静默变成全量推送。**过滤是声明出来的，不是默认的。** — `server/server.go:25,32-35,49`
 - **根订阅者只收 activePlayer 的事件；per-player 订阅者绝不受 `activePlayer` 与 `skipRoot` 影响。** ❌ — 根路径 = 单一「当前该播什么」的视图，破坏它 → OBS 根源收到多播放器歌词交错 → 直播串词。per-player 命名空间是「我就要盯这个播放器」的逃生舱，误把 switchSkip 作用上去会让 `/cloudmusicv3/ws` 莫名丢事件。
-- **绝不为了「修安全」去掉 `upgrader.CheckOrigin` 的恒真。** ❌ — 注入脚本跑在 `orpheus://` 协议的源上，恢复 gorilla 默认 `checkSameOrigin` 会比较 `orpheus` vs `127.0.0.1:8765` → 403 → **ingest 与 OBS 浏览器源可能一起断**。这条 CheckOrigin 对两条正路都是承重的。要收紧只能在 `handleEffectIngest` 里用专用 upgrader，不能就地改这个共用的。 — `server/server.go:104`（被 `/ws`、`/<player>/ws`、effect-ws、effect-ingest 四端点共用）
-- **effect-ingest 的现状是有意接受的，改它之前先读边界。** ❌ — 无认证、无 Origin 校验、无回环检查，且默认绑 `0.0.0.0:8765`；`main.go:114` 还把 ingest 地址塞进 `/service-status` 主动广告出去。`effect.go:255` 注释称「单一生产者（注入脚本只开一条），故不做并发保护」——**这是假设，零机制保证；第二条 ingest 连接进来时行为未定义**。 — `server/server.go:431`、`server/effect.go:255`、`config/config.go:62,307`
+- **绝不为了「修安全」去掉 `upgrader.CheckOrigin` 的恒真。** ❌ — 注入脚本跑在 `orpheus://` 协议的源上，恢复 gorilla 默认 `checkSameOrigin` 会比较 `orpheus` vs `127.0.0.1:8765` → 403 → **ingest 与 OBS 浏览器源可能一起断**。这条 CheckOrigin 对两条正路都是承重的。要收紧只能在 `handleEffectIngest` 里前置鉴权或用专用 upgrader，不能就地改这个共用的。（现状：写端已在 `handleEffectIngest` 里前置 token 校验收紧，未动共用 upgrader。） — `server/server.go:104`（被 `/ws`、`/<player>/ws`、effect-ws、effect-ingest 四端点共用）
+- **effect-ingest 写端已加 token 鉴权；其余现状仍是有意接受的，改之前先读边界。** ❌ — 写端要求进程内随机 token（`handleEffectIngest` Upgrade 前常量时间比较、不匹配 403），挡住本机其它软件伪造帧；但**仍无 Origin 校验、无回环检查，默认绑 `0.0.0.0:8765`**（写端安全靠 token，读端 effect-ws 不带 token）。`/service-status` 已不再广告 ingest 地址。`effect.go` 注释称「单一生产者（注入脚本只开一条），故升级后不做并发保护」——**这是假设，零机制保证；token 通过后的第二条 ingest 连接进来时行为未定义**。 — `server/server.go`、`server/effect.go`、`config/config.go:62,307`
 
 ### 3.5 自动更新与发版
 
@@ -1508,20 +1508,25 @@ per-player 前缀的对称性，导致新播放器只有根端点、没有 `/<na
 
 ### 已知并接受（**有意的，不是待办**）
 
-**effect-ingest 无认证。** `/cloudmusicv3/effect-ingest` 没有 token、没有 Origin 校验（共用
-恒真的 `CheckOrigin`）、没有回环校验，默认还绑 `0.0.0.0:8765`。局域网任意设备、或主播机浏览器
-里的任意网页（WebSocket 不受同源策略约束）都能连上并向 OBS 特效源注入任意 JPEG。
+**effect-ingest 写端有 token、无 Origin 校验。** `/cloudmusicv3/effect-ingest` 写端要求进程内
+一次性随机 token（`?t=`，`crypto/rand` 16B、仅内存不落盘；`handleEffectIngest` 在 Upgrade 前用
+`crypto/subtle` 常量时间比较、不匹配即 403）。仍共用恒真的 `CheckOrigin`、无回环校验、默认绑
+`0.0.0.0:8765`——**写端安全靠 token，不靠 Origin**：WebSocket 不受同源策略约束，局域网设备或主播机
+网页能发起连接，但没有 token 过不了鉴权。token 明文存在于注入网易云页面的抓帧脚本里，能读该进程
+内存或网易云 CDP/页面者仍可提取——但具此能力者本就能自行抓同一 canvas，无新增暴露。
 
-- **前提**：部署在单机可信网络。**这个前提一旦变化（多机部署 / 公网暴露 / 播控机在不可信
-  网络），必须重新评估。**
+- **前提**：token 防的是**本机其它软件**（能连端口、伪造 Origin、读用户文件，但无 CDP/页面 JS 权）。
+  **多机部署 / 公网暴露 / 播控机在不可信网络时必须重新评估**（0.0.0.0 绑定 + token 明文在页面脚本里）。
 - **未保障的假设**：`effect.go` 的注释称「单一生产者（注入脚本只开一条），故不做并发保护」
-  ——**没有任何机制保证它**；第二条 ingest 连接进来时行为**未定义**。
-- **加重项**：`main.go` 把 ingest 地址塞进 `/service-status`，**端点被无认证地主动广告出去**，
-  一个 GET 就能拿到写入端点，零侦察成本。
-- **将来真要加防护时的硬约束**：**别照着「去掉 `CheckOrigin`」改，会炸。** 注入脚本跑在
-  `orpheus://` 源上，恢复 gorilla 默认的 `checkSameOrigin` 会比较 `orpheus` vs
-  `127.0.0.1:8765` → 403 → ingest 断，OBS 浏览器源也可能一起断。**这条恒真的 CheckOrigin
-  对两条正路都是承重的。** 正确做法是给 ingest 单独一个 upgrader，不要动共用那个。
+  ——**没有任何机制保证它**；token 通过后的第二条 ingest 连接进来时行为**未定义**。
+- **进程重启后 token 会变**：注入脚本 `captureInjectJS` 有热接管（`__mbxCapV2` 版本门 +
+  `window.__mbxCapSetIngest` 切地址、不新起 rAF 循环）；升级前注入的旧脚本无法热接管，靠网易云
+  reload/切歌重建 canvas 恢复（一次性升级过渡瑕疵，不为它引双 loop 或 reload 网易云）。
+- **`/service-status` 不再广告 ingest 地址**（端点仍在，注入脚本经 `EffectIngestWSURL()` 内部取址）。
+- **硬约束：别照着「去掉 `CheckOrigin`」改，会炸。** 注入脚本跑在 `orpheus://` 源上，恢复 gorilla
+  默认的 `checkSameOrigin` 会比较 `orpheus` vs `127.0.0.1:8765` → 403 → ingest 断，OBS 浏览器源
+  也可能一起断。**这条恒真的 CheckOrigin 对两条正路都是承重的。** 收紧写端的正确做法是像现在这样
+  在 `handleEffectIngest` 里前置 token 校验，不要动共用的 upgrader。
 
 ### 未决
 

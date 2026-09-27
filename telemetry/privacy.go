@@ -132,6 +132,15 @@ const privacyNotice = noticeHeader + noticeTelemetrySection + noticeDivider + no
 // privacyNoticeEN 是英文全集，供英文门禁核对采集面（同 privacyNotice 之于中文）。
 const privacyNoticeEN = noticeHeaderEN + noticeTelemetrySectionEN + noticeDivider + noticeUpdateSectionEN + noticeFooter
 
+// bannerLogo 是启动 Banner 顶部 VTB-LIVE ASCII logo 的副本（与 main.go 各存一份）。
+// 隐私提示停留最久、用户看得最清，在其顶部再打印一份以提高 logo 曝光。有意复制而非跨包引用：
+// telemetry 不反向依赖 main，且 logo 极少变动，两处各自维护的代价可接受。
+const bannerLogo = `___    __________________         ______ ___________    ____________
+__ |  / /___  __/___  __ )        ___  / ____  _/__ |  / /___  ____/
+__ | / / __  /   __  __  |__________  /   __  /  __ | / / __  __/
+__ |/ /  _  /    _  /_/ / _/_____/_  /_____/ /   __ |/ /  _  /___
+_____/   /_/     /_____/          /_____//___/   _____/   /_____/   `
+
 // PrintPrivacyNotice 打印隐私提示，然后倒计时 wait 后自动继续。
 //
 // versionCheckActive 传 main.isReleaseVersion(Version) —— 即「这次启动会不会真的去查版本」。
@@ -147,6 +156,10 @@ func PrintPrivacyNotice(wait time.Duration, versionCheckActive bool) {
 		return
 	}
 
+	// logo 与倒计时同属 AGENTS.md §6.2 允许 fmt 的例外（都是用户可见的启动输出）。
+	// 只在提示确实要显示时（text 非空）才打印，保持本地 dev 构建一个字都不打的现状。
+	fmt.Println(bannerLogo)
+	fmt.Println()
 	fmt.Println(text)
 	countdown(wait)
 }

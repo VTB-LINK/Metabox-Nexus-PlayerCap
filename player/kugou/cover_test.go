@@ -5,15 +5,13 @@ package kugou
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/player"
 )
 
-// deadCoverURL 指向一个必然连不上的地址：TCP 端口 1 上没有服务，连接立即被拒。
+// deadCoverURL 指向一个必然连不上的地址：既是回环（SSRF 拨号校验直接拒绝），端口 1 上也无服务。
 // 用它让 FetchCoverBase64 快速返回空串，模拟「封面 URL 有效但 b64 拿不到」。
 const deadCoverURL = "http://127.0.0.1:1/cover.jpg"
 
@@ -103,22 +101,23 @@ func TestRunCoverFetchEmitsWithoutCoverURL(t *testing.T) {
 // return 了——测试照样绿，却根本没走到 Emit 前的那道检查。实测确认过：那种写法下把末尾
 // 的 ctx 检查整个删掉，测试依然 PASS，是个装饰品。
 //
-// 这里用一个可阻塞的 httptest 服务把时序钉死：等下载真正发起（此时 URL 已从 channel
-// 取走、顶部 select 已过）再 cancel，然后放行下载，逼它走到末尾的检查。
+// 这里用一个可阻塞的下载桩把时序钉死：等下载真正发起（此时 URL 已从 channel 取走、顶部
+// select 已过）再 cancel，然后放行下载，逼它走到末尾的检查。桩替换 fetchCoverBase64 seam
+// 而非起真实服务——封面下载现带 SSRF 拨号校验会拒回环地址，httptest 的 127.0.0.1 mock 已不可用。
 func TestRunCoverFetchRespectsCancel(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	orig := fetchCoverBase64
+	defer func() { fetchCoverBase64 = orig }()
+	fetchCoverBase64 = func(_, _ string, _ time.Duration) string {
 		close(entered)
 		<-release
-		w.Header().Set("Content-Type", "image/jpeg")
-		w.Write([]byte{0xFF, 0xD8, 0xFF, 0xD9}) //nolint // 极小的假 jpeg，够 base64 出非空串
-	}))
-	defer srv.Close()
+		return "data:image/jpeg;base64,/9j/2Q==" // 非空 b64，模拟正常拿到
+	}
 
 	p := New(0, 500)
 	ch := make(chan string, 1)
-	ch <- srv.URL + "/cover.jpg"
+	ch <- "http://cover.example/cover.jpg"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -133,7 +132,7 @@ func TestRunCoverFetchRespectsCancel(t *testing.T) {
 		t.Fatal("封面下载未在 2s 内发起")
 	}
 	cancel()       // 下载途中换歌
-	close(release) // 放行下载，让 FetchCoverBase64 正常拿到 b64
+	close(release) // 放行下载，让桩正常返回 b64
 	<-done
 
 	if si := recvSongInfo(t, p, 300*time.Millisecond); si != nil {

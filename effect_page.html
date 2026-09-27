@@ -57,10 +57,10 @@
     return Math.min(hi, Math.max(lo, n));
   }
 
-  // 连接参数
-  const host = qs.get('host') || 'localhost';
-  const port = qs.get('port') || '8765';
-  const baseWS = qs.get('ws') || ('ws://' + host + ':' + port + '/cloudmusicv3/effect-ws');
+  // 连接参数：目标锁定本机回环，杜绝把 WebSocket 指向任意主机——host/ws 覆盖已弃用，仅端口允许数字覆盖
+  const portRaw = qs.get('port') || '';
+  const port = /^[0-9]{1,5}$/.test(portRaw) ? portRaw : '8765';
+  const baseWS = 'ws://localhost:' + port + '/cloudmusicv3/effect-ws';
   // 截帧/注入参数（透传给后端；缺省=后端默认 quality=88 header_clickable=1 footer_clickable=0）
   // 注：纯层捕获直读 canvas 原生分辨率，scale 已无意义（不再透传）；仅 quality 影响 JPEG 编码。
   const capParams = new URLSearchParams();

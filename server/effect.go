@@ -1,6 +1,9 @@
 package server
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -52,6 +55,7 @@ type effectHub struct {
 	// 由捕获器注册的 ingestHandler 做帧门控后广播给 effect-ws 订阅者。
 	ingestHandler func([]byte) // 捕获器注册：处理一帧 ingest 进来的 JPEG（含门控）
 	ingestPort    string       // 服务监听端口，供拼接注入脚本里的 page→Go WS 地址
+	ingestToken   string       // 进程内一次性随机 token（仅存内存、绝不落盘）：ingest 写端鉴权，防本机其它软件伪造帧
 }
 
 func newEffectHub() *effectHub {
@@ -63,7 +67,20 @@ func newEffectHub() *effectHub {
 		footerClickable: false,
 		strategy:        "fadeout",
 		manualParkCmd:   -1,
+		ingestToken:     newIngestToken(),
 	}
+}
+
+// newIngestToken 生成 effect-ingest 写端鉴权用的一次性随机 token（16 字节 hex）。
+// 进程内生成一次、仅存内存、绝不落盘。crypto/rand 在 Windows 上由系统 CSPRNG 支撑、
+// 实践中不失败；万一失败则 panic —— 它发生在 server 构造（启动早期、OBS 尚未拉流），
+// 崩溃可见且可重启恢复，绝不退化成空 token（空 token 会让 ConstantTimeCompare 放行一切）。
+func newIngestToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("effect ingest token 生成失败: " + err.Error())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // EffectStrategy 返回最小化/迷你时的策略（fadeout | park），供捕获器读取。
@@ -116,6 +133,7 @@ func (s *Server) handleEffectControl(w http.ResponseWriter, r *http.Request) {
 	resp := fmt.Sprintf("strategy=%s manualParkCmd=%d", h.strategy, h.manualParkCmd)
 	h.mu.Unlock()
 	serverLog.Info("网易云特效控制: %s", resp)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(resp + "\n"))
 }
 
@@ -239,21 +257,36 @@ func (s *Server) SetEffectIngestHandler(fn func([]byte)) {
 	h.mu.Unlock()
 }
 
-// EffectIngestWSURL 返回注入脚本用的 page→Go 帧回传地址（本机回环）。
+// EffectIngestWSURL 返回注入脚本用的 page→Go 帧回传地址（本机回环，带写端鉴权 token）。
 func (s *Server) EffectIngestWSURL() string {
 	h := s.effectHub
 	h.mu.Lock()
 	port := h.ingestPort
+	token := h.ingestToken
 	h.mu.Unlock()
 	if port == "" {
 		port = "8765"
 	}
-	return "ws://127.0.0.1:" + port + "/cloudmusicv3/effect-ingest"
+	// token 仅含 [0-9a-f]，作为 query 值无需转义；注入脚本里经 %q 输出为合法 JS 字符串字面量。
+	return "ws://127.0.0.1:" + port + "/cloudmusicv3/effect-ingest?t=" + token
 }
 
 // handleEffectIngest 接收网易云注入脚本推来的二进制 JPEG 帧，交给捕获器注册的 handler。
-// 单一生产者（注入脚本只开一条），故不做并发保护；handler 缺失则丢弃。
+// 写端鉴权：Upgrade 之前先用常量时间比较校验 query 的 t 与进程内 ingestToken，不匹配即 403 且
+// 绝不 Upgrade，防本机其它软件向 OBS 特效源伪造帧（读端 effect-ws 不带 token、不受影响）。
+// 单一生产者（注入脚本只开一条），故升级后不做并发保护；handler 缺失则丢弃。
 func (s *Server) handleEffectIngest(w http.ResponseWriter, r *http.Request) {
+	// token 校验必须前置于 Upgrade：不匹配直接 403 返回，绝不升级为 WS。绝不改共用的
+	// s.upgrader.CheckOrigin（/ws、/<player>/ws、effect-ws、effect-ingest 四端点共用，改了会
+	// 403 掉 OBS 浏览器源的 effect-ws，见 AGENTS.md §3.4）——鉴权独立前置，不动 upgrader。
+	h := s.effectHub
+	h.mu.Lock()
+	token := h.ingestToken
+	h.mu.Unlock()
+	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("t")), []byte(token)) != 1 {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		serverLog.Warn("网易云特效Ingest Upgrade 失败: %v", err)

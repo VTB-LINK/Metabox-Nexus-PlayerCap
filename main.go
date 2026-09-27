@@ -177,10 +177,11 @@ func main() {
 		pe.Set("song_info", scheme+"://"+cfg.Addr+"/"+pn+"/song_info")
 		pe.Set("lyric_update-SSE", scheme+"://"+cfg.Addr+"/"+pn+"/lyric_update-SSE")
 		pe.Set("song_info-SSE", scheme+"://"+cfg.Addr+"/"+pn+"/song_info-SSE")
-		// 网易云特效镜像通道（仅 cloudmusicv3，归于其命名空间）
+		// 网易云特效镜像通道（仅 cloudmusicv3，归于其命名空间）：
+		// 只广告读端 effect-ws；写端 effect-ingest 需内存随机 token，端点仍存在但不对外广告，
+		// 注入脚本经 EffectIngestWSURL() 内部取址（含 token），不依赖此表。
 		if pn == cloudmusic.PlayerName {
 			pe.Set("effect-ws", wsScheme+"://"+cfg.Addr+"/"+pn+"/effect-ws")
-			pe.Set("effect-ingest", wsScheme+"://"+cfg.Addr+"/"+pn+"/effect-ingest")
 		}
 		endpointsOM.Set(pn, pe)
 	}

@@ -42,6 +42,7 @@ func main() {
 		mux.HandleFunc("/active", func(w http.ResponseWriter, r *http.Request) {
 			p := r.URL.Query().Get("p")
 			srv.SetActivePlayer(p)
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Write([]byte("active=" + p + "\n"))
 		})
 		http.ListenAndServe("127.0.0.1:8766", mux)
