@@ -81,8 +81,9 @@ func TestDeMorganBreaksOnNaN(t *testing.T) {
 }
 
 // TestNaNPoisonsDownstream 记录 NaN 通过校验后的下游后果，说明为什么这条值得当 HIGH 修。
-// encoding/json 编码不了 NaN，会让 WS 的 WriteJSON 报错；而写 goroutine 遇错即 return
-// 却不关闭连接（server.go:490），订阅者会永久僵死却仍在册。
+// encoding/json 编码不了 NaN，会让 WS 的 WriteJSON 报错。修复当时 server 包 handleWS 的写
+// goroutine 遇错即 return 却不关闭连接，订阅者会永久僵死却仍在册；该缺陷已由 9cb446e 修复
+// （遇错即关连接，见 server/ws_zombie_test.go），现在的后果是收到 NaN 事件的 WS 订阅者被断开。
 func TestNaNPoisonsDownstream(t *testing.T) {
 	nan := float32(math.NaN())
 	if !math.IsNaN(float64(nan)) {

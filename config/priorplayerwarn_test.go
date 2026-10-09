@@ -19,11 +19,12 @@ import (
 func captureLog(t *testing.T, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer
-	oldFlags := stdlog.Flags()
+	oldOut := stdlog.Writer()  // 必须还原真实 writer（os.Stderr），而非 nil：
+	oldFlags := stdlog.Flags() // 还原成 nil 后，下一个测试里任何 log 调用都会写 nil output → panic。
 	stdlog.SetOutput(&buf)
 	stdlog.SetFlags(0)
 	defer func() {
-		stdlog.SetOutput(nil) // 交回给 testing 的默认行为
+		stdlog.SetOutput(oldOut)
 		stdlog.SetFlags(oldFlags)
 	}()
 	fn()

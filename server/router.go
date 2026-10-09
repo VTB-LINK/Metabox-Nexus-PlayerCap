@@ -9,6 +9,7 @@ import (
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 var routerLog = logger.New("Router")
@@ -94,6 +95,7 @@ func (r *Router) Run() {
 
 	for _, p := range r.players {
 		go func(p player.Player) {
+			defer telemetry.Guard()
 			for evt := range p.Events() {
 				merged <- evt
 			}
@@ -440,6 +442,7 @@ func forceGroupInert(states map[string]*playerState) {
 
 // watchExpire 监控所有播放器超时（prior + normal 的 per-player + 组级）
 func (r *Router) watchExpire() {
+	defer telemetry.Guard()
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 

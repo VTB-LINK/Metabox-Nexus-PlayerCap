@@ -12,9 +12,13 @@ import (
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/wesing/lyric"
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
-const PlayerName = "wesing"
+const (
+	PlayerName        = "wesing"
+	TargetProcessName = "WeSing.exe"
+)
 
 func init() { config.RegisterPlayer(PlayerName) }
 
@@ -71,7 +75,7 @@ func (p *WesingPlayer) waitForProcess() (syscall.Handle, uint32) {
 			return 0, 0
 		default:
 		}
-		pid, err := proc.FindProcess("WeSing.exe")
+		pid, err := proc.FindProcess(TargetProcessName)
 		if err == nil {
 			handle, err := proc.OpenProc(pid)
 			if err == nil {
@@ -234,6 +238,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		// 无守卫时迟到的回写会把这首歌的标题+封面盖在下一首上，且整首歌不自愈。
 		coverGen := p.NewSongGen()
 		go func(gen uint64, handle syscall.Handle, mid, name, singer, title, url string) {
+			defer telemetry.Guard()
 			coverURL := url
 			// 如果初始未获取到封面 URL，重试从内存中搜索（K歌客户端可能延迟加载封面数据）
 			if coverURL == "" && mid != "" {
@@ -529,7 +534,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 }
 
 func (p *WesingPlayer) isProcessAlive() bool {
-	_, err := proc.FindProcess("WeSing.exe")
+	_, err := proc.FindProcess(TargetProcessName)
 	return err == nil
 }
 

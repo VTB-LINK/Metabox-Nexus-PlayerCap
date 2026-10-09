@@ -4,7 +4,7 @@
 
 # VTB-TOOLS Metabox-Nexus-PlayerCap
 
-多播放器歌词实时推送服务 —— 从多个音乐播放器中提取歌词与歌曲信息，通过 WebSocket / HTTP / SSE 广播给外部应用。
+多播放器歌词实时推送服务 —— 从多个音乐播放器中提取歌词、歌曲信息与实时音频波形，并镜像网易云音乐的特效歌词画面，通过 WebSocket / HTTP / SSE 广播给外部应用。
 </br>
 **纯 Go 实现** · Windows 专用 · 支持优先级路由 · 自动更新
 
@@ -24,24 +24,25 @@
 
 `✔` 完整支持 · `⚠` 部分/受限支持 · `🚫` 不支持
 
-| 播放器 | 逐字歌词 | 逐行歌词 | 翻译歌词 | 音译歌词 | 歌名 | 歌手 | 封面 | 播放状态 | 进度/跳转 |
-|--------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| 全民K歌 `wesing` | ✔ | ✔ | 🚫 | 🚫 | ✔ | ✔ | ✔ | ✔ | ⚠ |
-| 网易云音乐 `cloudmusicv3` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| QQ 音乐 `qqmusic` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| 酷狗音乐 `kugou` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| 汽水音乐 `sodamusic` | ✔ | ✔ | ✔ | ⚠ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| 播放器 | 逐字歌词 | 逐行歌词 | 翻译歌词 | 音译歌词 | 歌名 | 歌手 | 封面 | 播放状态 | 进度/跳转 | 音频波形 |
+|--------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| 全民K歌 `wesing` | ✔ | ✔ | 🚫 | 🚫 | ✔ | ✔ | ✔ | ✔ | ⚠ | ✔ |
+| 网易云音乐 `cloudmusicv3` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| QQ 音乐 `qqmusic` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| 酷狗音乐 `kugou` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| 汽水音乐 `sodamusic` | ✔ | ✔ | ✔ | ⚠ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
 
 - **翻译歌词** — wesing 无翻译轨（进程内存不含译文）；其余四家分别解析网易云 YRC 译轨、QQ trans、酷狗 KRC 内嵌轨、汽水独立 tlyric 轨。
 - **音译歌词** — cloudmusicv3（网易云 romalrc，逐行罗马音）、qqmusic（QQ QRC 逐字罗马音）、kugou（KRC 内嵌 type=0，形态因语言而异：日文罗马音 / 韩文汉语谐音）原生提供，与翻译各自独立、互不覆盖；wesing 无（音译系客户端运行时转写、不落内存，见 issue #34）。sodamusic 平台自身无音译源，标 `⚠` 而非 `✔`：改由酷狗歌词接口按歌名 + 时长匹配「借」音译补全，并按**字序**把酷狗保留到字的音译贴到汽水主歌词的字上、再按汽水行边界重拼行级音译，以覆盖两边断行不同的段（字级对不上的行回落行级文本匹配，仍不行留空）——**非平台原生、不保证稳定**。
 - **播放状态** — 五家均检测暂停 / 恢复；wesing、qqmusic 按播放时间停滞间接判定，cloudmusicv3、kugou、sodamusic 直读平台上报状态。
 - **进度跳转** — cloudmusicv3、qqmusic、kugou、sodamusic 为回跳 + 前跳双向检测；wesing 仅回跳 / 重播，无任意跳转。
+- **音频波形** — 全部播放器相同：以 WASAPI 进程级 loopback 捕获播放器主进程及其整棵子进程树的输出，不混入系统其它声音。只能捕获经 Windows 音频引擎（共享模式）的输出；按 WASAPI 机制，播放器设为 WASAPI 独占或 ASIO 输出时应为全零帧（未实测）。
 - **逐字 / 翻译** 标 `✔` 指具备解析能力；单曲是否有逐字 / 翻译取决于平台是否提供该数据，缺失时自动回落逐行 / 无译文。
 
 ## 功能特性
 
 - ✅ **多播放器支持** — 同时监控全民K歌、网易云音乐、QQ 音乐、酷狗音乐和汽水音乐，优先级路由自动切换
-- ✅ **三种接口** — WebSocket（双向实时）、SSE（单向推送）、HTTP（静态查询）
+- ✅ **三种接口** — WebSocket（实时推送；歌词与状态为 JSON 事件，音频波形与网易云特效画面为二进制帧）、SSE（实时推送，仅 JSON 事件）、HTTP（静态查询）
 - ✅ **Per-player 端点** — 每个播放器独立端点（`/wesing/ws`、`/cloudmusicv3/ws`、`/qqmusic/ws`、`/kugou/ws`、`/sodamusic/ws` 等）
 - ✅ **播放器切换事件** — 活跃播放器变化时推送 `player_switch` + 新播放器完整状态
 - ✅ **自动等待进程** — 目标播放器未启动时持续等待，启动后自动开始
@@ -60,6 +61,7 @@
 - ✅ **跨重启稳定** — AOB 特征搜索，地址动态定位（WeSing / QQMusic）；CDP 远程连接（CloudMusic / KuGou / SodaMusic）
 - ✅ **酷狗自动接入** — 自动检测酷狗安装和 CDP patch 状态，支持自动提权修补 libcef.dll、重启酷狗并等待端口就绪
 - ✅ **网易云特效歌词镜像** — 直读网易云「特效歌词」WebGL 画面（极光/霓虹/液态流体…）镜像给 OBS；只读不动源画面，主播可常开工具栏；多播放器联动淡入/淡出，最小化可屏外保活，非特效时可回退纯净歌词（详见[网易云特效歌词镜像](#网易云特效歌词镜像)）
+- ✅ **实时音频波形** — 全部播放器均支持，音频帧含 RMS、左右声道峰值与 512 点频谱；`/audio-ws` 跟随活跃播放器，`/<player>/audio-ws` 固定单个播放器；仅在有客户端订阅时捕获；音量归一化（`audio-normalize`，默认开，可按播放器覆盖）
 
 
 ### 多播放器路由
@@ -82,7 +84,7 @@ Router（事件合并主循环）
 ### 前置条件
 
 - Go 1.25+
-- Windows 10/11
+- Windows 10/11（音频波形要求 Windows 10 2004 / build 19041 及以上）
 - 任意支持的播放器
 
 ### 编译
@@ -110,6 +112,11 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 > ⚠️ 需要**管理员权限**运行（读取其他进程内存需要 `PROCESS_VM_READ` 权限）
 > 酷狗音乐首次接入时会检测并自动 patch `libcef.dll` 以开启 CDP 端口，过程中可能触发 UAC；若检测到未知 libcef 版本，将不会强行修改，需等待适配或手动处理。
 
+> 有客户端连接音频波形端点（`/audio-ws`、`/<player>/audio-ws`），且有需要捕获的播放器在运行时，程序会以 `--audio-capture-helper` 参数再启动自身，作为音频捕获子进程。
+> 因此任务管理器「详细信息」页可见两个同名进程。该子进程不触发 UAC，不需要也不应手动启动。
+> 所有波形连接断开或主程序退出后，子进程随之结束。
+> 子进程与主程序共用控制台，捕获相关日志带 `[helper]` 前缀。
+
 ```bash
 # 直接运行（使用 config.yml 或默认配置）
 .\Metabox-Nexus-PlayerCap.exe
@@ -123,7 +130,7 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 
 ### 命令行参数
 
-格式 `-参数 值`（如 `-offset 500`），优先级最高（> config.yml > 内置默认）；`-h` 打印全部参数。
+格式 `-参数 值`（如 `-offset 500`），优先级最高（> config.yml > 内置默认）；`-h` 打印全部参数。开关类参数（`-audio-normalize`、`-<player>-audio-normalize`）例外：写 `-参数` 为开、`-参数=false` 为关；写成 `-参数 false` 会被解析为开，且其后的全部参数被静默忽略。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -133,15 +140,19 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 | `-prior-player` | `wesing` | 优先播放器列表，逗号分隔（如 `wesing,kugou`），一开唱立即抢占主输出；传空串=无优先播放器 |
 | `-prior-player-expire` | `15` | 优先播放器暂停超过 N 秒后释放主输出；`0`=关闭全部超时（含普通组），慎用 |
 | `-per-player-idle-hide` | `0` | 「指定播放器」通道无活跃 N 秒后自动清屏隐藏末行；`0`=关。仅作用于 per-player 端点，不影响根路径 |
+| `-audio-normalize` | `true` | 音频波形音量归一化：只作用于音频波形帧（`/audio-ws` 与 `/<player>/audio-ws`）的 RMS、左右声道峰值与频谱，使各播放器波形幅度趋于一致，不改变实际播放音量 |
+| `-audio-normalize-target` | `-14` | 归一化目标响度（dBFS），范围 -60~0，越界钳到边界 |
+| `-audio-normalize-max-gain` | `30` | 归一化最大增益（dB），范围 0~45，越界钳到边界 |
 | `-cloudmusicv3-effect-strategy` | `fadeout` | 网易云特效最小化策略：`park`（屏外渲染保活）/ `fadeout`（自动淡出） |
 | `-<player>-offset` | *(沿用 `-offset`)* | 指定播放器专属时间偏移（毫秒） |
 | `-<player>-poll` | *(沿用 `-poll`)* | 指定播放器专属轮询间隔（毫秒） |
 | `-<player>-idle-hide` | *(沿用 `-per-player-idle-hide`)* | 指定播放器专属无活跃自动隐藏（秒，`0`=该播放器关闭） |
+| `-<player>-audio-normalize` | *(沿用 `-audio-normalize`)* | 指定播放器专属归一化开关；目标响度与最大增益只能全局设置 |
 
-> `<player>` ∈ `wesing` / `cloudmusicv3` / `qqmusic` / `kugou` / `sodamusic`，专属参数由 `config.RegisterPlayer()` 动态生成，未设置时自动沿用全局值。例：`-cloudmusicv3-offset 300`、`-wesing-idle-hide 15`。
+> `<player>` ∈ `wesing` / `cloudmusicv3` / `qqmusic` / `kugou` / `sodamusic`，专属参数由 `config.RegisterPlayer()` 动态生成，未设置时自动沿用全局值。例：`-cloudmusicv3-offset 300`、`-wesing-idle-hide 15`、`-qqmusic-audio-normalize=false`。
 >
 > 各播放器另有自己的轮询下限，低于它的取值会被静默抬高：cloudmusicv3 低于 50 抬到 100、
-> qqmusic 低于 30 抬到 50、sodamusic 低于 200 抬到 200。
+> qqmusic 低于 30 抬到 50、sodamusic 低于 200 抬到 200。经钳制与抬高后的实际值见 `/service-status` 的 `config_effective`。
 
 ### 配置文件
 
@@ -179,31 +190,45 @@ prior-player-expire: 15
 # 不写=跟随此全局值，0=该播放器关闭，n=该播放器用 n 秒（示例见下方 cloudmusicv3 段）。
 per-player-idle-hide: 0
 
+# 音频波形音量归一化：只作用于音频波形帧（/audio-ws 与 /<player>/audio-ws）的 RMS、左右声道峰值与频谱，
+# 使各播放器的波形幅度趋于一致，不改变实际播放音量。每个播放器可用 <name>-audio-normalize 单独覆盖
+# （true/false），不写=跟随此全局开关。
+audio-normalize: true
+# 目标响度（dBFS），范围 [-60,0]，越界自动钳到边界
+audio-normalize-target: -14
+# 最大增益（dB），范围 [0,45]，越界自动钳到边界
+audio-normalize-max-gain: 30
+
 # 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
 # wesing-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# wesing-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 100   # 低于 50 会被网易云自身的下限抬到 100，写 30 也是跑 100
 # cloudmusicv3-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# cloudmusicv3-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 cloudmusicv3-effect-strategy: fadeout # 特效最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
 # QQ 音乐 配置
 qqmusic-offset: 400
 # qqmusic-poll: 50
 # qqmusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# qqmusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 酷狗音乐 配置
 kugou-offset: 430
 # kugou-poll: 30
 # kugou-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# kugou-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 汽水音乐 配置
 sodamusic-offset: 340
 # sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
 # sodamusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# sodamusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 ```
 
 ### 预期输出
@@ -234,7 +259,7 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 
 ### WebSocket
 
-> WS 事件类型、字段结构及完整消息示例请参阅 [在线 API 文档](https://playercap.nexus.metabox.apifox.vtb.link/)，README 不再同步维护此部分内容。
+> WS 事件类型、字段结构及完整消息示例请参阅 [在线 API 文档](https://playercap.nexus.metabox.apifox.vtb.link/)（音频波形的二进制帧格式见其中 `/audio-ws` 接口），README 不再同步维护此部分内容。
 
 ### 接口清单参考
 
@@ -243,7 +268,7 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 | 端点 | 类型 | 说明 |
 |------|------|------|
 | `/health-check` | HTTP | 健康检查 |
-| `/service-status` | HTTP | 服务状态（版本、配置、播放器状态、客户端列表） |
+| `/service-status` | HTTP | 服务状态（版本、配置写下的值与实际生效的值、播放器状态、`/ws` 与 `/<player>/ws` 客户端列表） |
 | `/ws` | WebSocket | 实时事件推送（全部事件） |
 | `/all_lyrics` | HTTP | 完整歌词列表 |
 | `/lyric_update` | HTTP | 当前歌词行 |
@@ -251,12 +276,13 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 | `/song_info` | HTTP | 歌曲信息 |
 | `/lyric_update-SSE` | SSE | 实时歌词推送流 |
 | `/song_info-SSE` | SSE | 实时歌曲信息推送流 |
+| `/audio-ws` | WebSocket | 音频波形帧流（二进制：RMS + 左右声道峰值 + 频谱），跟随活跃播放器；无音频捕获（含无活跃播放器）时每 100ms 推一帧空闲帧 |
 | `/cloudmusicv3/effect-ws` | WebSocket | 网易云特效画面镜像（二进制 JPEG 帧 + 文本状态），供 OBS/前端订阅 |
 | `/cloudmusicv3/effect-ingest` | WebSocket | 内部：注入网易云页面的抓帧脚本把特效 JPEG 回传到此（非用户接口） |
 
 **Per-player 端点**（始终返回指定播放器数据，不受路由切换影响）：
 
-所有根端点（除 `/health-check` 和 `/service-status`）均有对应的播放器路径版本：
+除 `/health-check`、`/service-status` 与两个 `/cloudmusicv3/effect-*` 端点外，所有根端点均有对应的播放器路径版本：
 
 ```
 /wesing/ws                /cloudmusicv3/ws               /qqmusic/ws                /kugou/ws                /sodamusic/ws
@@ -266,6 +292,7 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 /wesing/song_info         /cloudmusicv3/song_info        /qqmusic/song_info         /kugou/song_info         /sodamusic/song_info
 /wesing/lyric_update-SSE  /cloudmusicv3/lyric_update-SSE /qqmusic/lyric_update-SSE  /kugou/lyric_update-SSE  /sodamusic/lyric_update-SSE
 /wesing/song_info-SSE     /cloudmusicv3/song_info-SSE    /qqmusic/song_info-SSE     /kugou/song_info-SSE     /sodamusic/song_info-SSE
+/wesing/audio-ws          /cloudmusicv3/audio-ws         /qqmusic/audio-ws          /kugou/audio-ws          /sodamusic/audio-ws
 ```
 
 ---
@@ -319,8 +346,13 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 
 | 依赖 | 用途 |
 |------|------|
+| `github.com/getsentry/sentry-go` | 崩溃与错误上报（未注入 DSN 的构建自动禁用） |
+| `github.com/go-ole/go-ole` | 任务栏进度显示（ITaskbarList3 COM） |
 | `github.com/gorilla/websocket` | WebSocket 服务 |
-| `github.com/shirou/gopsutil/v3` | 进程管理（CloudMusic Watchdog） |
+| `github.com/josephspurrier/goversioninfo` | 构建期生成 exe 图标与版本信息资源（`tools/winicon`） |
+| `github.com/shirou/gopsutil/v3` | 进程枚举与命令行读取（网易云 / 汽水 watchdog、网易云 park、音频捕获子进程孤儿清理） |
+| `golang.org/x/image` | 构建期图标缩放（`tools/winicon`） |
+| `golang.org/x/mod` | 自动更新的版本号比较（semver） |
 | `golang.org/x/sys` | Windows 系统调用 |
 | `gopkg.in/yaml.v3` | YAML 配置文件解析 |
 

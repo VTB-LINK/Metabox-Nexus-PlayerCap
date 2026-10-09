@@ -11,6 +11,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
+	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"github.com/gorilla/websocket"
 )
@@ -44,7 +45,7 @@ func (sub *subscriber) matchesType(evtType string) bool {
 
 type routeDef struct {
 	suffix   string
-	kind     string                        // "http", "ws", "sse"
+	kind     string                        // "http", "ws", "sse", "audio"
 	httpH    func(string) http.HandlerFunc // http 用
 	sseTypes []string                      // sse 用：订阅哪些事件类型
 }
@@ -75,7 +76,8 @@ type ServiceInfo struct {
 	Sources           []string
 	Endpoints         *OrderedMap
 	PlayerSupport     []string
-	Config            *OrderedMap
+	Config            *OrderedMap // 配置写下的值（未钳制）
+	ConfigEffective   *OrderedMap // 运行时实际生效的值，键集合与顺序同 Config
 	ConfigOverwritten []string
 }
 
@@ -98,9 +100,18 @@ type Server struct {
 	// 网易云特效镜像帧分发（独立于 JSON 事件通道）
 	effectHub *effectHub
 
+	// 音频波形帧分发（独立于 JSON/特效通道）：root（/audio-ws）跟随 activePlayer，
+	// per-player（/<player>/audio-ws）固定那一家。
+	audioHub *audioHub
+
 	// per-player 通道无活跃自动隐藏阈值解析器（秒，0=关），由 main 注入 cfg.GetPlayerIdleHide。
 	// 受 s.mu 保护；nil=未注入=全关（本地/测试零副作用）。
 	idleHideResolver func(playerName string) int
+
+	// audioWake 由 main 注入捕获管理器的 Wake（activePlayer 切换时唤醒其立即重算门控，消切歌空窗）。
+	// 受 s.mu 保护；nil=未注入（本地/测试零副作用）。回调本身只向缓冲=1 的 channel 非阻塞投递、
+	// 不阻塞、不 panic、不回读 s.mu，故可在 SetActivePlayer 的 r.mu 主线上安全调用（§3.4）。
+	audioWake func()
 }
 
 // NewServer 创建统一服务器
@@ -118,6 +129,7 @@ func NewServer(playerNames []string) *Server {
 		subscribers:  make(map[*subscriber]struct{}),
 		serviceInfo:  &ServiceInfo{},
 		effectHub:    newEffectHub(),
+		audioHub:     newAudioHub(),
 	}
 }
 
@@ -335,11 +347,27 @@ func (s *Server) SetActivePlayer(name string) {
 	s.mu.Lock()
 	changed := s.activePlayer != name
 	s.activePlayer = name
+	wake := s.audioWake // 锁内快照，锁外调用：避免在 s.mu 内触发回调
 	s.mu.Unlock()
 	if changed {
 		// 通知特效订阅者：网易云是否仍是活跃输出（驱动前端淡入/淡出）
 		s.BroadcastEffectStatus()
+		// 更新音频 hub 的 active 缓存（只写一次缓存、非阻塞、不 panic、不回读 s.mu）。
+		// 在 router 的 r.mu 写锁主线上调用，故必须守住这三点（§3.4）；本钩子只更新 root 跟随判据。
+		s.audioHub.onActivePlayerChanged(name)
+		// 唤醒捕获管理器立即重算门控，消切歌空窗（manager.Wake 非阻塞、不 panic，§3.4 安全）。
+		if wake != nil {
+			wake()
+		}
 	}
+}
+
+// SetAudioWake 注入捕获管理器的唤醒回调（main 启动时传 audioMgr.Wake）。
+// 见 audioWake 字段注释：回调须非阻塞、不 panic。
+func (s *Server) SetAudioWake(fn func()) {
+	s.mu.Lock()
+	s.audioWake = fn
+	s.mu.Unlock()
 }
 
 // SetIdleHideResolver 注入 per-player 通道无活跃自动隐藏阈值解析器（秒，0=关）。
@@ -390,6 +418,7 @@ func (s *Server) NotifySubscribersClear(oldPlayer string) {
 // （/{player}/* 的 HTTP 快照、WS/SSE 重连初始态、以及 live 推送），绝不读或改 activePlayer /
 // skipRoot / 根路径（§3.4）；IdleHidden 只是叠加在缓存之上的一层「视图隐藏」，缓存保持新鲜（§2.7）。
 func (s *Server) watchIdleHide() {
+	defer telemetry.Guard()
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -589,6 +618,9 @@ func (s *Server) Start(addr string, readyCh chan struct{}) error {
 		{"/song_info", "http", s.handleSongInfo, nil},
 		{"/lyric_update-SSE", "sse", nil, []string{"lyric_update"}},
 		{"/song_info-SSE", "sse", nil, []string{"song_info_update"}},
+		// 音频波形帧（二进制自包含帧，非 JSON 事件）：root 跟随 activePlayer，per-player 固定那一家；
+		// handleAudioWS 共用 s.upgrader（不改其 CheckOrigin：全部 WS 端点共用的红线，AGENTS.md §3.4）。
+		{"/audio-ws", "audio", nil, nil},
 	}
 
 	registerRoutes := func(prefix, playerName string) {
@@ -601,6 +633,8 @@ func (s *Server) Start(addr string, readyCh chan struct{}) error {
 				mux.HandleFunc(path, rd.httpH(playerName))
 			case "sse":
 				mux.HandleFunc(path, s.handleSSE(playerName, rd.sseTypes...))
+			case "audio":
+				mux.HandleFunc(path, s.handleAudioWS(playerName))
 			}
 		}
 	}
@@ -684,6 +718,7 @@ func (s *Server) handleWS(playerName string) http.HandlerFunc {
 		// wsCount() 仍把它算作在线，而它再也收不到任何事件。
 		done := make(chan struct{})
 		go func() {
+			defer telemetry.Guard()
 			defer close(done)
 			for evt := range sub.ch {
 				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -749,6 +784,7 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		NowTime           string      `json:"now_time"`
 		ConfigSources     []string    `json:"config_sources"`
 		Config            *OrderedMap `json:"config"`
+		ConfigEffective   *OrderedMap `json:"config_effective"`
 		ConfigOverwritten []string    `json:"config_overwritten"`
 		PlayerSupport     []string    `json:"player_support"`
 		PlayerRunning     []string    `json:"player_running"`
@@ -762,6 +798,7 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		NowTime:           time.Now().Format(time.RFC3339),
 		ConfigSources:     info.Sources,
 		Config:            info.Config,
+		ConfigEffective:   info.ConfigEffective,
 		ConfigOverwritten: info.ConfigOverwritten,
 		PlayerSupport:     info.PlayerSupport,
 		PlayerRunning:     playerRunning,
@@ -823,7 +860,7 @@ func (s *Server) perPlayerHidden(requestPlayer string) bool {
 // --- HTTP 读取端点：锁内取快照，锁外序列化 ---
 //
 // 这四个 handler 的既有写法是「RLock → 取 *PlayerState → RUnlock → 读它的字段」，
-// 锁只保护了 map 查找，字段读全在锁外，而 UpdatePlayerState(:329) 是在 s.mu.Lock()
+// 锁只保护了 map 查找，字段读全在锁外，而 UpdatePlayerState 是在 s.mu.Lock()
 // 内写这些字段的 —— 写侧持锁、读侧不持锁，是真实数据竞争，已复现两种后果：
 //  1. slice header 撕裂：ps.AllLyrics 拿到「新 ptr + 旧 len」→ BuildLyricsDetailed
 //     把分配区外的垃圾当 LyricLine 迭代 → BuildDetailedText 解引用垃圾指针 panic。
@@ -846,7 +883,8 @@ func (s *Server) perPlayerHidden(requestPlayer string) bool {
 //     写网络等于让一个慢下游阻塞 UpdatePlayerState，进而阻塞整个路由器。
 //
 // 只拷 slice header / 指针而不做深拷贝是安全的：发布出去的数据事实上不可变——
-// ps.AllLyrics 只被整体替换（:356 / :366），全仓无 AllLyrics[i] 下标写入；
+// ps.AllLyrics 只在 UpdatePlayerState 的 EventAllLyrics / EventClearSongData 分支被整体替换，
+// 全仓无 AllLyrics[i] 下标写入；
 // ps.Status / ps.SongInfo / ps.LyricUpdate 每次更新都是新分配的结构体。
 func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

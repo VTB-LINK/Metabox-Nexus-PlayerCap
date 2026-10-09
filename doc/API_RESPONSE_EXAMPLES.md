@@ -1,8 +1,8 @@
 # Metabox-Nexus-PlayerCap API 响应示例
 
-> **多播放器架构：** 所有 HTTP 响应和 WS/SSE 事件均包含 `player` 字段，标识数据来源的播放器。当前五家：`"wesing"`、`"cloudmusicv3"`、`"qqmusic"`、`"kugou"`、`"sodamusic"`。  
+> **多播放器架构：** HTTP 响应与 `/ws`、`/<player>/ws`、SSE 的 JSON 事件均包含 `player` 字段，标识数据来源的播放器；音频波形帧内携带 `player`。当前五家：`"wesing"`、`"cloudmusicv3"`、`"qqmusic"`、`"kugou"`、`"sodamusic"`。  
 > **空数据约定：** 所有事件在无数据时统一返回 `"data": {}`（空对象），而非 `null`。  
-> **Per-player 端点：** 除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`、`/sodamusic/ws`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
+> **Per-player 端点：** 除 `/health-check`、`/service-status` 与 `/cloudmusicv3/effect-*` 外，所有端点均有播放器专属路径版本（如 `/wesing/ws`、`/cloudmusicv3/all_lyrics`、`/sodamusic/ws`、`/wesing/audio-ws`）。根端点跟随活跃播放器，Per-player 端点始终返回指定播放器数据。
 
 ---
 
@@ -49,15 +49,64 @@
       ],
       "prior-player-expire": 15,
       "per-player-idle-hide": 0,
+      "audio-normalize": true,
+      "audio-normalize-target": -14,
+      "audio-normalize-max-gain": 30,
       "cloudmusicv3-effect-strategy": "fadeout",
       "wesing-offset": 200,
       "wesing-poll": 30,
+      "wesing-idle-hide": 0,
+      "wesing-audio-normalize": true,
       "cloudmusicv3-offset": 500,
       "cloudmusicv3-poll": 30,
+      "cloudmusicv3-idle-hide": 0,
+      "cloudmusicv3-audio-normalize": true,
       "qqmusic-offset": 400,
       "qqmusic-poll": 30,
+      "qqmusic-idle-hide": 0,
+      "qqmusic-audio-normalize": true,
       "kugou-offset": 430,
-      "kugou-poll": 30
+      "kugou-poll": 30,
+      "kugou-idle-hide": 0,
+      "kugou-audio-normalize": true,
+      "sodamusic-offset": 340,
+      "sodamusic-poll": 30,
+      "sodamusic-idle-hide": 0,
+      "sodamusic-audio-normalize": true
+    },
+    "config_effective": {
+      "addr": "0.0.0.0:8765",
+      "offset": 200,
+      "poll": 30,
+      "prior-player": [
+        "wesing"
+      ],
+      "prior-player-expire": 15,
+      "per-player-idle-hide": 0,
+      "audio-normalize": true,
+      "audio-normalize-target": -14,
+      "audio-normalize-max-gain": 30,
+      "cloudmusicv3-effect-strategy": "fadeout",
+      "wesing-offset": 200,
+      "wesing-poll": 30,
+      "wesing-idle-hide": 0,
+      "wesing-audio-normalize": true,
+      "cloudmusicv3-offset": 500,
+      "cloudmusicv3-poll": 100,
+      "cloudmusicv3-idle-hide": 0,
+      "cloudmusicv3-audio-normalize": true,
+      "qqmusic-offset": 400,
+      "qqmusic-poll": 30,
+      "qqmusic-idle-hide": 0,
+      "qqmusic-audio-normalize": true,
+      "kugou-offset": 430,
+      "kugou-poll": 30,
+      "kugou-idle-hide": 0,
+      "kugou-audio-normalize": true,
+      "sodamusic-offset": 340,
+      "sodamusic-poll": 200,
+      "sodamusic-idle-hide": 0,
+      "sodamusic-audio-normalize": true
     },
     "config_overwritten": [
       "addr",
@@ -65,23 +114,30 @@
       "poll",
       "prior-player",
       "prior-player-expire",
+      "per-player-idle-hide",
+      "audio-normalize",
+      "audio-normalize-target",
+      "audio-normalize-max-gain",
       "cloudmusicv3-effect-strategy",
       "cloudmusicv3-offset",
       "qqmusic-offset",
-      "kugou-offset"
+      "kugou-offset",
+      "sodamusic-offset"
     ],
     "player_support": [
       "wesing",
       "cloudmusicv3",
       "qqmusic",
-      "kugou"
+      "kugou",
+      "sodamusic"
     ],
     "player_running": [],
     "player_status": {
       "wesing": "waiting_process",
       "cloudmusicv3": "waiting_process",
       "qqmusic": "waiting_process",
-      "kugou": "waiting_process"
+      "kugou": "waiting_process",
+      "sodamusic": "waiting_process"
     },
     "endpoints": {
       "health-check": "http://0.0.0.0:8765/health-check",
@@ -93,6 +149,7 @@
       "song_info": "http://0.0.0.0:8765/song_info",
       "lyric_update-SSE": "http://0.0.0.0:8765/lyric_update-SSE",
       "song_info-SSE": "http://0.0.0.0:8765/song_info-SSE",
+      "audio-ws": "ws://0.0.0.0:8765/audio-ws",
       "wesing": {
         "ws": "ws://0.0.0.0:8765/wesing/ws",
         "all_lyrics": "http://0.0.0.0:8765/wesing/all_lyrics",
@@ -100,7 +157,8 @@
         "status_update": "http://0.0.0.0:8765/wesing/status_update",
         "song_info": "http://0.0.0.0:8765/wesing/song_info",
         "lyric_update-SSE": "http://0.0.0.0:8765/wesing/lyric_update-SSE",
-        "song_info-SSE": "http://0.0.0.0:8765/wesing/song_info-SSE"
+        "song_info-SSE": "http://0.0.0.0:8765/wesing/song_info-SSE",
+        "audio-ws": "ws://0.0.0.0:8765/wesing/audio-ws"
       },
       "cloudmusicv3": {
         "ws": "ws://0.0.0.0:8765/cloudmusicv3/ws",
@@ -110,6 +168,7 @@
         "song_info": "http://0.0.0.0:8765/cloudmusicv3/song_info",
         "lyric_update-SSE": "http://0.0.0.0:8765/cloudmusicv3/lyric_update-SSE",
         "song_info-SSE": "http://0.0.0.0:8765/cloudmusicv3/song_info-SSE",
+        "audio-ws": "ws://0.0.0.0:8765/cloudmusicv3/audio-ws",
         "effect-ws": "ws://0.0.0.0:8765/cloudmusicv3/effect-ws"
       },
       "qqmusic": {
@@ -119,7 +178,8 @@
         "status_update": "http://0.0.0.0:8765/qqmusic/status_update",
         "song_info": "http://0.0.0.0:8765/qqmusic/song_info",
         "lyric_update-SSE": "http://0.0.0.0:8765/qqmusic/lyric_update-SSE",
-        "song_info-SSE": "http://0.0.0.0:8765/qqmusic/song_info-SSE"
+        "song_info-SSE": "http://0.0.0.0:8765/qqmusic/song_info-SSE",
+        "audio-ws": "ws://0.0.0.0:8765/qqmusic/audio-ws"
       },
       "kugou": {
         "ws": "ws://0.0.0.0:8765/kugou/ws",
@@ -128,7 +188,18 @@
         "status_update": "http://0.0.0.0:8765/kugou/status_update",
         "song_info": "http://0.0.0.0:8765/kugou/song_info",
         "lyric_update-SSE": "http://0.0.0.0:8765/kugou/lyric_update-SSE",
-        "song_info-SSE": "http://0.0.0.0:8765/kugou/song_info-SSE"
+        "song_info-SSE": "http://0.0.0.0:8765/kugou/song_info-SSE",
+        "audio-ws": "ws://0.0.0.0:8765/kugou/audio-ws"
+      },
+      "sodamusic": {
+        "ws": "ws://0.0.0.0:8765/sodamusic/ws",
+        "all_lyrics": "http://0.0.0.0:8765/sodamusic/all_lyrics",
+        "lyric_update": "http://0.0.0.0:8765/sodamusic/lyric_update",
+        "status_update": "http://0.0.0.0:8765/sodamusic/status_update",
+        "song_info": "http://0.0.0.0:8765/sodamusic/song_info",
+        "lyric_update-SSE": "http://0.0.0.0:8765/sodamusic/lyric_update-SSE",
+        "song_info-SSE": "http://0.0.0.0:8765/sodamusic/song_info-SSE",
+        "audio-ws": "ws://0.0.0.0:8765/sodamusic/audio-ws"
       }
     },
     "client_count": 1,
@@ -142,9 +213,11 @@
 }
 ```
 
-> **以上为真实响应原文**（2026-07-17 录制，本机开发构建、四个播放器均未启动）。所以你会看到
+> **以上以 2026-07-17 录制的真实响应为底本**（本机开发构建、播放器均未启动），所以你会看到
 > `version: "0.0.0"`（未注入版本号）、`player_running: []`、`player_status` 全是 `waiting_process`
-> ——那是「服务起了但没人放歌」的**常态**，不是残缺。
+> ——那是「服务起了但没人放歌」的**常态**，不是残缺。录制之后新增的键（`sodamusic` 各条目、各 idle-hide 键、`audio-normalize` 系列键、`config_effective`、`audio-ws` 端点）按默认 `config.yml` 下的代码输出补入。
+> 默认 `config.yml` 不写各播放器的 poll，它们继承全局 `poll: 30`，所以 `config` 里都是 30；`config_effective`
+> 里 `cloudmusicv3-poll` 与 `sodamusic-poll` 分别是 100 与 200，即这两家播放器层下限抬高后的实际间隔。
 >
 > **这个端点是端点全表的运行时真源。** 它比本文档更新得快：新增播放器时 `player_support`
 > 与 `endpoints` 自动跟着变，而文档要靠人改。**拿不准有哪些端点时，直接问它。**
@@ -155,11 +228,11 @@
 - `tag_name` 使用完整 semver；若 release 标题以 `-force` 结尾，则客户端允许强制同步到更低版本
 
 **config_sources 说明：**
-- 显示配置来源的完整链路，按优先级顺序排列
+- 实际生效的配置来源列表。成功加载 `config.yml` 时其值为 `config.yml`（`内置默认` 已被它取代、不再出现在列表中）；`config.yml` 读取或 YAML 解析失败时仍为 `内置默认`；命令行覆盖了任何键时追加 `命令行参数`。为未设键兜底的内置默认不体现在此列表
 - 可能的值：`"内置默认"`、`"config.yml"`、`"命令行参数"`
 - 示例：
-  - `["内置默认"]` - 使用所有默认值
-  - `["config.yml"]` - 所有值来自 config.yml
+  - `["内置默认"]` - config.yml 读取或 YAML 解析失败，全部取内置默认
+  - `["config.yml"]` - 从 config.yml 加载，未设的键取内置默认
   - `["config.yml", "命令行参数"]` - 从 config.yml 加载，部分被命令行参数覆盖
 
 **root WS 初始化说明：**
@@ -173,8 +246,15 @@
   的播放器不是活跃播放器，其残留数据不得从根端点漏出
 - 「没有活跃播放器」是常态而非异常：开机后没放歌时即处于该状态
 
+**config 与 config_effective 说明：**
+- 两者键集合与顺序相同：全局键按 `config.yml` 的顺序，随后每个播放器（按 `player_support` 顺序）`<player>-offset`、`<player>-poll`、`<player>-idle-hide`、`<player>-audio-normalize`
+- `config` 为配置写下的值：按「播放器覆盖 → 全局 → 内置默认」解析继承，不做钳制或纠正。越界的数值与非法的 `cloudmusicv3-effect-strategy` 字符串按原值回显；类型错误等解析不出值的键视同未设置
+- `config_effective` 为运行时实际生效的值，计入配置层钳制（`poll` 与 `<player>-poll` 钳到 [10,2000]，`audio-normalize-target` 钳到 [-60,0]，`audio-normalize-max-gain` 钳到 [0,45]）、非法值回退、播放器层轮询下限（`cloudmusicv3` 低于 50 抬到 100，`qqmusic` 低于 30 抬到 50，`sodamusic` 低于 200 抬到 200）与 Windows 11 下 `park` 强制改为 `fadeout`
+- 某键在两者中取值不同，即写下的值未按原样生效
+
 **config_overwritten 说明：**
-- 列出被更高优先级来源覆盖的配置键名
+- 列出被更高优先级来源覆盖的配置键名，按 `config` 的键顺序
+- 写下但未被采纳的值（如非法的 `cloudmusicv3-effect-strategy`）不计入；被钳制的值仍计入
 - 仅在有覆盖时出现非空数组
 
 **player_support 说明：**
@@ -185,14 +265,16 @@
 
 **player_status 说明：**
 - 所有支持的播放器及其当前状态（按注册顺序），值为 status 字符串
-- 可能的状态值：`"offline"` / `"waiting_process"` / `"waiting_song"` / `"loading"` / `"playing"` / `"paused"` / `"standby"`
+- 可能的状态值：`"offline"`（服务端兜底：从未上报过状态）/ `"waiting_process"` / `"waiting_song"` / `"playing"` / `"paused"` / `"standby"` / `"error"`（仅 kugou 故障终态）。`"loading"` 为保留值，当前版本不会出现
 
 **ws_connected 说明：**
-- `connected` - 布尔值，表示是否有客户端连接
-- `clients` - 字符串数组，已连接的客户端 IP 地址列表（RemoteAddr 格式）
+- 仅统计 `/ws` 与 `/<player>/ws` 的连接；SSE、`effect-ws`、`audio-ws` 连接不计入
+- `connected` - 布尔值，表示是否存在上述连接
+- `clients` - 字符串数组，上述连接的客户端地址列表（RemoteAddr 格式）
 
 **endpoints 说明：**
 - WebSocket 使用 `ws://`，HTTP/SSE 使用 `http://`
+- `audio-ws` 为音频波形二进制通道：根级条目跟随活跃播放器，各播放器子对象内的条目固定为该播放器，见 [音频波形](#音频波形)
 
 ---
 
@@ -607,7 +689,7 @@ ms=103195  红日   cover=有  cover_base64=232427     ← 第二条，188ms 后
 
 ### Per-player 端点
 
-除 `/health-check` 和 `/service-status` 外，所有端点均有播放器专属路径。**五个播放器都有**：
+除 `/health-check`、`/service-status` 与 `/cloudmusicv3/effect-*` 外，所有端点均有播放器专属路径。**五个播放器都有**：
 
 ```
 /wesing/all_lyrics          /cloudmusicv3/all_lyrics
@@ -617,6 +699,7 @@ ms=103195  红日   cover=有  cover_base64=232427     ← 第二条，188ms 后
 /wesing/lyric_update-SSE    /cloudmusicv3/lyric_update-SSE
 /wesing/song_info-SSE       /cloudmusicv3/song_info-SSE
 /wesing/ws                  /cloudmusicv3/ws
+/wesing/audio-ws            /cloudmusicv3/audio-ws
 
 /qqmusic/all_lyrics         /kugou/all_lyrics         /sodamusic/all_lyrics
 /qqmusic/lyric_update       /kugou/lyric_update       /sodamusic/lyric_update
@@ -625,11 +708,12 @@ ms=103195  红日   cover=有  cover_base64=232427     ← 第二条，188ms 后
 /qqmusic/lyric_update-SSE   /kugou/lyric_update-SSE   /sodamusic/lyric_update-SSE
 /qqmusic/song_info-SSE      /kugou/song_info-SSE      /sodamusic/song_info-SSE
 /qqmusic/ws                 /kugou/ws                 /sodamusic/ws
+/qqmusic/audio-ws           /kugou/audio-ws           /sodamusic/audio-ws
 ```
 
 Per-player 端点始终返回指定播放器的数据，不受路由切换影响。响应格式与根端点相同，`player` 字段固定为对应播放器名。
 
-> 端点全表也可以直接问服务：`GET /service-status` 的 `endpoints` 字段列出全部可用地址（含 per-player 与网易云特效通道），`player_support` 列出所有播放器。**那是运行时的真源，比本文档更新得快。**
+> 端点全表也可以直接问服务：`GET /service-status` 的 `endpoints` 字段列出全部可用地址（含 per-player、网易云特效通道与音频波形通道），`player_support` 列出所有播放器。**那是运行时的真源，比本文档更新得快。**
 
 ---
 
@@ -768,7 +852,7 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 
 ### `/ws` - WebSocket 连接（根端点，跟随活跃播放器）
 
-> **统一事件格式：** 所有 WebSocket 和 SSE 推送的消息均使用 `{"type": "事件名", "player": "播放器名", "data": 载荷}` 格式。  
+> **统一事件格式：** JSON 事件通道（`/ws`、`/<player>/ws` 与全部 SSE）使用 `{"type": "事件名", "player": "播放器名", "data": 载荷}` 格式；网易云特效镜像为二进制 JPEG 帧加文本状态，音频波形为二进制帧，见各自章节。  
 > 所有事件无数据时 `data` 均为 `{}`（空对象）。  
 > 下游客户端统一按 `msg.type` 分发，`msg.player` 识别来源，`msg.data` 读取载荷即可。
 
@@ -1252,7 +1336,7 @@ OBS/前端连接此端点，收到两类消息：
 | `header_clickable` | `1` | 双击隐藏顶栏后是否保留点击/拖动 |
 | `footer_clickable` | `0` | 双击隐藏底栏后是否保留点击 |
 
-> 最小化策略（`fadeout` / `park`）不是 URL 参数，由服务端 `config.yml` 的 `cloudmusicv3-effect-strategy` 决定，可在 `/service-status` 查看。
+> 最小化策略（`fadeout` / `park`）不是 URL 参数，由服务端 `config.yml` 的 `cloudmusicv3-effect-strategy` 决定（Windows 11 下 `park` 强制改为 `fadeout`），实际生效值见 `/service-status` 的 `config_effective`。
 
 ### cURL / wscat 测试
 
@@ -1262,6 +1346,30 @@ wscat -c "ws://localhost:8765/cloudmusicv3/effect-ws"
 
 # 查看当前策略与端点
 curl http://localhost:8765/service-status
+```
+
+---
+
+## 音频波形
+
+把播放器的实时音频分析结果（RMS、左右声道峰值与频谱）推给前端/OBS。与 JSON 事件通道分离的专用二进制通道。帧的字节布局、`epoch` / 时间戳语义与归一化规则以 API 文档（`doc/openapi.yaml`）的 `/audio-ws` 为准，本节只列要点。
+
+### `/audio-ws` 与 `/<player>/audio-ws` — 波形帧订阅（WebSocket）
+
+每条消息恰为一帧二进制自包含音频帧（含 `player`、`flags`、`epoch`、毫秒时间戳、RMS、左右声道峰值 `peakL` / `peakR`、频谱 `bins`），`ws.binaryType='arraybuffer'` 后按 `/audio-ws` 的示例读取；不发送文本消息。`flags` 的 bit0 标记该路已启用音量归一化，空闲帧为 0。
+
+- 根端点跟随活跃播放器。连接期间两种端点都持续有帧，捕获停止转为空闲帧时最多约 400 毫秒无帧；不含 `bins`（N = 0）的是空闲帧，表示当前无音频捕获：根端点无活跃播放器时其 `player` 为空串，其余情况为对应播放器名。
+- 目标播放器进程未运行、捕获未就绪、退避重试（单个播放器失败后最长 8 秒，捕获子进程崩溃后最长 16 秒，看门狗重启子进程不额外退避），或该播放器乃至全部捕获已放弃时，收到 `player` 为该播放器名的空闲帧，见 `/audio-ws`「收到空闲帧的情况」；持续约 1 秒以上一帧都收不到，表示连接或服务端异常。
+- per-player 端点只收该播放器的帧（含其空闲帧），不收 `player` 为空串的空闲帧。
+- 播放器暂停或处于静音段时，收到 RMS、峰值与 `bins` 全为 0 的静音帧；按 WASAPI 机制推断，经 ASIO 或 WASAPI 独占模式输出时亦然，未实测。
+- 开启 `audio-normalize`（或 `<player>-audio-normalize`）后 RMS、峰值与 `bins` 乘以同一增益，可能大于 1，服务端不钳制；此时峰值大于 1 不代表真实削波。峰值不截断，未开启归一化时也可能略超 1；采样中的 NaN 与 ±Inf 按 0 计入，不会使这些值出现 NaN 或无穷大。
+- 连接时不补发缓存帧。
+
+### wscat 测试
+
+```bash
+# 订阅根端点波形帧（二进制）
+wscat -c "ws://localhost:8765/audio-ws"
 ```
 
 ---
@@ -1347,7 +1455,7 @@ curl http://localhost:8765/service-status
 
 ### 断线重连
 
-WebSocket 断线后重新连接时，服务端会立即发送已缓存的初始状态消息（最多 4 条：`status_update` + `song_info_update` + `all_lyrics` + `lyric_update`，仅包含已有缓存的类型）。前端只需据此重建完整状态，无需额外的恢复逻辑。
+`/ws` 断线后重新连接时，服务端会立即发送已缓存的初始状态消息（最多 4 条：`status_update` + `song_info_update` + `all_lyrics` + `lyric_update`，仅包含已有缓存的类型）。前端只需据此重建完整状态，无需额外的恢复逻辑。
 
 建议重连策略：
 ```
@@ -1360,6 +1468,7 @@ WebSocket 断线后重新连接时，服务端会立即发送已缓存的初始�
 | 场景 | 推荐端点 | 理由 |
 |------|----------|------|
 | OBS 直播画面 | 根端点 `/ws` | 自动跟随活跃播放器，单个连接即可覆盖全部播放器 |
+| OBS 波形可视化 | 根端点 `/audio-ws` | 跟随活跃播放器；无活跃播放器时收到空闲帧 |
 | 调试特定播放器 | Per-player `/<player>/ws` | 不受路由切换干扰 |
 | 多播放器同时展示 | 分别连接各 Per-player | 各自独立，互不影响 |
 

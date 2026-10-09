@@ -22,6 +22,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/krc"
 	"Metabox-Nexus-PlayerCap/player/sodamusic/cdp"
 	"Metabox-Nexus-PlayerCap/player/sodamusic/watchdog"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 const PlayerName = "sodamusic"
@@ -65,6 +66,16 @@ const durationGrace = 2 * time.Second
 // 200ms 是在这段相位（实测均值 96ms，见 §7.7）与「每秒 33 次往返打在主播的音乐进程上」
 // 之间取的折中。要更紧的相位就调小它，但收益上限只有 200ms，别指望它能提高分辨率。
 const minPollInterval = 200 * time.Millisecond
+
+// EffectivePollInterval 返回配置轮询间隔为 pollMs 毫秒时汽水实际采用的间隔：低于 minPollInterval 抬到它。
+// 轮询循环与 /service-status 的 config_effective 共用此函数，下限只在这里定义。
+func EffectivePollInterval(pollMs int) time.Duration {
+	d := time.Duration(pollMs) * time.Millisecond
+	if d < minPollInterval {
+		return minPollInterval
+	}
+	return d
+}
 
 // sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
 func (p *SodaMusicPlayer) sleepOrStop(d time.Duration) bool {
@@ -129,10 +140,7 @@ func (p *SodaMusicPlayer) Start() {
 // runSession 轮询 sharedState 播放态并 emit 事件，直到 CDP 断开。
 func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 	offsetSec := float32(p.offsetMs) / 1000.0
-	pollInterval := time.Duration(p.pollMs) * time.Millisecond
-	if pollInterval < minPollInterval {
-		pollInterval = minPollInterval
-	}
+	pollInterval := EffectivePollInterval(p.pollMs)
 
 	var lastMediaID string
 	var lastPlaying = -1 // -1 未知 / 0 暂停 / 1 播放
@@ -547,6 +555,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 // 对照 kugou：它首条不带封面是**因为那时确实还没拿到 URL**（`if coverURL == ""` 才发那一条）；
 // 汽水的 URL 随 Extract 一起到、就在入参里，没有理由丢掉。
 func (p *SodaMusicPlayer) runCoverFetch(ctx context.Context, coverURL, name, singer, title string) {
+	defer telemetry.Guard()
 	select {
 	case <-ctx.Done():
 		return

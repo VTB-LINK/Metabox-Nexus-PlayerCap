@@ -47,7 +47,7 @@ type lyricLine struct {
 	Time  float32
 	Text  string
 	// SubText 翻译（QQ 的 trans 字段，与主歌词同一次响应返回；无翻译时为空）。
-	// 由 mergeTrans 按时间就近填入。
+	// 由 mergeTrans 按行序对齐填入（见 alignByTime）。
 	SubText string
 	// RomaText 音译/罗马音（QQ 的 roma 字段，与主歌词同一次响应返回；无音译时为空）。
 	// 由 mergeRoma 按时间就近填入。**与 SubText 是相互独立的两条轨，绝不互相覆盖**。
@@ -57,20 +57,31 @@ type lyricLine struct {
 	Detailed player.LyricTextDetailed
 }
 
-// transToleranceMs 是翻译行与主歌词行的时间匹配容差。
+// transToleranceMs 是翻译行与主歌词行配对时允许的最大时间差。配对本身由 alignByTime 按
+// 行序做，本容差只是兜底：超出它的两行不许配。
 //
-// **绝不能改成精确匹配**（cloudmusic 的 MergeTlyric 用精确匹配，那是因为网易云的 lrc 与
-// tlyric 同源同精度，不可照抄）：QQ 的 trans 是标准 LRC（`[mm:ss.xx]` 两位毫秒 → 10ms
-// 精度），主歌词是 QRC 毫秒精度（`[5451,...]`），trans 相当于把 QRC 时间截断到 10ms，
-// 二者恒差 0~10ms。实测四首有翻译的歌，精确匹配命中 3/35、10/69、10/88、7/57
-// —— 九成翻译会静默丢失；±20ms 则 100% 命中（实测最大差 10ms）。
+// QQ 的 trans 是标准 LRC（`[mm:ss.xx]`，10ms 精度），主歌词是 QRC（毫秒精度）。trans 的
+// 时间戳**不一定取自 QRC 的时间轴**——2026-10 用 musicu.fcg 实取日/韩/欧美榜 1210 首有翻译
+// 的歌，按行序配对后：
 //
-// 取 20 而非更大：只需覆盖 10ms 截断误差并留一倍余量。再放宽没有收益，只会抬高
-// 把翻译配到相邻行的风险。
-const transToleranceMs = 20
+//	1181 首  同一行差 0~10ms（trans = QRC 时间截断到 10ms）
+//	  24 首  有歌词行差 11~99ms（另一套时间轴；如 songID=1163799「結ンデ開イテ羅刹ト骸」）
+//	   3 首  只有片头 "//" 署名行偏（两首差 50ms 级、一首差到秒级），歌词行 ≤10ms
+//	   2 首  翻译取自另一版歌词（断行不同、行数更多），正确配对的时差实测到 ~460ms
+//
+// 旧实现按 ±20ms 就近匹配：第二类 24 首全部静默丢翻译，共丢 178/1022 行（1163799 丢 26/55），
+// OBS 上表现为副歌词「有几句、没几句」；另有 4 首因平局取先或一句配多行而丢或错配（见
+// alignByTime）。精确匹配更糟，连第一类都丢九成（cloudmusic 的 MergeTlyric 用精确匹配，
+// 那是因为网易云的 lrc 与 tlyric 同源同精度，不可照抄）。
+//
+// 取 300 是保守取值，不是实测边界：覆盖同轴最大偏差 99ms 并留三倍余量。放到 500 在上述语料里
+// 能给异版本那两首多显示 6 行翻译且无错配；不追，是因为容差越大，某行的真实对应落在容差外时，
+// 「配对数优先」能从越远处把邻行的翻译拉过来（见 alignByTime 的已知局限）——错配在 OBS 上
+// 比留空更糟（TestMergeTransRejectsBeyondTolerance）。
+const transToleranceMs = 300
 
-// transNoLyricMark 是 QQ 的「本行不翻译」占位符（实测每首 1~4 行，多在前奏/间奏）。
-// 不过滤会让 OBS 的副歌词行直接显示 "//"。
+// transNoLyricMark 是 QQ 的「本行不翻译」占位符（上述 1210 首中位数每首 4 行，多则数十行，
+// 集中在片头署名与间奏）。不过滤会让 OBS 的副歌词行直接显示 "//"。
 const transNoLyricMark = "//"
 
 // transMetaKeywords 命中的翻译行是 QQ 自己的产品文案，不是翻译内容，必须丢弃。
@@ -80,7 +91,7 @@ const transNoLyricMark = "//"
 //	"QQ音乐享有本翻译作品的著作权"    —— 版权声明
 //	"以下歌词翻译由文曲大模型提供"     —— AI 翻译来源声明（较新，16 首取样中 2 首命中）
 //
-// 它们会被时间匹配配到主歌词第一行上（多为标题行），直接推成 OBS 的副歌词。
+// 它们会被配到主歌词第一行上（多为标题行），直接推成 OBS 的副歌词。
 //
 // **用关键词而非全文匹配**：这是随时会改的产品文案——单是取样就已经有两种句式，
 // 全文匹配挡得住今天这条、挡不住下一条。关键词取三个词根，覆盖「版权」与「翻译来源」
@@ -103,11 +114,12 @@ func transIsDroppable(text string) bool {
 	return false
 }
 
-// mergeTrans 把 QQ 的翻译歌词（标准 LRC）按时间就近合并进主歌词的 SubText。
+// mergeTrans 把 QQ 的翻译歌词（标准 LRC）合并进主歌词的 SubText：先 alignByTime 按行序
+// 配对，再丢掉占位符与 QQ 自家文案。
 //
-// 用切片顺序扫描而非 map 查找：map 迭代序随机，平局时选中的条目会随机变化，而结果
-// 直接进 sub_text 推上 OBS —— 这正是 AGENTS.md 3.8 记录的「map 迭代结果逃出循环」
-// 那类缺陷的形状（本仓已踩三次）。parseLRC 返回切片、天然有序，平局取先出现者即确定。
+// 占位行（"//"、版权声明）必须**先参与配对、后丢弃**：它们在翻译轨里占着对应主歌词行
+// （标题行、词曲署名行）的位置。先滤掉再配，紅蓮華那种「编曲署名行与首句歌词只差 2ms」的
+// 地方，首句的翻译会被配给署名行。
 //
 // 匹配不上或翻译缺失一律保持 SubText 为空：翻译是纯增量的锦上添花，任何情况下都不能
 // 反过来影响主歌词。
@@ -119,26 +131,86 @@ func mergeTrans(lines []lyricLine, transLRC string) {
 	if len(transLines) == 0 {
 		return
 	}
-	for i := range lines {
-		lineMs := int(lines[i].Time*1000 + 0.5)
-		best := -1
-		bestDiff := transToleranceMs + 1
-		for j := range transLines {
-			diff := int(transLines[j].Time*1000+0.5) - lineMs
-			if diff < 0 {
-				diff = -diff
-			}
-			// 严格 < ：平局保留先出现的那条，结果不依赖遍历起点。
-			if diff < bestDiff {
-				best = j
-				bestDiff = diff
-			}
-		}
-		if best < 0 || transIsDroppable(transLines[best].Text) {
+	for i, j := range alignByTime(lines, transLines, transToleranceMs) {
+		if j < 0 || transIsDroppable(transLines[j].Text) {
 			continue
 		}
-		lines[i].SubText = transLines[best].Text
+		lines[i].SubText = transLines[j].Text
 	}
+}
+
+// alignByTime 把 trans 的行按行序一对一配到 lines 上，返回 match：match[i] 是 lines[i]
+// 配上的 trans 下标，-1 = 不配。
+//
+// 约束：配对不交叉（保序）、一对一、两行时间差 ≤ tolMs；在此之下**先求配上的行数最多，
+// 再求总时差最小**（LCS 式 DP）。QQ 的翻译轨与主歌词逐行平行（见 transToleranceMs），
+// 行数相等且每行都在容差内时，唯一满足的就是逐行配对，与时间戳差多少无关。
+//
+// 为什么不是旧实现的「每行找时间最近的那条」——它在偏差之外还有两种错法，旧实现上都实测到过：
+//   - 平局取先：紅蓮華（songID=233911619）的翻译轨在同一时间戳 1220 有两行（"//" 与首句
+//     翻译），首句选中先出现的 "//"，翻译丢失。保序配对按行序各取各的。
+//   - 一句配多行：songID=326486987 的署名行「Mastered by…」（789ms）离下一行的翻译「疯掉」
+//     （790）比离自己的 "//"（780）更近，于是「疯掉」同时出现在两行上。容差放宽后更甚：
+//     songID=244191667 有三行主歌词同为 63679，按 300ms 就近会把同一句翻译贴到三行上。
+//     一对一下只有一行能配上，其余留空。
+//
+// 为什么不是双指针贪心（容差内遇到就配）：1210 首上结果与本函数逐行一致，但它在「容差内
+// 先出现一条多余的翻译行」时会抢先配上、显示错译；DP 在同样行数下选总时差更小的那种。
+//
+// 已知局限：「配对数优先」意味着某行的真实对应落在容差外时，容差内的邻行翻译会被配上来。
+// 整条翻译轨相对主歌词平移超过 tolMs 时即如此（构造数据：songID=102193601 整轨提前 350ms，
+// 「Oh」「Yup」与署名行配上了邻行翻译，共 5 行错配，旧实现留空）。实测语料里没有这种平移：
+// 24 首偏差歌每首的平均偏差在 -12~+5ms，是围绕 0 的抖动。纯按时间无法区分「平移到邻行」与
+// 「真实偏差」，真遇到再考虑先估全局偏移。
+//
+// 回溯时依次优先「配对」「lines 行不配」「trans 行不配」——任一与表值相符的前驱都通向
+// 最优解，固定顺序让结果确定。表大小 (len(lines)+1)×(len(trans)+1)，一首百行量级，
+// 每次取词只跑一次。
+func alignByTime(lines, trans []lyricLine, tolMs int) []int {
+	type score struct{ pairs, cost int }
+	better := func(a, b score) bool {
+		return a.pairs > b.pairs || a.pairs == b.pairs && a.cost < b.cost
+	}
+	ms := func(l lyricLine) int { return int(l.Time*1000 + 0.5) }
+	n, m := len(lines), len(trans)
+	dp := make([]score, (n+1)*(m+1)) // dp[i*(m+1)+j]：lines[:i] 与 trans[:j] 的最优配法
+	at := func(i, j int) score { return dp[i*(m+1)+j] }
+	// pair 返回把 lines[i-1] 配给 trans[j-1] 后的得分，以及时差是否在容差内。
+	pair := func(i, j int) (score, bool) {
+		d := ms(lines[i-1]) - ms(trans[j-1])
+		if d < 0 {
+			d = -d
+		}
+		p := at(i-1, j-1)
+		return score{p.pairs + 1, p.cost + d}, d <= tolMs
+	}
+	for i := 1; i <= n; i++ {
+		for j := 1; j <= m; j++ {
+			best := at(i-1, j)
+			if s := at(i, j-1); better(s, best) {
+				best = s
+			}
+			if s, ok := pair(i, j); ok && better(s, best) {
+				best = s
+			}
+			dp[i*(m+1)+j] = best
+		}
+	}
+	match := make([]int, n)
+	for i := range match {
+		match[i] = -1
+	}
+	for i, j := n, m; i > 0 && j > 0; {
+		if s, ok := pair(i, j); ok && s == at(i, j) {
+			match[i-1] = j - 1
+			i, j = i-1, j-1
+		} else if at(i-1, j) == at(i, j) {
+			i--
+		} else {
+			j--
+		}
+	}
+	return match
 }
 
 // qrcWordRegex 匹配 QRC 的逐字时间戳 (起始ms,持续ms)。
@@ -463,24 +535,27 @@ func attachTrans(lines []lyricLine, rawTrans string, crypt int) {
 
 // romaToleranceMs 是音译行（roma）与主歌词行的时间匹配容差（毫秒）。
 //
-// **不与 transToleranceMs 合用一个常量**：两者数值恰好相同，成因却不同。翻译 trans 是标准
-// LRC（把 QRC 毫秒时间截断到 10ms），必须靠 ±20ms 覆盖那段截断误差；roma 与主歌词 lyric
+// **不与 transToleranceMs 合用一个常量**：两者成因不同、数值也不同。翻译 trans 的时间戳不一定
+// 取自 QRC 的时间轴（同一行实测差到 99ms，见 transToleranceMs）；roma 与主歌词 lyric
 // **同源同为 QRC 毫秒精度**（同一次 musicu.fcg 响应、共用 crypt），行首时间戳理论上逐毫秒
-// 相等，正确匹配的时间差本就 ≈0，容差在这里只是「防意外抖动」的安全网，不覆盖任何系统性误差。
+// 相等（2026-10 实测 58 首与主歌词行数相等的音译轨，非占位行最大差 1ms），正确匹配的时间差
+// 本就 ≈0，容差在这里只是「防意外抖动」的安全网，不覆盖任何系统性误差。
 //
 // 为什么取 20 而不「更严」：既然同源、正确匹配 diff≈0，收紧容差没有收益（正确那行照样命中），
 // 反而在 roma 与 lyric 万一有个位数毫秒抖动时把该行音译静默丢掉——与「稳定 > 功能完整度」
 // 相悖。为什么不取更大：QRC 相邻行间隔以秒计，20ms 远低于误配到相邻行的阈值，放宽只是白扩
-// 风险窗口。故与 trans 取同一稳妥值。（真机核对由主会话 qqromaprobe 端到端做，见 attachRoma
-// 的临时日志。）
+// 风险窗口。（真机核对由主会话 qqromaprobe 端到端做，见 attachRoma 的临时日志。）
 const romaToleranceMs = 20
 
 // mergeRoma 把 QQ 的音译歌词按时间就近合并进主歌词的 RomaText。
 //
-// 与 mergeTrans 同构（切片顺序扫描、平局取先出现者、容差就近匹配），唯二区别：
+// 每行取容差内时间最近的那条（切片顺序扫描、平局取先出现者）。与 mergeTrans 的区别：
 //   - 写 RomaText 而非 SubText —— 音译与翻译是两条独立轨，任一条的失败/缺失绝不能波及另一条
 //     或主歌词（roma_text 与 sub_text 互不污染，AGENTS 硬约束）。
 //   - 用 romaToleranceMs（同源，理由见其注释）。
+//   - 仍是就近匹配，未改用 alignByTime。roma 同源无时间轴偏差，但 alignByTime 注释里那两种
+//     错法（平局取先、一句配多行）照样会犯：片头署名行密集处会被贴上邻行的音译（2026-10 实测
+//     743 首有音译的歌中 15 首、共 32 行与 alignByTime 的结果不同）。已知未修。
 //
 // 复用 parseLRC 天然做到「格式兼容」：QQ 的 roma 实测为 QRC 逐字（`[start,dur]文字(ts,dur)…`，
 // 与主歌词 lyric 同格式），parseLRC 的 qqRe 分支解析它、剥掉字级时间戳得每行罗马音文本；
@@ -504,7 +579,7 @@ func mergeRoma(lines []lyricLine, romaLRC string) {
 			if diff < 0 {
 				diff = -diff
 			}
-			// 严格 < ：平局保留先出现的那条，结果不依赖遍历起点（同 mergeTrans）。
+			// 严格 < ：平局保留先出现的那条，结果不依赖遍历起点。
 			if diff < bestDiff {
 				best = j
 				bestDiff = diff

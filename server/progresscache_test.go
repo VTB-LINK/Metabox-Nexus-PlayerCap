@@ -120,7 +120,7 @@ func TestInitAllLyricsIsSelfConsistent(t *testing.T) {
 		t.Fatal("duration 为 0，无法校验自洽性")
 	}
 	want := al.Position / al.Duration
-	if diff := want - al.Progress; diff > 0.01 || diff < -0.01 {
+	if diff := want - al.Progress; !(diff <= 0.01 && diff >= -0.01) {
 		t.Errorf("position=%v / duration=%v = %.4f，但 progress=%v —— 两个投影不是同一时刻的，"+
 			"下游拿 position 显示时间、拿 progress 画进度条，两者会打架",
 			al.Position, al.Duration, want, al.Progress)

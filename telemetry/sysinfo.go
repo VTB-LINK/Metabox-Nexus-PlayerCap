@@ -2,7 +2,7 @@ package telemetry
 
 // 系统信息采集。**本文件引入 x/sys/windows，使 telemetry 包只能在 Windows 构建。**
 // 这符合现状（本项目是纯 Windows，见 AGENTS.md §3.7），且不违反 §0.3 —— 那条只要求
-// config/ 与 logger/ 保持 Linux 可构建，而依赖方向是单向的：telemetry → logger，反过来没有。
+// config/、logger/、i18n/ 保持 Linux 可构建，而依赖方向是单向的：telemetry → 这三者，反过来没有。
 //
 // # 为什么这些值全得自己采
 //

@@ -27,7 +27,7 @@ func drain(b *BaseEmitter) []Event {
 // 真实场景：封面靠 goroutine 异步下载（cloudmusic/qqmusic 5s，wesing 最长约 10s），
 // 取完才补发 song_info_update。若下载期间换了歌，迟到的回写会把上一首的标题+封面盖在
 // 当前歌曲上——而 song_info_update 只在换歌分支发一次，轮询循环不会重发，**整首歌都
-// 不自愈**。go vet 看不见这类缺陷：裸 go func 没有 CancelFunc 可丢。
+// 不自愈**。go vet 看不见这类缺陷：不带 context 的 go func 没有 CancelFunc 可丢。
 //
 // 变异自证：去掉 EmitForGen 里的代次比较即红。
 func TestEmitForGenDropsStaleWriteback(t *testing.T) {

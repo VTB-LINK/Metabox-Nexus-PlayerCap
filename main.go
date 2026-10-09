@@ -1,6 +1,8 @@
 package main
 
 import (
+	"Metabox-Nexus-PlayerCap/audiocap/helper"
+	"Metabox-Nexus-PlayerCap/audiocap/manager"
 	"Metabox-Nexus-PlayerCap/clientid"
 	"Metabox-Nexus-PlayerCap/config"
 	"Metabox-Nexus-PlayerCap/i18n"
@@ -56,6 +58,13 @@ func main() {
 	if len(os.Args) >= 3 && os.Args[1] == "--kugou-patch-helper" {
 		watchdog.RunPatchHelper(os.Args[2])
 		return // RunPatchHelper 内部调用 os.Exit，此 return 仅作为安全保障
+	}
+
+	// 音频波形捕获 helper 模式：由主服务通过 exec.Command 拉起，命令行形如 --audio-capture-helper。
+	// 直接调用 helper.Run(stdin, stdout) 并退出，绕过一切初始化（隐私提示/更新检查等）。
+	if len(os.Args) >= 2 && os.Args[1] == "--audio-capture-helper" {
+		helper.Run(os.Stdin, os.Stdout)
+		return
 	}
 
 	// 设置日志格式
@@ -168,6 +177,7 @@ func main() {
 	endpointsOM.Set("song_info", scheme+"://"+cfg.Addr+"/song_info")
 	endpointsOM.Set("lyric_update-SSE", scheme+"://"+cfg.Addr+"/lyric_update-SSE")
 	endpointsOM.Set("song_info-SSE", scheme+"://"+cfg.Addr+"/song_info-SSE")
+	endpointsOM.Set("audio-ws", wsScheme+"://"+cfg.Addr+"/audio-ws") // 音频波形根端点（跟随活跃播放器）
 	for _, pn := range playerNames {
 		pe := server.NewOrderedMap()
 		pe.Set("ws", wsScheme+"://"+cfg.Addr+"/"+pn+"/ws")
@@ -177,6 +187,8 @@ func main() {
 		pe.Set("song_info", scheme+"://"+cfg.Addr+"/"+pn+"/song_info")
 		pe.Set("lyric_update-SSE", scheme+"://"+cfg.Addr+"/"+pn+"/lyric_update-SSE")
 		pe.Set("song_info-SSE", scheme+"://"+cfg.Addr+"/"+pn+"/song_info-SSE")
+		// 音频波形通道（全播放器端点，与只在 cloudmusicv3 的 effect-ws 不同），归于各自命名空间：
+		pe.Set("audio-ws", wsScheme+"://"+cfg.Addr+"/"+pn+"/audio-ws")
 		// 网易云特效镜像通道（仅 cloudmusicv3，归于其命名空间）：
 		// 只广告读端 effect-ws；写端 effect-ingest 需内存随机 token，端点仍存在但不对外广告，
 		// 注入脚本经 EffectIngestWSURL() 内部取址（含 token），不依赖此表。
@@ -186,36 +198,7 @@ func main() {
 		endpointsOM.Set(pn, pe)
 	}
 
-	// 构建有序配置表：按 config.yml 的字段顺序，播放器字段输出所有 resolved 值
-	configOM := server.NewOrderedMap()
-	configOM.Set("addr", cfg.Addr)
-	configOM.Set("offset", cfg.Offset)
-	configOM.Set("poll", cfg.Poll)
-	configOM.Set("prior-player", cfg.PriorPlayer)
-	configOM.Set("prior-player-expire", cfg.PriorPlayerExpire)
-	configOM.Set("per-player-idle-hide", cfg.PerPlayerIdleHide)
-	configOM.Set("cloudmusicv3-effect-strategy", cfg.EffectStrategy)
-	for _, name := range playerNames {
-		configOM.Set(name+"-offset", cfg.GetPlayerOffset(name))
-		configOM.Set(name+"-poll", cfg.GetPlayerPoll(name))
-		configOM.Set(name+"-idle-hide", cfg.GetPlayerIdleHide(name))
-	}
-
-	// config_overwritten：按 config 的键顺序筛选出显式设置的条目
-	configOverwritten := []string{}
-	for _, k := range []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "cloudmusicv3-effect-strategy"} {
-		if cfg.ExplicitKeys[k] {
-			configOverwritten = append(configOverwritten, k)
-		}
-	}
-	for _, name := range playerNames {
-		for _, k := range []string{name + "-offset", name + "-poll", name + "-idle-hide"} {
-			if cfg.ExplicitKeys[k] {
-				configOverwritten = append(configOverwritten, k)
-			}
-		}
-	}
-
+	configOM, configEffectiveOM, configOverwritten := buildConfigEcho(&cfg, playerNames, effectStrategy)
 	srv.SetServiceInfo(&server.ServiceInfo{
 		Version:           displayVersion(Version),
 		Addr:              cfg.Addr,
@@ -223,6 +206,7 @@ func main() {
 		Endpoints:         endpointsOM,
 		PlayerSupport:     playerNames,
 		Config:            configOM,
+		ConfigEffective:   configEffectiveOM,
 		ConfigOverwritten: configOverwritten,
 	})
 
@@ -271,6 +255,27 @@ func main() {
 	effectCapturer := effect.New(srv, cp.IsConnected)
 	go func() { defer telemetry.Guard(); effectCapturer.Run() }()
 
+	// 音频波形捕获管理器（进程级 WASAPI loopback → /audio-ws 扇出）。
+	// 位置承重：必须在 checkAndUpdate 之后（正式启动才拉起），照特效捕获器一带——checkAndUpdate 可能
+	// os.Exit/换 exe/restartSelf，在它之前起音频（乃至 spawn helper）是错的；且 manager 懒汉，无订阅
+	// 不 spawn helper，双保险。manager 内部只查 GetPlayerStatus、扇出帧、Wake 唤醒，不回调 router。
+	//
+	// 关停：主服务退出走 os.Exit(0)，helper 由 Job Object（KILL_ON_JOB_CLOSE）+ stdin-EOF 自杀回收，
+	// 无需在信号处理里显式 Stop（Phase 1 不加）。
+	selfExe, _ := os.Executable()
+	audioNormResolver := func(p string) manager.NormParams {
+		return manager.NormParams{
+			Enabled: cfg.GetPlayerAudioNormalize(p),
+			Target:  cfg.AudioNormalizeTarget,
+			MaxGain: cfg.AudioNormalizeMaxGain,
+		}
+	}
+	audioMgr := manager.New(srv.AudioHub(), srv.GetPlayerStatus, audioNormResolver, selfExe)
+	srv.SetAudioWake(audioMgr.Wake) // 切歌钩子唤醒管理器立即重算门控
+	// 本地 recover、绝不挂 telemetry.Guard：音频波形是可降级附加能力，其 goroutine panic 只记日志降级，
+	// 绝不 re-panic 杀主进程（Guard 会 re-panic=直播事故）。这是对主服务侧 Guard 范式的有意豁免。
+	go func() { defer localRecover("audio-manager"); audioMgr.Run() }()
+
 	// 优雅退出：收到中断信号时，还原网易云被双击隐藏的菜单后再退出
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -289,6 +294,68 @@ func main() {
 	router.Run()
 }
 
+// playerPollIntervals 是各播放器轮询循环所用的同一个下限函数；不在表中的播放器（wesing、kugou）
+// 没有播放器层下限，实际间隔即配置层钳制后的值。播放器新增或去掉下限时同改此表。
+var playerPollIntervals = map[string]func(pollMs int) time.Duration{
+	cloudmusic.PlayerName: cloudmusic.EffectivePollInterval,
+	qqmusic.PlayerName:    qqmusic.EffectivePollInterval,
+	sodamusic.PlayerName:  sodamusic.EffectivePollInterval,
+}
+
+// buildConfigEcho 组装 /service-status 的配置三件套。
+//
+// config 是配置写下的值：按「播放器覆盖 → 全局 → 内置默认」解析继承，不含任何钳制或校验回退；
+// effective 是运行时实际生效的值：计入配置层钳制、校验回退、播放器层轮询下限，以及传入的
+// effectStrategy（main 对 cfg.EffectStrategy 做 Win11 降级后的结果）。两表键集合与顺序相同：
+// 全局键按 config.yml 顺序，随后每个播放器（注册顺序）四个键。overwritten 按同一键序列出显式
+// 设置且被采纳的键（ExplicitKeys）。
+func buildConfigEcho(cfg *config.Config, playerNames []string, effectStrategy string) (written, effective *server.OrderedMap, overwritten []string) {
+	written, effective, overwritten = server.NewOrderedMap(), server.NewOrderedMap(), []string{}
+	set := func(key string, w, e any) {
+		written.Set(key, w)
+		effective.Set(key, e)
+		if cfg.ExplicitKeys[key] {
+			overwritten = append(overwritten, key)
+		}
+	}
+	same := func(key string, v any) { set(key, v, v) }
+
+	same("addr", cfg.Addr)
+	same("offset", cfg.Offset)
+	set("poll", cfg.Written("poll", cfg.Poll), cfg.Poll)
+	prior := cfg.PriorPlayer
+	if prior == nil {
+		prior = []string{} // `prior-player: []` 与 `-prior-player ""` 得到 nil，回显须为 [] 而非 null
+	}
+	same("prior-player", prior)
+	same("prior-player-expire", cfg.PriorPlayerExpire)
+	same("per-player-idle-hide", cfg.PerPlayerIdleHide)
+	same("audio-normalize", cfg.AudioNormalize)
+	set("audio-normalize-target", cfg.Written("audio-normalize-target", cfg.AudioNormalizeTarget), cfg.AudioNormalizeTarget)
+	set("audio-normalize-max-gain", cfg.Written("audio-normalize-max-gain", cfg.AudioNormalizeMaxGain), cfg.AudioNormalizeMaxGain)
+	set("cloudmusicv3-effect-strategy", cfg.Written("cloudmusicv3-effect-strategy", cfg.EffectStrategy), effectStrategy)
+	for _, name := range playerNames {
+		same(name+"-offset", cfg.GetPlayerOffset(name))
+		poll := cfg.GetPlayerPoll(name)
+		if f := playerPollIntervals[name]; f != nil {
+			poll = int(f(poll).Milliseconds())
+		}
+		set(name+"-poll", cfg.WrittenPlayerPoll(name), poll)
+		same(name+"-idle-hide", cfg.GetPlayerIdleHide(name))
+		same(name+"-audio-normalize", cfg.GetPlayerAudioNormalize(name))
+	}
+	return written, effective, overwritten
+}
+
+// localRecover 是音频子系统 goroutine 的本地兜底：panic 只记日志降级，绝不 re-panic 杀主进程。
+// 这是对主服务侧「go func(){ defer telemetry.Guard() }」范式的有意豁免——音频波形是可降级的附加
+// 能力，其 goroutine 崩溃不该拖垮歌词/特效主线（telemetry.Guard 会 re-panic）。见计划启动时序条与 §1。
+func localRecover(label string) {
+	if r := recover(); r != nil {
+		mainLog.Warn("[audio] %s panic 已本地恢复: %v", label, r)
+	}
+}
+
 // ============================================================================
 // 版本检查与自动更新
 // ============================================================================
@@ -303,9 +370,11 @@ const versionCheckURL = "https://gateway.vtb.link/vtb-tools/metabox/nexus/player
 // 同一台机器换 IP 算成多台、同一出口的多台算成一台，DAU/MAU 两头都不准。
 // 现在带上匿名设备标识与客户端环境，让网关能去重、能按版本切分。见 clientid 包注释。
 //
-// **标识走请求头，绝不走 query。** 这个端点后面挂着网关的响应缓存（有一条专门的
-// purge workflow，AGENTS.md §12），把客户端标识拼进 query 会让缓存键按客户端打散，
-// 缓存当场失效 —— 每台机器每天都回源。头不参与默认缓存键，没有这个副作用。
+// **标识走请求头，绝不走 query。** 这是面向将来的约束，不是对现状的描述：2026-08-10 实测
+// 这条 route 上没有生效的 proxy-cache，配套的 purge workflow 也已停用（AGENTS.md §3.5、§12），
+// 别把 purge workflow 的存在当成缓存存在的证据。一旦网关启用 proxy-cache，其默认缓存键是
+// 「方法 + URI + query」、不含请求头：标识拼进 query 会让缓存键按客户端打散，缓存等于没开；
+// 走请求头则不参与默认缓存键，没有这个副作用。
 
 var (
 	clientEnvOnce sync.Once

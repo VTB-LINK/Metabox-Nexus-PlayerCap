@@ -8,6 +8,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/krc"
 	klyric "Metabox-Nexus-PlayerCap/player/kugou/lyric"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 // —— 汽水音译：从酷狗「借」，字级对齐 + 行级回落两层 ————————————————————————————
@@ -333,6 +334,7 @@ func normLyricRune(r rune) (rune, bool) {
 // 直接 Emit，才必须靠 coverCancel 挡住迟到回写盖掉当前歌曲）。缓冲容量 1 保证送出不阻塞、
 // goroutine 必能退出。
 func (p *SodaMusicPlayer) fetchKugouRoma(romaCh chan<- []krc.Line, sodaLines []krc.Line, name, singer string, durationMs int) {
+	defer telemetry.Guard()
 	// 传空 hash → 走 Tier 2/3（按歌手+歌名 catalog 搜 + ±5s 时长严格匹配），不依赖酷狗 hash。
 	kugouLines, err := klyric.Fetch("", durationMs, name, singer)
 	if err != nil {

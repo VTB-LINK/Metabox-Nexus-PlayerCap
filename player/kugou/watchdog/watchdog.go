@@ -38,8 +38,8 @@ var ErrVersionUnsupported = errors.New("libcef.dll 版本不受支持（已知�
 var ErrElevationFailed = errors.New("未取得管理员权限")
 
 const (
-	targetProcess = "KuGou.exe"
-	cdpPort       = 12233
+	TargetProcessName = "KuGou.exe"
+	cdpPort           = 12233
 
 	// knownVersion is the KuGou.exe FileVersion the patches were reverse-engineered against.
 	// Patches may work on other versions but are not guaranteed.
@@ -271,7 +271,7 @@ func findLibcefForExe(base, ver string) string {
 // killKuGou terminates all running KuGou.exe processes and waits for them to exit.
 func killKuGou() {
 	log.Info("正在终止酷狗进程...")
-	exec.Command("taskkill", "/F", "/IM", targetProcess).Run() //nolint
+	exec.Command("taskkill", "/F", "/IM", TargetProcessName).Run() //nolint
 	// Poll until all instances exit (max 5s)
 	for i := 0; i < 10; i++ {
 		time.Sleep(500 * time.Millisecond)
@@ -284,11 +284,11 @@ func killKuGou() {
 
 // IsKuGouRunning returns true if any KuGou.exe process is alive.
 func IsKuGouRunning() bool {
-	out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq "+targetProcess, "/NH").Output()
+	out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq "+TargetProcessName, "/NH").Output()
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(out), targetProcess)
+	return strings.Contains(string(out), TargetProcessName)
 }
 
 // launchKuGou starts KuGou.exe in detached mode from its own directory.

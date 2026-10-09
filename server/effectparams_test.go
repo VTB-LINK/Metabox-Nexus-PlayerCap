@@ -31,7 +31,7 @@ func effectSrv(t *testing.T, s *Server) *httptest.Server {
 // —— 于是主播在浏览器地址栏敲 /cloudmusicv3/effect-ws?quality=60 想探活（普通 GET，
 // 无升级头，Upgrade 必败），直播画质就被当场改掉，只能重启服务才能恢复。
 //
-// 这不是安全问题：server.go:104 的 CheckOrigin 恒 true 是 AGENTS.md §14 有意接受的
+// 这不是安全问题：NewServer 中 upgrader 的 CheckOrigin 恒 true 是 AGENTS.md §14 有意接受的
 // 现状，任意网页 new WebSocket 的握手照样成功、参数照样生效。本测试守的是运维 footgun。
 //
 // 变异自证：把 setEffectParams 移回 Upgrade 之前即红。

@@ -108,3 +108,26 @@ PlayerCap (sodamusic 模块)
 └─ 本地时钟外推：进度源只有 1Hz，仅在采样变化时落锚、两次采样之间按墙钟推进
    —— 每轮都落锚等于没有外推，position 会退化成 1 秒阶梯、歌词整体滞后
 ```
+
+### 音频波形（WASAPI 进程级 loopback，全部播放器通用）
+
+```
+播放器进程树
+├─ 主进程：同名进程集合中父进程不在该集合内者（多个时取 PID 最小）
+├─ 出声的可能是子进程（CEF / Chromium 系为 --type=utility 的音频服务进程；QQ 音乐另有异名子进程，同在捕获范围内）
+└─ Windows 音频引擎：loopback 客户端以 48kHz / 2ch / float32 初始化，由引擎转换
+   —— 独占 / ASIO 输出不经引擎，按机制应只得到零帧（未实测）
+
+PlayerCap (audiocap 模块)
+├─ 门控：无波形订阅时不扫描、不捕获（启动时清理遗留捕获子进程的一次进程枚举除外）；有订阅时捕获被 per-player 订阅的播放器，
+│  根订阅下另捕获当前活跃播放器（含暂停中）与所有 playing 的播放器（切换时无需等激活）
+├─ 进程发现：Toolhelp 快照选主进程，捕获前复核 PID 与进程名（防 PID 复用）
+├─ 捕获子进程：同一 exe 以 --audio-capture-helper 启动，stdin 收控制命令、stdout 回传帧；
+│  Job Object（KILL_ON_JOB_CLOSE）+ stdin 关闭即退出，主进程退出时随之结束
+├─ 子进程内：ActivateAudioInterfaceAsync（PROCESS_LOOPBACK + INCLUDE_TARGET_PROCESS_TREE，
+│  需 Windows 10 build 19041+）→ 降混前按声道取峰值 → 降混单声道 → RMS + 512 点幅度谱 → 可选音量归一化
+│  → 名义约 33ms 一帧（实测约 25fps）；无声时照发零帧保活，引擎无数据时约 100ms 一帧
+├─ 故障隔离：单路无帧按播放器退避重试、连续 5 次失败放弃该播放器；子进程启动失败或自身崩溃后退避重启，累计 5 次启动失败或快速崩溃（期间稳定运行满 10 秒即清零）才全局放弃；
+│  看门狗判子进程假死而重启时不退避、不计入崩溃次数；主进程侧异常只记日志，不影响歌词与特效
+└─ 主进程按 magic 重对齐解帧，按 player 扇出到 /audio-ws（跟随活跃）与 /<player>/audio-ws
+```

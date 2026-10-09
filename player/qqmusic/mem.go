@@ -57,6 +57,7 @@ const (
 	PAGE_EXECUTE_READWRITE = 0x40
 	PAGE_READWRITE         = 0x04
 	LIST_MODULES_ALL       = 0x03
+	TargetProcessName      = "qqmusic.exe"
 )
 
 type MEMORY_BASIC_INFORMATION struct {
@@ -395,7 +396,7 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 	ret, _, _ := procProcess32First.Call(hSnap, uintptr(unsafe.Pointer(&pe32)))
 	for ret != 0 {
 		name := syscall.UTF16ToString(pe32.ExeFile[:])
-		if strings.ToLower(name) == "qqmusic.exe" {
+		if strings.ToLower(name) == TargetProcessName {
 			pids = append(pids, pe32.ProcessID)
 		}
 		ret, _, _ = procProcess32Next.Call(hSnap, uintptr(unsafe.Pointer(&pe32)))
@@ -972,7 +973,8 @@ type SongMetadata struct {
 // （0xB1 解成 RuneError、>= 32 被保留），于是 overlay 闪一个乱码标题。
 //
 // 触发主力是 clear()：capacity 保留（仍 > 15）而 length 归 0 —— 实测原写法这条 96.9%
-// 出乱码。版本偏移错位（detectVersion 对未知版本回退 22.16）也能进来，实测原写法 8.5%
+// 出乱码。版本偏移错位（未知版本借用已知版本的偏移，现见 nearestKnownVersion；当时是固定回退
+// 22.16）也能进来，实测原写法 8.5%
 // 出乱码、其余靠内联分支「找不到 NUL 就返回空」侥幸兜住。两条现在都收敛为返回空。
 //
 // 上界保持 1000：同文件的 ReadSSOString 用的是 2048，别顺手抄过来，那是放宽两倍上界。

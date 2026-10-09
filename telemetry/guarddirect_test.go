@@ -112,7 +112,7 @@ func TestGuardOnlyUsedAsDirectDefer(t *testing.T) {
 	}
 
 	// 反向自证：如果一个 Guard 调用点都没扫到，说明这个门禁在空转 —— 那比没有门禁更糟，
-	// 因为它会让人以为「已经守住了」。main.go 现在就有 7 处（main 自己 + 6 个 goroutine）。
+	// 因为它会让人以为「已经守住了」。main.go 现在就有 11 处（main 自己 + 10 个 goroutine）。
 	if guarded == 0 {
 		t.Errorf("全仓没有扫到任何 %s.Guard 调用点（检查了 %d 个 import 了本包的文件）—— "+
 			"要么接线全没了，要么这个门禁的匹配逻辑坏了。两种都得查。", pkgPath, scanned)

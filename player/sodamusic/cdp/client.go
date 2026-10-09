@@ -25,7 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var log = logger.New("Soda] [CDP")
+var log = logger.New("Soda] [CDP") // 渲染为 [Soda] [CDP]
 
 const inspectorPort = 9229
 

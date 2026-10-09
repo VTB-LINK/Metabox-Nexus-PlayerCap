@@ -99,6 +99,16 @@ func snapshotMatchesCurrentSong(data *cdp.ExtractionData, songName, songArtist s
 // 自动恢复的机会（不必重启 PlayerCap）。
 const unsupportedRecheck = 30 * time.Second
 
+// EffectivePollInterval 返回配置轮询间隔为 pollMs 毫秒时网易云实际采用的间隔：低于 50ms 抬到 100ms，
+// 兼防 time.NewTicker(<=0) panic。轮询循环与 /service-status 的 config_effective 共用此函数，下限只在这里定义。
+func EffectivePollInterval(pollMs int) time.Duration {
+	d := time.Duration(pollMs) * time.Millisecond
+	if d < 50*time.Millisecond {
+		return 100 * time.Millisecond
+	}
+	return d
+}
+
 // Start 启动轮询循环（阻塞）
 func (p *CloudMusicPlayer) Start() {
 	// 0. Patch Windows registry auto-start
@@ -195,11 +205,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 	var cdpLyricsOK bool // CDP 已成功获取歌词，跳过 Redux fallback
 	var songDuration float32
 
-	pollInterval := time.Duration(p.pollMs) * time.Millisecond
-	if pollInterval < 50*time.Millisecond {
-		pollInterval = 100 * time.Millisecond
-	}
-	ticker := time.NewTicker(pollInterval)
+	ticker := time.NewTicker(EffectivePollInterval(p.pollMs))
 	defer ticker.Stop()
 
 	var errLog extractErrLog // 会话级：Extract 错误的降噪状态
@@ -340,6 +346,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			// 标题+封面盖在下一首上，且 song_info_update 只在换歌分支发一次，整首歌不自愈。
 			coverGen := p.NewSongGen()
 			go func(gen uint64, name, artist, title, cover string) {
+				defer telemetry.Guard()
 				if b64 := player.FetchCoverBase64("CloudMusic", cover, 5*time.Second); b64 != "" {
 					p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
 						Name: name, Singer: artist, Title: title,

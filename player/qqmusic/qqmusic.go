@@ -9,6 +9,7 @@ import (
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 const PlayerName = "qqmusic"
@@ -35,6 +36,16 @@ func New(offsetMs, pollMs int) *QQMusicPlayer {
 		offsetMs:    offsetMs,
 		pollMs:      pollMs,
 	}
+}
+
+// EffectivePollInterval 返回配置轮询间隔为 pollMs 毫秒时 QQ 音乐实际采用的间隔：低于 30ms 抬到 50ms。
+// 轮询循环与 /service-status 的 config_effective 共用此函数，下限只在这里定义。
+func EffectivePollInterval(pollMs int) time.Duration {
+	d := time.Duration(pollMs) * time.Millisecond
+	if d < 30*time.Millisecond {
+		return 50 * time.Millisecond
+	}
+	return d
 }
 
 // Start 启动 QQ 音乐轮询循环（阻塞）
@@ -118,10 +129,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	var lastMemProgress uint32 = 0
 	const pauseTimeoutSec = 1.0
 
-	pollInterval := time.Duration(p.pollMs) * time.Millisecond
-	if pollInterval < 30*time.Millisecond {
-		pollInterval = 50 * time.Millisecond
-	}
+	pollInterval := EffectivePollInterval(p.pollMs)
 
 	for {
 		select {
@@ -257,6 +265,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			// 异步封面下载（带代次守卫，理由同 cloudmusic：迟到的回写会盖住下一首）
 			coverGen := p.NewSongGen()
 			go func(gen uint64, url, name, singer, t string) {
+				defer telemetry.Guard()
 				if url == "" {
 					return
 				}
@@ -325,6 +334,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 						coverURL := fetchCoverURL(sid, smid)
 						coverGen := p.NewSongGen()
 						go func(gen uint64, url, nm, sg, t string) {
+							defer telemetry.Guard()
 							if url == "" {
 								return
 							}

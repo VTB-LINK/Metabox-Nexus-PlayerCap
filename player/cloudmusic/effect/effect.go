@@ -9,7 +9,7 @@
 // 兜底：环境变量 MBX_EFFECT_MODE=screencast 回退到 Page.startScreencast 截整视口（含 chrome）。
 // 保活：Emulation.setFocusEmulationEnabled + Page.setWebLifecycleState(active)（best-effort）；
 // 被遮挡/最小化的 100% 保活由 off-screen 泊车（park 策略）提供。
-// 设计与实测细节见 doc/cloudmusic-effect-capture.md。
+// 原设计文档 doc/cloudmusic-effect-capture.md 已于 5d22d80 删除（原文见 git 历史）；现行约束见 AGENTS.md §7.4、§7.6。
 package effect
 
 import (
@@ -24,6 +24,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/park"
+	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"github.com/gorilla/websocket"
 )
@@ -297,6 +298,7 @@ func (c *Capturer) doUnpark() {
 //
 // 始终运行（不随订阅者启停），以便任何时候都能把遗留泊车的窗口救回。
 func (c *Capturer) windowStateLoop() {
+	defer telemetry.Guard()
 	wasForeground := false
 	prevMin := false
 	parkAllowed := false // 本次最小化是否允许 park：刚最小化那刻前台是「另一真实 app」=按钮最小化 → 允许
@@ -371,6 +373,7 @@ func (c *Capturer) windowStateLoop() {
 // 甚至已恢复了上一首歌（context 已建、来不及注入 shim）。故这里独立、尽早地直连 9222 注册 addScript，
 // 恢复「生命周期合并之前」的早注入时机。安静重试（不打日志、不刷屏）；连接断（网易云重启）后自动重注。
 func (c *Capturer) shimInjectLoop() {
+	defer telemetry.Guard()
 	for {
 		wsURL, err := screencastWSURL()
 		if err != nil {
@@ -453,6 +456,7 @@ func (c *Capturer) Run() {
 // 配合帧门控（不在详情页停发帧），前端冻结在最后一张特效帧。
 // 网易云退出（连不上/读失败）时报 showing=false，触发前端淡出。
 func (c *Capturer) pollShowingLoop() {
+	defer telemetry.Guard()
 	for {
 		if !c.sink.HasEffectSubscribers() {
 			c.setShowing(false)
@@ -768,6 +772,7 @@ func (c *Capturer) session() error {
 	var closed int32
 	stopWatcher := make(chan struct{})
 	go func() {
+		defer telemetry.Guard()
 		t := time.NewTicker(1 * time.Second)
 		defer t.Stop()
 		for {

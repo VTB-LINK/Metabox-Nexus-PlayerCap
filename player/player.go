@@ -246,7 +246,7 @@ func (b *BaseEmitter) Emit(evtType string, data interface{}) {
 // 把上一首的标题+封面盖在当前歌曲上，**整首歌都不自愈**。异步回写者应在 spawn 时捕获
 // 本代次，回写时走 EmitForGen。
 //
-// go vet 对这类缺陷结构性失明：裸 go func 没有 CancelFunc 可丢，lostcancel 无从下手。
+// go vet 对这类缺陷结构性失明：不带 context 的 go func 没有 CancelFunc 可丢，lostcancel 无从下手。
 func (b *BaseEmitter) NewSongGen() uint64 {
 	return atomic.AddUint64(&b.songGen, 1)
 }

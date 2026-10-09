@@ -18,6 +18,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/kugou/cdp"
 	klyric "Metabox-Nexus-PlayerCap/player/kugou/lyric"
 	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 const PlayerName = "kugou"
@@ -80,6 +81,7 @@ var fetchCoverBase64 = player.FetchCoverBase64
 // 循环只在换歌时发、不会自愈。b64 只是加速手段（省掉前端自己取图），拿不到就带 URL 发，
 // 前端自行加载——FetchCoverBase64 在图片超限时本来就是这个约定。
 func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name, singer, title, hash string) {
+	defer telemetry.Guard()
 	start := time.Now()
 
 	var coverURL string
@@ -325,9 +327,10 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 	// 保持显式调用，vet 才能在将来有人新增 return 却忘了取消时当场抓住。
 	//
 	// **别把 vet 绿当成这类问题已经清了。** cloudmusic/qqmusic/wesing 三家的封面
-	// goroutine 是裸 go func，连 context 都没有（全仓 WithCancel 只此一处），因此
+	// goroutine 都不带 context（非测试代码里 WithCancel 只有这里与 sodamusic 的 runSession），因此
 	// lostcancel **结构性看不见它们**——没有 CancelFunc 可丢，分析器就无从下手。
-	// 那三处同样会出现「迟到的封面回写覆盖当前歌曲」，而且比这里更糟：连换歌取消都没有。
+	// 那三处的「迟到的封面回写覆盖当前歌曲」改由代次守卫拦截（BaseEmitter 的 NewSongGen /
+	// EmitForGen），vet 同样看不见某处是否漏接。
 
 	// Local clock interpolation for smooth progress between polls
 	var anchorProgressSec float32

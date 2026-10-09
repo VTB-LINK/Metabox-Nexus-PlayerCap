@@ -76,4 +76,8 @@ var english = map[string]string{
 	"%s 歌词时间偏移（毫秒）":                  "%s lyric time offset (ms)",
 	"%s 轮询间隔（毫秒）":                    "%s poll interval (ms)",
 	"%s 无活跃自动隐藏（秒，0=关，不传=跟随全局）":      "%s idle auto-hide (s, 0 = off, omit = follow global)",
+
+	// config 取值校验告警（cloudmusicv3-effect-strategy：config.yml 与命令行各一条）
+	"cloudmusicv3-effect-strategy 期望 park 或 fadeout，实际 %T（%v），已忽略": "cloudmusicv3-effect-strategy expects park or fadeout, got %T (%v); ignored",
+	"-cloudmusicv3-effect-strategy 期望 park 或 fadeout，实际 %q，已忽略":    "-cloudmusicv3-effect-strategy expects park or fadeout, got %q; ignored",
 }

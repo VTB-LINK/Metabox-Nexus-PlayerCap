@@ -1,12 +1,16 @@
 package qqmusic
 
-// 本文件只测翻译歌词（QQ 的 trans → sub_text）这条链：mergeTrans 的时间就近匹配、
+// 本文件只测翻译歌词（QQ 的 trans → sub_text）这条链：mergeTrans / alignByTime 的保序配对、
 // attachTrans 的解密与降级、以及 toLyricLines 的接线。
 //
-// 这条链最容易犯的错是**照抄 cloudmusic 的 MergeTlyric 用精确时间戳匹配**——那对网易云
-// 成立（lrc 与 tlyric 同源同精度），对 QQ 则会静默丢掉九成翻译：trans 是标准 LRC
-// （10ms 精度），主歌词是 QRC（毫秒精度），二者恒差 0~10ms。故下面的样本刻意全部取自
-// 实测数据，且**没有一行是精确对齐的**。
+// 这条链踩过两个坑，都是「按时间戳找同一行」：
+//   - **照抄 cloudmusic 的 MergeTlyric 用精确时间戳匹配**——那对网易云成立（lrc 与 tlyric
+//     同源同精度），对 QQ 则会静默丢掉九成翻译：trans 是标准 LRC（10ms 精度），主歌词是
+//     QRC（毫秒精度），多数歌二者差 0~10ms。
+//   - **按 ±20ms 就近匹配**——少数歌的 trans 取自另一套时间轴，同一行差到 99ms，翻译行
+//     成片静默丢失（songID=1163799 丢 26/55 行；实测与统计见 transToleranceMs 的注释）。
+//
+// 故下面的样本刻意全部取自实测数据，且**没有一行是精确对齐的**。
 
 import (
 	"strings"
@@ -53,8 +57,159 @@ func TestMergeTransMatchesWithinTolerance(t *testing.T) {
 	for i, w := range want {
 		if lines[i].SubText != w {
 			t.Fatalf("lines[%d].SubText = %q, want %q（行 t=%.3f）；"+
-				"trans 与 QRC 恒差 0~10ms，必须按容差就近匹配而非精确匹配",
+				"trans 与 QRC 差 0~10ms，必须带容差配对而非精确匹配",
 				i, lines[i].SubText, w, lines[i].Time)
+		}
+	}
+}
+
+// 取自实测解密结果（songID=1163799「結ンデ開イテ羅刹ト骸」，行首时间戳原样，逐字时间轴
+// 简化为整行一段）。这首的 trans 不是 QRC 截断到 10ms，而是另一套时间轴：
+//
+//	QRC [28780] ↔ [00:28.75] 差 -30    QRC [37076] ↔ [00:37.03] 差 -46
+//	QRC [31507] ↔ [00:31.48] 差 -27    QRC [40085] ↔ [00:40.10] 差 +15
+//	QRC [34420] ↔ [00:34.39] 差 -30    QRC [42900] ↔ [00:42.94] 差 +40
+//
+// 旧的 ±20ms 就近匹配只配得上 40085 那一行。片头四行署名对应 "//"，[00:09.49] 是空行。
+const driftQRC = `[618,5936]結ンデ開イテ羅刹ト骸 - 米津玄師(618,5936)
+[6780,589]词：ハチ(6780,589)
+[7594,713]曲：ハチ(7594,713)
+[8514,983]编曲：ハチ(8514,983)
+[28780,2559]片足無くした猫が笑う(28780,2559)
+[31507,2681]「ソコ行ク御嬢サン遊ビマショ」(31507,2681)
+[34420,2504]首輪に繋がる赤い紐は(34420,2504)
+[37076,2648]片足の代わりになっちゃいない(37076,2648)
+[40085,2474]や や や や 嫌 嫌 嫌(40085,2474)
+[42900,2505]列成す卒塔婆の群れが歌う(42900,2505)`
+
+const driftTrans = `[00:00.61]//
+[00:06.78]//
+[00:07.59]//
+[00:08.51]//
+[00:09.49]
+[00:28.75]少了一只脚的猫笑着
+[00:31.48]要往那边去的小姐我们来玩吧
+[00:34.39]绑在项圈上的红绳子
+[00:37.03]根本没办法代替一只脚
+[00:40.10]讨厌讨厌讨厌
+[00:42.94]排成一排的墓地牌子唱着歌`
+
+// 翻译轨走另一套时间轴（同一行差几十毫秒）时，每行仍须配上自己的翻译。
+//
+// 变异自证：把 transToleranceMs 改回 20，本例变红（只剩 40085 一行配得上）——这正是
+// 「两句有、两句没有」那个线上症状。
+func TestMergeTransDriftedTimeline(t *testing.T) {
+	lines, _, _ := parseLRC(driftQRC, 0)
+	if len(lines) != 10 {
+		t.Fatalf("len(lines) = %d, want 10；样本解析就不对，后面的断言无意义", len(lines))
+	}
+	mergeTrans(lines, driftTrans)
+
+	want := []string{"", "", "", "",
+		"少了一只脚的猫笑着", "要往那边去的小姐我们来玩吧", "绑在项圈上的红绳子",
+		"根本没办法代替一只脚", "讨厌讨厌讨厌", "排成一排的墓地牌子唱着歌"}
+	for i, w := range want {
+		if lines[i].SubText != w {
+			t.Fatalf("lines[%d].SubText = %q, want %q（行 t=%.3f）；"+
+				"trans 与 QRC 时间轴不同的歌，同一行差到几十毫秒，必须按行序配对",
+				i, lines[i].SubText, w, lines[i].Time)
+		}
+	}
+}
+
+// 取自实测解密结果（songID=233911619「紅蓮華」，行首时间戳原样，逐字时间轴简化）。片头三行
+// 署名挤在 1206~1224ms，首句歌词在 1226ms；翻译轨在同一时间戳 [00:01.22] 有两行——编曲
+// 署名的 "//" 与首句的翻译。
+const tieQRC = `[0,1205]紅蓮華 - LiSA(0,1205)
+[1206,4]词：LiSA(1206,4)
+[1211,12]曲：草野華余子(1211,12)
+[1224,1]编曲：江口亮(1224,1)
+[1226,6107]強くなれる理由を知った(1226,6107)
+[7806,11346]僕を連れて進め(7806,11346)`
+
+const tieTrans = `[00:00.00]QQ音乐享有本翻译作品的著作权
+[00:01.20]//
+[00:01.21]//
+[00:01.22]//
+[00:01.22]我已知晓能够变强的理由
+[00:07.80]带着我 前进吧`
+
+// 同一时间戳上有两行翻译时，按行序各归各的：首句拿到自己的翻译，署名行拿到 "//"（丢弃）。
+//
+// 变异自证：把 mergeTrans 里的 alignByTime 换回「每行取容差内最近、平局取先」，本例变红
+// （首句与编曲署名行都选中先出现的 "//"）；把占位行改成配对前先滤掉，本例同样变红（首句的
+// 翻译被配给只差 2ms 的编曲署名行）。
+func TestMergeTransTieAtSameTimestamp(t *testing.T) {
+	lines, _, _ := parseLRC(tieQRC, 0)
+	if len(lines) != 6 {
+		t.Fatalf("len(lines) = %d, want 6；样本解析就不对，后面的断言无意义", len(lines))
+	}
+	mergeTrans(lines, tieTrans)
+
+	want := []string{"", "", "", "", "我已知晓能够变强的理由", "带着我 前进吧"}
+	for i, w := range want {
+		if lines[i].SubText != w {
+			t.Fatalf("lines[%d].SubText = %q, want %q（行 %q）；"+
+				"同一时间戳的两行翻译必须按行序配给各自的主歌词行",
+				i, lines[i].SubText, w, lines[i].Text)
+		}
+	}
+}
+
+// 取自实测（songID=244191667，主歌词为 LRC）：三行主歌词共用同一时间戳 01:03.679，而翻译轨
+// 是另一版歌词、只有一行落在附近。
+const dupLyric = `[00:57.866]You're my real life fantasy
+[01:03.679]You complete my rhapsody
+[01:03.679]Like the moon and the stars above
+[01:03.679]Never try to admit this
+[01:17.927]Right or wrong`
+
+const dupTrans = `[00:57.79]你是我的白日幻想
+[01:03.56]你完整了我的狂想曲
+[01:09.22]就像星星和月亮
+[01:14.76]不去计较
+[01:17.85]对与错`
+
+// 一行翻译只能配给一行主歌词：同时间戳的另外两行宁可留空，也不能贴上同一句翻译。
+//
+// 变异自证：把 mergeTrans 里的 alignByTime 换回「每行取容差内最近」（容差仍为 300），
+// 本例变红（三行都贴上「你完整了我的狂想曲」）；把 alignByTime 的回溯改成先退 trans 再退
+// lines，本例同样变红（翻译落到三行中的最后一行）。
+func TestMergeTransOneTranslationPerLine(t *testing.T) {
+	lines, _, _ := parseLRC(dupLyric, 0)
+	if len(lines) != 5 {
+		t.Fatalf("len(lines) = %d, want 5；样本解析就不对，后面的断言无意义", len(lines))
+	}
+	mergeTrans(lines, dupTrans)
+
+	want := []string{"你是我的白日幻想", "你完整了我的狂想曲", "", "", "对与错"}
+	for i, w := range want {
+		if lines[i].SubText != w {
+			t.Fatalf("lines[%d].SubText = %q, want %q（行 %q）；"+
+				"一行翻译只能配给一行主歌词",
+				i, lines[i].SubText, w, lines[i].Text)
+		}
+	}
+}
+
+// 翻译轨在容差内、本行翻译之前多出一行（异版本翻译会这样）时，不能被它抢走本行：配对数
+// 相同，取时差更小的那条。构造数据：在 realTrans 的第 1 行翻译前 200ms 插一行。
+//
+// 变异自证：把 alignByTime 换成双指针贪心（容差内遇到就配），或去掉它 better 里的总时差
+// 比较，本例均变红（第 1 行配上多出来的那行）。
+func TestMergeTransExtraLineDoesNotSteal(t *testing.T) {
+	lines, _, _ := parseLRC(realQRC, 0)
+	mergeTrans(lines, `[00:00.00]//
+[00:05.25]多出来的一行
+[00:05.45]你永远不会了解现在的我
+[00:14.94]所有的细节
+[00:26.48]我不知道`)
+
+	want := []string{"", "你永远不会了解现在的我", "所有的细节", "我不知道"}
+	for i, w := range want {
+		if lines[i].SubText != w {
+			t.Fatalf("lines[%d].SubText = %q, want %q；多出来的翻译行抢走了本行的翻译",
+				i, lines[i].SubText, w)
 		}
 	}
 }
@@ -107,10 +262,10 @@ func TestMergeTransMetaKeywordIsSubstring(t *testing.T) {
 
 // 超出容差的翻译行绝不能被拉过来配上：宁可没有 sub_text，也不能配错行。
 //
-// 变异自证：把 transToleranceMs 放大到 1000，本例变红。
+// 变异自证：把 transToleranceMs 放大到 500，本例变红（差 499ms）。
 func TestMergeTransRejectsBeyondTolerance(t *testing.T) {
 	lines, _, _ := parseLRC(realQRC, 0)
-	// 把翻译整体推后 500ms，远超 20ms 容差
+	// 一条翻译落在第 1 行后 499ms，超出 300ms 容差
 	mergeTrans(lines, `[00:05.95]不该被配上的翻译`)
 	for i := range lines {
 		if lines[i].SubText != "" {

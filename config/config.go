@@ -19,9 +19,10 @@ var log = logger.New("Config")
 
 // PlayerConfig 单播放器配置覆盖（nil 表示沿用全局值）
 type PlayerConfig struct {
-	Offset   *int
-	Poll     *int
-	IdleHide *int // per-player 通道无活跃自动隐藏阈值（秒，0=显式关）；nil=跟随全局 PerPlayerIdleHide
+	Offset         *int
+	Poll           *int
+	IdleHide       *int  // per-player 通道无活跃自动隐藏阈值（秒，0=显式关）；nil=跟随全局 PerPlayerIdleHide
+	AudioNormalize *bool // per-player 音量归一化开关；nil=跟随全局 AudioNormalize（对照 IdleHide 的 *int 语义）
 }
 
 // 播放器自动注册（播放器包在 init() 中调用 RegisterPlayer）
@@ -49,30 +50,70 @@ func RegisteredPlayers() []string {
 
 // Config 应用配置
 type Config struct {
-	Addr              string                   `yaml:"addr"`                 // WebSocket 监听地址
-	Offset            int                      `yaml:"offset"`               // 全局时间偏移（毫秒）
-	Poll              int                      `yaml:"poll"`                 // 全局轮询间隔（毫秒）
-	PriorPlayer       []string                 `yaml:"prior-player"`         // 优先播放器列表
-	PriorPlayerExpire int                      `yaml:"prior-player-expire"`  // 优先播放器暂停超时（秒）
-	PerPlayerIdleHide int                      `yaml:"per-player-idle-hide"` // 指定播放器通道无活跃自动隐藏（秒，0=关）
-	EffectStrategy    string                   `yaml:"-"`                    // 网易云特效最小化策略：park | fadeout（键 cloudmusicv3-effect-strategy）
-	Players           map[string]*PlayerConfig `yaml:"-"`                    // 各播放器专属配置
-	Sources           []string                 `yaml:"-"`                    // 配置来源列表（内部字段）
-	ExplicitKeys      map[string]bool          `yaml:"-"`                    // 被显式设置（非默认）的字段集合
+	Addr              string   `yaml:"addr"`                 // WebSocket 监听地址
+	Offset            int      `yaml:"offset"`               // 全局时间偏移（毫秒）
+	Poll              int      `yaml:"poll"`                 // 全局轮询间隔（毫秒）
+	PriorPlayer       []string `yaml:"prior-player"`         // 优先播放器列表
+	PriorPlayerExpire int      `yaml:"prior-player-expire"`  // 优先播放器暂停超时（秒）
+	PerPlayerIdleHide int      `yaml:"per-player-idle-hide"` // 指定播放器通道无活跃自动隐藏（秒，0=关）
+	// 音量归一化（EMA-AGC）。yaml tag 仅为文档，实际解码经 mergeYAML 手工搬运（见 §3.3）。
+	AudioNormalize        bool                     `yaml:"audio-normalize"`          // 全局音量归一化开关
+	AudioNormalizeTarget  int                      `yaml:"audio-normalize-target"`   // 目标响度（dBFS），范围 [-60,0]
+	AudioNormalizeMaxGain int                      `yaml:"audio-normalize-max-gain"` // 最大增益（dB），范围 [0,45]
+	EffectStrategy        string                   `yaml:"-"`                        // 网易云特效最小化策略：park | fadeout（键 cloudmusicv3-effect-strategy）
+	Players               map[string]*PlayerConfig `yaml:"-"`                        // 各播放器专属配置
+	Sources               []string                 `yaml:"-"`                        // 配置来源列表（内部字段）
+	ExplicitKeys          map[string]bool          `yaml:"-"`                        // 被显式设置（非默认）的字段集合
+	// WrittenValues 记录被钳制或校验回退改写过的键在配置中写下的原值（键名同 config.yml），
+	// 未被改写的键不在其中。上面各字段保存的始终是采纳后的运行值；原值只供 /service-status
+	// 的 config 回显（写下的值），经 Written / WrittenPlayerPoll 读取。
+	WrittenValues map[string]any `yaml:"-"`
+}
+
+// noteWritten 记录 key 写下但未按原样采纳的值。
+func (c *Config) noteWritten(key string, v any) {
+	if c.WrittenValues == nil {
+		c.WrittenValues = make(map[string]any)
+	}
+	c.WrittenValues[key] = v
+}
+
+// Written 返回 key 在配置中写下的值；该键未被钳制或校验回退改写过时即为 adopted（运行值）。
+func (c *Config) Written(key string, adopted any) any {
+	if v, ok := c.WrittenValues[key]; ok {
+		return v
+	}
+	return adopted
+}
+
+// WrittenPlayerPoll 返回 <name>-poll 写下的值：继承解析同 GetPlayerPoll（播放器覆盖 → 全局），
+// 但取钳制前的原值。
+func (c *Config) WrittenPlayerPoll(playerName string) int {
+	key, v := "poll", c.Poll
+	if pc, ok := c.Players[playerName]; ok && pc.Poll != nil {
+		key, v = playerName+"-poll", *pc.Poll
+	}
+	if w, ok := c.WrittenValues[key].(int); ok {
+		return w
+	}
+	return v
 }
 
 // DefaultConfig 返回内置默认配置
 func DefaultConfig() Config {
 	return Config{
-		Addr:              "0.0.0.0:8765",
-		Offset:            200,
-		Poll:              30,
-		PriorPlayer:       []string{"wesing"},
-		PriorPlayerExpire: 15,
-		PerPlayerIdleHide: 0,
-		EffectStrategy:    "fadeout",
-		Players:           make(map[string]*PlayerConfig),
-		ExplicitKeys:      make(map[string]bool),
+		Addr:                  "0.0.0.0:8765",
+		Offset:                200,
+		Poll:                  30,
+		PriorPlayer:           []string{"wesing"},
+		PriorPlayerExpire:     15,
+		PerPlayerIdleHide:     0,
+		AudioNormalize:        true,
+		AudioNormalizeTarget:  -14,
+		AudioNormalizeMaxGain: 30,
+		EffectStrategy:        "fadeout",
+		Players:               make(map[string]*PlayerConfig),
+		ExplicitKeys:          make(map[string]bool),
 	}
 }
 
@@ -99,6 +140,15 @@ func (c *Config) GetPlayerIdleHide(playerName string) int {
 		return *pc.IdleHide
 	}
 	return c.PerPlayerIdleHide
+}
+
+// GetPlayerAudioNormalize 获取播放器音量归一化开关。
+// per-player *bool 覆盖优先（false 与 nil 可区分），nil 则回退全局 AudioNormalize，语义同 GetPlayerIdleHide。
+func (c *Config) GetPlayerAudioNormalize(playerName string) bool {
+	if pc, ok := c.Players[playerName]; ok && pc.AudioNormalize != nil {
+		return *pc.AudioNormalize
+	}
+	return c.AudioNormalize
 }
 
 // IsPriorPlayer 检查播放器是否为优先播放器
@@ -129,8 +179,8 @@ var (
 // 注册表 Run 键自启、起始位置为空的快捷方式，CWD 都是 C:\Windows\system32：
 // 配置在那儿读、在那儿生成，还可能在提权时把 System32 写脏。
 //
-// 更糟的是 CWD 会跨 re-exec 传染：ensureCanonicalName(main.go:50) 与 restartSelf() 都用
-// exec.Command 且不设 cmd.Dir，而 ensureCanonicalName 跑在 config.Load()(main.go:55)
+// 更糟的是 CWD 会跨 re-exec 传染：main.go 的 ensureCanonicalName() 与 restartSelf() 都用
+// exec.Command 且不设 cmd.Dir，而 main() 里 ensureCanonicalName 跑在 config.Load()
 // **之前** —— 子进程是带着坏 CWD 去 Load 的。
 //
 // CWD 回退只为「开发者 go build 到临时目录再从别处跑」这一种场景保留。**它对 zip 用户
@@ -215,31 +265,38 @@ func Load() Config {
 	// 命令行参数覆盖
 	var cliAddr, cliPriorPlayer, cliEffectStrategy string
 	var cliOffset, cliPoll, cliIdleHide, cliPriorExpire int
+	var cliAudioNormalize bool
+	var cliAudioNormalizeTarget, cliAudioNormalizeMaxGain int
 	flag.StringVar(&cliAddr, "addr", "", i18n.T("WebSocket 监听地址"))
 	flag.IntVar(&cliOffset, "offset", 0, i18n.T("歌词时间偏移（毫秒）"))
 	flag.IntVar(&cliPoll, "poll", 0, i18n.T("轮询间隔（毫秒）"))
 	flag.IntVar(&cliPriorExpire, "prior-player-expire", 0, i18n.T("优先播放器暂停超时（秒）；0=关闭全部超时（含普通组），慎用"))
 	flag.IntVar(&cliIdleHide, "per-player-idle-hide", 0, i18n.T("指定播放器通道无活跃自动隐藏（秒，0=关）"))
+	flag.BoolVar(&cliAudioNormalize, "audio-normalize", false, i18n.T("音量归一化开关"))
+	flag.IntVar(&cliAudioNormalizeTarget, "audio-normalize-target", 0, i18n.T("音量归一化目标响度（dBFS），范围 [-60,0]"))
+	flag.IntVar(&cliAudioNormalizeMaxGain, "audio-normalize-max-gain", 0, i18n.T("音量归一化最大增益（dB），范围 [0,45]"))
 	flag.StringVar(&cliPriorPlayer, "prior-player", "", i18n.T("优先播放器列表，逗号分隔（如 wesing,kugou）；传空串=无优先播放器"))
 	flag.StringVar(&cliEffectStrategy, "cloudmusicv3-effect-strategy", "", i18n.T("网易云特效最小化策略：park（屏外保活）| fadeout（淡出）"))
 
 	// 为已注册的播放器动态创建 CLI flag
 	type playerCLI struct {
-		offset   *int
-		poll     *int
-		idleHide *int
+		offset         *int
+		poll           *int
+		idleHide       *int
+		audioNormalize *bool
 	}
 	cliPlayers := make(map[string]*playerCLI)
 	for _, name := range registeredPlayers {
 		cliPlayers[name] = &playerCLI{
-			offset:   flag.Int(name+"-offset", 0, fmt.Sprintf(i18n.T("%s 歌词时间偏移（毫秒）"), name)),
-			poll:     flag.Int(name+"-poll", 0, fmt.Sprintf(i18n.T("%s 轮询间隔（毫秒）"), name)),
-			idleHide: flag.Int(name+"-idle-hide", 0, fmt.Sprintf(i18n.T("%s 无活跃自动隐藏（秒，0=关，不传=跟随全局）"), name)),
+			offset:         flag.Int(name+"-offset", 0, fmt.Sprintf(i18n.T("%s 歌词时间偏移（毫秒）"), name)),
+			poll:           flag.Int(name+"-poll", 0, fmt.Sprintf(i18n.T("%s 轮询间隔（毫秒）"), name)),
+			idleHide:       flag.Int(name+"-idle-hide", 0, fmt.Sprintf(i18n.T("%s 无活跃自动隐藏（秒，0=关，不传=跟随全局）"), name)),
+			audioNormalize: flag.Bool(name+"-audio-normalize", false, fmt.Sprintf(i18n.T("%s 音量归一化开关（不传=跟随全局）"), name)),
 		}
 	}
 
 	// 自定义 Usage：全局 flag 在前，播放器 flag 按字母排序在后
-	globalFlags := []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "cloudmusicv3-effect-strategy"}
+	globalFlags := []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "cloudmusicv3-effect-strategy"}
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		// 先输出全局 flag
@@ -270,6 +327,10 @@ func Load() Config {
 
 	flag.Parse()
 
+	// CLI 的 cloudmusicv3-effect-strategy 取值非法时要撤销下面的显式标记，但 config.yml 已合法
+	// 设置过的标记须保留（它记录的是 yml 那一层的改动）。
+	effectStrategyFromYAML := cfg.ExplicitKeys["cloudmusicv3-effect-strategy"]
+
 	hasCliArgs := false
 	flag.Visit(func(f *flag.Flag) {
 		hasCliArgs = true
@@ -285,10 +346,25 @@ func Load() Config {
 			cfg.PriorPlayerExpire = cliPriorExpire
 		case "per-player-idle-hide":
 			cfg.PerPlayerIdleHide = cliIdleHide
+		case "audio-normalize":
+			cfg.AudioNormalize = cliAudioNormalize
+		case "audio-normalize-target":
+			cfg.AudioNormalizeTarget = cliAudioNormalizeTarget
+		case "audio-normalize-max-gain":
+			cfg.AudioNormalizeMaxGain = cliAudioNormalizeMaxGain
 		case "prior-player":
 			cfg.PriorPlayer = splitCommaList(cliPriorPlayer)
 		case "cloudmusicv3-effect-strategy":
-			cfg.EffectStrategy = cliEffectStrategy
+			if validEffectStrategy(cliEffectStrategy) {
+				cfg.EffectStrategy = cliEffectStrategy
+				delete(cfg.WrittenValues, f.Name) // CLI 写下的值已采纳，覆盖 config.yml 那层的非法值记录
+			} else {
+				cfg.noteWritten(f.Name, cliEffectStrategy)
+				log.Warn("-cloudmusicv3-effect-strategy 期望 park 或 fadeout，实际 %q，已忽略", cliEffectStrategy)
+				if !effectStrategyFromYAML {
+					delete(cfg.ExplicitKeys, f.Name)
+				}
+			}
 		default:
 			for _, name := range registeredPlayers {
 				if f.Name == name+"-offset" {
@@ -300,6 +376,9 @@ func Load() Config {
 				} else if f.Name == name+"-idle-hide" {
 					v := *cliPlayers[name].idleHide
 					cfg.Players[name].IdleHide = &v
+				} else if f.Name == name+"-audio-normalize" {
+					v := *cliPlayers[name].audioNormalize
+					cfg.Players[name].AudioNormalize = &v
 				}
 			}
 		}
@@ -309,6 +388,7 @@ func Load() Config {
 	}
 
 	clampPolls(&cfg)
+	clampAudioNormalize(&cfg)
 	warnUnknownPriorPlayers(&cfg)
 
 	return cfg
@@ -359,8 +439,9 @@ func warnUnknownPriorPlayers(cfg *Config) {
 // 轮询间隔的安全边界。
 //
 // 这是**安全下限**，不是调参下限：各播放器自身另有更高的下限（qqmusic <30ms→50ms、
-// cloudmusic <50ms→100ms，且后者兼防 time.NewTicker(0) panic），那些是它们各自的性能
-// 考量，都在 pollMin 之上、不会与本边界冲突。这里只挡「会把机器打爆」的值。
+// cloudmusic <50ms→100ms，且后者兼防 time.NewTicker(0) panic；sodamusic <200ms→200ms），
+// 定义在各包的 EffectivePollInterval，那些是它们各自的性能考量，都在 pollMin 之上、不会与
+// 本边界冲突。这里只挡「会把机器打爆」的值。
 const (
 	pollMin = 10
 	pollMax = 2000
@@ -390,6 +471,7 @@ func clampPoll(v int) (int, bool) {
 func clampPolls(cfg *Config) {
 	if v, clamped := clampPoll(cfg.Poll); clamped {
 		log.Warn("poll=%d 超出范围 [%d,%d]，已钳制为 %d", cfg.Poll, pollMin, pollMax, v)
+		cfg.noteWritten("poll", cfg.Poll)
 		cfg.Poll = v
 	}
 
@@ -407,10 +489,55 @@ func clampPolls(cfg *Config) {
 		}
 		if v, clamped := clampPoll(*pc.Poll); clamped {
 			log.Warn("%s-poll=%d 超出范围 [%d,%d]，已钳制为 %d", name, *pc.Poll, pollMin, pollMax, v)
+			cfg.noteWritten(name+"-poll", *pc.Poll)
 			*pc.Poll = v
 		}
 	}
 }
+
+// 音量归一化的参数边界。target 是 dBFS（0 为满刻度，负值为低于满刻度），max-gain 是允许
+// 放大的上限（dB，非负）。越界只钳不拒，照 clampPolls 惯例打 Warn。per-player 覆盖是 bool，
+// 无数值范围，不参与钳制。
+const (
+	audioNormTargetMin  = -60
+	audioNormTargetMax  = 0
+	audioNormMaxGainMin = 0
+	audioNormMaxGainMax = 45
+)
+
+// clampInt 把 v 夹进 [lo, hi]，返回夹后的值与是否发生过夹紧。
+func clampInt(v, lo, hi int) (int, bool) {
+	if v < lo {
+		return lo, true
+	}
+	if v > hi {
+		return hi, true
+	}
+	return v, false
+}
+
+// clampAudioNormalize 对全局 target/max-gain 应用边界，越界打 Warn。
+func clampAudioNormalize(cfg *Config) {
+	if v, clamped := clampInt(cfg.AudioNormalizeTarget, audioNormTargetMin, audioNormTargetMax); clamped {
+		log.Warn("audio-normalize-target=%d 超出范围 [%d,%d]，已钳制为 %d",
+			cfg.AudioNormalizeTarget, audioNormTargetMin, audioNormTargetMax, v)
+		cfg.noteWritten("audio-normalize-target", cfg.AudioNormalizeTarget)
+		cfg.AudioNormalizeTarget = v
+	}
+	if v, clamped := clampInt(cfg.AudioNormalizeMaxGain, audioNormMaxGainMin, audioNormMaxGainMax); clamped {
+		log.Warn("audio-normalize-max-gain=%d 超出范围 [%d,%d]，已钳制为 %d",
+			cfg.AudioNormalizeMaxGain, audioNormMaxGainMin, audioNormMaxGainMax, v)
+		cfg.noteWritten("audio-normalize-max-gain", cfg.AudioNormalizeMaxGain)
+		cfg.AudioNormalizeMaxGain = v
+	}
+}
+
+// validEffectStrategy 是 cloudmusicv3-effect-strategy 的取值判据，mergeYAML 与 CLI 覆盖共用。
+//
+// 非法值必须在 config 层拦下：server.SetDefaultEffectStrategy 对非法值静默忽略（运行时仍是
+// fadeout），而 /service-status 的 config_effective 与 config_overwritten 读的是 cfg 的运行值 ——
+// 放过去就是回显显示已生效、实际并未生效。被拦下的写下值记入 WrittenValues，只进 config 回显。
+func validEffectStrategy(s string) bool { return s == "park" || s == "fadeout" }
 
 // mergeYAML 只覆盖 YAML 中实际写了的字段
 func mergeYAML(dst *Config, m map[string]interface{}) {
@@ -460,10 +587,39 @@ func mergeYAML(dst *Config, m map[string]interface{}) {
 			log.Warn("per-player-idle-hide 期望整数，实际 %T（%v），已忽略", v, v)
 		}
 	}
+	if v, ok := m["audio-normalize"]; ok {
+		if b, ok := v.(bool); ok {
+			dst.AudioNormalize = b
+			mark("audio-normalize")
+		} else {
+			log.Warn("audio-normalize 期望布尔值，实际 %T（%v），已忽略", v, v)
+		}
+	}
+	if v, ok := m["audio-normalize-target"]; ok {
+		if i, ok := v.(int); ok {
+			dst.AudioNormalizeTarget = i
+			mark("audio-normalize-target")
+		} else {
+			log.Warn("audio-normalize-target 期望整数，实际 %T（%v），已忽略", v, v)
+		}
+	}
+	if v, ok := m["audio-normalize-max-gain"]; ok {
+		if i, ok := v.(int); ok {
+			dst.AudioNormalizeMaxGain = i
+			mark("audio-normalize-max-gain")
+		} else {
+			log.Warn("audio-normalize-max-gain 期望整数，实际 %T（%v），已忽略", v, v)
+		}
+	}
 	if v, ok := m["cloudmusicv3-effect-strategy"]; ok {
-		if s, ok := v.(string); ok && (s == "park" || s == "fadeout") {
+		if s, ok := v.(string); ok && validEffectStrategy(s) {
 			dst.EffectStrategy = s
 			mark("cloudmusicv3-effect-strategy")
+		} else {
+			if ok {
+				dst.noteWritten("cloudmusicv3-effect-strategy", s) // 非法字符串：不采纳，但回显写下的值
+			}
+			log.Warn("cloudmusicv3-effect-strategy 期望 park 或 fadeout，实际 %T（%v），已忽略", v, v)
 		}
 	}
 
@@ -492,6 +648,14 @@ func mergeYAML(dst *Config, m map[string]interface{}) {
 				mark(name + "-idle-hide")
 			} else {
 				log.Warn("%s-idle-hide 期望整数，实际 %T（%v），已忽略", name, v, v)
+			}
+		}
+		if v, ok := m[name+"-audio-normalize"]; ok {
+			if b, ok := v.(bool); ok {
+				pc.AudioNormalize = &b
+				mark(name + "-audio-normalize")
+			} else {
+				log.Warn("%s-audio-normalize 期望布尔值，实际 %T（%v），已忽略", name, v, v)
 			}
 		}
 	}
@@ -542,31 +706,45 @@ prior-player-expire: 15
 # 不写=跟随此全局值，0=该播放器关闭，n=该播放器用 n 秒（示例见下方 cloudmusicv3 段）。
 per-player-idle-hide: 0
 
+# 音频波形音量归一化：只作用于音频波形帧（/audio-ws 与 /<player>/audio-ws）的 RMS、左右声道峰值与频谱，
+# 使各播放器的波形幅度趋于一致，不改变实际播放音量。每个播放器可用 <name>-audio-normalize 单独覆盖
+# （true/false），不写=跟随此全局开关。
+audio-normalize: true
+# 目标响度（dBFS），范围 [-60,0]，越界自动钳到边界
+audio-normalize-target: -14
+# 最大增益（dB），范围 [0,45]，越界自动钳到边界
+audio-normalize-max-gain: 30
+
 # 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
 # wesing-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# wesing-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 网易云音乐 v3 配置
 cloudmusicv3-offset: 500
 # cloudmusicv3-poll: 100   # 低于 50 会被网易云自身的下限抬到 100，写 30 也是跑 100
 # cloudmusicv3-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# cloudmusicv3-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 cloudmusicv3-effect-strategy: fadeout # 特效最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
 # QQ 音乐 配置
 qqmusic-offset: 400
 # qqmusic-poll: 50
 # qqmusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# qqmusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 酷狗音乐 配置
 kugou-offset: 430
 # kugou-poll: 30
 # kugou-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# kugou-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 汽水音乐 配置
 sodamusic-offset: 340
 # sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
 # sodamusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# sodamusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 `
 
 // DefaultConfigContent 返回内置默认配置模板（唯一权威来源）。

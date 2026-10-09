@@ -198,7 +198,7 @@ func windowPID(hwnd uintptr) uint32 {
 // --- 包级回调：findMainAny（绝不在函数内 NewCallback）---
 //
 // windows.NewCallback 有全局数量上限（2000）且**永不回收**——这条约束对整个仓库有效，
-// player/wesing/proc/memory.go:120 与 :209 就是遵守它的样板。
+// player/wesing/proc/memory.go 的 enumWindowsCallback 与 getPlayStateCallback 就是遵守它的样板。
 //
 // 这里曾经每次调用都新建回调，实际可达且会打死进程：findMainAny 经 mainWindow 被
 // IsMainMinimized/IsMainForeground 调用，而它们在 effect 的 windowStateLoop 里每 80ms
@@ -315,7 +315,8 @@ func getRect(hwnd uintptr) rect {
 }
 
 // --- 包级回调：DebugList（同 findMainCallback，绝不在函数内 NewCallback）---
-// tools/parktest 是循环调用它的，同样会耗尽回调配额。
+// 现唯一调用方 tools/parktest 每进程只调一次（range 的是返回的切片），不构成实际敞口；
+// 放包级是规矩本身的要求——函数内 NewCallback 每调用一次就永久占一个槽位。
 var (
 	enumDebugMu   sync.Mutex
 	enumDebugPIDs map[uint32]bool

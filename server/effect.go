@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/telemetry"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -277,7 +279,7 @@ func (s *Server) EffectIngestWSURL() string {
 // 单一生产者（注入脚本只开一条），故升级后不做并发保护；handler 缺失则丢弃。
 func (s *Server) handleEffectIngest(w http.ResponseWriter, r *http.Request) {
 	// token 校验必须前置于 Upgrade：不匹配直接 403 返回，绝不升级为 WS。绝不改共用的
-	// s.upgrader.CheckOrigin（/ws、/<player>/ws、effect-ws、effect-ingest 四端点共用，改了会
+	// s.upgrader.CheckOrigin（/ws、/<player>/ws、audio-ws、effect-ws、effect-ingest 全部 WS 端点共用，改了会
 	// 403 掉 OBS 浏览器源的 effect-ws，见 AGENTS.md §3.4）——鉴权独立前置，不动 upgrader。
 	h := s.effectHub
 	h.mu.Lock()
@@ -385,6 +387,7 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 	// 一个收不到帧的僵尸供帧）。
 	done := make(chan struct{})
 	go func() {
+		defer telemetry.Guard()
 		defer close(done)
 		for msg := range sub.ch {
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
