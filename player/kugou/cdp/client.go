@@ -86,13 +86,13 @@ func Connect() (*Client, error) {
 	for _, p := range pages {
 		if strings.Contains(p.URL, "desktop-popup") || strings.Contains(p.Title, "desktop") {
 			wsUrl = p.WebSocketDebuggerUrl
-			log.Info("连接页面: %s (%s)", p.Title, p.URL)
+			log.Info("Connecting to page: %s (%s)", p.Title, p.URL)
 			break
 		}
 	}
 	if wsUrl == "" {
 		wsUrl = pages[0].WebSocketDebuggerUrl
-		log.Info("使用首页: %s (%s)", pages[0].Title, pages[0].URL)
+		log.Info("Using first page: %s (%s)", pages[0].Title, pages[0].URL)
 	}
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)

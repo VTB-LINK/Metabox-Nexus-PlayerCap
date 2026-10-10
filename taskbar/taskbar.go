@@ -96,9 +96,10 @@ func Flash() {
 }
 
 // Detach 释放 conhost 后端占用的 COM 与被锁定的 OS 线程，但保留任务栏当前颜色
-// （进度状态绑定窗口句柄、由 shell 维持，释放 COM 对象不影响显示）。用于「连不上网关→标红」
-// 这类设完终态还要继续跑服务的路径，避免 consoleInit 的 LockOSThread 泄漏到 server 阶段。
-// 下载成功/失败路径不需要它——那两条都直接 os.Exit。
+// （进度状态绑定窗口句柄、由 shell 维持，释放 COM 对象不影响显示）。用于设完终态之后进程还要
+// 长时间存活的路径：「连不上网关→标红」之后继续跑服务，避免 consoleInit 的 LockOSThread 泄漏到
+// server 阶段；更新成功之后 restartSelf 要等新进程结束才退出。下载失败路径不需要它——那条以
+// os.Exit 结束。
 func Detach() {
 	if tbMode == tbConsole {
 		consoleBackendDetach()

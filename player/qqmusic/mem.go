@@ -434,7 +434,7 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 			// → qqmusic 的重试循环继续转，已经够用；两遍模式要多一次动态分配 + 一次 syscall。
 			numModules := cbNeeded / uint32(unsafe.Sizeof(modules[0]))
 			if numModules > uint32(len(modules)) {
-				log.Warn("QQMusic.exe 模块数 %d 超出缓冲区 %d，只扫前 %d 个（找不到 DLL 会走重试）",
+				log.Warn("QQMusic.exe module count %d exceeds buffer %d; scanning only the first %d (missing DLL will trigger retry)",
 					numModules, len(modules), len(modules))
 				numModules = uint32(len(modules))
 			}
@@ -509,7 +509,7 @@ func (m *QQMusicMem) detectVersion() {
 	// 连版本号都读不到（路径 / PE 资源失败）：没有可算距离的信息，退到最新已知版本。
 	if exePath == "" {
 		fb := latestKnownVersion()
-		log.Warn("无法获取 QQMusic.exe 路径，回退到最新已知版本 v%s", fb)
+		log.Warn("Cannot obtain QQMusic.exe path; falling back to latest known version v%s", fb)
 		m.version = "unknown"
 		m.fallbackTo = fb
 		m.offsets = knownVersions[fb]
@@ -519,7 +519,7 @@ func (m *QQMusicMem) detectVersion() {
 	major, minor := getFileVersion(exePath)
 	if major == 0 && minor == 0 {
 		fb := latestKnownVersion()
-		log.Warn("版本检测失败，回退到最新已知版本 v%s", fb)
+		log.Warn("Version detection failed; falling back to latest known version v%s", fb)
 		m.version = "unknown"
 		m.fallbackTo = fb
 		m.offsets = knownVersions[fb]
@@ -530,14 +530,14 @@ func (m *QQMusicMem) detectVersion() {
 
 	if offsets, ok := knownVersions[m.version]; ok {
 		m.offsets = offsets
-		log.Info("QQ 音乐版本: %s (偏移已匹配)", m.version)
+		log.Info("QQ Music version: %s (offsets matched)", m.version)
 	} else {
 		// 「预期之外」：这台机器上的 QQ 音乐是我们没见过的版本，没有正确的偏移表。
 		// 按 semver 距离挑最近的已知版本去赌（而非写死某个版本）——读出来多半是垃圾
 		// （见 AGENTS.md §5.1），这不是「降级运行」，是「正在读错内存」。上报移到
 		// ReadAllMetadata：带上用这个 fallback 读到的歌名样本，才能判断赌对没有。
 		fb := nearestKnownVersion(m.version)
-		log.Warn("QQ 音乐版本 %s 无已知偏移表，按距离回退到 v%s", m.version, fb)
+		log.Warn("QQ Music version %s has no known offset table; falling back by distance to v%s", m.version, fb)
 		m.fallbackTo = fb
 		m.offsets = knownVersions[fb]
 	}
@@ -780,12 +780,12 @@ func (m *QQMusicMem) InjectSliderAOB() error {
 		return errors.New("aob pattern not found in memory (might be already injected)")
 	}
 
-	log.Info("AOB 滑块目标地址: 0x%X (模式 %d)", targetAddr, matchedPattern)
+	log.Info("AOB slider target address: 0x%X (pattern %d)", targetAddr, matchedPattern)
 
 	// Check if already hooked
 	firstByte := m.ReadBytes(targetAddr, 1)
 	if len(firstByte) > 0 && firstByte[0] == 0xE9 {
-		log.Info("滑块 Hook 已激活")
+		log.Info("Slider hook already active")
 		return nil
 	}
 
@@ -796,7 +796,7 @@ func (m *QQMusicMem) InjectSliderAOB() error {
 	}
 
 	m.sliderPointer = caveAddr + 0x100
-	log.Detail("Codecave @ 0x%X, 指针 @ 0x%X", caveAddr, m.sliderPointer)
+	log.Detail("Codecave @ 0x%X, pointer @ 0x%X", caveAddr, m.sliderPointer)
 
 	// Build assembly
 	buf := new(bytes.Buffer)
@@ -837,7 +837,7 @@ func (m *QQMusicMem) InjectSliderAOB() error {
 	// Restore protect
 	procVirtualProtectEx.Call(m.hProcess, targetAddr, 6, uintptr(oldProtect), uintptr(unsafe.Pointer(&oldProtect)))
 
-	log.Info("滑块 AOB Hook 注入成功")
+	log.Info("Slider AOB hook injected successfully")
 	return nil
 }
 
@@ -866,7 +866,7 @@ func (m *QQMusicMem) InjectProgressAOB() error {
 	if !bytes.Equal(actual, expect) {
 		// Check if already hooked (first byte = JMP = 0xE9)
 		if len(actual) > 0 && actual[0] == 0xE9 {
-			log.Info("进度 Hook 已激活")
+			log.Info("Progress hook already active")
 			return nil
 		}
 		return fmt.Errorf("unexpected bytes at dll+%X: got %X, want %X", targetOffset, actual, expect)
@@ -876,7 +876,7 @@ func (m *QQMusicMem) InjectProgressAOB() error {
 	// This avoids needing to resolve GetTickCount across 32/64 bit process boundaries.
 	// TickCount.LowPart = [0x7FFE0320], TickCountMultiplier = [0x7FFE0004]
 	// Result = (LowPart * Multiplier) >> 24 = milliseconds
-	log.Detail("使用 KUSER_SHARED_DATA 获取 tick count")
+	log.Detail("Using KUSER_SHARED_DATA to obtain tick count")
 
 	// Allocate codecave
 	caveAddr, _, _ := procVirtualAllocEx.Call(m.hProcess, 0, 0x1000, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE)
@@ -887,7 +887,7 @@ func (m *QQMusicMem) InjectProgressAOB() error {
 	// Data area at cave+0x100 (progressMs) and cave+0x104 (timestamp)
 	m.progressPtr = caveAddr + 0x100
 	m.progressTsPtr = caveAddr + 0x104
-	log.Detail("进度 Hook Cave @ 0x%X, progressPtr @ 0x%X, tsPtr @ 0x%X",
+	log.Detail("Progress hook cave @ 0x%X, progressPtr @ 0x%X, tsPtr @ 0x%X",
 		caveAddr, m.progressPtr, m.progressTsPtr)
 
 	// Build codecave assembly
@@ -945,7 +945,7 @@ func (m *QQMusicMem) InjectProgressAOB() error {
 	// Restore protection
 	procVirtualProtectEx.Call(m.hProcess, targetAddr, 6, uintptr(oldProtect), uintptr(unsafe.Pointer(&oldProtect)))
 
-	log.Info("进度 Hook 注入成功")
+	log.Info("Progress hook injected successfully")
 	return nil
 }
 
@@ -1126,7 +1126,7 @@ func (m *QQMusicMem) FindCookie() string {
 					if strings.Contains(cookieStr, "qqmusic_key=") || strings.Contains(cookieStr, "qm_keyst=") {
 						lastCachedCookie = cookieStr
 						lastCookieTime = time.Now()
-						log.Detail("提取到 Cookie: %s...", cookieStr[:min(50, len(cookieStr))])
+						log.Detail("Extracted cookie: %s...", cookieStr[:min(50, len(cookieStr))])
 
 						return cookieStr
 					}
@@ -1186,7 +1186,7 @@ func (m *QQMusicMem) FindSongMid(durationMs uint32) string {
 				}
 				if hit {
 					if mid := extractSongMid(data, durationMs); mid != "" {
-						log.Detail("找到 songmid '%s' (songPlayTime=%d)", mid, durationMs)
+						log.Detail("Found songmid '%s' (songPlayTime=%d)", mid, durationMs)
 						return mid
 					}
 				}

@@ -326,7 +326,7 @@ func normLyricRune(r rune) (rune, bool) {
 // （lyric_update 每轮读它取当前行）。若本 goroutine 直接 Emit 一份带音译的 all_lyrics，主循环
 // 手里的 currentLyrics 仍是空音译版，其后每条 lyric_update 继续发空 roma_text——两个事件自相
 // 矛盾。交回主循环由它统一换掉 currentLyrics 再重发 all_lyrics，才能让 all_lyrics 与其后每条
-// lyric_update 都带音译（与其余四家一致：两个事件同源）。
+// lyric_update 都带音译（与其余各家一致：两个事件同源）。
 //
 // **为什么无需 ctx 取消 / 代次淘汰**：本 goroutine 从不 Emit，只往 romaCh（每首歌一个、容量 1）
 // 送一次结果。换歌时主循环给下一首建新 romaCh，上一首的迟到结果落进被弃置的旧 channel 随之 GC，
@@ -338,16 +338,16 @@ func (p *SodaMusicPlayer) fetchKugouRoma(romaCh chan<- []krc.Line, sodaLines []k
 	// 传空 hash → 走 Tier 2/3（按歌手+歌名 catalog 搜 + ±5s 时长严格匹配），不依赖酷狗 hash。
 	kugouLines, err := klyric.Fetch("", durationMs, name, singer)
 	if err != nil {
-		log.Detail("酷狗音译借取失败：按「%s - %s」搜索出错：%v", singer, name, err)
+		log.Detail("Borrowing romanization from KuGou failed: search for \"%s - %s\" errored: %v", singer, name, err)
 		return
 	}
 	if len(kugouLines) == 0 {
-		log.Detail("酷狗音译未命中：按「%s - %s」搜不到对应曲，音译留空", singer, name)
+		log.Detail("No KuGou romanization match: no song found for \"%s - %s\"; romanization left empty", singer, name)
 		return
 	}
 	st := mergeKugouRomaStats(sodaLines, kugouLines)
 	if st.matched == 0 {
-		log.Detail("酷狗命中「%s - %s」%d 行，但与汽水主歌词无一对齐（版本/母带/翻唱不同？），音译留空",
+		log.Detail("KuGou matched \"%s - %s\" with %d lines, but none align with the SodaMusic main lyrics (different version/master/cover?); romanization left empty",
 			singer, name, len(kugouLines))
 		return
 	}
@@ -355,7 +355,7 @@ func (p *SodaMusicPlayer) fetchKugouRoma(romaCh chan<- []krc.Line, sodaLines []k
 	if sample == "" {
 		sample = romaSample(sodaLines) // 全靠行级回落时字级无样本，退回首个带音译行
 	}
-	log.Detail("酷狗音译已对齐：按「%s - %s」命中酷狗 %d 行；字级 %d + 行级回落 %d = 共 %d/%d 行、留空 %d 行；样本 %s",
+	log.Detail("KuGou romanization aligned: \"%s - %s\" matched %d KuGou lines; word-level %d + line-level fallback %d = %d/%d lines in total, %d left empty; sample %s",
 		singer, name, len(kugouLines), st.charLines, st.lineLines, st.matched, len(sodaLines), len(sodaLines)-st.matched, sample)
 	romaCh <- sodaLines
 }

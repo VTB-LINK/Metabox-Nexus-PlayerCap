@@ -395,12 +395,12 @@ func Park() bool {
 	}
 	hwnd := mainWindow()
 	if hwnd == 0 {
-		log.Warn("未找到网易云主窗口，无法泊车")
+		log.Warn("NetEase Cloud Music main window not found; cannot park")
 		return false
 	}
 	wp, ok := getPlacement(hwnd)
 	if !ok {
-		log.Warn("读取窗口位置失败，无法泊车")
+		log.Warn("Failed to read window placement; cannot park")
 		return false
 	}
 	parkedMem = true
@@ -418,7 +418,7 @@ func Park() bool {
 	setPlacement(hwnd, &off) // 取消最小化 + 不激活（但 SetWindowPlacement 会把位置钳到可见工作区）
 	// SetWindowPos 不钳制，真正移到屏外（SetWindowPlacement 对正常态窗口会夹到屏幕边缘）
 	procSetWindowPos.Call(hwnd, 0, uintptr(ox), 100, 0, 0, swpNoActivate|swpNoZOrder|swpNoSize)
-	log.Success("网易云已泊车至屏幕外（不抢焦点）")
+	log.Success("NetEase Cloud Music parked off-screen (without stealing focus)")
 	return true
 }
 
@@ -440,7 +440,7 @@ func Unpark() bool {
 		wp.ShowCmd = swShowNormal // 若泊车时是从最小化态存的，还原成正常显示而非再最小化
 	}
 	setPlacement(hwnd, &wp)
-	log.Success("网易云窗口已还原")
+	log.Success("NetEase Cloud Music window restored")
 	return true
 }
 
@@ -450,7 +450,7 @@ func RestoreOrphaned() {
 	if s == nil || !s.Parked {
 		return
 	}
-	log.Warn("检测到遗留泊车状态（上次异常退出），正在还原网易云窗口...")
+	log.Warn("Detected orphaned park state (previous abnormal exit); restoring NetEase Cloud Music window...")
 	mu.Lock()
 	parkedMem = true
 	savedPlacement = s.Placement // 采纳崩溃前落盘的原始位置

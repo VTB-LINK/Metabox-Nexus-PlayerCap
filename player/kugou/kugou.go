@@ -116,7 +116,7 @@ func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name,
 				return
 			default:
 			}
-			log.Info("无法获取封面，回退到歌手艺术照")
+			log.Info("Cover unavailable; falling back to artist photo")
 			coverURL = fetchCoverFromAPI(hash)
 			fromAPI = true
 		case <-ctx.Done():
@@ -195,7 +195,7 @@ func (p *KuGouPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("酷狗音乐未启动或 CDP 未就绪"), Reason: player.ReasonProcessNotRunning})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("KuGou not running or CDP not ready"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		// 自动检测并修复：若 libcef.dll 未 patch 则 kill → patch → 重启酷狗
@@ -206,14 +206,14 @@ func (p *KuGouPlayer) Start() {
 			default:
 			}
 			if errors.Is(err, watchdog.ErrInstallNotFound) {
-				log.Error("自动修复失败: %v（请手动运行酷狗启动工具或检查安装路径）", err)
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("未找到酷狗安装，已停止"), Reason: player.ReasonInstallNotFound})
+				log.Error("Auto-repair failed: %v (run the KuGou launch tool manually or check the install path)", err)
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("KuGou installation not found, stopped"), Reason: player.ReasonInstallNotFound})
 				return
 			}
 			if errors.Is(err, watchdog.ErrVersionUnsupported) {
 				// 版本指纹不认识：重试也只会反复弹 UAC 打错版本，终态停止。
-				log.Error("自动修复失败: %v（请降级到受支持的酷狗版本，或等待适配后重试）", err)
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("酷狗 libcef.dll 版本不受支持，已停止"), Reason: player.ReasonVersionUnsupported})
+				log.Error("Auto-repair failed: %v (downgrade to a supported KuGou version, or retry after adaptation)", err)
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("KuGou libcef.dll version unsupported, stopped"), Reason: player.ReasonVersionUnsupported})
 				return
 			}
 			if errors.Is(err, watchdog.ErrElevationFailed) {
@@ -221,19 +221,18 @@ func (p *KuGouPlayer) Start() {
 				// CDP 不可能起来，而 waitForCDP 在酷狗没跑时会立即返回，等于 2s 后又弹 UAC。
 				backoff, giveUp := elevation.record()
 				if giveUp {
-					log.Error("连续 %d 次未取得管理员权限，停止自动修复（再试只会让 UAC 安全桌面反复夺焦）。"+
-						"如需启用酷狗，请重启本程序并在 UAC 弹窗点「是」", len(elevationBackoffs)+1)
-					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("未取得管理员权限，已停止自动修复"), Reason: player.ReasonNoAdmin})
+					log.Error("Failed to obtain administrator rights %d times in a row; stopping auto-repair (retrying only makes the UAC secure desktop repeatedly steal focus). To enable KuGou, restart this program and click \"Yes\" on the UAC prompt", len(elevationBackoffs)+1)
+					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("Administrator rights not obtained, auto-repair stopped"), Reason: player.ReasonNoAdmin})
 					return
 				}
-				log.Warn("未取得管理员权限（第 %d/%d 次）: %v —— %v 后重试",
+				log.Warn("Administrator rights not obtained (attempt %d/%d): %v — retrying in %v",
 					elevation.fails, len(elevationBackoffs)+1, err, backoff)
 				if p.sleepOrStop(backoff) {
 					return
 				}
 				continue
 			}
-			log.Warn("自动修复失败: %v（请手动运行酷狗启动工具或检查安装路径）", err)
+			log.Warn("Auto-repair failed: %v (run the KuGou launch tool manually or check the install path)", err)
 			// 其他错误继续等待——用户可能手动启动酷狗
 		} else {
 			elevation.reset() // 提权成功（或本就无需提权）：下次失败重新从最短退避算起
@@ -247,18 +246,18 @@ func (p *KuGouPlayer) Start() {
 			default:
 			}
 			// CDP 等待超时（酷狗可能已退出），重新走 EnsurePatched 检测
-			log.Warn("CDP 未就绪，重新检测酷狗状态...")
+			log.Warn("CDP not ready; rechecking KuGou status...")
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		log.Info("CDP 连接成功，开始监听播放状态")
+		log.Info("CDP connected, monitoring playback state")
 		p.runSession(client)
 		client.Close()
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("酷狗音乐 CDP 已断开"), Reason: player.ReasonCDPDisconnected})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("KuGou CDP disconnected"), Reason: player.ReasonCDPDisconnected})
 		p.Emit(player.EventClearSongData, nil)
-		log.Info("会话结束，等待酷狗重新启动...")
+		log.Info("Session ended; waiting for KuGou to restart...")
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -282,16 +281,16 @@ func (p *KuGouPlayer) waitForCDP() (*cdp.Client, error) {
 
 		// 进程已退出则立即返回，不再等待 90s
 		if !watchdog.IsKuGouRunning() {
-			return nil, i18n.Errorf("酷狗进程已退出")
+			return nil, i18n.Errorf("KuGou process has exited")
 		}
 
 		now := time.Now()
 		if now.After(nextLog) {
-			log.Info("等待酷狗 CDP 端口 12233 就绪... (%v)", err)
+			log.Info("Waiting for KuGou CDP port 12233... (%v)", err)
 			nextLog = now.Add(10 * time.Second)
 		}
 		if now.After(deadline) {
-			return nil, i18n.Errorf("CDP 90s 内未就绪: %w", err)
+			return nil, i18n.Errorf("CDP not ready within 90s: %w", err)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -355,8 +354,13 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 		}
 
 		info, err := client.GetPlayInfo()
+		// sampleTime 是本轮进度读数（info.Progress）的时刻。换歌分支与进度更新处落锚都配它，不取用到读数
+		// 时的时刻：换歌分支里的取词是阻塞的网络请求，取词返回后再取当前时刻，就把取词前的读数配到了
+		// 取词后的时刻上，位置落后取词耗时；进度更新处拿推算位置与读数比较，耗时超过 3 秒还会判成回跳。
+		// 换歌分支在取词之后会重读一次，读到同一首歌时 info、progressSec 与它一起换成新读数。
+		sampleTime := time.Now()
 		if err != nil {
-			log.Warn("GetPlayInfo 失败: %v", err)
+			log.Warn("GetPlayInfo failed: %v", err)
 			// Connection likely broken
 			if coverCancel != nil {
 				coverCancel()
@@ -382,14 +386,17 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			lastHash = info.Hash
 			lastLineIdx = -1
 			currentDurationSec = durationSec
-			isPlaying = (info.PlayStatus == "playing")
+			// 与 statusStr、下方播放状态变化检测同一个判据（都认 "play"）：只认 "playing" 的话，状态为
+			// "play" 时这里记成未在播，而 lastStatus 也是 "play"、状态变化检测不触发，本地时钟到下一次
+			// 状态变化之前都不走。
+			isPlaying = statusStr(info.PlayStatus) == "playing"
 			// progress 仅在合法范围内时作为初始锚点，否则从 0 开始
 			if isProgressValid(progressSec, durationSec) {
 				anchorProgressSec = progressSec
 			} else {
 				anchorProgressSec = 0
 			}
-			anchorTime = time.Now()
+			anchorTime = sampleTime
 
 			name, singer := splitFilename(info.Filename)
 			// 捕获上一首歌的标识，用于判断是否是"同名同歌手但 hash 变了"的场景
@@ -400,13 +407,14 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			currentTitle = buildTitle(name, singer)
 			currentCover = strings.Replace(info.Cover, "/stdmusic/120/", "/stdmusic/800/", 1)
 
-			log.Info("♪ 歌曲: %s - %s (hash: %s)", currentName, currentSinger, info.Hash)
+			log.Info("♪ Song: %s - %s (hash: %s)", currentName, currentSinger, info.Hash)
 
 			// 切歌瞬间 CDP 常回一个过渡态 play_status（新歌尚未起播，读到空/stopped），statusStr
 			// 会把它塌成 standby。但 hash 已变，本身就证明「新歌入场」而非待机——这条 standby 发出去
 			// 会让路由器把 kugou 判为 idle：正在播的其他播放器立刻顶上又被抢回（overlay 硬切/闪烁；
 			// 单播放器时则 player_clear 瞬间全黑）。故过渡态不发 status_update，留给下方 play_status
-			// 变化检测下一帧读到真实 playing/paused 再发；真正的 playing/paused 一律照发。
+			// 变化检测读到真实 playing/paused 再发（本轮取词后重读到的，或下一帧读到的）；真正的
+			// playing/paused 一律照发。
 			if s := statusStr(info.PlayStatus); s != "standby" {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: s, Detail: currentTitle})
 			}
@@ -428,25 +436,49 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			lines, lyrErr := klyric.Fetch(info.Hash, int(durationMs), name, singer)
 			sameSong := name == prevName && singer == prevSinger
 			if lyrErr != nil {
-				log.Warn("歌词获取失败: %v", lyrErr)
+				log.Warn("lyric fetch failed: %v", lyrErr)
 				if !sameSong {
 					currentLyrics = nil
 				}
 			} else if len(lines) > 0 {
 				applyDetailedOffset(lines, offsetSec)
 				currentLyrics = lines
-				log.Info("歌词加载完成: %d 行；逐字：%s", len(lines), detailedFlag(lines))
+				log.Info("Lyrics loaded: %d lines; per-character: %s", len(lines), detailedFlag(lines))
 			} else if sameSong && len(currentLyrics) > 0 {
 				// 同名同歌手但本次取不到（伴唱模式 hash 变化）→ 复用上一次的歌词
 				// 复用的是已套过 offset 的 currentLyrics，不要再套一次。
-				log.Info("同曲目 hash 变化，复用上一次歌词（%d 行）；逐字：%s", len(currentLyrics), detailedFlag(currentLyrics))
+				log.Info("Same song, hash changed; reusing previous lyrics (%d lines); word-by-word: %s", len(currentLyrics), detailedFlag(currentLyrics))
 			} else {
 				currentLyrics = nil
-				log.Info("纯音乐/无歌词；逐字：%s", detailedFlag(currentLyrics))
+				log.Info("Instrumental / no lyrics; word-by-word: %s", detailedFlag(currentLyrics))
 			}
 
 			lyricItems := toLyricLines(currentLyrics, offsetSec)
-			initPlay := anchorProgressSec // 已经过合法性验证的初始进度
+
+			// 取词是阻塞的网络请求，返回时本轮读到的进度与播放状态都已过时：其间可能暂停、恢复或拖动过。
+			// 再读一次，读到的仍是这首歌就把它当作本轮的读数——info、progressSec 与 sampleTime 一起替换，
+			// 进度合法则以它落锚；下面随歌词发出的位置、本轮其后的播放状态变化检测与进度更新都基于它。
+			// 读不到、或读到的已不是这首歌，则沿用取词前的读数，留给下一轮。重读出错不在这里退出：
+			// 连接若已断，下一轮的 GetPlayInfo 会处理。
+			//
+			// statusAtChange 是取词前的状态，即上面已发出（过渡态时压下未发）的那个。分支末尾记进
+			// lastStatus 的必须是它，不是重读到的：取词期间状态变了，紧接着的播放状态变化检测才会发出
+			// playback_pause / playback_resume 与状态；过渡态压下的那次状态也由该处补发。
+			statusAtChange := info.PlayStatus
+			if fresh, rerr := client.GetPlayInfo(); rereadSameSong(fresh, rerr, lastHash) {
+				sampleTime = time.Now()
+				freshRaw, _ := strconv.ParseFloat(fresh.Progress, 64)
+				info = fresh
+				progressSec = float32(freshRaw / 1e7)
+				if isProgressValid(progressSec, currentDurationSec) {
+					anchorProgressSec = progressSec
+					anchorTime = sampleTime
+				}
+			}
+
+			// 随歌词发出的位置取此刻的（服务端以事件到达的时刻为采样时刻）：重读成功时锚点就是刚读到的
+			// 进度，没有重读到则由取词前的锚点按经过的时间推算。算式与下方歌词行匹配处的 interpSec 是同一个。
+			initPlay := player.LivePosition(anchorProgressSec, anchorTime, time.Now(), isPlaying, currentDurationSec)
 			progress := player.ClampProgress(initPlay, currentDurationSec)
 
 			// 酷狗对没有歌词的歌返回一行「纯音乐，请欣赏」，而非空歌词。归一成
@@ -456,7 +488,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			// all_lyrics 说 count:0、轮询却仍按那一行发 index:0 的 lyric_update。
 			pureHint := ""
 			if player.IsPureMusicOnly(lyricItems) {
-				log.Info("平台只返回提示语「%s」，按无歌词处理", lyricItems[0].Text)
+				log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
 				pureHint = lyricItems[0].Text
 				currentLyrics = nil
 				lyricItems = []player.LyricLine{} // 显式空 slice——nil 会序列化成 null，破坏「空数据一律 {} / []」
@@ -478,14 +510,14 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				})
 			}
 
-			lastStatus = info.PlayStatus
+			lastStatus = statusAtChange // 取词前的状态，理由见 statusAtChange
 		}
 
 		// ── 封面延迟到达（VIP 歌曲首次播放时封面为空，稍后才填入）──
 		// 仅将 URL 送入 channel，由封面 goroutine 统一下载并发送（不额外发事件）
 		if info.Cover != "" && info.Cover != currentCover {
 			currentCover = info.Cover
-			log.Info("封面 URL 已更新: %s", currentCover)
+			log.Info("Cover URL updated: %s", currentCover)
 			if coverCh != nil {
 				select {
 				case coverCh <- currentCover:
@@ -508,7 +540,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				anchorTime = time.Now()
 				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: anchorProgressSec, Progress: player.ClampProgress(anchorProgressSec, currentDurationSec)})
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
-				log.Info("恢复 @ %.2fs", anchorProgressSec)
+				log.Info("resumed @ %.2fs", anchorProgressSec)
 			case "paused", "pause", "pasued":
 				isPlaying = false
 				// 暂停时冻结到合法进度；否则用本地时钟插值值冻结
@@ -524,9 +556,9 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				anchorTime = time.Now()
 				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: anchorProgressSec, Progress: player.ClampProgress(anchorProgressSec, currentDurationSec)})
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentTitle})
-				log.Info("暂停 @ %.2fs", anchorProgressSec)
+				log.Info("paused @ %.2fs", anchorProgressSec)
 			default:
-				log.Warn("未知的 play_status 值: %q", info.PlayStatus)
+				log.Warn("Unknown play_status value: %q", info.PlayStatus)
 			}
 		}
 
@@ -535,33 +567,26 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 		// KuGou 在播放状态下可能返回超出歌曲时长的值（单位非 ms），此时让
 		// 本地时钟自由运行，不更新锚点，不触发 seek 事件。
 		if isPlaying && isProgressValid(progressSec, currentDurationSec) {
-			interpSec := anchorProgressSec + float32(time.Since(anchorTime).Seconds())
+			// 与读数比较的是读数时刻的推算位置，落锚也配读数时刻（见 sampleTime）。
+			interpSec := anchorProgressSec + float32(sampleTime.Sub(anchorTime).Seconds())
 			drift := progressSec - interpSec
 			if drift < -3.0 {
-				log.Info("检测到回跳: %.2fs → %.2fs", anchorProgressSec, progressSec)
+				log.Info("Seek-back detected: %.2fs → %.2fs", anchorProgressSec, progressSec)
 				lastLineIdx = -1
 				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: progressSec, Progress: player.ClampProgress(progressSec, currentDurationSec)})
 			} else if drift > 3.0 {
-				log.Info("检测到前跳: %.2fs → %.2fs", anchorProgressSec, progressSec)
+				log.Info("forward seek detected: %.2fs → %.2fs", anchorProgressSec, progressSec)
 				lastLineIdx = -1
 				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: progressSec, Progress: player.ClampProgress(progressSec, currentDurationSec)})
 			}
 			anchorProgressSec = progressSec
-			anchorTime = time.Now()
+			anchorTime = sampleTime
 		}
 
 		// ── 本地时钟插值 ──
-		var interpSec float32
-		if isPlaying {
-			interpSec = anchorProgressSec + float32(time.Since(anchorTime).Seconds())
-		} else {
-			interpSec = anchorProgressSec
-		}
-		if currentDurationSec > 0 && interpSec > currentDurationSec {
-			interpSec = currentDurationSec
-		}
+		interpSec := player.LivePosition(anchorProgressSec, anchorTime, time.Now(), isPlaying, currentDurationSec)
 
-		matchTime := interpSec + offsetSec
+		matchTime := player.LyricMatchTime(interpSec, offsetSec)
 
 		// ── 歌词行匹配 ──
 		if len(currentLyrics) > 0 {
@@ -584,6 +609,13 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 					offsetSec, interpSec, currentDurationSec,
 				))
 			}
+		}
+
+		// 位置采样（见 BaseEmitter.EmitPositionSample）：播放中按固定间隔报一次，校准服务端缓存里的位置
+		// ——上面每轮都以平台进度重新落锚，3s 以内的偏差直接吸收、不发事件，无歌词的歌又没有歌词行可推。
+		// 传 interpSec，与上面 lyric_update 的 position 同一个量；offset 只进了 matchTime，这里不带。
+		if isPlaying {
+			p.EmitPositionSample(time.Now(), interpSec, currentDurationSec)
 		}
 
 		time.Sleep(pollInterval)
@@ -616,6 +648,13 @@ func statusStr(playStatus string) string {
 	default:
 		return "standby"
 	}
+}
+
+// rereadSameSong 判断换歌取词之后重读到的播放信息能否当作本轮的读数：读成功、有歌，且仍是 hash
+// 这一首。比较与轮询循环的换歌判据一致（hash 逐字相等）；放宽了，这里采用的读数会在下一轮被判成换歌。
+// GetPlayInfo 在没有歌时返回 nil, nil，故须先判 fresh 非空。
+func rereadSameSong(fresh *cdp.PlayInfo, err error, hash string) bool {
+	return err == nil && fresh != nil && hash != "" && fresh.Hash == hash
 }
 
 // isProgressValid 判断 progressSec 是否在合理的播放范围内（[0, duration*1.05]）。
@@ -672,10 +711,10 @@ func applyDetailedOffset(lines []klyric.Line, offsetSec float32) {
 func detailedFlag(lines []klyric.Line) string {
 	for _, l := range lines {
 		if len(l.Detailed.Words) > 0 {
-			return i18n.T("是")
+			return i18n.T("yes")
 		}
 	}
-	return i18n.T("否")
+	return i18n.T("no")
 }
 
 // ── 酷狗 API 封面兜底 ────────────────────────────────────────────────────────
@@ -697,7 +736,7 @@ func fetchCoverFromAPI(hash string) string {
 	url := "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=" + hash
 	resp, err := kugouAPIClient.Get(url)
 	if err != nil {
-		log.Warn("封面 API 请求失败: %v", err)
+		log.Warn("Cover API request failed: %v", err)
 		return ""
 	}
 	defer resp.Body.Close()

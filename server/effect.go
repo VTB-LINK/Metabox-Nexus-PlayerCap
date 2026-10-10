@@ -134,7 +134,7 @@ func (s *Server) handleEffectControl(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := fmt.Sprintf("strategy=%s manualParkCmd=%d", h.strategy, h.manualParkCmd)
 	h.mu.Unlock()
-	serverLog.Info("网易云特效控制: %s", resp)
+	serverLog.Info("NetEase effect control: %s", resp)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(resp + "\n"))
 }
@@ -159,7 +159,7 @@ func (s *Server) setEffectParams(quality int, scale float64, headerClickable, fo
 		h.headerClickable = headerClickable
 		h.footerClickable = footerClickable
 		h.gen++
-		serverLog.Info("网易云特效参数更新: quality=%d scale=%.2f headerClickable=%v footerClickable=%v (gen=%d)",
+		serverLog.Info("NetEase effect params updated: quality=%d scale=%.2f headerClickable=%v footerClickable=%v (gen=%d)",
 			quality, scale, headerClickable, footerClickable, h.gen)
 	}
 	h.mu.Unlock()
@@ -291,11 +291,11 @@ func (s *Server) handleEffectIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		serverLog.Warn("网易云特效Ingest Upgrade 失败: %v", err)
+		serverLog.Warn("NetEase effect ingest upgrade failed: %v", err)
 		return
 	}
 	defer conn.Close()
-	serverLog.Info("网易云特效Ingest 连接: %s", conn.RemoteAddr())
+	serverLog.Info("NetEase effect ingest connected: %s", conn.RemoteAddr())
 	for {
 		mt, data, err := conn.ReadMessage()
 		if err != nil {
@@ -312,7 +312,7 @@ func (s *Server) handleEffectIngest(w http.ResponseWriter, r *http.Request) {
 			fn(data)
 		}
 	}
-	serverLog.Info("网易云特效Ingest 断开: %s", conn.RemoteAddr())
+	serverLog.Info("NetEase effect ingest disconnected: %s", conn.RemoteAddr())
 }
 
 // parseBoolParam 解析 "1"/"0"/"true"/"false"/"yes"/"no"，无法识别时返回 def。
@@ -330,7 +330,7 @@ func parseBoolParam(v string, def bool) bool {
 func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		serverLog.Warn("网易云特效WS Upgrade 失败: %v", err)
+		serverLog.Warn("NetEase effect WS upgrade failed: %v", err)
 		return
 	}
 
@@ -377,7 +377,7 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 	h.subs[sub] = struct{}{}
 	count := len(h.subs)
 	h.mu.Unlock()
-	serverLog.Info("网易云特效WS 连接: %s (total: %d)", conn.RemoteAddr(), count)
+	serverLog.Info("NetEase effect WS connected: %s (total: %d)", conn.RemoteAddr(), count)
 
 	// 连接即发一次当前状态（网易云是否活跃输出）
 	sub.ch <- effectMsg{mt: websocket.TextMessage, data: s.effectStatusJSON()}
@@ -392,7 +392,7 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 		for msg := range sub.ch {
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteMessage(msg.mt, msg.data); err != nil {
-				serverLog.Warn("网易云特效WS 写入失败，关闭连接: %s: %v", conn.RemoteAddr(), err)
+				serverLog.Warn("NetEase effect WS write failed, closing connection: %s: %v", conn.RemoteAddr(), err)
 				conn.Close() // 解阻塞读循环，交由下面既有的清理路径注销
 				return
 			}
@@ -413,5 +413,5 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 	close(sub.ch)
 	conn.Close()
 	<-done
-	serverLog.Info("网易云特效WS 断开: %s (total: %d)", conn.RemoteAddr(), count)
+	serverLog.Info("NetEase effect WS disconnected: %s (total: %d)", conn.RemoteAddr(), count)
 }

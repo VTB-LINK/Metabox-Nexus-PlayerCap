@@ -1,16 +1,17 @@
 //go:build windows
 
-// Command wesingprobe 是全民K歌「音译歌词」内存探测工具（只读、仅本地调试）。
+// Command wesingprobe 是全民K歌歌词的内存探测工具（只读、仅本地调试）。
 //
-// 探测结论（2026-09）：wesing 歌词堆里只有主歌词假名/汉字 + 逐字时间；罗马音/音译任何形态
-// （连写 / 带空格 / 单音节）在可写区与全可读区均 0 命中——K 歌音译系运行时动态转写、不落
-// 字符串。故 wesing 音译无法从内存直读、保持不支持。本工具为该结论的可复现证据留档（issue #34）。
+// 探测结论（2026-10-09 订正）：**音译在内存里。** LyricHost 里并排放着几条歌词轨（间距 0x70、虚表
+// 相同）：FindLyricHost 返回的子结构是主歌词，路径以 _Roma.qrc 结尾的那条是音译，两者逐行对应
+// （行数相同、行起始时间相等）。生产代码的读取见 player/wesing/lyric/roma.go。本工具把各条轨列出来
+// （路径、行数、前几行），并对指定行的 LyricEntry 及其前若干 CharElement 逐 4 字节 dump（float 解读 +
+// 跟随指针读 UTF-16 字符串）。
 //
-// 复用 wesing 生产定位链（FindLyricHost → LyricEntry → CharElement），对指定行的
-// LyricEntry 及其前若干 CharElement 逐 4 字节 dump，float 解读 + 跟随每个指针读
-// UTF-16 字符串，用以定位音译（罗马音 / 韩罗 / 粤拼 / 俄拉丁…）挂在哪个偏移：
-// 可能是 CharElement 的某个偏移指向音译 RenderData（逐字），也可能是 LyricEntry 下
-// 第二条并行字符向量（整行音译轨）。
+// 本文件 2026-09 的旧结论「罗马音任何形态在可写区与全可读区均 0 命中，音译系运行时动态转写、不落
+// 字符串」（issue #34）不成立。当时是到 LyricEntry+0x30 去找「第二条字符向量」——LyricEntry 只有
+// 0x20 字节，+0x30 已经是相邻的下一个 LyricEntry——没有往 LyricHost 的其它子结构看。那次全内存搜索
+// 为什么没搜到，没有留下可复查的记录。
 //
 // 只读约束（AGENTS.md §0）：仅经 wesing/proc 的只读原语读取——OpenProc 只申请
 // PROCESS_VM_READ|PROCESS_QUERY_INFORMATION，句柄层面无写权限；绝不写目标进程。
@@ -19,7 +20,7 @@
 // 用法（需管理员权限读进程内存；K歌开着「音译歌词」开关、播放或暂停在某行）：
 //
 //	go run ./tools/wesingprobe --line "手を伸"   // 只 dump 主文本含该子串的行
-//	go run ./tools/wesingprobe -n 3              // dump 前 3 行
+//	go run ./tools/wesingprobe -n 3              // 各条轨列前 3 行，并 dump 主歌词前 3 行的结构
 package main
 
 import (
@@ -203,34 +204,49 @@ func entryMainText(h syscall.Handle, entryPtr uint32) (text string, charBegin, n
 	return sb.String(), charBegin, numChars
 }
 
-// dumpSecondVector 把 LyricEntry+0x30/+0x34 当第二字符向量遍历，逐元素读主文本
-// （CharElement+0x00 → RenderData → UTF-16），以 | 分隔打印；再 dump 首元素结构，
-// 用以确认它是否为整行音译轨。
-func dumpSecondVector(h syscall.Handle, entryPtr uint32) {
-	begin, _ := proc.ReadUint32(h, entryPtr+0x30)
-	end, _ := proc.ReadUint32(h, entryPtr+0x34)
-	if !looksPtr(begin) || end <= begin {
-		fmt.Printf("  ++ 第二向量(+0x30): 无（begin=0x%X end=0x%X）\n", begin, end)
-		return
+// lyricTrackStride 是 LyricHost 里相邻两条歌词轨的间距（与 player/wesing/lyric/roma.go 的 trackStride 同值）。
+const lyricTrackStride = 0x70
+
+// readCString 读 ATL 式 CString：指针指向字符，字符数在指针前 12 字节。
+func readCString(h syscall.Handle, ptr uint32) string {
+	if !looksPtr(ptr) {
+		return ""
 	}
-	n := (end - begin) / 4
-	if n > 500 {
-		fmt.Printf("  ++ 第二向量(+0x30): 元素数异常 %d\n", n)
-		return
+	n, err := proc.ReadUint32(h, ptr-12)
+	if err != nil || n == 0 || n > 520 {
+		return ""
 	}
-	var sb strings.Builder
-	for c := uint32(0); c < n; c++ {
-		ce, _ := proc.ReadUint32(h, begin+c*4)
-		if ce == 0 {
+	return readWide(h, ptr, int(n))
+}
+
+// dumpTracks 列出 LyricHost 里的各条歌词轨：从主歌词子结构起每隔 lyricTrackStride 一条，虚表与主歌词
+// 相同的才算。每条打印路径（+0x04）、行数（+0x48/+0x4C；+0x50 是容量末尾）与前 maxLines 行的文本。
+func dumpTracks(h syscall.Handle, mainTrack uint32, maxLines int) {
+	vtable, _ := proc.ReadUint32(h, mainTrack)
+	for i := uint32(0); i < 6; i++ {
+		track := mainTrack + i*lyricTrackStride
+		vt, err := proc.ReadUint32(h, track)
+		if err != nil || vt != vtable {
+			fmt.Printf("  轨 %d @0x%08X：虚表 0x%08X 与主歌词不同，到此为止\n", i, track, vt)
+			return
+		}
+		pathPtr, _ := proc.ReadUint32(h, track+0x04)
+		begin, _ := proc.ReadUint32(h, track+0x48)
+		end, _ := proc.ReadUint32(h, track+0x4C)
+		capEnd, _ := proc.ReadUint32(h, track+0x50)
+		fmt.Printf("  轨 %d @0x%08X  路径=%q\n", i, track, readCString(h, pathPtr))
+		if !looksPtr(begin) || end <= begin {
+			fmt.Println("      （没有行）")
 			continue
 		}
-		rd, _ := proc.ReadUint32(h, ce)
-		sb.WriteString(readWide(h, rd, 16))
-		sb.WriteString("|")
-	}
-	fmt.Printf("  ++ 第二向量(+0x30) %d 元素文本: %q\n", n, sb.String())
-	if ce0, _ := proc.ReadUint32(h, begin); ce0 != 0 {
-		dumpStruct(h, ce0, 0x18, "第二向量CharElement[0]")
+		n := (end - begin) / 4
+		fmt.Printf("      行数=%d（容量 %d）\n", n, (capEnd-begin)/4)
+		for j := uint32(0); j < n && int(j) < maxLines; j++ {
+			entry, _ := proc.ReadUint32(h, begin+j*4)
+			t, _ := proc.ReadFloat32(h, entry)
+			text, _, _ := entryMainText(h, entry)
+			fmt.Printf("      [%2d] %7.2fs  %q\n", j, t, text)
+		}
 	}
 }
 
@@ -340,6 +356,11 @@ func main() {
 	}
 	fmt.Println()
 
+	// 各条歌词轨（主歌词 / 音译 …）。音译轨与主歌词逐行对应，纯英文行在音译轨里是单独一个空格或照抄原文。
+	fmt.Println("---- LyricHost 里的各条歌词轨 ----")
+	dumpTracks(h, subStruct, *maxLines)
+	fmt.Println()
+
 	beginPtr, _ := proc.ReadUint32(h, subStruct+0x48)
 	endPtr, _ := proc.ReadUint32(h, subStruct+0x50)
 	if beginPtr == 0 || endPtr <= beginPtr {
@@ -363,10 +384,9 @@ func main() {
 		}
 		timeVal, _ := proc.ReadFloat32(h, entryPtr)
 		fmt.Printf("========== 行 %d  time=%.2fs  %q  (%d 字符) ==========\n", i, timeVal, mainText, numChars)
-		// LyricEntry 本体：+0x00 time、+0x08/+0x0C 主字符向量已知；重点看 +0x10 起有没有
-		// 第二对 begin/end 指针（整行音译轨候选）。
-		dumpStruct(h, entryPtr, 0x48, "LyricEntry")
-		dumpSecondVector(h, entryPtr)
+		// LyricEntry 本体（0x20 字节）：+0x00 行起始秒、+0x04 行时长秒、+0x08/+0x0C/+0x10 字级单元向量
+		// 的 begin / end / 容量末尾。
+		dumpStruct(h, entryPtr, 0x1C, "LyricEntry")
 		// 前若干 CharElement：+0x00 主文本 RenderData、+0x04 起始、+0x08 时长已知。
 		for c := uint32(0); c < numChars && c < uint32(*perLineChars); c++ {
 			ce, _ := proc.ReadUint32(h, charBegin+c*4)

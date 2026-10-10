@@ -147,7 +147,7 @@ func (s *Server) AudioHub() *audioHub {
 // 而音频故障必须被隔离在音频子系统内、不拖垮歌词/特效主线。仅记日志、不 re-panic。
 func audioRecover(label string) {
 	if r := recover(); r != nil {
-		serverLog.Warn("[audio] %s panic 已本地恢复: %v", label, r)
+		serverLog.Warn("[audio] %s panic recovered locally: %v", label, r)
 	}
 }
 
@@ -166,13 +166,13 @@ func (s *Server) handleAudioWS(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := s.upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			serverLog.Warn("音频WS Upgrade 失败: %v", err)
+			serverLog.Warn("Audio WS upgrade failed: %v", err)
 			return
 		}
 
 		sub := &audioSub{ch: make(chan []byte, 8), player: playerName}
 		s.audioHub.addSub(sub)
-		serverLog.Info("音频WS 连接: %s player=%q", conn.RemoteAddr(), playerName)
+		serverLog.Info("Audio WS connected: %s player=%q", conn.RemoteAddr(), playerName)
 
 		// 写入 goroutine：从订阅通道读帧、以二进制消息发出。三条 defer 的执行顺序为 audioRecover →
 		// conn.Close → close(done)：
@@ -190,7 +190,7 @@ func (s *Server) handleAudioWS(playerName string) http.HandlerFunc {
 			for payload := range sub.ch {
 				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
-					serverLog.Warn("音频WS 写入失败，关闭连接: %s player=%q: %v", conn.RemoteAddr(), playerName, err)
+					serverLog.Warn("Audio WS write failed, closing connection: %s player=%q: %v", conn.RemoteAddr(), playerName, err)
 					return
 				}
 			}
@@ -208,6 +208,6 @@ func (s *Server) handleAudioWS(playerName string) http.HandlerFunc {
 		close(sub.ch)
 		conn.Close()
 		<-done
-		serverLog.Info("音频WS 断开: %s player=%q", conn.RemoteAddr(), playerName)
+		serverLog.Info("Audio WS disconnected: %s player=%q", conn.RemoteAddr(), playerName)
 	}
 }

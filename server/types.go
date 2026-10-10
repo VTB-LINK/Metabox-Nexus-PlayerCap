@@ -26,6 +26,17 @@ func (om *OrderedMap) Set(key string, val interface{}) {
 	om.vals[key] = val
 }
 
+// Keys 返回按插入顺序排列的键（副本）。
+func (om *OrderedMap) Keys() []string {
+	return append([]string(nil), om.keys...)
+}
+
+// Get 返回 key 对应的值与该键是否存在。
+func (om *OrderedMap) Get(key string) (interface{}, bool) {
+	v, ok := om.vals[key]
+	return v, ok
+}
+
 // MarshalJSON 按插入顺序序列化。
 func (om *OrderedMap) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer

@@ -58,7 +58,7 @@ const (
 
 	// readTimeoutMs：单次 Read 里 WaitForSingleObject 的上限（毫秒）。事件驱动下引擎约每 10ms 触发；
 	// 设 100ms 上限使 Read 在长时间静音（进程不出声、引擎不推缓冲）时也能定期返回 0 帧，
-	// 让调用方循环得以检查停止信号、按 cadence 发 keepalive，不至于永久阻塞在事件上。
+	// 让调用方循环得以检查停止信号、按墙钟发 keepalive，不至于永久阻塞在事件上。
 	readTimeoutMs = 100
 )
 

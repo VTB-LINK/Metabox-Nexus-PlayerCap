@@ -12,7 +12,7 @@ import (
 func PatchRegistryAutoStart() {
 	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
-		log.Error("打开注册表 Run 键失败: %v", err)
+		log.Error("Failed to open registry Run key: %v", err)
 		return
 	}
 	defer key.Close()
@@ -33,11 +33,11 @@ func PatchRegistryAutoStart() {
 
 	if newVal != val {
 		if err = key.SetStringValue("cloudmusic", newVal); err != nil {
-			log.Error("设置注册表 Run 值失败: %v", err)
+			log.Error("Failed to set registry Run value: %v", err)
 		} else {
-			log.Success("已修补网易云自启动参数: %s", newVal)
+			log.Success("Patched NetEase Cloud Music autostart flags: %s", newVal)
 		}
 	} else {
-		log.Info("网易云自启动调试/保活参数已就绪")
+		log.Info("NetEase Cloud Music autostart debug/keepalive flags already present")
 	}
 }

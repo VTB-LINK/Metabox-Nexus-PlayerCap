@@ -5,7 +5,7 @@ package player
 //
 // # 为什么这条要用 AST 门禁，而不是单元测试
 //
-// 三个发出 index:-1 的包（cloudmusic / kugou / qqmusic）**CI 永远跑不了**（AGENTS.md §8：
+// 发出 index:-1 的包（cloudmusic / kugou / qqmusic / sodamusic / applemusic）**CI 永远跑不了**（AGENTS.md §8：
 // GOOS=linux go vet 全部 FAIL）。而 AST 扫描不需要编译目标平台，所以这是这条契约唯一
 // 能自动化的守法。
 //
@@ -14,7 +14,7 @@ package player
 // Progress 的契约是「整首播到哪」。纯音乐时歌照样在走，progress 不该是 0。
 // 但 cloudmusic 与 kugou 的 index:-1 字面量此前都漏了这个字段，Go 零值兜出一个 0，
 // 而同一时刻它们自己发的 all_lyrics.progress 是实时值——**同一个事件对里自相矛盾**。
-// qqmusic 写对了，于是三家给出两种答案（实测：qqmusic 0.125 / kugou 0）。
+// qqmusic 写对了，于是这三家给出两种答案（实测：qqmusic 0.125 / kugou 0）。
 //
 // 更糟的是这个零值被当成契约写进了对外文档：openapi.yaml 四处声称「index:-1 时
 // progress 为 0」。写文档的人照着 cloudmusic 看的，而 cloudmusic 只是漏了字段。
@@ -23,7 +23,7 @@ package player
 // # 为什么盯 Index: -1 而不是所有 LyricUpdate
 //
 // 常规歌词行由 BuildLyricUpdate 统一构造（40e77af 把易错的语义锁在了一处），
-// 不会漏字段。index:-1 是三家各自手写字面量的地方——手写就是漏字段的温床。
+// 不会漏字段。index:-1 是各家各自手写字面量的地方——手写就是漏字段的温床。
 
 import (
 	"go/ast"

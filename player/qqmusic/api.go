@@ -289,7 +289,7 @@ func qrcDecrypt(encrypted string) (string, error) {
 	}
 
 	if len(ciphertext)%8 != 0 {
-		return "", i18n.Errorf("%w: 密文长度 %d 不是 8 的倍数", errNotCiphertext, len(ciphertext))
+		return "", i18n.Errorf("%w: ciphertext length %d is not a multiple of 8", errNotCiphertext, len(ciphertext))
 	}
 
 	// Use the ported QQ Music 3DES implementation (in qrc_decrypt.go)
@@ -344,10 +344,10 @@ func decryptIfNeeded(rawLyric string, crypt int) (string, bool, error) {
 	decrypted, err := qrcDecrypt(rawLyric)
 	if err != nil {
 		if errors.Is(err, errNotCiphertext) {
-			log.Warn("crypt=%d 但内容不是 QRC 密文，按明文处理: %v", crypt, err)
+			log.Warn("crypt=%d but content is not QRC ciphertext; treating as plaintext: %v", crypt, err)
 			return rawLyric, false, nil
 		}
-		return "", false, i18n.Errorf("QRC 解密失败 (crypt=%d, len=%d): %w", crypt, len(rawLyric), err)
+		return "", false, i18n.Errorf("QRC decryption failed (crypt=%d, len=%d): %w", crypt, len(rawLyric), err)
 	}
 	return decrypted, true, nil
 }
@@ -464,7 +464,7 @@ func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) (
 
 	data := musicuResp.Req0.Data
 	rawLyric := data.Lyric
-	log.Detail("API 响应: songID=%d crypt=%d lyricLen=%d", data.SongID, data.Crypt, len(rawLyric))
+	log.Detail("API response: songID=%d crypt=%d lyricLen=%d", data.SongID, data.Crypt, len(rawLyric))
 
 	if rawLyric == "" {
 		// 纯音乐：API 成功但返回空歌词，不是错误
@@ -489,7 +489,7 @@ func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) (
 		return nil, "", "", err
 	}
 	if didDecrypt {
-		log.Detail("QRC 解密成功 (%d 字符)", len(plain))
+		log.Detail("QRC decryption succeeded (%d chars)", len(plain))
 	}
 	rawLyric = plain
 
@@ -516,7 +516,7 @@ func attachTrans(lines []lyricLine, rawTrans string, crypt int) {
 	}
 	transPlain, _, err := decryptIfNeeded(rawTrans, crypt)
 	if err != nil {
-		log.Warn("翻译歌词解密失败，本首无 sub_text（不影响主歌词）: %v", err)
+		log.Warn("Translation lyric decryption failed; no sub_text for this song (main lyrics unaffected): %v", err)
 
 		// 「预期之外」，但比主歌词那条轻：只少一行副歌词，主歌词照常。
 		//
@@ -608,7 +608,7 @@ func attachRoma(lines []lyricLine, rawRoma string, crypt int) {
 	}
 	romaPlain, _, err := decryptIfNeeded(rawRoma, crypt)
 	if err != nil {
-		log.Warn("音译歌词解密失败，本首无 roma_text（不影响主歌词/翻译）: %v", err)
+		log.Warn("Romanization lyric decryption failed; no roma_text for this song (main lyrics and translation unaffected): %v", err)
 
 		// 「预期之外」，与 trans 同级：只少一行音译。单独一个 key 而不与 trans/主歌词合并——
 		// roma 与主歌词共用同一 crypt、同一次响应返回，「主歌词解开了、roma 没解开」比「都失败」
@@ -625,9 +625,9 @@ func attachRoma(lines []lyricLine, rawRoma string, crypt int) {
 	// 临时诊断日志（主会话 qqromaprobe 端到端核对用）：解密后 roma 明文前 120 字符，供确认
 	// 「roma 确为 QRC 逐字、格式假设成立」。rune 安全截断，避免切断多字节字符。核对通过后可删。
 	if head := []rune(romaPlain); len(head) > 120 {
-		log.Detail("roma 明文(前120字符): %s", string(head[:120]))
+		log.Detail("roma plaintext (first 120 chars): %s", string(head[:120]))
 	} else {
-		log.Detail("roma 明文(前120字符): %s", romaPlain)
+		log.Detail("roma plaintext (first 120 chars): %s", romaPlain)
 	}
 
 	mergeRoma(lines, romaPlain)
@@ -639,7 +639,7 @@ func attachRoma(lines []lyricLine, rawRoma string, crypt int) {
 			withRoma++
 		}
 	}
-	log.Detail("attachRoma: %d/%d 行有 roma_text", withRoma, len(lines))
+	log.Detail("attachRoma: %d/%d lines have roma_text", withRoma, len(lines))
 }
 
 func parseLRC(lrc string, durationMs uint32) ([]lyricLine, string, string) {
@@ -805,13 +805,13 @@ func fetchCoverURLBySongMid(songMid string) string {
 	track := result.Data[0]
 	if mid := track.Album.Mid; mid != "" {
 		url := buildCoverURL("T002", mid, 800)
-		log.Detail("封面(MID专辑): %s → %s", track.Album.Name, url)
+		log.Detail("Cover (MID album): %s → %s", track.Album.Name, url)
 		return url
 	}
 	for _, s := range track.Singer {
 		if mid := s.Mid; mid != "" {
 			url := buildCoverURL("T001", mid, 800)
-			log.Detail("封面(MID歌手): %s → %s", s.Name, url)
+			log.Detail("Cover (MID singer): %s → %s", s.Name, url)
 			return url
 		}
 	}
@@ -865,18 +865,18 @@ func fetchCoverURL(songID uint32, songMid string) string {
 	// Priority: album cover → first singer cover
 	if mid := track.Album.Mid; mid != "" {
 		url := buildCoverURL("T002", mid, 800)
-		log.Detail("封面(专辑): %s → %s", track.Album.Name, url)
+		log.Detail("Cover (album): %s → %s", track.Album.Name, url)
 		return url
 	}
 	if mid := track.Album.Pmid; mid != "" {
 		url := buildCoverURL("T002", mid, 800)
-		log.Detail("封面(专辑pmid): %s", url)
+		log.Detail("Cover (album pmid): %s", url)
 		return url
 	}
 	for _, s := range track.Singer {
 		if mid := s.Mid; mid != "" {
 			url := buildCoverURL("T001", mid, 800)
-			log.Detail("封面(歌手): %s → %s", s.Name, url)
+			log.Detail("Cover (singer): %s → %s", s.Name, url)
 			return url
 		}
 	}

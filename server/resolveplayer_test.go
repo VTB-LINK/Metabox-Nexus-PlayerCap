@@ -27,7 +27,7 @@ func standby(s *Server, name string) {
 // TestResolvePlayerNoActiveReturnsEmpty 钉死本条的核心：**待机播放器不得被复活成活跃播放器**。
 //
 // 缺陷背景：这里曾有两个 range-map 兜底循环（先找 Status=="playing"，再找任意 Status != nil）。
-// 后者条件只要求「曾经发过任何状态」，而四个播放器在对应 App 没开时都会发 waiting_process
+// 后者条件只要求「曾经发过任何状态」，而各播放器在对应 App 没开时都会发 waiting_process
 // —— 于是「开机没放歌」这个长期稳态下，根 HTTP 会挑一个待机播放器返回它的残留数据，而同
 // 一状态下 WS 收到的是干净的 player_clear。它是 9090f0b 从 router 删掉的
 // findAnyNonPriorPlayer()（commit 原话「歌词冻结 bug 的根本原因」「不检查播放状态」）的同型残株。

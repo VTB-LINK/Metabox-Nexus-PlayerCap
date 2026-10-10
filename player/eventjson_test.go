@@ -145,3 +145,47 @@ func TestAllLyricsDataLyricsDetailedUsesWordText(t *testing.T) {
 		t.Fatalf("lyrics_detailed[0] = %#v", got.LyricsDetailed[0])
 	}
 }
+
+// roma_text_detailed 与 text_detailed 同形：零值序列化成 {}（不是 null，也不省略），有词时带 words。
+// 每条歌词行与 lyric_update 都带这个键；目前只有 wesing 会填。
+//
+// 变异自证：把 LyricLine 或 LyricUpdate 里 RomaTextDetailed 的 json tag 改成别的名字，对应那一段
+// 取不到 roma_text_detailed 而红。
+func TestRomaTextDetailedJSONShape(t *testing.T) {
+	decode := func(v any) map[string]any {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		return got
+	}
+	for name, v := range map[string]any{
+		"LyricLine":   LyricLine{Index: 1, Text: "hello"},
+		"LyricUpdate": LyricUpdate{Index: 1, Text: "hello"},
+	} {
+		obj, ok := decode(v)["roma_text_detailed"].(map[string]any)
+		if !ok || len(obj) != 0 {
+			t.Fatalf("%s 零值：roma_text_detailed = %#v，want 空对象 {}", name, decode(v)["roma_text_detailed"])
+		}
+	}
+
+	roma := LyricTextDetailed{Timestamp: 13.711, PlayTime: 13.511, Duration: 0.69, Words: []LyricTextDetailedWord{
+		{Timestamp: 13.711, PlayTime: 13.511, Duration: 0.2, Text: "hi "},
+		{Timestamp: 13.911, PlayTime: 13.711, Duration: 0.49, Text: "ka "},
+	}}
+	for name, v := range map[string]any{
+		"LyricLine":   LyricLine{Text: "ひか", RomaText: "hi ka", RomaTextDetailed: roma},
+		"LyricUpdate": LyricUpdate{Text: "ひか", RomaText: "hi ka", RomaTextDetailed: roma},
+	} {
+		obj, _ := decode(v)["roma_text_detailed"].(map[string]any)
+		words, _ := obj["words"].([]any)
+		if len(words) != 2 || words[1].(map[string]any)["text"] != "ka " {
+			t.Fatalf("%s：roma_text_detailed.words = %#v，want 两个音节", name, obj["words"])
+		}
+	}
+}

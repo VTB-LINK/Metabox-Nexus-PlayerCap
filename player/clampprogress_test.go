@@ -1,6 +1,6 @@
 package player
 
-// 本文件只测 ClampProgress —— 四个播放器共用的播放进度计算。
+// 本文件只测 ClampProgress —— 各播放器共用的播放进度计算。
 //
 // 它是从 cloudmusic / kugou 两份逐字相同的私有副本 + wesing / qqmusic 的手写展开合并而来，
 // 合并的前提是「四处语义完全一致」，故这里把那个语义钉死：非正时长返回 0、越界钳到 [0,1]、

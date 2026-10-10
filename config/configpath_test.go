@@ -122,7 +122,10 @@ func TestGenerateDefaultConfigWritesToGivenPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, configName)
 
-	generateDefaultConfig(path)
+	cfg := DefaultConfig()
+	if !generateDefaultConfig(osFileOps, &cfg, path, latestMigrationBoundary) {
+		t.Fatal("目标不存在时应生成成功")
+	}
 
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("模板应写到传入的 path，实测不存在: %v", err)
@@ -143,5 +146,8 @@ func TestGenerateDefaultConfigSurvivesWriteFailure(t *testing.T) {
 		}
 	}()
 	// 往一个不存在的目录里写 —— 必然失败
-	generateDefaultConfig(filepath.Join(t.TempDir(), "no-such-dir", configName))
+	cfg := DefaultConfig()
+	if generateDefaultConfig(osFileOps, &cfg, filepath.Join(t.TempDir(), "no-such-dir", configName), latestMigrationBoundary) {
+		t.Error("写不进去时不应报告已生成")
+	}
 }

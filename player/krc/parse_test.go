@@ -2,7 +2,7 @@ package krc
 
 // 本文件只测 KRC 明文解析（ParsePlainKRC / parseWords）：把酷狗/汽水 KRC 的字级时间轴解成逐字片段。
 //
-// 要害是**相对偏移**：KRC 的 <off,dur,0> 里 off 是相对行首的，不是绝对时间。三家格式三个样，
+// 要害是**相对偏移**：KRC 的 <off,dur,0> 里 off 是相对行首的，不是绝对时间。QQ、网易云、酷狗三家格式三个样，
 // 照抄 QQ（文字在前、绝对）或网易云（时间在前、绝对）都会错，故这里逐条钉死。
 
 import "testing"

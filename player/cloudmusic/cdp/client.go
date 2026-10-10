@@ -261,9 +261,9 @@ func Connect() (*Client, error) {
 		return nil, err
 	}
 
-	log.Info("可用页面:")
+	log.Info("available pages:")
 	for _, p := range pages {
-		log.Detail("- 类型: %s, URL: %s", p.Type, p.URL)
+		log.Detail("- type: %s, URL: %s", p.Type, p.URL)
 	}
 
 	var wsUrl string
@@ -306,7 +306,7 @@ func Connect() (*Client, error) {
 		return nil, err
 	}
 
-	log.Info("目标页面: %s", matchUrl)
+	log.Info("target page: %s", matchUrl)
 
 	return &Client{
 		wsUrl: wsUrl,

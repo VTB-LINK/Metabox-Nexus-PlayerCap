@@ -254,7 +254,7 @@ func TestRunPanicTearsDownHelper(t *testing.T) {
 		close(exited)
 	}()
 
-	m := New(panicSink{}, nil, nil, os.Args[0])
+	m := New(panicSink{}, nil, nil, 25, os.Args[0])
 	t.Cleanup(m.Stop) // 结束 idleKeepalive
 	m.helper = &helperProc{cmd: cmd, stdin: stdin, exited: exited, start: time.Now()}
 	m.Wake() // 第一轮 reconcile 立即执行
@@ -407,8 +407,8 @@ func TestReconcileFilterWant(t *testing.T) {
 	}{
 		{"已放弃", captureFailure{count: maxQuickFails, givenUp: true, pid: pid}, nil, true},
 		{"退避期内", captureFailure{count: 1, retryAt: time.Now().Add(time.Hour), pid: pid}, nil, true},
-		{"退避期满", captureFailure{count: 1, retryAt: time.Now().Add(-time.Second), pid: pid}, []string{fmt.Sprintf("capture %d %s 0 0 0", pid, player)}, true},
-		{"PID 变化", captureFailure{count: maxQuickFails, givenUp: true, pid: pid + 1}, []string{fmt.Sprintf("capture %d %s 0 0 0", pid, player)}, false},
+		{"退避期满", captureFailure{count: 1, retryAt: time.Now().Add(-time.Second), pid: pid}, []string{fmt.Sprintf("capture %d %s 0 0 0 50", pid, player)}, true},
+		{"PID 变化", captureFailure{count: maxQuickFails, givenUp: true, pid: pid + 1}, []string{fmt.Sprintf("capture %d %s 0 0 0 50", pid, player)}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w.lines = nil
@@ -501,10 +501,12 @@ func (w *recWriter) Close() error {
 }
 
 // newApplyManager 构造一个带固定 normResolver 的 Manager（接 recWriter 假 stdin），
-// resolver 对所有 player 返回同一 NormParams，便于断言 capture 命令的 6 字段参数。
+// resolver 对所有 player 返回同一 NormParams，便于断言 capture 命令的各字段。帧率取 50 而非默认的 25：
+// applyControls 把帧率字段写死为 25 时，TestApplyControls 等用例的期望行即不符（隔离副本，实测）。
 func newApplyManager(w *recWriter, np NormParams) *Manager {
 	m := &Manager{
 		normResolver: func(string) NormParams { return np },
+		frameRate:    50,
 		dispatched:   map[string]uint32{},
 		dispatchedAt: map[string]time.Time{},
 		captureFails: map[string]captureFailure{},
@@ -516,15 +518,15 @@ func newApplyManager(w *recWriter, np NormParams) *Manager {
 }
 
 // TestApplyControls 验证差异控制：新增→capture；PID 变更→先 stop 旧再 capture 新；
-// 移除→stop 且 dispatched 与 lastFrame 均被清。capture 命令为 6 字段（含归一化参数），
+// 移除→stop 且 dispatched 与 lastFrame 均被清。capture 命令为 7 字段（归一化参数与帧率），
 // 由 normResolver 的 Enabled 决定 bit 位（1/0）。
 func TestApplyControls(t *testing.T) {
 	w := &recWriter{}
 	m := newApplyManager(w, NormParams{Enabled: true, Target: -14, MaxGain: 30})
 
-	// 1. 新增 kugou→100：只下发 capture，含归一化参数（enabled→bit=1）。
+	// 1. 新增 kugou→100：只下发 capture，含归一化参数（enabled→bit=1）与帧率。
 	m.applyControls(map[string]uint32{"kugou": 100})
-	if got, want := w.lines, []string{"capture 100 kugou 1 -14 30"}; !reflect.DeepEqual(got, want) {
+	if got, want := w.lines, []string{"capture 100 kugou 1 -14 30 50"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("新增后下发 = %v, 期望 %v", got, want)
 	}
 	if m.dispatched["kugou"] != 100 {
@@ -542,10 +544,10 @@ func TestApplyControls(t *testing.T) {
 		t.Fatalf("新增后不应写 lastForward[kugou]")
 	}
 
-	// 2. PID 变更 kugou→200：先 stop 旧再 capture 新（仍带 6 字段参数）。
+	// 2. PID 变更 kugou→200：先 stop 旧再 capture 新（仍带全部参数）。
 	w.lines = nil
 	m.applyControls(map[string]uint32{"kugou": 200})
-	if got, want := w.lines, []string{"stop kugou", "capture 200 kugou 1 -14 30"}; !reflect.DeepEqual(got, want) {
+	if got, want := w.lines, []string{"stop kugou", "capture 200 kugou 1 -14 30 50"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("PID 变更后下发 = %v, 期望 %v", got, want)
 	}
 	if m.dispatched["kugou"] != 200 {
@@ -575,7 +577,7 @@ func TestApplyControlsNormDisabled(t *testing.T) {
 	m := newApplyManager(w, NormParams{Enabled: false, Target: -14, MaxGain: 30})
 
 	m.applyControls(map[string]uint32{"kugou": 100})
-	if got, want := w.lines, []string{"capture 100 kugou 0 -14 30"}; !reflect.DeepEqual(got, want) {
+	if got, want := w.lines, []string{"capture 100 kugou 0 -14 30 50"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("禁用归一化后下发 = %v, 期望 %v", got, want)
 	}
 }
@@ -624,7 +626,7 @@ func decodeFrame(t *testing.T, b []byte) frame.Frame {
 // QPC 读数之间。
 func recvIdleFrame(t *testing.T, sink idleSink, player string) {
 	t.Helper()
-	m := New(sink, nil, nil, "")
+	m := New(sink, nil, nil, 25, "")
 	t.Cleanup(m.Stop)
 	before := qpcMillisNow()
 	go m.idleKeepalive()
@@ -668,7 +670,7 @@ func TestIdleKeepalivePlayerFrame(t *testing.T) {
 // 跑过一拍；随后 Stop 并等 idleKeepalive 返回，已推出的帧中不得有 kugou。
 func TestIdleKeepaliveSkipsForwarded(t *testing.T) {
 	sink := idleSink{ch: make(chan []byte, 64), subs: map[string]bool{"kugou": true, "sodamusic": true}}
-	m := New(sink, nil, nil, "")
+	m := New(sink, nil, nil, 25, "")
 	t.Cleanup(m.Stop)
 	m.lastForward["kugou"] = time.Now().Add(time.Hour) // 取未来时刻：首拍被调度延迟超过 noCaptureAfter 也不会误推
 	done := make(chan struct{})
@@ -703,7 +705,7 @@ func TestIdleKeepaliveSkipsForwarded(t *testing.T) {
 // 判无捕获），并把帧交给 sink。cmd 未启动，结尾的 cmd.Wait 只返回错误。
 func TestDemuxRecordsForward(t *testing.T) {
 	sink := idleSink{ch: make(chan []byte, 1)}
-	m := New(sink, nil, nil, "")
+	m := New(sink, nil, nil, 25, "")
 	hp := &helperProc{cmd: &exec.Cmd{}, exited: make(chan struct{})}
 
 	before := time.Now()
@@ -736,7 +738,7 @@ func (s slowSink) BroadcastAudioFrame(p string, b []byte) {
 func TestDemuxForwardTimeAfterBroadcast(t *testing.T) {
 	var returned time.Time
 	sink := slowSink{idleSink: idleSink{ch: make(chan []byte, 1)}, delay: 50 * time.Millisecond, returned: &returned}
-	m := New(sink, nil, nil, "")
+	m := New(sink, nil, nil, 25, "")
 	hp := &helperProc{cmd: &exec.Cmd{}, exited: make(chan struct{})}
 
 	m.demux(hp, bytes.NewReader(frame.Encode(nil, frame.Frame{Player: "kugou", Epoch: 1})))

@@ -161,7 +161,7 @@ func PrintPrivacyNotice(wait time.Duration, versionCheckActive bool) {
 	fmt.Println(bannerLogo)
 	fmt.Println()
 	fmt.Println(text)
-	countdown(wait)
+	Countdown(wait)
 }
 
 // noticeFor 按两个开关拼出**这次真正要打印的**文案；两段都不适用时返回空串。
@@ -186,12 +186,15 @@ func noticeFor(telemetryOn, versionCheckOn bool) string {
 	return header + strings.Join(sections, noticeDivider) + noticeFooter
 }
 
-// countdown 原地倒计时，结束后把那行擦掉，免得它留在日志里碍眼。
+// Countdown 原地倒计时，结束后把那行擦掉，免得它留在日志里碍眼。
 //
 // 用 `\r` 覆写 —— 与更新进度条同属 AGENTS.md §6.2 允许 fmt 的例外。
-func countdown(wait time.Duration) {
+//
+// 导出是因为它另被 config.yml 的重建提示使用（根包 configrebuild.go 的 showRebuildNotice）：
+// 两处给用户看的都是同一行逐秒倒计时，不另写一份。
+func Countdown(wait time.Duration) {
 	for i := int(wait.Seconds()); i > 0; i-- {
-		fmt.Printf(i18n.T("\r   %2d 秒后自动继续..."), i)
+		fmt.Printf(i18n.T("\r   continuing in %2d s..."), i)
 		time.Sleep(time.Second)
 	}
 	// 用空格盖掉整行再回到行首：直接打 \n 会在日志里留下一行倒计时残迹。

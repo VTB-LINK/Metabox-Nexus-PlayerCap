@@ -87,15 +87,15 @@ func Connect() (*Client, error) {
 	httpClient := &http.Client{Timeout: 2 * time.Second}
 	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/json/list", inspectorPort))
 	if err != nil {
-		return nil, i18n.Errorf("取 /json/list 失败: %w", err)
+		return nil, i18n.Errorf("failed to fetch /json/list: %w", err)
 	}
 	defer resp.Body.Close()
 	var targets []devToolsTarget
 	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
-		return nil, i18n.Errorf("解析 /json/list 失败: %w", err)
+		return nil, i18n.Errorf("failed to parse /json/list: %w", err)
 	}
 	if len(targets) == 0 {
-		return nil, i18n.Errorf("inspector 无可用目标")
+		return nil, i18n.Errorf("inspector has no available target")
 	}
 	// 主进程 inspector 只有一个 node 目标（electron/js2c/browser_init）。取第一个 node 型，
 	// 兜底取第 0 个。
@@ -110,11 +110,11 @@ func Connect() (*Client, error) {
 		wsURL = targets[0].WebSocketDebuggerUrl
 	}
 	if wsURL == "" {
-		return nil, i18n.Errorf("目标无 webSocketDebuggerUrl")
+		return nil, i18n.Errorf("target has no webSocketDebuggerUrl")
 	}
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
-		return nil, i18n.Errorf("WS 连接失败: %w", err)
+		return nil, i18n.Errorf("WebSocket connection failed: %w", err)
 	}
 	return &Client{conn: conn, msgID: 1}, nil
 }
@@ -126,14 +126,14 @@ func (c *Client) Extract() (*ExtractionData, error) {
 		return nil, err
 	}
 	if valStr == "" || valStr == "null" {
-		return nil, i18n.Errorf("提取返回空")
+		return nil, i18n.Errorf("extraction returned empty")
 	}
 	var data ExtractionData
 	if err := json.Unmarshal([]byte(valStr), &data); err != nil {
-		return nil, i18n.Errorf("提取结果解析失败: %w", err)
+		return nil, i18n.Errorf("failed to parse extraction result: %w", err)
 	}
 	if !data.OK {
-		return nil, i18n.Errorf("提取未成功: %s", data.Err)
+		return nil, i18n.Errorf("extraction unsuccessful: %s", data.Err)
 	}
 	return &data, nil
 }
@@ -144,7 +144,7 @@ func (c *Client) evaluate(expression string, awaitPromise bool) (string, error) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return "", i18n.Errorf("会话已关闭")
+		return "", i18n.Errorf("session already closed")
 	}
 	c.msgID++
 	id := c.msgID
@@ -164,7 +164,7 @@ func (c *Client) evaluate(expression string, awaitPromise bool) (string, error) 
 	}
 	if err := c.conn.WriteJSON(req); err != nil {
 		c.markClosed()
-		return "", i18n.Errorf("写 CDP 请求失败: %w", err)
+		return "", i18n.Errorf("failed to write CDP request: %w", err)
 	}
 	// 读到匹配 id 的回复；忽略其它帧。ReadDeadline 兜底防卡死。
 	_ = c.conn.SetReadDeadline(time.Now().Add(9 * time.Second))
@@ -172,14 +172,14 @@ func (c *Client) evaluate(expression string, awaitPromise bool) (string, error) 
 		var res cdpResponse
 		if err := c.conn.ReadJSON(&res); err != nil {
 			c.markClosed()
-			return "", i18n.Errorf("读 CDP 回复失败: %w", err)
+			return "", i18n.Errorf("failed to read CDP reply: %w", err)
 		}
 		if res.ID != id {
 			continue
 		}
 		if len(res.Result.ExceptionDetails) > 0 && string(res.Result.ExceptionDetails) != "null" {
 			// 注意用 %s 而非把内容当格式串（内容里可能含 %）。
-			return "", i18n.Errorf("求值异常: %s", res.Result.ExceptionDetails)
+			return "", i18n.Errorf("evaluation exception: %s", res.Result.ExceptionDetails)
 		}
 		if len(res.Result.Result.Value) == 0 {
 			return "", nil
@@ -187,7 +187,7 @@ func (c *Client) evaluate(expression string, awaitPromise bool) (string, error) 
 		// value 是 JSON 字符串（主进程桥 JSON.stringify 的产物）→ 先解成 Go string。
 		var s string
 		if err := json.Unmarshal(res.Result.Result.Value, &s); err != nil {
-			return "", i18n.Errorf("求值返回非字符串（type=%s）: %w", res.Result.Result.Type, err)
+			return "", i18n.Errorf("evaluation returned non-string (type=%s): %w", res.Result.Result.Type, err)
 		}
 		return s, nil
 	}

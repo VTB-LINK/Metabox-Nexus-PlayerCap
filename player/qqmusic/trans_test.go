@@ -333,7 +333,7 @@ func TestToLyricLinesCarriesSubText(t *testing.T) {
 	lines, _, _ := parseLRC(realQRC, 0)
 	mergeTrans(lines, realTrans)
 
-	out := toLyricLines(lines, 0.4)
+	out := toLyricLines(lines, -0.4)
 	if len(out) != len(lines) {
 		t.Fatalf("len(out) = %d, want %d", len(out), len(lines))
 	}
@@ -341,7 +341,7 @@ func TestToLyricLinesCarriesSubText(t *testing.T) {
 		t.Fatalf("out[1].SubText = %q, want 翻译文本；toLyricLines 没把 SubText 传给 BuildLyricLine",
 			out[1].SubText)
 	}
-	// 顺带钉住：sub_text 的加入不能动到既有的 play_time 语义（timestamp - offset）
+	// 顺带钉住：sub_text 的加入不能动到既有的 play_time 语义（timestamp + offset，offset 为负即提前）
 	if got, want := out[1].PlayTime, float32(5.451-0.4); got != want {
 		t.Fatalf("out[1].PlayTime = %v, want %v；SubText 不该影响 play_time", got, want)
 	}

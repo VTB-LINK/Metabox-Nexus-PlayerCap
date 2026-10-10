@@ -7,8 +7,8 @@ package config
 // 被放过，回显显示已生效、实际并未生效。（被拦下的写下值只进 config 回显，见 writtenvalues_test。）
 //
 // 只覆盖 mergeYAML 一侧。CLI 覆盖（Load 里 flag.Visit 的同名分支）共用 validEffectStrategy，
-// 但测不到：Load 往全局 flag.CommandLine 注册 flag，二次调用 panic（同 clamppoll_test 的说明）。
-// CLI 侧「非法值撤销显式标记、config.yml 的合法标记保留」靠人守。
+// 不在本包测（同 clamppoll_test 的说明）：CLI 侧「非法值撤销显式标记、config.yml 的合法标记保留」
+// 由根包 bannerconfig_test.go 的 TestBannerCommandLineOverride 经真实的 Load 守。
 
 import (
 	"strings"

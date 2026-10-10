@@ -191,8 +191,8 @@ func TestNoticeSectionsFollowTheirOwnSwitch(t *testing.T) {
 // TestCountdownZeroReturnsImmediately wait 为 0 时不能卡住。
 func TestCountdownZeroReturnsImmediately(t *testing.T) {
 	start := time.Now()
-	countdown(0)
+	Countdown(0)
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Errorf("countdown(0) 花了 %v", elapsed)
+		t.Errorf("Countdown(0) 花了 %v", elapsed)
 	}
 }

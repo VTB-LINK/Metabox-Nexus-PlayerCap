@@ -106,7 +106,7 @@ func environmentFor(isRelease bool) string {
 // 不返回 error：遥测起不来不是主程序需要处理的事。
 func Init(opts Options) {
 	if !Enabled() {
-		log.Info("未注入 DSN，遥测已禁用")
+		log.Info("No DSN injected; telemetry disabled")
 		return
 	}
 
@@ -143,7 +143,7 @@ func Init(opts Options) {
 	if err != nil {
 		// 走到这儿说明 DSN 注入了但解析不了（sentry.Init 只在 DSN 格式错误时返回 error）。
 		// 大概率是 CI 的 secret 配错了。主程序照常跑，只是没上报。
-		log.Warn("遥测初始化失败: %v，程序继续运行", err)
+		log.Warn("Telemetry initialization failed: %v; the program continues running", err)
 		return
 	}
 
@@ -162,7 +162,7 @@ func Init(opts Options) {
 		applyUserIP(scope) // 见 userip.go：SendDefaultPII 在 Go SDK 里给不出 IP，实测过
 	})
 
-	log.Info("遥测已启用（environment=%s release=%s）", env, opts.Version)
+	log.Info("Telemetry enabled (environment=%s release=%s)", env, opts.Version)
 	logOSInfo(sys)
 	logAppInfo(app)
 }

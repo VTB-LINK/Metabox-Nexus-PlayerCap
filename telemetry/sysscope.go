@@ -69,14 +69,12 @@ func setTagIfNotEmpty(scope *sentry.Scope, key, value string) {
 // **它其实不该住在 telemetry 里** —— 受害者是 park，理应由 park 自检。但那是另一条线的改动，
 // 这里先把已经采到的信息用起来，别浪费。
 func logOSInfo(o osInfo) {
-	log.Info("系统: Windows %s (%s) %s / %s / %s / %d 核",
-		o.version(), nonEmpty(o.Edition, i18n.T("edition 未知")), o.Arch,
-		nonEmpty(o.Locale, i18n.T("locale 未知")), nonEmpty(o.TimeZone, i18n.T("时区未知")), o.CPUCores)
+	log.Info("System: Windows %s (%s) %s / %s / %s / %d cores",
+		o.version(), nonEmpty(o.Edition, i18n.T("edition unknown")), o.Arch,
+		nonEmpty(o.Locale, i18n.T("locale unknown")), nonEmpty(o.TimeZone, i18n.T("timezone unknown")), o.CPUCores)
 
 	if o.Shimmed {
-		log.Warn("检测到兼容性 shim：系统真实版本 %s，但 RtlGetVersion 报的是 %s。"+
-			"park 的 Win11 判据读的正是后者 —— 若这台机器其实是 Win11，屏外保活不会被降级，"+
-			"网易云特效可能黑屏。建议右键 exe →「属性」→「兼容性」，取消勾选兼容模式。",
+		log.Warn("Compatibility shim detected: the real system version is %s, but RtlGetVersion reports %s. park's Win11 check reads the latter -- if this machine is actually Win11, off-screen keep-alive will not be downgraded and NetEase Cloud Music effects may go black. Right-click the exe -> Properties -> Compatibility, and uncheck compatibility mode.",
 			o.version(), o.shimVersion())
 	}
 }

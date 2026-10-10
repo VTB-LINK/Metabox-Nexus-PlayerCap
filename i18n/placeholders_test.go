@@ -23,22 +23,25 @@ func verbs(s string) []string {
 	return out
 }
 
-// TestEnglishPlaceholdersMatch 钉死每条英文译文的占位符与中文原文逐一对应。
+// TestChinesePlaceholdersMatch 钉死每条中文译文的占位符与英文原文逐一对应。
 //
 // i18n 最隐蔽的 bug：译文漏掉 / 多出 / 写错一个 %-占位符，fmt 会打出 %!s(MISSING)
 // 之类的垃圾，而它只在运行到那条文案时才现形。这里对全表一次性核对，编译后即拦。
 // %[n] 显式序号允许语序重排，故只比动词多重集、不比出现顺序。
-func TestEnglishPlaceholdersMatch(t *testing.T) {
-	for zh, en := range english {
-		vz, ve := verbs(zh), verbs(en)
-		mismatch := len(vz) != len(ve)
-		for i := 0; !mismatch && i < len(vz); i++ {
-			if vz[i] != ve[i] {
+//
+// 变异自证（实测）：把 messages.go 里 "   Version: v%s\n" 的译文改成 "   版本: v%d\n"、
+// 或删掉译文里的占位符，均红。
+func TestChinesePlaceholdersMatch(t *testing.T) {
+	for en, zh := range chinese {
+		ve, vz := verbs(en), verbs(zh)
+		mismatch := len(ve) != len(vz)
+		for i := 0; !mismatch && i < len(ve); i++ {
+			if ve[i] != vz[i] {
 				mismatch = true
 			}
 		}
 		if mismatch {
-			t.Errorf("占位符与原文不一致：\n  中文 %q → %v\n  英文 %q → %v", zh, vz, en, ve)
+			t.Errorf("占位符与原文不一致：\n  英文 %q → %v\n  中文 %q → %v", en, ve, zh, vz)
 		}
 	}
 }

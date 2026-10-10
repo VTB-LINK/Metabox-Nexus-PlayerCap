@@ -96,7 +96,7 @@ func (p *SodaMusicPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("汽水音乐未启动或未连上"), Reason: player.ReasonProcessNotRunning})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Soda Music not running or not connected"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		pid, err := watchdog.FindMainPID()
@@ -109,7 +109,7 @@ func (p *SodaMusicPlayer) Start() {
 		}
 
 		if err := watchdog.EnsureInspector(pid); err != nil {
-			log.Warn("开启汽水音乐 inspector 失败: %v", err)
+			log.Warn("failed to open SodaMusic inspector: %v", err)
 			if p.sleepOrStop(3 * time.Second) {
 				return
 			}
@@ -118,18 +118,18 @@ func (p *SodaMusicPlayer) Start() {
 
 		client, err := cdp.Connect()
 		if err != nil {
-			log.Warn("CDP 连接失败: %v", err)
+			log.Warn("CDP connection failed: %v", err)
 			if p.sleepOrStop(2 * time.Second) {
 				return
 			}
 			continue
 		}
 
-		log.Info("CDP 连接成功，开始监听播放状态")
+		log.Info("CDP connected, monitoring playback state")
 		p.runSession(client)
 		client.Close()
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("汽水音乐 CDP 已断开"), Reason: player.ReasonCDPDisconnected})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("Soda Music CDP disconnected"), Reason: player.ReasonCDPDisconnected})
 		p.Emit(player.EventClearSongData, nil)
 		if p.sleepOrStop(2 * time.Second) {
 			return
@@ -261,7 +261,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 
 		if data.Throttled && !throttleWarned {
 			throttleWarned = true
-			log.Warn("汽水渲染器的后台节流没能关掉：窗口最小化久了进度源会掉到 1/60Hz，seek/暂停最长 60s 后才被发现")
+			log.Warn("SodaMusic renderer background throttling could not be disabled: after the window stays minimized, the progress source drops to 1/60Hz, so seek/pause may take up to 60s to be detected")
 		}
 
 		// ── 换歌检测（稳定 MediaID）──
@@ -327,7 +327,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 			singer := strings.Join(data.Artists, " / ")
 			currentTitle = buildTitle(name, singer)
 
-			log.Info("♪ 歌曲: %s - %s (id: %s)", name, singer, data.MediaID)
+			log.Info("♪ Song: %s - %s (id: %s)", name, singer, data.MediaID)
 
 			// 换歌瞬间发一次真实播放态。isPlaying 是明确布尔（非酷狗那种会塌成 standby 的过渡态），
 			// playing/paused 都是正常态、不会被路由判 idle，直接发。
@@ -349,9 +349,9 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 			// 歌词：明文 KRC 解析 + 翻译轨合并 + 套 offset，逐字有无由 detailedFlag 如实反映。
 			currentLyrics = parseSodaLyrics(data, offsetSec)
 			if len(currentLyrics) > 0 {
-				log.Info("歌词加载完成: %d 行；逐字：%s", len(currentLyrics), detailedFlag(currentLyrics))
+				log.Info("Lyrics loaded: %d lines; per-character: %s", len(currentLyrics), detailedFlag(currentLyrics))
 			} else {
-				log.Info("纯音乐/无歌词；逐字：%s", detailedFlag(currentLyrics))
+				log.Info("Instrumental / no lyrics; word-by-word: %s", detailedFlag(currentLyrics))
 			}
 
 			lyricItems := toLyricLines(currentLyrics, offsetSec)
@@ -361,7 +361,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 			// 若平台只返回一句提示语（如「纯音乐，请欣赏」），归一成 index:-1。
 			pureHint := ""
 			if player.IsPureMusicOnly(lyricItems) {
-				log.Info("平台只返回提示语「%s」，按无歌词处理", lyricItems[0].Text)
+				log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
 				pureHint = lyricItems[0].Text
 				currentLyrics = nil
 				lyricItems = []player.LyricLine{} // 显式空 slice——nil 会序列化成 null
@@ -396,7 +396,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 
 		// 音译补发落地：goroutine 借酷狗对齐后把整份歌词经 romaCh 交回，本循环（currentLyrics 的
 		// 单写者）换掉它并重发一次 all_lyrics，随后 lastLineIdx 归 -1 逼下一轮按含音译的当前行重发
-		// lyric_update——如此 all_lyrics 与其后每条 lyric_update 都带音译，与其余四家同源一致。
+		// lyric_update——如此 all_lyrics 与其后每条 lyric_update 都带音译，与其余各家同源一致。
 		// 非阻塞收：没到就跳过；对齐 0 行时 goroutine 根本不送，这里恒空转（不重发）。
 		// 重发一次 all_lyrics 是既有受支持的动作（对照下面「时长晚到」补发）。
 		select {
@@ -405,7 +405,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 			currentLyricItems = toLyricLines(merged, offsetSec)
 			lastLineIdx = -1
 			pos := livePos()
-			log.Info("音译已补入，重发 all_lyrics（%d 行）", len(currentLyricItems))
+			log.Info("Romanization filled in; re-emitting all_lyrics (%d lines)", len(currentLyricItems))
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 				Title:    currentTitle,
 				Duration: currentDurationSec,
@@ -422,8 +422,8 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 		// 会让 progress 恒 0（真机录音里实见过整首 progress=0）、插值也失去上限。
 		//
 		// **补到就必须重发一次 all_lyrics，不能只补内部时钟。** 服务端缓存里 `ps.Duration` 只由
-		// all_lyrics 写，而 `ps.Progress` 由 all_lyrics 与 lyric_update 两条都写（server.go 的
-		// UpdatePlayerState）。只补内部时钟的话，此后每条 lyric_update 会把 progress 写成非 0，
+		// all_lyrics 写，而 `ps.Progress` 由 all_lyrics、lyric_update 与 playback_pause/resume 都写
+		// （server.go 的 UpdatePlayerState）。只补内部时钟的话，此后每条 lyric_update 会把 progress 写成非 0，
 		// 而 duration 永远停在 0 —— 缓存里同时存在 `duration:0` 与 `progress:0.57`，
 		// buildInitEvents / FullState / HTTP `/all_lyrics` 会把这个**自相矛盾**的载荷发给中途连入
 		// 的每一个前端。补之前两个字段同为 0（错但自洽），只补一半反而把降级态变成了不自洽态，
@@ -434,7 +434,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 		if currentDurationSec <= 0 && durationSec > 0 {
 			currentDurationSec = durationSec
 			pos := livePos()
-			log.Info("时长晚到，补发 all_lyrics（duration=%.2fs）", currentDurationSec)
+			log.Info("duration arrived late; re-sending all_lyrics (duration=%.2fs)", currentDurationSec)
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 				Title:    currentTitle,
 				Duration: currentDurationSec,
@@ -462,7 +462,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 				anchorTime = time.Now()
 				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: anchorProgressSec, Progress: player.ClampProgress(anchorProgressSec, currentDurationSec)})
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
-				log.Info("恢复 @ %.2fs", anchorProgressSec)
+				log.Info("resumed @ %.2fs", anchorProgressSec)
 			} else {
 				// 冻结位置：**只有本轮刚刷新的采样才比外推值可信**。progressSeconds 是 1Hz 的，
 				// 上一轮那个旧采样最多滞后 1s，直接拿它当冻结点会把「停在哪」写早近一秒。
@@ -477,7 +477,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 				anchorTime = time.Now()
 				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: anchorProgressSec, Progress: player.ClampProgress(anchorProgressSec, currentDurationSec)})
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentTitle})
-				log.Info("暂停 @ %.2fs", anchorProgressSec)
+				log.Info("paused @ %.2fs", anchorProgressSec)
 			}
 		}
 
@@ -492,11 +492,11 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 				before := livePos()
 				drift := progressSec - before
 				if drift < -3.0 {
-					log.Info("检测到回跳: %.2fs → %.2fs", before, progressSec)
+					log.Info("Seek-back detected: %.2fs → %.2fs", before, progressSec)
 					lastLineIdx = -1
 					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: progressSec, Progress: player.ClampProgress(progressSec, currentDurationSec)})
 				} else if drift > 3.0 {
-					log.Info("检测到前跳: %.2fs → %.2fs", before, progressSec)
+					log.Info("forward seek detected: %.2fs → %.2fs", before, progressSec)
 					lastLineIdx = -1
 					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: progressSec, Progress: player.ClampProgress(progressSec, currentDurationSec)})
 				}
@@ -508,7 +508,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 		// ── 本地时钟插值 ──
 		interpSec := livePos()
 
-		matchTime := interpSec + offsetSec
+		matchTime := player.LyricMatchTime(interpSec, offsetSec)
 
 		// ── 歌词行匹配 → lyric_update ──
 		if len(currentLyrics) > 0 {
@@ -529,6 +529,15 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 					offsetSec, interpSec, currentDurationSec,
 				))
 			}
+		}
+
+		// 位置采样（见 BaseEmitter.EmitPositionSample）：播放中按固定间隔报一次，校准服务端缓存里的位置
+		// ——采样变化时重新落锚，3s 以内的偏差直接吸收、不发事件，无歌词的歌又没有歌词行可推。
+		// 缓冲中（loading）照发：那时状态仍是 playing、livePos 停住，而服务端仍按墙钟外推，采样把它的
+		// 超前量限制在一个间隔以内。传 interpSec，与上面 lyric_update 的 position 同一个量；offset 只进了
+		// matchTime，这里不带。
+		if isPlaying {
+			p.EmitPositionSample(time.Now(), interpSec, currentDurationSec)
 		}
 
 		time.Sleep(pollInterval)
@@ -664,8 +673,8 @@ func applyDetailedOffset(lines []krc.Line, offsetSec float32) {
 func detailedFlag(lines []krc.Line) string {
 	for _, l := range lines {
 		if len(l.Detailed.Words) > 0 {
-			return i18n.T("是")
+			return i18n.T("yes")
 		}
 	}
-	return i18n.T("否")
+	return i18n.T("no")
 }

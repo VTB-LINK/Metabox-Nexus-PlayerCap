@@ -31,7 +31,7 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 
 	// scheme 白名单：挡掉 file://、gopher:// 等可被利用的 scheme。
 	if u, err := url.Parse(coverURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		coverLog.Detail("[%s] 封面 URL 非 http/https，跳过: %q", playerName, coverURL)
+		coverLog.Detail("[%s] cover URL is not http/https, skipping: %q", playerName, coverURL)
 		return ""
 	}
 
@@ -89,7 +89,7 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(body)
-	coverLog.Detail("[%s] 封面已获取 (%d bytes → base64)", playerName, len(body))
+	coverLog.Detail("[%s] cover fetched (%d bytes → base64)", playerName, len(body))
 	return "data:" + mimeType + ";base64," + encoded
 }
 

@@ -63,8 +63,9 @@ func consoleWindow() windows.HWND {
 }
 
 // consoleInit 建立 ITaskbarList3。COM 套间有线程亲和，故锁定当前 OS 线程 —— 本函数在
-// checkAndUpdate 主 goroutine 内调用，该 goroutine 后续必然 os.Exit（成功 restart / 失败
-// exit），不必再 Unlock。任一步失败都干净降级，绝不影响更新本身。
+// checkAndUpdate 主 goroutine 内调用。更新失败的路径以 os.Exit 结束，不必再 Unlock；更新成功
+// （restartSelf 要等新进程结束）与连不上网关两条路径此后还要长时间存活，由调用方 Detach 释放。
+// 任一步失败都干净降级，绝不影响更新本身。
 func consoleInit() bool {
 	hwnd := consoleWindow()
 	if hwnd == 0 {

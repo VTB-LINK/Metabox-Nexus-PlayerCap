@@ -2,19 +2,24 @@ package player
 
 // 本文件只测 LyricPlayTime —— play_time 的唯一公式。
 //
-// 它守的契约：play_time 是「这一行何时该播出」（displayStart - offset），**不是**「当前播放
+// 它守的契约：play_time 是「这一行何时该播出」（displayStart + offset），**不是**「当前播放
 // 到哪」。四家播放器曾各写各的：cloudmusic 走公式，qqmusic/wesing/kugou 直接发实时插值位置。
 // 两者在常规行上只差一个轮询滞后（毫秒级），长期看不出差别——正因如此，这里必须把语义钉死，
 // 否则下次又会有人「顺手」把它改回实时位置而所有测试照样绿。
 
 import "testing"
 
-// 基本契约：无逐字时 play_time = timestamp - offset（用户给的定义原文：
-// timestamp=170.0、offset=500ms → play_time=169.5）。
-func TestLyricPlayTimeIsTimestampMinusOffset(t *testing.T) {
-	got := LyricPlayTime(170.0, LyricTextDetailed{}, 0.5)
-	if got != 169.5 {
-		t.Fatalf("LyricPlayTime(170.0, {}, 0.5) = %v, want 169.5", got)
+// 基本契约：无逐字时 play_time = timestamp + offset。offset 是延迟量（issue #54）：负值提前、正值延后。
+// timestamp=170.0、offset=-500ms → play_time=169.5；offset=+500ms → play_time=170.5。
+//
+// 变异自证（隔离的 worktree，实测）：AdjustLyricPlayTime 的符号改回 timestamp - offset → 本例与本文件
+// 其余带 offset 的各例红。
+func TestLyricPlayTimeIsTimestampPlusOffset(t *testing.T) {
+	if got := LyricPlayTime(170.0, LyricTextDetailed{}, -0.5); got != 169.5 {
+		t.Fatalf("LyricPlayTime(170.0, {}, -0.5) = %v, want 169.5（负值 = 提前）", got)
+	}
+	if got := LyricPlayTime(170.0, LyricTextDetailed{}, 0.5); got != 170.5 {
+		t.Fatalf("LyricPlayTime(170.0, {}, 0.5) = %v, want 170.5（正值 = 延后）", got)
 	}
 }
 
@@ -25,7 +30,7 @@ func TestLyricPlayTimeIgnoresLaterDetailed(t *testing.T) {
 		Timestamp: 5.04, // 晚于行的 4.75
 		Words:     []LyricTextDetailedWord{{Timestamp: 5.04, Duration: 0.66, Text: "You"}},
 	}
-	got := LyricPlayTime(4.75, detailed, 0.5)
+	got := LyricPlayTime(4.75, detailed, -0.5)
 	if got != 4.25 {
 		t.Fatalf("LyricPlayTime = %v, want 4.25（逐字晚于行时应以行时间戳为准）", got)
 	}
@@ -40,7 +45,7 @@ func TestLyricPlayTimeUsesEarlierDetailedStart(t *testing.T) {
 		Timestamp: 10.92,
 		Words:     []LyricTextDetailedWord{{Timestamp: 10.92, Duration: 0.03, Text: "A"}},
 	}
-	got := LyricPlayTime(14.58, detailed, 0.5)
+	got := LyricPlayTime(14.58, detailed, -0.5)
 	if want := float32(10.92 - 0.5); got != want {
 		t.Fatalf("LyricPlayTime = %v, want %v（逐字早于行时应提前到第一个字发声的时刻）", got, want)
 	}
@@ -50,15 +55,15 @@ func TestLyricPlayTimeUsesEarlierDetailedStart(t *testing.T) {
 // 否则零值结构体会把 play_time 拽到 0。
 func TestLyricPlayTimeIgnoresDetailedWithoutWords(t *testing.T) {
 	detailed := LyricTextDetailed{Timestamp: 0} // 无 Words
-	got := LyricPlayTime(14.58, detailed, 0.5)
+	got := LyricPlayTime(14.58, detailed, -0.5)
 	if want := float32(14.58 - 0.5); got != want {
 		t.Fatalf("LyricPlayTime = %v, want %v；空 Words 不构成逐字", got, want)
 	}
 }
 
-// offset 大于时间戳时钳到 0，不得为负。
+// 提前量（负的 offset）大于时间戳时钳到 0，不得为负。
 func TestLyricPlayTimeNeverNegative(t *testing.T) {
-	if got := LyricPlayTime(0.2, LyricTextDetailed{}, 0.5); got != 0 {
+	if got := LyricPlayTime(0.2, LyricTextDetailed{}, -0.5); got != 0 {
 		t.Fatalf("LyricPlayTime = %v, want 0", got)
 	}
 }
@@ -67,8 +72,8 @@ func TestLyricPlayTimeNeverNegative(t *testing.T) {
 //
 // 用例刻意让三者的正确答案互不相同、也不等于任何单一输入：
 //
-//	play_time = 170.0 - 0.5      = 169.5   （歌词时间轴，本行何时上屏）
-//	position  = 100.0            = 100.0   （实时时钟，整曲播到哪，playPos 原值、不减 offset）
+//	play_time = 170.0 + (-0.5)   = 169.5   （歌词时间轴，本行何时上屏）
+//	position  = 100.0            = 100.0   （实时时钟，整曲播到哪，playPos 原值、不含 offset）
 //	progress  = 100.0 / 200.0    = 0.5     （position / 总时长）
 //
 // 于是「把实时位置塞进 play_time」（旧的 qqmusic/wesing/kugou 写法，得 100.0）、
@@ -78,15 +83,15 @@ func TestLyricPlayTimeNeverNegative(t *testing.T) {
 // 变异自证：把 BuildLyricUpdate 里的 PlayTime 改成 playPos、删掉 Position: playPos、
 // 或把 Progress 改成 ClampProgress(lineTime, duration)，本例分别变红。
 func TestBuildLyricUpdateKeepsPlayTimeAndProgressIndependent(t *testing.T) {
-	u := BuildLyricUpdate(3, 170.0, "text", "sub", "roma", LyricTextDetailed{}, 0.5, 100.0, 200.0)
+	u := BuildLyricUpdate(3, 170.0, "text", "sub", "roma", LyricTextDetailed{}, -0.5, 100.0, 200.0)
 
 	if u.PlayTime != 169.5 {
 		t.Fatalf("PlayTime = %v, want 169.5；play_time 是「本行何时该播出」"+
-			"(timestamp-offset)，不是当前播放位置(playPos=100)", u.PlayTime)
+			"(timestamp+offset)，不是当前播放位置(playPos=100)", u.PlayTime)
 	}
 	if u.Position != 100.0 {
 		t.Fatalf("Position = %v, want 100.0；position 是整曲实时播放位置(playPos)，"+
-			"与 play_time(169.5) 语义相反、不减 offset", u.Position)
+			"与 play_time(169.5) 语义相反、不含 offset", u.Position)
 	}
 	if u.Progress != 0.5 {
 		t.Fatalf("Progress = %v, want 0.5；progress 是「整首播到哪」(position/duration)，"+
@@ -110,8 +115,8 @@ func TestBuildLyricUpdateAgreesWithBuildLyricLine(t *testing.T) {
 		Timestamp: 10.92,
 		Words:     []LyricTextDetailedWord{{Timestamp: 10.92, Text: "A"}},
 	}
-	line := BuildLyricLine(1, 14.58, "t", "s", "", detailed, 0.5)
-	upd := BuildLyricUpdate(1, 14.58, "t", "s", "", detailed, 0.5, 99.0, 200.0)
+	line := BuildLyricLine(1, 14.58, "t", "s", "", detailed, -0.5)
+	upd := BuildLyricUpdate(1, 14.58, "t", "s", "", detailed, -0.5, 99.0, 200.0)
 	if line.PlayTime != upd.PlayTime {
 		t.Fatalf("all_lyrics 的 play_time (%v) != lyric_update 的 play_time (%v)",
 			line.PlayTime, upd.PlayTime)
@@ -141,8 +146,8 @@ func TestBuildLyricLineAndLyricPlayTimeAgree(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			built := BuildLyricLine(0, c.lineTime, "t", "s", "", c.detailed, 0.5)
-			direct := LyricPlayTime(c.lineTime, c.detailed, 0.5)
+			built := BuildLyricLine(0, c.lineTime, "t", "s", "", c.detailed, -0.5)
+			direct := LyricPlayTime(c.lineTime, c.detailed, -0.5)
 			if built.PlayTime != direct {
 				t.Fatalf("all_lyrics 的 play_time (%v) != lyric_update 的 play_time (%v)；"+
 					"同一行在两个事件里报了两个时间", built.PlayTime, direct)

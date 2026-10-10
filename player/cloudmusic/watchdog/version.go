@@ -47,7 +47,7 @@ type UnsupportedVersionError struct {
 }
 
 func (e *UnsupportedVersionError) Error() string {
-	return fmt.Sprintf(i18n.T("网易云音乐 v%s 不支持 CDP（需 v%d 及以上）"), e.Version, v3MinMajor)
+	return fmt.Sprintf(i18n.T("NetEase Cloud Music v%s does not support CDP (requires v%d or later)"), e.Version, v3MinMajor)
 }
 
 var (

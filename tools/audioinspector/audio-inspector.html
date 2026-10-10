@@ -1,0 +1,244 @@
+<!doctype html>
+<!-- /audio-ws 检查页（开发调试用，不随发布包分发）。直接双击打开即可，默认连本机 8765。
+     可带参数：?port=8765&player=applemusic&auto=1
+     帧格式以 audiocap/frame/frame.go 与 doc/openapi.yaml 的 /audio-ws 为准（v1）。 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>audio-ws inspector</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --fg:#e6e9ef; --dim:#9aa3b2;
+          --bar:#ff2fb0; --bar2:#8b5cff; --ok:#33d17a; --warn:#ffb020; --err:#ff5964; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.5 ui-monospace,Consolas,monospace; }
+  header { display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line); }
+  input,select,button { background:#11141a; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 9px; font:inherit; }
+  button { cursor:pointer; }
+  button.primary { background:var(--bar); border-color:var(--bar); color:#fff; }
+  #status { margin-left:auto; padding:3px 10px; border-radius:999px; border:1px solid var(--line); }
+  #status.on { color:var(--ok); border-color:var(--ok); }
+  #status.off { color:var(--dim); }
+  #status.err { color:var(--err); border-color:var(--err); }
+  main { display:grid; grid-template-columns:1fr 380px; gap:12px; padding:12px 14px; }
+  @media(max-width:820px){ main{ grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .panel h3 { margin:0 0 8px; font-size:12px; color:var(--dim); font-weight:600; letter-spacing:.04em; }
+  canvas { width:100%; display:block; background:#0b0d12; border-radius:6px; }
+  .metrics { display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; color:var(--dim); }
+  .metrics b { color:var(--fg); font-variant-numeric:tabular-nums; }
+  #kind.live { color:var(--ok); } #kind.idle { color:var(--warn); }
+  #log { height:560px; overflow:auto; background:#0b0d12; border-radius:6px; padding:8px; white-space:pre-wrap; word-break:break-all; }
+  .row { padding:2px 0; border-bottom:1px solid #171b22; }
+  .t { color:var(--dim); }
+  .p { color:var(--bar2); } .r { color:var(--ok); } .e { color:var(--err); } .w { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <label>端口 <input id="port" size="5" value="8765"></label>
+  <label>端点
+    <select id="ep">
+      <option value="">/audio-ws（根，跟随活跃播放器）</option>
+      <option value="wesing">/wesing/audio-ws</option>
+      <option value="cloudmusicv3">/cloudmusicv3/audio-ws</option>
+      <option value="qqmusic">/qqmusic/audio-ws</option>
+      <option value="kugou">/kugou/audio-ws</option>
+      <option value="sodamusic">/sodamusic/audio-ws</option>
+      <option value="applemusic">/applemusic/audio-ws</option>
+    </select>
+  </label>
+  <label>WS <input id="url" size="40"></label>
+  <button id="connect" class="primary">连接</button>
+  <span id="status" class="off">未连接</span>
+</header>
+<main>
+  <div>
+    <div class="panel">
+      <h3>实时频谱（全 bin）</h3>
+      <canvas id="spec" height="220"></canvas>
+      <div class="metrics">
+        <span>帧 <b id="kind">—</b></span>
+        <span>player <b id="m-player">—</b></span>
+        <span>epoch <b id="m-epoch">—</b></span>
+        <span>RMS <b id="m-rms">0.000</b></span>
+        <span>峰值 L/R <b id="m-peak">0.000 / 0.000</b></span>
+        <span>bins <b id="m-bins">0</b></span>
+        <span>归一化 <b id="m-norm">—</b></span>
+      </div>
+      <div class="metrics">
+        <span>帧率 <b id="m-fps">0</b>/s</span>
+        <span>真帧 <b id="m-live">0</b></span>
+        <span>空闲帧 <b id="m-idle">0</b></span>
+        <span>坏帧 <b id="m-bad">0</b></span>
+        <span>RMS 非零 <b id="m-nonzero">0</b></span>
+        <span>ts <b id="m-ts">—</b> ms</span>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h3>电平（条 = RMS，竖线 = 左 / 右峰值；满刻度 1.0，归一化开启时可能超过）</h3>
+      <canvas id="rms" height="34"></canvas>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h3>RMS 包络（每帧一列）</h3>
+      <canvas id="tape" height="120"></canvas>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>事件 / 帧日志（切换、空闲与真帧互转、坏帧全记；其余每 25 帧记一条）</h3>
+    <div id="log"></div>
+  </div>
+</main>
+<script>
+// 线格式 v1（全小端；括号内为帧内偏移）：
+//   magic(0,u32) | payloadLen(4,u32) | version(8,u32) | headerLen(12,u32) | flags(16,u32) |
+//   epoch(20,u32) | ts(24,f64) | rms(32,f32) | peakL(36,f32) | peakR(40,f32) | playerLen(44,u32) |
+//   bins(headerLen,f32×N) | player(headerLen+4N)
+// 帧长 = 8 + payloadLen；N = (帧长 − headerLen − playerLen) / 4。N = 0 是空闲帧（无捕获）。
+const MAGIC = [0x57,0x41,0x54,0x56], HEADER_LEN = 48, MAX_PAYLOAD = 1 << 16, VERSION = 1, FLAG_NORMALIZED = 1;
+const $ = id => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+let ws = null, buf = new Uint8Array(0);
+let live = 0, idle = 0, bad = 0, nonzero = 0, fpsCount = 0, sinceLog = 0;
+let lastPlayer = null, lastEpoch = null, lastIdle = null;
+
+function log(cls, msg){
+  const el = $('log'), row = document.createElement('div'), t = document.createElement('span'), m = document.createElement('span');
+  row.className = 'row'; t.className = 't'; m.className = cls;
+  t.textContent = new Date().toLocaleTimeString() + ' '; m.textContent = msg;
+  row.append(t, m); el.appendChild(row);
+  if (el.children.length > 400) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+function setStatus(s, cls){ const el = $('status'); el.textContent = s; el.className = cls; }
+function badFrame(why){ bad++; $('m-bad').textContent = bad; log('e', '坏帧：' + why); }
+
+function concat(a, b){ const c = new Uint8Array(a.length + b.length); c.set(a); c.set(b, a.length); return c; }
+function findMagic(u8){
+  for (let i = 0; i + 4 <= u8.length; i++)
+    if (u8[i] === MAGIC[0] && u8[i+1] === MAGIC[1] && u8[i+2] === MAGIC[2] && u8[i+3] === MAGIC[3]) return i;
+  return -1;
+}
+// 按魔数对齐逐帧解；坏帧跳过这个魔数继续找下一个（与 frame.Decoder 同一策略）。
+function drain(){
+  for (;;) {
+    const i = findMagic(buf);
+    if (i < 0) { if (buf.length > 3) buf = buf.slice(buf.length - 3); return; }
+    if (i > 0) buf = buf.slice(i);
+    if (buf.length < 8) return;
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
+    const payLen = dv.getUint32(4, true);
+    if (payLen > MAX_PAYLOAD) { badFrame('payloadLen ' + payLen + ' 超过上限'); buf = buf.slice(4); continue; }
+    const frameLen = 8 + payLen;
+    if (buf.length < frameLen) return;
+    const err = decode(dv, frameLen);
+    if (err) { badFrame(err); buf = buf.slice(4); continue; }
+    buf = buf.slice(frameLen);
+  }
+}
+function decode(dv, frameLen){
+  if (frameLen < HEADER_LEN) return '帧长 ' + frameLen + ' 小于定长头';
+  const version = dv.getUint32(8, true);
+  if (version !== VERSION) return 'version ' + version + ' 不受支持';
+  const hdr = dv.getUint32(12, true), playerLen = dv.getUint32(44, true);
+  if (hdr < HEADER_LEN || hdr % 4 !== 0 || hdr > frameLen) return 'headerLen ' + hdr + ' 不合法（帧长 ' + frameLen + '）';
+  if (hdr + playerLen > frameLen) return 'headerLen+playerLen 大于帧长';
+  const binBytes = frameLen - hdr - playerLen;
+  if (binBytes % 4 !== 0) return 'bins 字节数 ' + binBytes + ' 不是 4 的倍数';
+  const n = binBytes / 4, bins = new Float32Array(n);
+  for (let k = 0; k < n; k++) bins[k] = dv.getFloat32(hdr + 4 * k, true);
+  const pStart = dv.byteOffset + hdr + 4 * n;
+  const player = new TextDecoder().decode(new Uint8Array(dv.buffer, pStart, playerLen));
+  const f = {
+    flags: dv.getUint32(16, true), epoch: dv.getUint32(20, true), ts: dv.getFloat64(24, true),
+    rms: dv.getFloat32(32, true), peakL: dv.getFloat32(36, true), peakR: dv.getFloat32(40, true),
+    player, bins, headerLen: hdr,
+  };
+  // 帧结构合法而数值不是有限值（frame.Decoder 不查这一项）：按坏帧记，整帧照常消费。不拦的话 NaN 会传到
+  // createLinearGradient 抛异常，这一帧留在缓冲里，之后每条消息都重解它，后面的帧再也显示不出来。
+  if (![f.ts, f.rms, f.peakL, f.peakR].every(Number.isFinite) || !bins.every(Number.isFinite)) {
+    badFrame('含非有限数值（NaN / Inf）'); return '';
+  }
+  // 显示出错不得挡住解帧：记一次，帧照常消费。
+  try { onFrame(f); } catch (e) { badFrame('显示失败：' + e.message); }
+  return '';
+}
+
+function onFrame(f){
+  const isIdle = f.bins.length === 0, name = f.player || '（无活跃播放器）';
+  fpsCount++; sinceLog++;
+  if (isIdle) idle++; else { live++; if (f.rms > 0) nonzero++; }
+  const kind = $('kind'); kind.textContent = isIdle ? '空闲（无捕获）' : '真帧'; kind.className = isIdle ? 'idle' : 'live';
+  $('m-player').textContent = name; $('m-epoch').textContent = f.epoch;
+  $('m-rms').textContent = f.rms.toFixed(3); $('m-peak').textContent = f.peakL.toFixed(3) + ' / ' + f.peakR.toFixed(3);
+  $('m-bins').textContent = f.bins.length; $('m-norm').textContent = isIdle ? '—' : (f.flags & FLAG_NORMALIZED ? '开' : '关');
+  $('m-live').textContent = live; $('m-idle').textContent = idle; $('m-nonzero').textContent = nonzero;
+  $('m-ts').textContent = f.ts.toFixed(0);
+  const line = 'player=' + name + ' epoch=' + f.epoch + ' rms=' + f.rms.toFixed(3) +
+    ' peak=' + f.peakL.toFixed(3) + '/' + f.peakR.toFixed(3) + ' bins=' + f.bins.length +
+    (f.headerLen !== HEADER_LEN ? ' headerLen=' + f.headerLen : '');
+  if (f.player !== lastPlayer || f.epoch !== lastEpoch || isIdle !== lastIdle) {
+    log('p', (isIdle ? '→ 空闲 ' : '→ 真帧 ') + line);
+    lastPlayer = f.player; lastEpoch = f.epoch; lastIdle = isIdle; sinceLog = 0;
+  } else if (sinceLog >= 25) { log(isIdle ? 'w' : 'r', line); sinceLog = 0; }
+  drawSpec(f.bins); drawLevel(f); pushTape(isIdle ? 0 : f.rms);
+}
+
+function ctxOf(id){ const c = $(id), d = Math.max(1, devicePixelRatio || 1); c.width = c.clientWidth * d; return [c.getContext('2d'), c.width, c.height]; }
+function drawSpec(bins){
+  const [ctx, W, H] = ctxOf('spec'); ctx.clearRect(0, 0, W, H);
+  if (!bins.length) return;
+  const N = Math.min(bins.length, 128), bw = W / N;
+  for (let i = 0; i < N; i++) {
+    const v = Math.min(1, Math.max(0, bins[Math.floor(i * bins.length / N)])), h = Math.pow(v, 0.6) * H;
+    const g = ctx.createLinearGradient(0, H, 0, H - h); g.addColorStop(0, '#8b5cff'); g.addColorStop(1, '#ff2fb0');
+    ctx.fillStyle = g; ctx.fillRect(i * bw + bw * 0.15, H - h, bw * 0.7, h);
+  }
+}
+function drawLevel(f){
+  const [ctx, W, H] = ctxOf('rms'); ctx.clearRect(0, 0, W, H);
+  const x = v => Math.min(1, Math.max(0, v)) * W;
+  const g = ctx.createLinearGradient(0, 0, W, 0);
+  g.addColorStop(0, '#33d17a'); g.addColorStop(0.7, '#ffb020'); g.addColorStop(1, '#ff5964');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, x(f.rms), H);
+  ctx.fillStyle = '#e6e9ef';
+  ctx.fillRect(x(f.peakL) - 1, 0, 2, H / 2 - 1); ctx.fillRect(x(f.peakR) - 1, H / 2 + 1, 2, H / 2 - 1);
+}
+let tape = [];
+function pushTape(rms){
+  const [ctx, W, H] = ctxOf('tape');
+  tape.push(Math.min(1, rms * 2.5)); const cols = Math.floor(W / 2); if (tape.length > cols) tape = tape.slice(tape.length - cols);
+  ctx.clearRect(0, 0, W, H); ctx.strokeStyle = '#ff2fb0'; ctx.beginPath();
+  for (let i = 0; i < tape.length; i++) { const h = tape[i] * H * 0.9; ctx.moveTo(i * 2, H / 2 - h / 2); ctx.lineTo(i * 2, H / 2 + h / 2 + 1); }
+  ctx.stroke();
+}
+
+function syncUrl(){
+  const p = $('ep').value;
+  $('url').value = 'ws://localhost:' + ($('port').value.trim() || '8765') + (p ? '/' + p : '') + '/audio-ws';
+}
+function connect(){
+  if (ws) { ws.close(); return; }
+  const url = $('url').value.trim();
+  buf = new Uint8Array(0); lastPlayer = lastEpoch = lastIdle = null;
+  setStatus('连接中…', 'off'); log('w', '连接 ' + url);
+  try { ws = new WebSocket(url); } catch (e) { setStatus('错误', 'err'); log('e', '无法创建连接：' + e.message); ws = null; return; }
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { setStatus('已连接', 'on'); log('r', '已连接'); $('connect').textContent = '断开'; };
+  ws.onclose = e => { setStatus('已断开', 'off'); log('w', '连接关闭 code=' + e.code); $('connect').textContent = '连接'; ws = null; };
+  ws.onerror = () => { setStatus('错误', 'err'); log('e', '连接出错（服务没起，或端口不对）'); };
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string') { log('w', '文本消息：' + ev.data); return; }
+    buf = concat(buf, new Uint8Array(ev.data)); drain();
+  };
+}
+if (/^\d{1,5}$/.test(q.get('port') || '')) $('port').value = q.get('port');
+if ([...$('ep').options].some(o => o.value === q.get('player'))) $('ep').value = q.get('player');
+syncUrl();
+$('port').oninput = syncUrl; $('ep').onchange = syncUrl;
+$('connect').onclick = connect;
+setInterval(() => { $('m-fps').textContent = fpsCount; fpsCount = 0; }, 1000);
+if (q.get('auto') === '1') connect();
+</script>
+</body>
+</html>

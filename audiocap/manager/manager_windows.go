@@ -82,6 +82,7 @@ type Manager struct {
 	sink         AudioSink
 	status       func(name string) string       // 主服务 GetPlayerStatus：返回 "playing"/"paused"/"idle"/...
 	normResolver func(player string) NormParams // 据 config 解析某家本轮归一化参数（下发 capture 时逐家查）
+	frameRate    int                            // 出帧帧率（帧每秒），全局值，随每条 capture 下发
 	exe          string                         // 本 exe 路径（spawn helper 与识别孤儿用）
 
 	wakeCh   chan struct{} // 带缓冲=1：切歌唤醒立即重算门控（消切换空窗）
@@ -105,13 +106,15 @@ type Manager struct {
 }
 
 // New 构造管理器。sink 为帧接收/门控能力（server 的 *audioHub），status 为主服务播放状态查询
-// （GetPlayerStatus），normResolver 据 config 逐家解析归一化参数（下发 capture 时查），exe 为本进程
-// exe 路径（os.Executable()，用于 spawn helper 与识别孤儿）。
-func New(sink AudioSink, status func(name string) string, normResolver func(player string) NormParams, exe string) *Manager {
+// （GetPlayerStatus），normResolver 据 config 逐家解析归一化参数（下发 capture 时查），frameRate 为
+// 出帧帧率（帧每秒，调用方已钳制到合法范围），exe 为本进程 exe 路径（os.Executable()，用于 spawn
+// helper 与识别孤儿）。
+func New(sink AudioSink, status func(name string) string, normResolver func(player string) NormParams, frameRate int, exe string) *Manager {
 	return &Manager{
 		sink:         sink,
 		status:       status,
 		normResolver: normResolver,
+		frameRate:    frameRate,
 		exe:          exe,
 		wakeCh:       make(chan struct{}, 1),
 		stopCh:       make(chan struct{}),
@@ -179,7 +182,7 @@ func (m *Manager) Run() {
 func (m *Manager) idleKeepalive() {
 	defer func() {
 		if r := recover(); r != nil {
-			managerLog.Warn("[idle-keepalive] panic 已本地恢复: %v", r)
+			managerLog.Warn("[idle-keepalive] panic recovered locally: %v", r)
 		}
 	}()
 	ticker := time.NewTicker(idleKeepaliveInterval)
@@ -242,7 +245,7 @@ func (m *Manager) reconcile() {
 	// 3. 进程快照 + 门控计算。
 	snap, err := procscan.Snapshot()
 	if err != nil {
-		managerLog.Warn("进程快照失败: %v", err)
+		managerLog.Warn("Process snapshot failed: %v", err)
 		return
 	}
 	hasRoot := m.sink.HasRootSubscriber()
@@ -282,7 +285,7 @@ func (m *Manager) reconcile() {
 			return
 		}
 		if err := m.spawnHelper(); err != nil {
-			managerLog.Warn("helper 启动失败: %v", err)
+			managerLog.Warn("Failed to start helper: %v", err)
 			m.noteSpawnFailure()
 			return
 		}
@@ -305,7 +308,7 @@ func (m *Manager) applyControls(want map[string]uint32) {
 			m.sendControl("stop " + player) // PID 变了（播放器重启）：先停旧
 		}
 		np := m.normResolver(player)
-		if m.sendControl(fmt.Sprintf("capture %d %s %s %d %d", pid, player, bit(np.Enabled), np.Target, np.MaxGain)) {
+		if m.sendControl(fmt.Sprintf("capture %d %s %s %d %d %d", pid, player, bit(np.Enabled), np.Target, np.MaxGain, m.frameRate)) {
 			now := time.Now()
 			m.dispatched[player] = pid
 			m.dispatchedAt[player] = now
@@ -352,7 +355,7 @@ func (m *Manager) sendControl(line string) bool {
 		return false
 	}
 	if _, err := io.WriteString(m.helper.stdin, line+"\n"); err != nil {
-		managerLog.Warn("下发控制失败（helper 可能已退出）: %v", err)
+		managerLog.Warn("Failed to send control (helper may have exited): %v", err)
 		return false
 	}
 	return true
@@ -386,7 +389,7 @@ func (m *Manager) checkWatchdog(want map[string]uint32) {
 		}
 	}
 	if killHelper {
-		managerLog.Warn("%d 路捕获持续 %v 无帧，且没有其他路在本次下发后出帧，判 helper 假死，kill 重启", len(stale), hangThreshold)
+		managerLog.Warn("%d capture(s) produced no frames for %v, and no other capture has produced a frame since this dispatch; treating the helper as hung, killing and restarting it", len(stale), hangThreshold)
 		m.helper.watchdogKill = true
 		m.killHelperForRestart()
 	}
@@ -397,10 +400,10 @@ func (m *Manager) noteCaptureFailure(player string, pid uint32, now time.Time) {
 	f := recordCaptureFailure(m.captureFails[player], now, m.dispatchedAt[player], pid)
 	m.captureFails[player] = f
 	if f.givenUp {
-		managerLog.Warn("player %q 捕获连续 %d 次失败，放弃该播放器的波形，直到其进程重启；其他播放器不受影响", player, f.count)
+		managerLog.Warn("Capture for player %q failed %d times in a row; giving up its waveform until its process restarts. Other players are unaffected", player, f.count)
 		return
 	}
-	managerLog.Warn("player %q 持续 %v 无帧，记第 %d 次捕获失败，%v 后重试", player, hangThreshold, f.count, f.retryAt.Sub(now))
+	managerLog.Warn("Player %q produced no frames for %v; recording capture failure #%d, retrying in %v", player, hangThreshold, f.count, f.retryAt.Sub(now))
 }
 
 // spawnHelper 拉起 helper 子进程、建 Job Object 并赋入、起 stdout 解复用 goroutine。
@@ -424,7 +427,7 @@ func (m *Manager) spawnHelper() error {
 	// killHelperForRestart / teardownHelper / reapHelper 退回 Process.Kill。
 	var job windows.Handle
 	if j, jerr := createKillOnCloseJob(); jerr != nil {
-		managerLog.Warn("创建 Job Object 失败（防孤儿降级为 stdin EOF + Process.Kill）: %v", jerr)
+		managerLog.Warn("Failed to create Job Object (orphan protection falls back to stdin EOF + Process.Kill): %v", jerr)
 	} else {
 		var aerr error
 		h, herr := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
@@ -438,7 +441,7 @@ func (m *Manager) spawnHelper() error {
 		}
 		if aerr != nil {
 			windows.CloseHandle(j)
-			managerLog.Warn("helper 未赋入 Job Object（防孤儿降级为 stdin EOF + Process.Kill）: %v", aerr)
+			managerLog.Warn("Helper not assigned to the Job Object (orphan protection falls back to stdin EOF + Process.Kill): %v", aerr)
 		} else {
 			job = j
 		}
@@ -451,7 +454,7 @@ func (m *Manager) spawnHelper() error {
 
 	go m.demux(hp, stdout)
 
-	managerLog.Info("音频捕获 helper 已启动 (pid=%d)", cmd.Process.Pid)
+	managerLog.Info("Audio capture helper started (pid=%d)", cmd.Process.Pid)
 	return nil
 }
 
@@ -462,7 +465,7 @@ func (m *Manager) demux(hp *helperProc, stdout io.Reader) {
 	defer close(hp.exited)
 	defer func() {
 		if r := recover(); r != nil {
-			managerLog.Warn("[demux] panic 已本地恢复: %v", r)
+			managerLog.Warn("[demux] panic recovered locally: %v", r)
 		}
 	}()
 
@@ -475,7 +478,7 @@ func (m *Manager) demux(hp *helperProc, stdout io.Reader) {
 			for {
 				f, ok, derr := dec.Next()
 				if derr != nil {
-					managerLog.Detail("丢弃坏帧: %v", derr) // Decoder 已跳过，继续
+					managerLog.Detail("Dropped bad frame: %v", derr) // Decoder 已跳过，继续
 					continue
 				}
 				if !ok {
@@ -500,7 +503,7 @@ func (m *Manager) demux(hp *helperProc, stdout io.Reader) {
 		}
 		if err != nil {
 			if err != io.EOF {
-				managerLog.Detail("读取 helper stdout 结束: %v", err)
+				managerLog.Detail("Reading helper stdout ended: %v", err)
 			}
 			break
 		}
@@ -540,17 +543,17 @@ func (m *Manager) reapHelper() {
 	if hp.watchdogKill {
 		// 看门狗所杀：只有超时各路已逐播放器记账，其重试由各自 retryAt 经 filterWant 控制；同被杀但未超时
 		// 的路不记账，在本轮 reconcile 随新 helper 立即恢复。不计 helper 快速失败、不抬退避、不推迟 respawnAfter。
-		managerLog.Warn("helper 已由看门狗终止（存活 %v），不退避、可立即重启", time.Since(hp.start).Round(time.Millisecond))
+		managerLog.Warn("Helper terminated by the watchdog (alive for %v); no backoff, may restart immediately", time.Since(hp.start).Round(time.Millisecond))
 		return
 	}
 	if m.quickFails >= maxQuickFails {
 		m.givenUp = true
-		managerLog.Warn("helper 累计 %d 次快速失败（spawn 失败或启动后不足 %v 退出，不含看门狗重启与按需拆除），本会话放弃音频捕获（波形降级），待主服务下次重启再试", m.quickFails, quickFailWindow)
+		managerLog.Warn("Helper has failed fast %d times (spawn failure or exit within %v of starting; watchdog restarts and on-demand teardowns not counted); giving up audio capture for this session (waveform degraded) until the main service restarts", m.quickFails, quickFailWindow)
 		return
 	}
 	m.bumpBackoff()
 	m.respawnAfter = time.Now().Add(m.backoff)
-	managerLog.Warn("helper 退出（存活 %v），%v 后重启", time.Since(hp.start).Round(time.Millisecond), m.backoff)
+	managerLog.Warn("Helper exited (alive for %v); restarting in %v", time.Since(hp.start).Round(time.Millisecond), m.backoff)
 }
 
 // noteSpawnFailure 处理 spawn 本身失败（exec 起不来）：同样计快速失败并退避。
@@ -558,7 +561,7 @@ func (m *Manager) noteSpawnFailure() {
 	m.quickFails++
 	if m.quickFails >= maxQuickFails {
 		m.givenUp = true
-		managerLog.Warn("helper 累计 %d 次快速失败（spawn 失败或启动后不足 %v 退出，不含看门狗重启与按需拆除），本会话放弃音频捕获（波形降级），待主服务下次重启再试", m.quickFails, quickFailWindow)
+		managerLog.Warn("Helper has failed fast %d times (spawn failure or exit within %v of starting; watchdog restarts and on-demand teardowns not counted); giving up audio capture for this session (waveform degraded) until the main service restarts", m.quickFails, quickFailWindow)
 		return
 	}
 	m.bumpBackoff()
@@ -647,7 +650,7 @@ func (m *Manager) sweepOrphans() {
 		if err != nil || !strings.Contains(cmdline, helperFlag) {
 			continue
 		}
-		managerLog.Warn("清理遗留音频 helper 孤儿进程 pid=%d", p.Pid)
+		managerLog.Warn("Cleaning up leftover orphaned audio helper process pid=%d", p.Pid)
 		p.Kill()
 	}
 }

@@ -17,6 +17,13 @@ type LyricLine struct {
 	// 时长，秒；CE 实测跨重启稳定）。时间轴不合法的行退回零值 → 序列化成 {}、只出行级。
 	// PlayTime 此处不填，由 wesing.go 的 applyDetailedOffset 按 offset 统一套。
 	Detailed player.LyricTextDetailed
+	// RomaText 这一行的音译（发音标注）。LoadLyrics 不填，由 LoadRoma 从同一个 LyricHost 的音译轨
+	// 按行号 + 行起始时间配上；这首歌没有音译轨、或这一行没有音译时为空串。
+	RomaText string
+	// RomaDetailed 音译的逐字（逐音节）时间轴，取自音译轨自己的字级单元——与 Detailed 的单元不一一
+	// 对应（「僕」一个单元，音译是 bo、ku 两个；空格可以单独占一个单元）。RomaText 为空、或这一行
+	// 音译的时间轴不合法时为零值。PlayTime 同样留给 wesing.go 的 applyDetailedOffset 套。
+	RomaDetailed player.LyricTextDetailed
 }
 
 // LoadLyrics 从内存中加载所有歌词行
@@ -27,20 +34,20 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 	// 读取歌词条目向量的 begin 和 end 指针
 	beginPtr, err := proc.ReadUint32(handle, subStructAddr+0x48)
 	if err != nil {
-		return nil, i18n.Errorf("读取歌词向量 begin 失败: %v", err)
+		return nil, i18n.Errorf("Failed to read lyric vector begin: %v", err)
 	}
 	endPtr, err := proc.ReadUint32(handle, subStructAddr+0x50)
 	if err != nil {
-		return nil, i18n.Errorf("读取歌词向量 end 失败: %v", err)
+		return nil, i18n.Errorf("Failed to read lyric vector end: %v", err)
 	}
 
 	if endPtr <= beginPtr || beginPtr == 0 {
-		return nil, i18n.Errorf("歌词向量为空 (begin=0x%X, end=0x%X)", beginPtr, endPtr)
+		return nil, i18n.Errorf("Lyric vector empty (begin=0x%X, end=0x%X)", beginPtr, endPtr)
 	}
 
 	numEntries := (endPtr - beginPtr) / 4
 	if numEntries > 1000 {
-		return nil, i18n.Errorf("歌词数量异常: %d", numEntries)
+		return nil, i18n.Errorf("Abnormal lyric count: %d", numEntries)
 	}
 
 	var lyrics []LyricLine

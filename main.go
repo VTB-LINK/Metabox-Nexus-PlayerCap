@@ -7,6 +7,7 @@ import (
 	"Metabox-Nexus-PlayerCap/config"
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player/applemusic"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/effect"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/park"
@@ -75,16 +76,27 @@ func main() {
 	// 结果注入纯 Go 的 i18n 包，使 logger/ 与 config/ 保持 GOOS=linux 可构建（AGENTS.md §0.3）。
 	i18n.SetLanguage(i18n.DetectSystemLanguage())
 
-	// 确保以标准文件名运行
+	// 确保以标准文件名运行。文件名不标准时本进程启动复制品并等它结束，不再往下执行。
 	ensureCanonicalName()
 
 	// 清理旧版 WesingCap 残留文件（v1.x → v2.0 迁移）
 	cleanupLegacyExe()
 
-	cfg := config.Load()
+	cfg := config.Load(Version)
 
 	// 播放器注册表（新增播放器只需在此追加）
-	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName}
+	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName, applemusic.PlayerName}
+
+	// 网易云特效最小化策略（config 静态读取）。Win11 下 park 屏外保活失效（DWM 停止合成不可见窗口），
+	// 故无论 config 配什么，Win11 一律强制 fadeout。
+	//
+	// 判定与 buildConfigEcho 都在横幅之前：横幅与 /service-status 用的是下面这同一份三件套，
+	// 生效策略须先定下来，横幅才不必另算。
+	effectStrategy := effectiveEffectStrategy(cfg.EffectStrategy, park.IsWindows11())
+	if effectStrategy != cfg.EffectStrategy {
+		mainLog.Warn("Detected Windows 11: park off-screen keep-alive is ineffective on Win11, forcing effect strategy to fadeout")
+	}
+	configOM, configEffectiveOM, configOverwritten := buildConfigEcho(&cfg, playerNames, effectStrategy)
 
 	fmt.Println()
 	fmt.Println(`___    __________________         ______ ___________    ____________`)
@@ -94,27 +106,14 @@ func main() {
 	fmt.Println(`_____/   /_/     /_____/          /_____//___/   _____/   /_____/   `)
 	fmt.Println()
 	fmt.Println("===========================================================")
-	fmt.Println(i18n.T("VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务 "))
+	fmt.Println(i18n.T("VTB-TOOLS Metabox Nexus-PlayerCap Multi-Player Lyrics Push Service "))
 	fmt.Println("===========================================================")
-	fmt.Printf(i18n.T("   版本: v%s\n"), displayVersion(Version))
-	fmt.Printf(i18n.T("   监听: %s\n"), cfg.Addr)
-	for _, pn := range playerNames {
-		fmt.Printf(i18n.T("   播放器: %s (offset=%dms poll=%dms)\n"), pn, cfg.GetPlayerOffset(pn), cfg.GetPlayerPoll(pn))
+	fmt.Printf(i18n.T("   Version: v%s\n"), displayVersion(Version))
+	fmt.Print(bannerConfigFileLine(&cfg))
+	// 配置行逐键取自上面的三件套；类型不符而被拒的原值不进三件套，由横幅单独列出，见 bannerConfigLines
+	for _, line := range bannerConfigLines(configOM, configEffectiveOM, configOverwritten, cfg.RejectedValues, playerNames) {
+		fmt.Print(line)
 	}
-	fmt.Printf(i18n.T("   优先播放器: %v (超时: %ds)\n"), cfg.PriorPlayer, cfg.PriorPlayerExpire)
-	idleHideParts := []string{}
-	if cfg.PerPlayerIdleHide > 0 {
-		idleHideParts = append(idleHideParts, fmt.Sprintf(i18n.T("全局 %ds"), cfg.PerPlayerIdleHide))
-	} else {
-		idleHideParts = append(idleHideParts, i18n.T("全局关"))
-	}
-	for _, pn := range playerNames {
-		// 只列与全局不同的显式覆盖（IdleHide != nil）
-		if pc := cfg.Players[pn]; pc != nil && pc.IdleHide != nil && *pc.IdleHide != cfg.PerPlayerIdleHide {
-			idleHideParts = append(idleHideParts, fmt.Sprintf("%s=%ds", pn, *pc.IdleHide))
-		}
-	}
-	fmt.Printf(i18n.T("   per-player 无活跃自动隐藏: %s\n"), strings.Join(idleHideParts, i18n.ListSep()))
 	fmt.Println("===========================================================")
 
 	// 遥测（Sentry）。放在 Banner 之后、checkAndUpdate 之前：自动更新本身就是个故障点
@@ -141,22 +140,16 @@ func main() {
 	// 见 telemetry/privacy.go。
 	telemetry.PrintPrivacyNotice(privacyNoticeWait, isReleaseVersion(Version))
 
-	// 强制版本检查与自动更新
-	checkAndUpdate()
+	// 强制版本检查与自动更新；网关要求时在这里重建 config.yml 并重启（见 rebuildConfigIfForced）
+	checkAndUpdate(&cfg)
 
-	// 每日在线心跳。**必须在 checkAndUpdate 之后起** —— 那一步可能替换 exe 并
-	// restartSelf() → os.Exit(0)，在它之前起等于给一个马上要死的进程挂后台 goroutine。
-	// 它只发请求、绝不做任何更新动作，见 sendHeartbeat。
+	// 每日在线心跳。**必须在 checkAndUpdate 之后起** —— 那一步可能替换 exe 并 restartSelf()：
+	// 本进程此后只等新进程结束、不再提供服务，在它之前起心跳，这个旧版本进程会在整个运行期里
+	// 照常上报在线。它只发请求、绝不做任何更新动作，见 sendHeartbeat。
 	startDailyHeartbeat()
 
 	srv := server.NewServer(playerNames)
-	// 网易云特效最小化策略（config 静态读取）。Win11 下 park 屏外保活失效（DWM 停止合成不可见窗口），
-	// 故无论 config 配什么，Win11 一律强制 fadeout。
-	effectStrategy := cfg.EffectStrategy
-	if effectStrategy == "park" && park.IsWindows11() {
-		mainLog.Warn("检测到 Windows 11：park 屏外保活在 Win11 上失效，特效策略强制改为 fadeout")
-		effectStrategy = "fadeout"
-	}
+	// 生效的特效策略在横幅之前已定下（effectiveEffectStrategy，含 Win11 降级）。
 	srv.SetDefaultEffectStrategy(effectStrategy)
 	// per-player 通道无活跃自动隐藏阈值解析器（issue #47）。Server 不持有 config，按既有单值注入
 	// 的思路把 cfg.GetPlayerIdleHide 喂进去（nil=全关；此处恒非 nil，全局默认 0 即全关）。
@@ -171,24 +164,24 @@ func main() {
 	endpointsOM.Set("health-check", scheme+"://"+cfg.Addr+"/health-check")
 	endpointsOM.Set("service-status", scheme+"://"+cfg.Addr+"/service-status")
 	endpointsOM.Set("ws", wsScheme+"://"+cfg.Addr+"/ws")
+	endpointsOM.Set("audio-ws", wsScheme+"://"+cfg.Addr+"/audio-ws") // 音频波形根端点（跟随活跃播放器），紧随 ws
 	endpointsOM.Set("all_lyrics", scheme+"://"+cfg.Addr+"/all_lyrics")
 	endpointsOM.Set("lyric_update", scheme+"://"+cfg.Addr+"/lyric_update")
 	endpointsOM.Set("status_update", scheme+"://"+cfg.Addr+"/status_update")
 	endpointsOM.Set("song_info", scheme+"://"+cfg.Addr+"/song_info")
 	endpointsOM.Set("lyric_update-SSE", scheme+"://"+cfg.Addr+"/lyric_update-SSE")
 	endpointsOM.Set("song_info-SSE", scheme+"://"+cfg.Addr+"/song_info-SSE")
-	endpointsOM.Set("audio-ws", wsScheme+"://"+cfg.Addr+"/audio-ws") // 音频波形根端点（跟随活跃播放器）
 	for _, pn := range playerNames {
 		pe := server.NewOrderedMap()
 		pe.Set("ws", wsScheme+"://"+cfg.Addr+"/"+pn+"/ws")
+		// 音频波形通道（全播放器端点，与只在 cloudmusicv3 的 effect-ws 不同），归于各自命名空间，紧随 ws：
+		pe.Set("audio-ws", wsScheme+"://"+cfg.Addr+"/"+pn+"/audio-ws")
 		pe.Set("all_lyrics", scheme+"://"+cfg.Addr+"/"+pn+"/all_lyrics")
 		pe.Set("lyric_update", scheme+"://"+cfg.Addr+"/"+pn+"/lyric_update")
 		pe.Set("status_update", scheme+"://"+cfg.Addr+"/"+pn+"/status_update")
 		pe.Set("song_info", scheme+"://"+cfg.Addr+"/"+pn+"/song_info")
 		pe.Set("lyric_update-SSE", scheme+"://"+cfg.Addr+"/"+pn+"/lyric_update-SSE")
 		pe.Set("song_info-SSE", scheme+"://"+cfg.Addr+"/"+pn+"/song_info-SSE")
-		// 音频波形通道（全播放器端点，与只在 cloudmusicv3 的 effect-ws 不同），归于各自命名空间：
-		pe.Set("audio-ws", wsScheme+"://"+cfg.Addr+"/"+pn+"/audio-ws")
 		// 网易云特效镜像通道（仅 cloudmusicv3，归于其命名空间）：
 		// 只广告读端 effect-ws；写端 effect-ingest 需内存随机 token，端点仍存在但不对外广告，
 		// 注入脚本经 EffectIngestWSURL() 内部取址（含 token），不依赖此表。
@@ -198,7 +191,7 @@ func main() {
 		endpointsOM.Set(pn, pe)
 	}
 
-	configOM, configEffectiveOM, configOverwritten := buildConfigEcho(&cfg, playerNames, effectStrategy)
+	// 配置三件套即横幅所列的那一份（buildConfigEcho 在横幅之前算过，不重算）。
 	srv.SetServiceInfo(&server.ServiceInfo{
 		Version:           displayVersion(Version),
 		Addr:              cfg.Addr,
@@ -215,7 +208,7 @@ func main() {
 	go func() {
 		defer telemetry.Guard()
 		if err := srv.Start(cfg.Addr, readyCh); err != nil {
-			mainLog.Error("服务启动失败: %v", err)
+			mainLog.Error("Server startup failed: %v", err)
 			os.Exit(1)
 		}
 	}()
@@ -227,6 +220,7 @@ func main() {
 	qp := qqmusic.New(cfg.GetPlayerOffset("qqmusic"), cfg.GetPlayerPoll("qqmusic"))
 	kp := kugou.New(cfg.GetPlayerOffset("kugou"), cfg.GetPlayerPoll("kugou"))
 	sp := sodamusic.New(cfg.GetPlayerOffset("sodamusic"), cfg.GetPlayerPoll("sodamusic"))
+	ap := applemusic.New(cfg.GetPlayerOffset("applemusic"), cfg.GetPlayerPoll("applemusic"))
 
 	// 创建路由器
 	router := server.NewRouter(&cfg, srv, playerNames)
@@ -235,6 +229,7 @@ func main() {
 	router.Register(qp)
 	router.Register(kp)
 	router.Register(sp)
+	router.Register(ap)
 
 	// 启动播放器 goroutines
 	//
@@ -246,6 +241,7 @@ func main() {
 	go func() { defer telemetry.Guard(); qp.Start() }()
 	go func() { defer telemetry.Guard(); kp.Start() }()
 	go func() { defer telemetry.Guard(); sp.Start() }()
+	go func() { defer telemetry.Guard(); ap.Start() }()
 
 	// 启动时若发现上次崩溃遗留的「网易云屏外泊车」状态，立即还原窗口
 	park.RestoreOrphaned()
@@ -270,7 +266,7 @@ func main() {
 			MaxGain: cfg.AudioNormalizeMaxGain,
 		}
 	}
-	audioMgr := manager.New(srv.AudioHub(), srv.GetPlayerStatus, audioNormResolver, selfExe)
+	audioMgr := manager.New(srv.AudioHub(), srv.GetPlayerStatus, audioNormResolver, cfg.AudioFrameRate, selfExe)
 	srv.SetAudioWake(audioMgr.Wake) // 切歌钩子唤醒管理器立即重算门控
 	// 本地 recover、绝不挂 telemetry.Guard：音频波形是可降级附加能力，其 goroutine panic 只记日志降级，
 	// 绝不 re-panic 杀主进程（Guard 会 re-panic=直播事故）。这是对主服务侧 Guard 范式的有意豁免。
@@ -282,13 +278,17 @@ func main() {
 	go func() {
 		defer telemetry.Guard()
 		<-sigCh
-		mainLog.Info("收到退出信号，正在还原网易云窗口与菜单...")
+		mainLog.Info("Received shutdown signal, restoring NetEase Cloud Music window and menu...")
 		park.Unpark() // 若处于屏外泊车，先飞回原位
 		effectCapturer.RestoreChrome()
 		os.Exit(0)
 	}()
 
-	mainLog.Info("所有播放器已启动，事件路由中...")
+	mainLog.Info("All players started, routing events...")
+	// 本进程是强制重建 config.yml 之后重启出来的：在启动完成处再提示一行，使它留在屏幕的最后几行。
+	if backup := os.Getenv(envConfigBackup); backup != "" {
+		mainLog.Warn("config.yml was rebuilt from the template of this version during this start; the previous file is kept as %s", backup)
+	}
 
 	// 主循环：路由器分发事件（阻塞）
 	router.Run()
@@ -300,15 +300,29 @@ var playerPollIntervals = map[string]func(pollMs int) time.Duration{
 	cloudmusic.PlayerName: cloudmusic.EffectivePollInterval,
 	qqmusic.PlayerName:    qqmusic.EffectivePollInterval,
 	sodamusic.PlayerName:  sodamusic.EffectivePollInterval,
+	applemusic.PlayerName: applemusic.EffectivePollInterval,
 }
 
-// buildConfigEcho 组装 /service-status 的配置三件套。
+// effectiveEffectStrategy 返回网易云特效最小化策略的生效值：Windows 11 上 park 屏外保活失效，一律降为
+// fadeout，其余原样。isWin11 由调用方传入（main 传 park.IsWindows11()），测试里注入。
+func effectiveEffectStrategy(configured string, isWin11 bool) string {
+	if configured == "park" && isWin11 {
+		return "fadeout"
+	}
+	return configured
+}
+
+// buildConfigEcho 组装配置三件套，/service-status 与启动横幅（bannerConfigLines）共用同一份结果。
 //
 // config 是配置写下的值：按「播放器覆盖 → 全局 → 内置默认」解析继承，不含任何钳制或校验回退；
 // effective 是运行时实际生效的值：计入配置层钳制、校验回退、播放器层轮询下限，以及传入的
-// effectStrategy（main 对 cfg.EffectStrategy 做 Win11 降级后的结果）。两表键集合与顺序相同：
-// 全局键按 config.yml 顺序，随后每个播放器（注册顺序）四个键。overwritten 按同一键序列出显式
-// 设置且被采纳的键（ExplicitKeys）。
+// effectStrategy（effectiveEffectStrategy 对 cfg.EffectStrategy 做 Win11 降级后的结果）。
+// 两表键集合与顺序相同：全局键按 config.yml 顺序，随后每个播放器（注册顺序）四个键。overwritten
+// 按同一键序列出显式设置且被采纳的键（ExplicitKeys）。
+//
+// 每个键在两表里的类型恒定，不随 config.yml 的写法变化——/service-status 的对外约定
+// （configecho_test.go 的 TestConfigEchoTypesNeverChange）。类型不符而被拒的值因此不在此列：对三件套
+// 而言该键视同未设置，原值记在 cfg.RejectedValues，由横幅单独列出。别从 RejectedValues 往这里取值。
 func buildConfigEcho(cfg *config.Config, playerNames []string, effectStrategy string) (written, effective *server.OrderedMap, overwritten []string) {
 	written, effective, overwritten = server.NewOrderedMap(), server.NewOrderedMap(), []string{}
 	set := func(key string, w, e any) {
@@ -333,6 +347,7 @@ func buildConfigEcho(cfg *config.Config, playerNames []string, effectStrategy st
 	same("audio-normalize", cfg.AudioNormalize)
 	set("audio-normalize-target", cfg.Written("audio-normalize-target", cfg.AudioNormalizeTarget), cfg.AudioNormalizeTarget)
 	set("audio-normalize-max-gain", cfg.Written("audio-normalize-max-gain", cfg.AudioNormalizeMaxGain), cfg.AudioNormalizeMaxGain)
+	set("audio-frame-rate", cfg.Written("audio-frame-rate", cfg.AudioFrameRate), cfg.AudioFrameRate)
 	set("cloudmusicv3-effect-strategy", cfg.Written("cloudmusicv3-effect-strategy", cfg.EffectStrategy), effectStrategy)
 	for _, name := range playerNames {
 		same(name+"-offset", cfg.GetPlayerOffset(name))
@@ -352,7 +367,7 @@ func buildConfigEcho(cfg *config.Config, playerNames []string, effectStrategy st
 // 能力，其 goroutine 崩溃不该拖垮歌词/特效主线（telemetry.Guard 会 re-panic）。见计划启动时序条与 §1。
 func localRecover(label string) {
 	if r := recover(); r != nil {
-		mainLog.Warn("[audio] %s panic 已本地恢复: %v", label, r)
+		mainLog.Warn("[audio] %s panic recovered locally: %v", label, r)
 	}
 }
 
@@ -361,6 +376,9 @@ func localRecover(label string) {
 // ============================================================================
 
 const versionCheckURL = "https://gateway.vtb.link/vtb-tools/metabox/nexus/playercap/v2/client-version"
+
+// versionCheckEndpoint 是版本检查请求实际发往的地址，恒为 versionCheckURL；测试换成本地的 httptest 服务。
+var versionCheckEndpoint = versionCheckURL
 
 // ---------------------------------------------------------------------------
 // 版本检查请求的客户端标注
@@ -406,7 +424,7 @@ func clientEnvFor(ping string) clientid.Env {
 // 「今天在线」= 两种时机去重，「今天启动了多少次」= 只数 X-Client-Ping: start。
 // 将来真要分开看，再在网关侧按这个头拆，客户端不用动。
 func newVersionCheckRequest(ping string) (*http.Request, error) {
-	req, err := http.NewRequest(http.MethodGet, versionCheckURL, nil)
+	req, err := http.NewRequest(http.MethodGet, versionCheckEndpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -415,29 +433,40 @@ func newVersionCheckRequest(ping string) (*http.Request, error) {
 }
 
 type releaseInfo struct {
-	TagName   string `json:"tag_name"`
-	Name      string `json:"name"`
-	GlobalCDN string `json:"global_cdn_download_url_prefix"`
-	ChinaCDN  string `json:"china_cdn_download_url_prefix"`
-	Assets    []struct {
+	TagName string `json:"tag_name"`
+	Name    string `json:"name"`
+	// ConfigForceUpdate 是强制重建 config.yml 的门槛：带 v 前缀的版本号，低于它的配置须按模板重建。
+	// 缺失、为空串或不是合法版本号即不强制。只在启动时的版本检查里读（rebuildConfigIfForced）。
+	ConfigForceUpdate string `json:"config_force_update"`
+	GlobalCDN         string `json:"global_cdn_download_url_prefix"`
+	ChinaCDN          string `json:"china_cdn_download_url_prefix"`
+	Assets            []struct {
 		Name   string `json:"name"`
 		Size   int64  `json:"size"`
 		Digest string `json:"digest"`
 	} `json:"assets"`
 }
 
-func checkAndUpdate() {
+// checkAndUpdate 做启动时的版本检查：取得网关的响应，先按 config_force_update 判定是否重建 config.yml
+// （rebuildConfigIfForced），再按版本决定是否更新（updateIfNeeded）。cfg 是 config.Load 的结果。
+//
+// **判定须在是否更新的分支之前**，凡拿到响应的进程都判一次。进程若先盖了 config.yml 的版本号、接着去
+// 更新而不判定，下一个进程读到的文件版本就是它的盖章值，原先的版本信息丢失，门槛再也不成立。
+// 判定用的是 cfg 里 Load 在改写之前记下的文件版本，不重读文件。
+//
+// 拿不到响应（非发布版本、连不上网关、响应非 200 或解析失败）时不重建，只有 Load 里的自动迁移。
+func checkAndUpdate(cfg *config.Config) {
 	if !isReleaseVersion(Version) {
-		mainLog.Info("当前版本 (%s) 不是可自动更新的发布版本，跳过更新检查", displayVersion(Version))
+		mainLog.Info("Current version (%s) is not an auto-updatable release version, skipping update check", displayVersion(Version))
 		return
 	}
 
 	cleanupOldExe()
-	mainLog.Info("正在检查版本更新...")
+	mainLog.Info("Checking for version updates...")
 
 	req, err := newVersionCheckRequest(clientid.PingStart)
 	if err != nil {
-		mainLog.Warn("版本检查请求组装失败: %v，继续运行", err)
+		mainLog.Warn("Failed to assemble version-check request: %v, continuing", err)
 		return
 	}
 
@@ -452,7 +481,7 @@ func checkAndUpdate() {
 		time.Sleep(4 * time.Second)
 		taskbar.Clear()
 		taskbar.Detach()
-		mainLog.Warn("版本检查失败: %v，继续运行", err)
+		mainLog.Warn("Version check failed: %v, continuing", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -463,48 +492,62 @@ func checkAndUpdate() {
 	markPinged(time.Now())
 
 	if resp.StatusCode != http.StatusOK {
-		mainLog.Warn("版本检查返回 %d，继续运行", resp.StatusCode)
+		mainLog.Warn("Version check returned %d, continuing", resp.StatusCode)
 		return
 	}
 
 	var release releaseInfo
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		mainLog.Warn("解析版本信息失败: %v，继续运行", err)
+		mainLog.Warn("Failed to parse version info: %v, continuing", err)
 		return
 	}
 
+	rebuilt := rebuildConfigIfForced(cfg, release.ConfigForceUpdate)
+	// 要更新的在这里更新并重启（restartSelf 不返回），由更新后的新进程读到重建好的 config.yml。
+	updateIfNeeded(release)
+	if rebuilt {
+		// 不更新而刚重建过：本进程加载的仍是旧配置，横幅也已按旧配置打印，重启以加载新文件。
+		// restartSelf 要等新进程结束才退出：先释放任务栏后端占用的 COM 与被锁的 OS 线程。
+		taskbar.Detach()
+		restartForRebuild()
+	}
+}
+
+// updateIfNeeded 按网关响应决定是否更新：要更新则下载、替换并经 restartSelf 重启，不返回；
+// 不更新、或没有可用的更新文件时返回。
+func updateIfNeeded(release releaseInfo) {
 	shouldUpdate, reason, err := decideUpdate(Version, release.TagName, release.Name)
 	if err != nil {
-		mainLog.Warn("版本信息无效: %v，继续运行", err)
+		mainLog.Warn("Invalid version info: %v, continuing", err)
 		return
 	}
 
 	if !shouldUpdate {
 		switch reason {
 		case updateReasonSameVersion:
-			mainLog.Success("当前已是最新版本 v%s", displayVersion(Version))
+			mainLog.Success("Already on the latest version v%s", displayVersion(Version))
 		case updateReasonOlderTargetBlocked:
-			mainLog.Info("检测到较低版本 v%s，release 标题未以 -force 结尾，跳过同步", displayVersion(release.TagName))
+			mainLog.Info("Detected lower version v%s, release title does not end with -force, skipping sync", displayVersion(release.TagName))
 		default:
-			mainLog.Success("当前版本 v%s 无需更新", displayVersion(Version))
+			mainLog.Success("Current version v%s needs no update", displayVersion(Version))
 		}
 		return
 	}
 
 	if reason == updateReasonOlderTargetForced {
-		mainLog.Warn("检测到强制版本同步: v%s -> v%s", displayVersion(Version), displayVersion(release.TagName))
+		mainLog.Warn("Detected forced version sync: v%s -> v%s", displayVersion(Version), displayVersion(release.TagName))
 	}
 
 	if len(release.Assets) == 0 {
-		mainLog.Warn("未找到可用的更新文件，继续运行")
+		mainLog.Warn("No available update files found, continuing")
 		return
 	}
 
 	fmt.Println()
 	fmt.Println("╔═════════════════════════════════════════════════════════╗")
-	fmt.Printf(i18n.T("║  🆕 发现新版本: v%s → v%s\n"), displayVersion(Version), displayVersion(release.TagName))
-	fmt.Printf(i18n.T("║  📦 共 %d 个文件需要更新\n"), len(release.Assets))
-	fmt.Println(i18n.T("║  正在自动更新..."))
+	fmt.Printf(i18n.T("║  🆕 New version available: v%s → v%s\n"), displayVersion(Version), displayVersion(release.TagName))
+	fmt.Printf(i18n.T("║  📦 %d file(s) to update\n"), len(release.Assets))
+	fmt.Println(i18n.T("║  Updating automatically..."))
 	fmt.Println("╚═════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
@@ -537,20 +580,22 @@ func checkAndUpdate() {
 	if err := performUpdateAll(cdnPrefix, release.TagName, sortedAssets); err != nil {
 		taskbar.Error()
 		manualURL := release.ChinaCDN + release.TagName + "/"
-		mainLog.Error("自动更新失败: %v", err)
-		mainLog.Warn("当前版本已过期，请手动下载最新版本:")
+		mainLog.Error("Auto-update failed: %v", err)
+		mainLog.Warn("Current version is outdated, please download the latest version manually:")
 		mainLog.Warn("%s", manualURL)
-		fmt.Println(i18n.T("\n按回车键退出..."))
+		fmt.Println(i18n.T("\nPress Enter to exit..."))
 		fmt.Scanln()
 		os.Exit(1)
 	}
 
 	taskbar.Warning()
 	taskbar.Flash()
-	mainLog.Success("全部更新完成！程序将自动重启...")
+	mainLog.Success("All updates complete! The program will restart automatically...")
 	// 金色醒目显示几秒后清除再重启：既不像 1s 那样一闪而过，也不会永久卡在金色。
 	time.Sleep(4 * time.Second)
 	taskbar.Clear()
+	// restartSelf 要等新进程结束才退出，本进程还会存活整个运行期：先释放 COM 与被锁的 OS 线程。
+	taskbar.Detach()
 	restartSelf()
 }
 
@@ -636,14 +681,14 @@ func startDailyHeartbeat() {
 func sendHeartbeat() {
 	req, err := newVersionCheckRequest(clientid.PingDaily)
 	if err != nil {
-		mainLog.Detail("在线心跳组装失败: %v", err)
+		mainLog.Detail("Failed to assemble online heartbeat: %v", err)
 		return
 	}
 
 	client := &http.Client{Timeout: heartbeatTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		mainLog.Detail("在线心跳发送失败: %v", err)
+		mainLog.Detail("Failed to send online heartbeat: %v", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -652,7 +697,7 @@ func sendHeartbeat() {
 	io.Copy(io.Discard, resp.Body)
 
 	markPinged(time.Now())
-	mainLog.Detail("在线心跳已发送")
+	mainLog.Detail("Online heartbeat sent")
 }
 
 func performUpdateAll(cdnPrefix, tagName string, assets []struct {
@@ -662,7 +707,7 @@ func performUpdateAll(cdnPrefix, tagName string, assets []struct {
 }) error {
 	exePath, err := os.Executable()
 	if err != nil {
-		return i18n.Errorf("获取程序路径失败: %v", err)
+		return i18n.Errorf("failed to get program path: %v", err)
 	}
 	exeDir := filepath.Dir(exePath)
 	exeBase := filepath.Base(exePath)
@@ -675,32 +720,31 @@ func performUpdateAll(cdnPrefix, tagName string, assets []struct {
 			strings.HasSuffix(strings.ToLower(asset.Name), ".exe")
 
 		mainLog.Info("[%d/%d] %s", i+1, len(assets), asset.Name)
-		mainLog.Info("正在下载: %s", downloadURL)
+		mainLog.Info("Downloading: %s", downloadURL)
 
 		tmpPath := targetPath + ".new"
 		if err := downloadFile(client, downloadURL, tmpPath, asset.Size, asset.Digest); err != nil {
-			return i18n.Errorf("下载 %s 失败: %v", asset.Name, err)
+			return i18n.Errorf("failed to download %s: %v", asset.Name, err)
 		}
 
 		if isExe {
-			oldPath := exePath + ".old"
-			os.Remove(oldPath)
+			oldPath := updateBackupPath(exePath)
 			if err := os.Rename(exePath, oldPath); err != nil {
 				os.Remove(tmpPath)
-				return i18n.Errorf("替换 %s 失败 (重命名): %v", asset.Name, err)
+				return i18n.Errorf("failed to replace %s (rename): %v", asset.Name, err)
 			}
 			if err := renameWithRetry(tmpPath, exePath); err != nil {
 				os.Rename(oldPath, exePath)
-				return i18n.Errorf("替换 %s 失败: %v", asset.Name, err)
+				return i18n.Errorf("failed to replace %s: %v", asset.Name, err)
 			}
-			mainLog.Success("已替换: %s", asset.Name)
+			mainLog.Success("Replaced: %s", asset.Name)
 		} else {
 			os.Remove(targetPath)
 			if err := renameWithRetry(tmpPath, targetPath); err != nil {
 				os.Remove(tmpPath)
-				return i18n.Errorf("放置 %s 失败: %v", asset.Name, err)
+				return i18n.Errorf("failed to place %s: %v", asset.Name, err)
 			}
-			mainLog.Success("已更新: %s", asset.Name)
+			mainLog.Success("Updated: %s", asset.Name)
 		}
 	}
 	return nil
@@ -709,7 +753,7 @@ func performUpdateAll(cdnPrefix, tagName string, assets []struct {
 func downloadFile(client *http.Client, url, destPath string, expectedSize int64, expectedDigest string) error {
 	resp, err := client.Get(url)
 	if err != nil {
-		return i18n.Errorf("连接失败: %v", err)
+		return i18n.Errorf("connection failed: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -724,7 +768,7 @@ func downloadFile(client *http.Client, url, destPath string, expectedSize int64,
 
 	out, err := os.Create(destPath)
 	if err != nil {
-		return i18n.Errorf("创建文件失败: %v", err)
+		return i18n.Errorf("failed to create file: %v", err)
 	}
 
 	hasher := sha256.New()
@@ -737,19 +781,19 @@ func downloadFile(client *http.Client, url, destPath string, expectedSize int64,
 	out.Close()
 	if err != nil {
 		os.Remove(destPath)
-		return i18n.Errorf("下载中断: %v", err)
+		return i18n.Errorf("download interrupted: %v", err)
 	}
 
 	if expectedDigest != "" {
 		actualHash := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 		if actualHash != expectedDigest {
 			os.Remove(destPath)
-			return i18n.Errorf("SHA256 验证失败: 期望 %s，实际 %s", expectedDigest, actualHash)
+			return i18n.Errorf("SHA256 verification failed: expected %s, got %s", expectedDigest, actualHash)
 		}
-		mainLog.Success("SHA256 验证成功")
+		mainLog.Success("SHA256 verification succeeded")
 	}
 
-	mainLog.Success("下载完成 (%.1f MB)", float64(written)/1024/1024)
+	mainLog.Success("Download complete (%.1f MB)", float64(written)/1024/1024)
 	return nil
 }
 
@@ -760,7 +804,7 @@ func renameWithRetry(src, dst string) error {
 		if err == nil {
 			return nil
 		}
-		mainLog.Info("文件被占用，等待释放 (%d/5)...", i+1)
+		mainLog.Info("File is in use, waiting for release (%d/5)...", i+1)
 		time.Sleep(1 * time.Second)
 	}
 	return err
@@ -778,7 +822,7 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	if pw.total > 0 {
 		pct := int(pw.written * 100 / pw.total)
 		if pct != pw.lastPct {
-			fmt.Printf(i18n.T("\r[*] 下载进度: %d%% (%.1f/%.1f MB)"), pct,
+			fmt.Printf(i18n.T("\r[*] Download: %d%% (%.1f/%.1f MB)"), pct,
 				float64(pw.written)/1024/1024, float64(pw.total)/1024/1024)
 			taskbar.Progress(pct)
 			pw.lastPct = pct
@@ -787,12 +831,56 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// cleanupOldExe 删除以前的更新留下的旧 exe（范围见 removeUpdateBackups），失败不报。
+//
+// 更新后的那一次运行里删不掉：旧版本进程的映像就是备份文件，它在 restartSelf 里等本进程结束。
+// 留到下一次启动时清理。
 func cleanupOldExe() {
 	exePath, err := os.Executable()
 	if err != nil {
 		return
 	}
+	removeUpdateBackups(exePath)
+}
+
+// updateBackupPath 返回 performUpdateAll 把正在运行的 exe 改名过去的备份路径。通常是 exePath 加
+// .old，上一次更新留下的那个先删掉。删不掉且文件仍在时，改用 exePath 加 .old.<本进程号>。
+//
+// 删不掉的情形：上一次更新后的旧进程还在 restartSelf 里等本进程，.old 就是它的映像。本进程此时
+// 再更新（旧进程下载期间又发布了新版本），改名的目标若仍是 .old 会因目标被占用而失败，更新失败、
+// 服务不启动。
+//
+// 带进程号的名字上若有残留不必先删：持有这个进程号的只能是本进程，残留不会是别的进程的映像；
+// os.Rename 在 Windows 上是 MoveFileEx 加 MOVEFILE_REPLACE_EXISTING（internal/syscall/windows 的
+// Rename），直接盖掉。
+func updateBackupPath(exePath string) string {
+	oldPath := exePath + ".old"
+	os.Remove(oldPath)
+	if _, err := os.Lstat(oldPath); os.IsNotExist(err) {
+		return oldPath
+	}
+	return fmt.Sprintf("%s.%d", oldPath, os.Getpid())
+}
+
+// removeUpdateBackups 删除 exePath 的更新备份，失败不报，删不掉的留着、继续删其余的。
+//
+// 范围是 updateBackupPath 产生的两种名字：exePath 加 .old；与 exe 同目录、名字为 exe 名加
+// 「.old.」加非空的纯 ASCII 十进制数字、且不是目录的条目，exe 名不分大小写。名字相近的
+// （.older、.old.txt、.old.12a 等）不动。
+func removeUpdateBackups(exePath string) {
 	os.Remove(exePath + ".old")
+
+	dir, prefix := filepath.Dir(exePath), filepath.Base(exePath)+".old."
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || len(name) <= len(prefix) || !strings.EqualFold(name[:len(prefix)], prefix) {
+			continue
+		}
+		if strings.Trim(name[len(prefix):], "0123456789") == "" {
+			os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 // cleanupLegacyExe 清理旧版 Metabox-Nexus-WesingCap 的残留文件（v1.x → v2.0 一次性迁移）
@@ -806,11 +894,10 @@ func cleanupLegacyExe() {
 		return
 	}
 	dir := filepath.Dir(exePath)
-	legacyName := "Metabox-Nexus-WesingCap.exe"
 
 	// 收集需要清理的文件
 	var targets []string
-	for _, name := range []string{legacyName, legacyName + ".old"} {
+	for _, name := range []string{legacyExeName, legacyExeName + ".old"} {
 		p := filepath.Join(dir, name)
 		if _, err := os.Stat(p); err == nil {
 			targets = append(targets, p)
@@ -820,7 +907,8 @@ func cleanupLegacyExe() {
 		return
 	}
 
-	// 后台重试删除：父进程（旧 exe）退出可能有短暂延迟，文件仍被锁定
+	// 后台重试删除：父进程（旧 exe）退出可能有短暂延迟，文件仍被锁定。
+	// 父进程不等待本进程、启动后即退出，是这里删得掉的前提，见 ensureCanonicalName 的例外。
 	go func() {
 		defer telemetry.Guard()
 		for attempt := 0; attempt < 10; attempt++ {
@@ -831,7 +919,7 @@ func cleanupLegacyExe() {
 				}
 			}
 			if len(remaining) == 0 {
-				mainLog.Info("已清理旧版 WesingCap 残留文件")
+				mainLog.Info("Cleaned up legacy WesingCap residual files")
 				return
 			}
 			targets = remaining
@@ -840,36 +928,94 @@ func cleanupLegacyExe() {
 	}()
 }
 
+// restartSelf 在 performUpdateAll 替换 exe 之后启动新版本并等它结束，以它的退出码退出
+// （relaunchSelf）；取不到自身路径或启动失败时报错，以 1 退出。不返回。
+//
+// 本进程的映像此时是 updateBackupPath 选定的备份文件，等待期间它一直被占用：新进程的
+// cleanupOldExe 删不掉它，要到下一次启动才清理；新进程自己又要更新时，备份改用别的名字。
 func restartSelf() {
 	exePath, err := os.Executable()
-	if err != nil {
-		mainLog.Error("无法自动重启: %v，请手动重新启动程序", err)
-		os.Exit(0)
+	if err == nil {
+		err = relaunchSelf(exePath)
 	}
-	cmd := exec.Command(exePath, os.Args[1:]...)
+	mainLog.Error("Unable to restart automatically: %v, please restart the program manually", err)
+	os.Exit(1)
+}
+
+// selfCommand 组装以 args 为参数、沿用本进程三个标准流运行 exePath 的命令。
+func selfCommand(exePath string, args []string) *exec.Cmd {
+	cmd := exec.Command(exePath, args...)
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	cmd.Start()
-	os.Exit(0)
+	return cmd
+}
+
+// runAndWait 以 args 为参数启动 exePath 并等它结束，返回它的退出码。启动失败时返回 error，
+// 此时没有子进程在跑。
+//
+// 等待期间接住中断（Ctrl+C、Ctrl+Break）而不处理。同一控制台里的进程都会收到 Ctrl+C；子进程
+// 有自己的退出流程（main 末尾的信号处理），本进程若先按默认处理结束，终端回到提示符时子进程
+// 还在收尾。
+//
+// 必须用 signal.Notify，signal.Ignore 在 Windows 上挡不住：换成 Ignore 或什么都不注册，本进程
+// 在 CTRL_BREAK 下都以 0xC000013A 结束（relaunchwait_test.go 的 TestRelaunchSelfOutlivesCtrlBreak，
+// 实测）。原因见 Go 1.26.1 的运行时源码：
+//   - runtime.ctrlHandler 把 CTRL_C / CTRL_BREAK 映射为 SIGINT，把 CTRL_CLOSE / CTRL_LOGOFF /
+//     CTRL_SHUTDOWN 映射为 SIGTERM；仅当 runtime.sigsend 返回 true 才向系统报告已处理，否则
+//     交给系统默认处理。
+//   - sigsend 只看 sig.wanted：signal.Notify 经 runtime.signal_enable 置位，signal.Ignore 经
+//     runtime.signal_ignore 清除它；Windows 上 runtime.sigignore 是空函数，ctrlHandler 也不读
+//     sig.ignored。
+//
+// 不接 syscall.SIGTERM（关窗、注销、关机）：控制台随之消失，本进程按默认处理立即结束即可，子进程
+// 照常走自己的退出流程。接住的话 ctrlHandler 调 block、不再返回，本进程要到系统超时才被结束；
+// 系统按什么顺序通知同一控制台里的各进程、是否等前一个结束再通知下一个，未核实，不让子进程的
+// 退出依赖它。
+//
+// 返回前 signal.Stop（经 runtime.signal_disable 清除 sig.wanted）：启动失败时调用方以当前进程
+// 继续运行，Ctrl+C 须恢复默认处理。
+func runAndWait(exePath string, args []string) (int, error) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+
+	cmd := selfCommand(exePath, args)
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	// 非零退出码不算错误，从 ProcessState 取。等待本身失败时 ProcessState 为 nil，ExitCode 返回 -1。
+	cmd.Wait()
+	return cmd.ProcessState.ExitCode(), nil
+}
+
+// relaunchSelf 以本进程的命令行参数运行 exePath，等它结束后以它的退出码退出本进程。
+// 只在启动失败时返回。ensureCanonicalName 与 restartSelf 共用。
+func relaunchSelf(exePath string) error {
+	code, err := runAndWait(exePath, os.Args[1:])
+	if err != nil {
+		return err
+	}
+	os.Exit(code)
+	return nil
 }
 
 func pickFastestCDNPrefix(globalPrefix, chinaPrefix, tagName, testFile string) string {
 	globalURL := globalPrefix + tagName + "/" + testFile
 
-	mainLog.Info("测试 GitHub CDN 下载速度...")
+	mainLog.Info("Testing GitHub CDN download speed...")
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	start := time.Now()
 	resp, err := client.Get(globalURL)
 	if err != nil {
-		mainLog.Info("GitHub CDN 连接失败，使用国内镜像")
+		mainLog.Info("GitHub CDN connection failed, using China mirror")
 		return chinaPrefix
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		mainLog.Info("GitHub CDN 返回 %d，使用国内镜像", resp.StatusCode)
+		mainLog.Info("GitHub CDN returned %d, using China mirror", resp.StatusCode)
 		return chinaPrefix
 	}
 
@@ -878,17 +1024,17 @@ func pickFastestCDNPrefix(globalPrefix, chinaPrefix, tagName, testFile string) s
 	elapsed := time.Since(start).Seconds()
 
 	if err != nil || elapsed == 0 {
-		mainLog.Info("GitHub CDN 下载测试失败，使用国内镜像")
+		mainLog.Info("GitHub CDN download test failed, using China mirror")
 		return chinaPrefix
 	}
 
 	speedKBs := float64(n) / elapsed / 1024
 	if speedKBs < 10 {
-		mainLog.Info("GitHub CDN 速度 %.1f KB/s < 10 KB/s，使用国内镜像", speedKBs)
+		mainLog.Info("GitHub CDN speed %.1f KB/s < 10 KB/s, using China mirror", speedKBs)
 		return chinaPrefix
 	}
 
-	mainLog.Info("GitHub CDN 可用 (%.0f KB/s)", speedKBs)
+	mainLog.Info("GitHub CDN available (%.0f KB/s)", speedKBs)
 	return globalPrefix
 }
 
@@ -929,12 +1075,12 @@ func isForceReleaseName(name string) bool {
 func decideUpdate(currentVersion, targetVersion, releaseName string) (bool, string, error) {
 	current := normalizeSemver(currentVersion)
 	if !isReleaseVersion(currentVersion) {
-		return false, "", i18n.Errorf("当前版本不是有效 semver 发布版本: %s", currentVersion)
+		return false, "", i18n.Errorf("current version is not a valid semver release version: %s", currentVersion)
 	}
 
 	target := normalizeSemver(targetVersion)
 	if !isReleaseVersion(targetVersion) {
-		return false, "", i18n.Errorf("目标版本不是有效 semver 发布版本: %s", targetVersion)
+		return false, "", i18n.Errorf("target version is not a valid semver release version: %s", targetVersion)
 	}
 
 	cmp := semver.Compare(target, current)
@@ -952,6 +1098,19 @@ func decideUpdate(currentVersion, targetVersion, releaseName string) (bool, stri
 
 const canonicalExeName = "Metabox-Nexus-PlayerCap.exe"
 
+// legacyExeName 是 v1.x 的可执行文件名，见 cleanupLegacyExe。
+const legacyExeName = "Metabox-Nexus-WesingCap.exe"
+
+// ensureCanonicalName 在文件名不是 canonicalExeName 时把自身复制成同目录下的该名字，启动复制品
+// 并等它结束，以它的退出码退出（relaunchSelf，issue #71）。复制或启动失败则返回，以当前文件
+// 继续运行。
+//
+// 启动后立即退出的旧写法在终端里的后果：本进程一退出，shell 回到提示符，复制品成为后台进程，
+// Ctrl+C 到不了它，只能按进程号结束。等待期间本进程不做任何初始化；原文件在此期间一直被占用。
+//
+// 例外：以 legacyExeName 启动（v1.x 升级后的首次运行）时不等待，启动复制品后即以 0 退出。
+// 复制品的 cleanupLegacyExe 要删掉这个文件，本进程不退出就删不掉；它留着，以后每次从它启动，
+// 都会把它的旧内容复制到标准文件名上、盖掉更新过的版本。
 func ensureCanonicalName() {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -977,13 +1136,16 @@ func ensureCanonicalName() {
 	}
 	io.Copy(dst, src)
 	dst.Close()
+	src.Close() // 下面要等到复制品结束，不留着原文件的句柄
 
-	mainLog.Info("已复制为标准文件名: %s", canonicalExeName)
+	mainLog.Info("Copied to canonical filename: %s", canonicalExeName)
 
-	cmd := exec.Command(canonicalPath, os.Args[1:]...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	cmd.Start()
-	os.Exit(0)
+	if strings.EqualFold(currentName, legacyExeName) {
+		if err = selfCommand(canonicalPath, os.Args[1:]).Start(); err == nil {
+			os.Exit(0)
+		}
+	} else {
+		err = relaunchSelf(canonicalPath)
+	}
+	mainLog.Warn("Failed to start %s: %v; continuing under the current filename", canonicalExeName, err)
 }

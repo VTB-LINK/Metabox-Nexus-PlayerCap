@@ -37,16 +37,22 @@ var heartbeatFuncs = []string{"startDailyHeartbeat", "sendHeartbeat"}
 // 报错时会把理由一起打出来 —— 一条只说「不许调这个」的门禁，撞上它的人第一反应是
 // 想办法绕过去，而不是理解它在拦什么。
 var forbiddenInHeartbeat = map[string]string{
-	"performUpdateAll":     "会下载并替换 exe",
-	"downloadFile":         "会往磁盘写文件",
-	"renameWithRetry":      "会替换正在运行的 exe",
-	"restartSelf":          "会重启进程 —— 直播进行到一半重启就是事故",
-	"checkAndUpdate":       "整条自动更新流程，只允许在启动时跑一次",
-	"decideUpdate":         "做「要不要更新」的决策 —— 心跳不该有决策",
-	"pickFastestCDNPrefix": "只在准备下载时才需要测速",
-	"Exit":                 "os.Exit 会直接杀死进程",
-	"Fatal":                "同上，log.Fatal 内部就是 os.Exit",
-	"Fatalf":               "同上",
+	"performUpdateAll":      "会下载并替换 exe",
+	"downloadFile":          "会往磁盘写文件",
+	"renameWithRetry":       "会替换正在运行的 exe",
+	"restartSelf":           "会重启进程 —— 直播进行到一半重启就是事故",
+	"relaunchSelf":          "会启动另一份自身并在它结束后退出本进程，restartSelf 即经它重启",
+	"runAndWait":            "会启动另一份自身并阻塞到它结束",
+	"checkAndUpdate":        "整条自动更新流程，只允许在启动时跑一次",
+	"updateIfNeeded":        "checkAndUpdate 里决定并执行更新的那一半",
+	"rebuildConfigIfForced": "会按网关的 config_force_update 重建 config.yml —— 只允许在启动时判一次",
+	"ForceRebuild":          "会把 config.yml 换成模板",
+	"restartForRebuild":     "重建 config.yml 之后的重启，即 restartSelf",
+	"decideUpdate":          "做「要不要更新」的决策 —— 心跳不该有决策",
+	"pickFastestCDNPrefix":  "只在准备下载时才需要测速",
+	"Exit":                  "os.Exit 会直接杀死进程",
+	"Fatal":                 "同上，log.Fatal 内部就是 os.Exit",
+	"Fatalf":                "同上",
 }
 
 func TestHeartbeatMakesNoUpdateCalls(t *testing.T) {

@@ -23,13 +23,9 @@ import (
 )
 
 const (
-	// fftSize 是每路 DSP 的窗长（2 的幂）。1024 点 @48kHz ≈ 21ms，配 ~30fps cadence 足够。
+	// fftSize 是每路 DSP 的窗长（2 的幂）。1024 点 @48kHz ≈ 21ms。帧率高于 46 时每帧新增的样本不足
+	// 一窗，由 framer 留着最近的非静音样本补足。
 	fftSize = 1024
-
-	// cadence 是分帧节拍（含 keepalive）。~30fps：有声期按此发实帧，静音期照发零帧。
-	// 注意：wasapi.Read 单次至多阻塞 100ms，故**真静音期**实际节拍退化到 ~100ms（仍规律、
-	// 足够活性看门狗判活）；有声期引擎事件 ~10ms 触发，Read 快速返回，节拍稳定在 cadence。
-	cadence = time.Second / 30
 
 	// outChanCap 是「采集排空」与「写 stdout」解耦的有界 channel 容量。满时 drop-oldest，
 	// 保证采集 goroutine 永不被 stdout 写阻塞冻住（§2.5）。~2KB/帧、64 帧上限 <128KB。
@@ -110,11 +106,11 @@ func Run(stdin io.Reader, stdout io.Writer) {
 			c := &capture{done: make(chan struct{})}
 			active[ctl.player] = c
 			capWG.Add(1)
-			go func(pid uint32, player string, norm bool, target, maxGain int, done <-chan struct{}) {
+			go func(ctl control, done <-chan struct{}) {
 				defer telemetry.Guard()
 				defer capWG.Done()
-				captureLoop(pid, player, norm, target, maxGain, done, frames)
-			}(ctl.pid, ctl.player, ctl.norm, ctl.target, ctl.maxGain, c.done)
+				captureLoop(ctl, done, frames)
+			}(ctl, c.done)
 		case "stop":
 			if c, ok := active[ctl.player]; ok {
 				close(c.done)
@@ -158,21 +154,22 @@ func writeLoop(w io.Writer, frames <-chan []byte) {
 }
 
 // captureLoop 跑一路捕获的完整生命周期，全程在同一 LockOSThread + MTA 的 goroutine 上（wasapi
-// 契约：Activate/Read/Close 须同线程 + MTA）。循环 Read→并入 window→按 cadence 取出 window 分析
-// 分帧→drop-oldest 入队；静音也照 cadence 发零帧（keepalive，使「无帧」明确等价于故障而非静音）。
-// done 关闭或读错即跳出循环 → defer Close 对称释放。
+// 契约：Activate/Read/Close 须同线程 + MTA）。出帧循环在 pumpFrames：Read → 按样本数分帧（每
+// 采样率/ctl.fps 个采样帧一帧）→ 分析编码 → drop-oldest 入队；静音也照发零帧（keepalive，使「无帧」
+// 明确等价于故障而非静音），没有数据时按墙钟约每 100ms 一帧。done 关闭或读错即返回 → defer Close
+// 对称释放。
 //
-// peak 的窗口为两次出帧之间的全部非静音样本（降混前按声道取峰），与 RMS、bins 只用其中最后至多
-// fftSize 个降混样本不同：peak 要抓住瞬态，RMS 与 bins 受 FFT 窗长约束。
+// peak 的窗口为本帧新增的全部非静音样本（降混前按声道取峰），与 RMS、bins 只用最近至多 fftSize 个
+// 降混样本不同：peak 要抓住瞬态，RMS 与 bins 受 FFT 窗长约束。
 //
-// norm/target/maxGain 为音量归一化参数：构造该路独立的 Normalizer（持独立 EMA），逐帧经
+// ctl.norm/target/maxGain 为音量归一化参数：构造该路独立的 Normalizer（持独立 EMA），逐帧经
 // encodeFrame 施于真音频帧（keepalive 零帧不经此路，不更新 EMA，避免静音后恢复过冲）。
-func captureLoop(pid uint32, player string, norm bool, target, maxGain int, done <-chan struct{}, frames chan []byte) {
+func captureLoop(ctl control, done <-chan struct{}, frames chan []byte) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
 	if err := coInitMTA(); err != nil {
-		log.Printf("[helper][%s] CoInitializeEx 失败: %v", player, err)
+		log.Printf("[helper][%s] CoInitializeEx 失败: %v", ctl.player, err)
 		return
 	}
 	defer windows.CoUninitialize()
@@ -184,49 +181,38 @@ func captureLoop(pid uint32, player string, norm bool, target, maxGain int, done
 	default:
 	}
 
-	c, err := wasapi.Activate(pid, true) // 含子进程树
+	c, err := wasapi.Activate(ctl.pid, true) // 含子进程树
 	if err != nil {
-		log.Printf("[helper][%s] WASAPI 激活失败(pid=%d): %v", player, pid, err)
+		log.Printf("[helper][%s] WASAPI 激活失败(pid=%d): %v", ctl.player, ctl.pid, err)
 		return // 这一路失败不崩整个 helper（其余路照跑）
 	}
 	defer c.Close()
 
-	epoch := atomic.AddUint32(&epochCounter, 1)
-	analyzer := dsp.New(fftSize)
-	nz := newNormalizer(norm, target, maxGain)                       // 每路一个，持独立 EMA
-	readBuf := make([]float32, wasapi.SampleRate*wasapi.Channels/10) // 100ms 容量，避免 Read 截断
-	win := window{batch: make([]float32, 0, wasapi.SampleRate/10)}   // 自上次发帧起的样本与峰值
-	nextEmit := time.Now().Add(cadence)
-
-	for {
-		select {
-		case <-done:
-			return
-		default:
-		}
-
-		n, silent, err := c.Read(readBuf)
-		if err != nil {
-			log.Printf("[helper][%s] 读取失败: %v", player, err)
-			return
-		}
-		// 仅累积真实（非静音）样本；静音包/无包一律不入 window → 到点自然发 keepalive 零帧。
-		win.add(readBuf[:n*wasapi.Channels], wasapi.Channels, silent)
-
-		if now := time.Now(); !now.Before(nextEmit) {
-			b, p := win.take()
-			enqueue(frames, encodeFrame(analyzer, nz, player, epoch, b, p))
-			nextEmit = now.Add(cadence)
-		}
+	if err := pumpCapture(c.Read, time.Now, ctl, atomic.AddUint32(&epochCounter, 1), done, frames); err != nil {
+		log.Printf("[helper][%s] 读取失败: %v", ctl.player, err)
 	}
 }
 
-// encodeFrame 用 batch 的**最近 fftSize 样本**算 RMS 与 bins，peaks 为两次出帧之间全部非静音样本
-// 按声道的峰值，编码为独立字节（可安全跨 goroutine 传递：frame.Encode 已把 bins 拷入返回切片，
-// 返回后复用 analyzer 内部缓冲安全）。归一化增益同乘到 RMS、bins 与 peak；nz 启用时每帧（含
-// keepalive）置 FlagNormalized。batch 空（自上次以来无实音）→ 发 keepalive 零帧：RMS、peak 为 0
-// （不论传入的 peaks）、bins 全零。
-func encodeFrame(a *dsp.Analyzer, nz *Normalizer, player string, epoch uint32, batch []float32, peaks [2]float32) []byte {
+// pumpCapture 把 read 读到的包按 ctl 的参数分帧、分析、归一化、编码后入队 frames，直到 done 关闭
+// （返回 nil）或读包出错（返回该错误）。captureLoop 在激活成功后以 Capturer.Read 与 time.Now 调用；
+// 两者可注入，本函数不触碰 WASAPI。
+func pumpCapture(read readFunc, now func() time.Time, ctl control, epoch uint32, done <-chan struct{}, frames chan []byte) error {
+	analyzer := dsp.New(fftSize)
+	nz := newNormalizer(ctl.norm, ctl.target, ctl.maxGain, wasapi.SampleRate) // 每路一个，持独立 EMA
+	readBuf := make([]float32, wasapi.SampleRate*wasapi.Channels/10)          // 100ms 容量，避免 Read 截断
+	fr := newFramer(hopFor(wasapi.SampleRate, ctl.fps), fftSize)
+	emit := func(batch []float32, peaks [2]float32, fresh int) {
+		enqueue(frames, encodeFrame(analyzer, nz, ctl.player, epoch, batch, peaks, fresh))
+	}
+	return pumpFrames(read, now, done, fr, readBuf, wasapi.Channels, time.Second/time.Duration(ctl.fps), emit)
+}
+
+// encodeFrame 用 batch 的**最近 fftSize 样本**算 RMS 与 bins，peaks 为本帧新增的全部非静音样本
+// 按声道的峰值，fresh 为新增的样本数（归一化的时长权重），编码为独立字节（可安全跨 goroutine 传递：
+// frame.Encode 已把 bins 拷入返回切片，返回后复用 analyzer 内部缓冲安全）。归一化增益同乘到 RMS、
+// bins 与 peak；nz 启用时每帧（含 keepalive）置 FlagNormalized。batch 空（本帧没有非静音样本）→ 发
+// keepalive 零帧：RMS、peak 为 0（不论传入的 peaks）、bins 全零。
+func encodeFrame(a *dsp.Analyzer, nz *Normalizer, player string, epoch uint32, batch []float32, peaks [2]float32, fresh int) []byte {
 	f := frame.Frame{
 		Player:   player,
 		Epoch:    epoch,
@@ -241,7 +227,7 @@ func encodeFrame(a *dsp.Analyzer, nz *Normalizer, player string, epoch uint32, b
 			w = w[len(w)-fftSize:] // 最近 fftSize 样本
 		}
 		res := a.Analyze(w)
-		g := nz.Apply(&res) // 仅真音频帧施归一化（disabled 返回 1）；keepalive 分支不经此路，不更新 EMA
+		g := nz.Apply(&res, fresh) // 仅真音频帧施归一化（disabled 返回 1）；keepalive 分支不经此路，不更新 EMA
 		f.RMS = res.RMS
 		f.PeakL = peaks[0] * g
 		f.PeakR = peaks[1] * g

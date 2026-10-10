@@ -28,7 +28,7 @@ func FindSongInfo(handle syscall.Handle, expectedName string) (SongInfo, error) 
 	results := proc.AOBScan(handle, pattern, mask, regions)
 
 	if len(results) == 0 {
-		return SongInfo{}, i18n.Errorf("未找到 songname 字段")
+		return SongInfo{}, i18n.Errorf("songname field not found")
 	}
 
 	// 优先匹配窗口标题对应的歌名（如果有多个匹配，取最高地址的）
@@ -55,7 +55,7 @@ func FindSongInfo(handle syscall.Handle, expectedName string) (SongInfo, error) 
 		}
 	}
 
-	return SongInfo{}, i18n.Errorf("找到 %d 个 songname 匹配但无有效歌曲信息", len(results))
+	return SongInfo{}, i18n.Errorf("Found %d songname matches but no valid song info", len(results))
 }
 
 func tryParseFromSongNameAddr(handle syscall.Handle, addr uint32) (SongInfo, bool) {

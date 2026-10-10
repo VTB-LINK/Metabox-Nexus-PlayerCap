@@ -1,11 +1,14 @@
 # Metabox-Nexus-PlayerCap 配置文件
 # 优先级：命令行参数 > config.yml > 内置默认值
 
+# 配置文件版本，由程序维护，请勿手动修改
+config-version: "v4.0.0-0"
+
 # HTTP/WebSocket/SSE 监听地址
 addr: "0.0.0.0:8765"
 
-# 歌词时间偏移（毫秒），正值=歌词提前，负值=延后
-offset: 200
+# 歌词延迟（毫秒），正值=延后，负值=提前
+offset: -200
 
 # 轮询间隔（毫秒），范围 10~2000
 poll: 30
@@ -17,6 +20,7 @@ prior-player:
 # - qqmusic
 # - kugou
 # - sodamusic
+# - applemusic
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
@@ -36,6 +40,10 @@ audio-normalize-target: -14
 # 最大增益（dB），范围 [0,45]，越界自动钳到边界
 audio-normalize-max-gain: 30
 
+# 音频波形帧率（帧每秒）：有音频数据时 /audio-ws 与 /<player>/audio-ws 每秒推送的帧数，
+# 范围 [15,60]，越界自动钳到边界
+audio-frame-rate: 25
+
 # 全民K歌 配置
 # wesing-offset: 0
 # wesing-poll: 30
@@ -43,26 +51,32 @@ audio-normalize-max-gain: 30
 # wesing-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 网易云音乐 v3 配置
-cloudmusicv3-offset: 500
+cloudmusicv3-offset: -500
 # cloudmusicv3-poll: 100   # 低于 50 会被网易云自身的下限抬到 100，写 30 也是跑 100
 # cloudmusicv3-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # cloudmusicv3-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 cloudmusicv3-effect-strategy: fadeout # 特效最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
 # QQ 音乐 配置
-qqmusic-offset: 400
+qqmusic-offset: -400
 # qqmusic-poll: 50
 # qqmusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # qqmusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 酷狗音乐 配置
-kugou-offset: 430
+kugou-offset: -430
 # kugou-poll: 30
 # kugou-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # kugou-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 汽水音乐 配置
-sodamusic-offset: 340
+sodamusic-offset: -340
 # sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
 # sodamusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # sodamusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
+
+# Apple Music 配置（纯内存扫描接入，与自身同用户的 AppleMusic.exe 普通权限即可读，无需管理员）
+applemusic-offset: -400
+# applemusic-poll: 50     # 低于 50 会被静默抬到 50（每轮只读 24 字节；位置的跳变与歌词行都在这一轮里发现、推出，调慢歌词跟着晚）
+# applemusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# applemusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize

@@ -4,7 +4,8 @@ package config
 // 不测 mergeYAML 的解析、不测 config.yml 的路径解析、不测 offset。
 //
 // 为什么手搓 Config 而不调 Load()：Load() 往全局 flag.CommandLine 注册 flag，
-// 二次调用会 panic（flag redefined: poll），表驱动测试没法反复调它。
+// 在同一个 FlagSet 上二次调用会 panic（flag redefined: poll）。Load() 里对 clampPolls 的调用点
+// 不在本包测，由根包 bannerconfig_test.go 换掉 flag.CommandLine 后经真实的 Load 守。
 
 import "testing"
 

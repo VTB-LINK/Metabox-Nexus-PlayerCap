@@ -212,7 +212,7 @@ func TestToLyricLinesCarriesRomaText(t *testing.T) {
 	lines, _, _ := parseLRC(jpQRC, 0)
 	mergeRoma(lines, jpRoma)
 
-	out := toLyricLines(lines, 0.2)
+	out := toLyricLines(lines, -0.2)
 	if len(out) != len(lines) {
 		t.Fatalf("len(out) = %d, want %d", len(out), len(lines))
 	}
@@ -223,7 +223,7 @@ func TestToLyricLinesCarriesRomaText(t *testing.T) {
 	if out[1].SubText != "" {
 		t.Fatalf("out[1].SubText = %q, want \"\"；音译不该串进翻译轨", out[1].SubText)
 	}
-	// 顺带钉住：roma_text 的加入不能动到既有的 play_time 语义（timestamp - offset）
+	// 顺带钉住：roma_text 的加入不能动到既有的 play_time 语义（timestamp + offset，offset 为负即提前）
 	if got, want := out[1].PlayTime, float32(3.0-0.2); got != want {
 		t.Fatalf("out[1].PlayTime = %v, want %v；RomaText 不该影响 play_time", got, want)
 	}

@@ -59,7 +59,7 @@ func (p *QQMusicPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("QQ音乐未启动"), Reason: player.ReasonProcessNotRunning})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("QQ Music not running"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		mem, err := ConnectQQMusic()
@@ -67,14 +67,14 @@ func (p *QQMusicPlayer) Start() {
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		log.Info("已连接 QQMusic.exe (PID: %d, 版本: %s)", mem.pid, mem.Version())
+		log.Info("Connected to QQMusic.exe (PID: %d, version: %s)", mem.pid, mem.Version())
 
 		p.runSession(mem, offsetSec)
 
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("QQ音乐已退出"), Reason: player.ReasonProcessExited})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("QQ Music has exited"), Reason: player.ReasonProcessExited})
 		p.Emit(player.EventClearSongData, nil)
-		log.Info("会话结束，等待新的 QQMusic 进程...")
+		log.Info("Session ended; waiting for a new QQMusic process...")
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -148,6 +148,11 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		if err != nil {
 			continue
 		}
+		// sampleTime 是 meta（含进度读数）的读取时刻。落锚、seek 检测与停滞判定都按它计时，不取用到读数时
+		// 的时刻：本轮若做过阻塞的取词（换歌分支、歌词补取），当前时刻比读数晚了取词耗时，这段时间里
+		// 计时器走没走并不知道——把它算进停滞时长会误判暂停，把取词前的读数配到取词后的时刻上会让位置落后。
+		// 取词返回后会重读一次进度，读到同一首歌时 meta.ProgressMs 与它一起换成新读数。
+		sampleTime := time.Now()
 
 		// --- 切歌检测 ---
 		// 用前缀挡掉 QQ 空闲/过渡态漏进 Name 字段的窗口标题串（"QQ音乐"、"QQ音乐 听我想听" 等）——
@@ -174,19 +179,19 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				if keepWaiting {
 					continue // 不认领 lastName：下次 songMid 就绪后重走完整换歌流程
 				}
-				log.Warn("songMid 等待 %v 仍未就绪，按无歌词继续（本地文件播放？）", midWaitWindow)
+				log.Warn("songMid still not ready after waiting %v; continuing without lyrics (local file playback?)", midWaitWindow)
 			}
 			midWait.reset()
 
 			lastName = meta.Name
 			lastLineIdx = -1
 			anchorProgressMs = meta.ProgressMs
-			anchorTime = time.Now()
+			anchorTime = sampleTime
 			lastMemProgress = meta.ProgressMs
 			isPaused = false
 			lyricsPending = false // 默认这一首已了结；仅下面取词失败时重新 arm
 
-			log.Info("♪ 歌曲: %s - %s", meta.Name, meta.Singer)
+			log.Info("♪ song: %s - %s", meta.Name, meta.Singer)
 
 			cookie := mem.FindCookie()
 			var lrcName, lrcSinger string
@@ -197,10 +202,23 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				// ID 去空请求（v20.05 上会返回别的歌的歌词/封面）。按无歌词发标题+空歌词，下面
 				// arm 补取块，ID 一落位就在窗口内补上。
 				err = errSongMidUnavailable
+				// **currentLyrics 必须一起清**：它是下方歌词行匹配的输入。不清的话 all_lyrics 说 count:0，
+				// 本轮及其后各轮却仍按上一首的歌词、新歌的进度发 lyric_update；补取窗口用尽还取不到
+				// （如播放本地文件）时，整首都在滚上一首。v20.05 的 midWait 路径在开始等待时清过，
+				// songID 读到 0 的各版只经过这里。补取成功后由补取块写入新歌词。
+				currentLyrics = nil
 			} else {
 				currentLyrics, lrcName, lrcSinger, err = fetchLRC(meta.SongID, meta.SongMid, cookie, meta.DurationMs)
 				applyDetailedOffset(currentLyrics, offsetSec)
 				coverURL = fetchCoverURL(meta.SongID, meta.SongMid)
+				// 取词与取封面地址是阻塞的网络请求，返回时本轮的进度读数已过时：其间可能暂停、恢复或拖动过。
+				// 再读一次，读到的仍是这首歌就把它当作本轮的读数——进度与 sampleTime 成对替换；下面随歌词
+				// 发出的位置、本轮其后的锚点更新、seek 检测与暂停检测都基于它。读不到、或读到的已不是这首歌，
+				// 则沿用取词前的读数，留给下一轮。
+				if fresh, rerr := mem.ReadAllMetadata(); rereadSameSong(fresh, rerr, lastName) {
+					sampleTime = time.Now()
+					meta.ProgressMs = fresh.ProgressMs
+				}
 			}
 
 			if lrcName != "" {
@@ -219,15 +237,20 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				Name: meta.Name, Singer: meta.Singer, Title: title, Cover: coverURL,
 			})
 
+			// 随歌词发出的位置取此刻的（服务端以事件到达的时刻为采样时刻）：重读成功时即刚读到的进度
+			// （sampleTime 就是此刻，读数没动就是没动，不必猜在不在播）；没有重读到则由取词前的读数按
+			// 经过的时间推算。算式与下方歌词行匹配处的 progressSec 是同一个。
+			playTimeSec := player.LivePosition(float32(meta.ProgressMs)/1000.0, sampleTime, time.Now(), !isPaused, currentDurationSec)
+			progress := player.ClampProgress(playTimeSec, currentDurationSec)
+
 			if err != nil {
 				// 换歌瞬间 songID/mid 尚未落位是预期过渡态，不是失败——静默进入补取重试。
 				// 计数清零：仅当重试满 lyricRetryLogAfter 次仍拿不到才打一行 Detail，快速落位的
 				// 常见情形完全静默；真失败由下方 8s 超时上报。
 				retryCount = 0
-				progress := player.ClampProgress(float32(meta.ProgressMs)/1000.0, currentDurationSec)
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: title, Duration: currentDurationSec,
-					Position: float32(meta.ProgressMs) / 1000.0,
+					Position: playTimeSec,
 					Progress: progress,
 					Lyrics:   []player.LyricLine{}, Count: 0,
 				})
@@ -237,9 +260,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				lastRetry = time.Time{} // 允许下一 tick 立即首次补取
 			} else if len(currentLyrics) == 0 {
 				// 纯音乐：API 成功但无歌词行
-				log.Info("检测到纯音乐/无歌词，清空歌词；逐字：%s", detailedFlag(currentLyrics))
-				playTimeSec := float32(meta.ProgressMs) / 1000.0
-				progress := player.ClampProgress(playTimeSec, currentDurationSec)
+				log.Info("Detected instrumental/no lyrics; clearing lyrics; per-word: %s", detailedFlag(currentLyrics))
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: title, Duration: currentDurationSec,
 					Position: playTimeSec,
@@ -251,12 +272,11 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 					Position: playTimeSec, Progress: progress,
 				})
 			} else {
-				log.Info("歌词加载完成: %d 行；逐字：%s", len(currentLyrics), detailedFlag(currentLyrics))
+				log.Info("Lyrics loaded: %d lines; per-character: %s", len(currentLyrics), detailedFlag(currentLyrics))
 				lyricItems := toLyricLines(currentLyrics, offsetSec)
-				progress := player.ClampProgress(float32(meta.ProgressMs)/1000.0, currentDurationSec)
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title: title, Duration: currentDurationSec,
-					Position: float32(meta.ProgressMs) / 1000.0,
+					Position: playTimeSec,
 					Progress: progress,
 					Count:    len(lyricItems), Lyrics: lyricItems,
 				})
@@ -284,7 +304,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		if lyricsPending && meta.Name == lastName && meta.Name != "" {
 			if time.Now().After(pendingDeadline) {
 				lyricsPending = false
-				log.Warn("歌词补取超时（%v），按无歌词继续（本地文件播放？）", lyricRetryWindow)
+				log.Warn("Lyric backfill timed out (%v); continuing without lyrics (local file playback?)", lyricRetryWindow)
 			} else if time.Since(lastRetry) >= lyricRetryInterval {
 				lastRetry = time.Now()
 				retryCount++
@@ -299,6 +319,13 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				if sid != 0 || smid != "" {
 					cookie := mem.FindCookie()
 					lines, lrcName, lrcSinger, ferr := fetchLRC(sid, smid, cookie, meta.DurationMs)
+					// 同换歌分支：取词返回后再读一次进度，当作本轮的读数。这里不能改用锚点与 isPaused 推算：
+					// 本块在本轮的锚点更新与暂停检测之前，它们还是上一轮的，本轮刚恢复或拖动过时位置会取到旧值。
+					// 下面的 fetchCoverURL 仍会阻塞，本轮其后的判定按 sampleTime 计，不受它影响。
+					if fresh, rerr := mem.ReadAllMetadata(); rereadSameSong(fresh, rerr, lastName) {
+						sampleTime = time.Now()
+						meta.ProgressMs = fresh.ProgressMs
+					}
 					if ferr == nil {
 						applyDetailedOffset(lines, offsetSec)
 						lyricsPending = false
@@ -314,17 +341,19 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 						title := name + " - " + singer
 						currentTitle = title
 						currentDurationSec = float32(meta.DurationMs) / 1000.0
-						psec := float32(meta.ProgressMs) / 1000.0
+						// 位置取本轮的读数：重读成功时即刚读到的进度；没有重读到则是取词前的读数，上一轮未判
+						// 暂停时按经过的时间推算。
+						psec := player.LivePosition(float32(meta.ProgressMs)/1000.0, sampleTime, time.Now(), !isPaused, currentDurationSec)
 						prog := player.ClampProgress(psec, currentDurationSec)
 						p.Emit(player.EventSongInfoUpdate, &player.SongInfo{Name: name, Singer: singer, Title: title})
 						if len(lines) == 0 {
-							log.Info("检测到纯音乐/无歌词，清空歌词；逐字：%s", detailedFlag(lines))
+							log.Info("Detected instrumental/no lyrics; clearing lyrics; per-word: %s", detailedFlag(lines))
 							p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 								Title: title, Duration: currentDurationSec, Position: psec, Progress: prog,
 								Lyrics: []player.LyricLine{}, Count: 0,
 							})
 						} else {
-							log.Info("歌词加载完成(补取): %d 行；逐字：%s", len(lines), detailedFlag(lines))
+							log.Info("Lyrics loaded (backfill): %d lines; per-word: %s", len(lines), detailedFlag(lines))
 							items := toLyricLines(lines, offsetSec)
 							p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 								Title: title, Duration: currentDurationSec, Position: psec, Progress: prog,
@@ -349,7 +378,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				// 只有重试满 lyricRetryLogAfter 次仍没取到才打一行（快速落位则完全静默）；
 				// 成功已把 lyricsPending 置 false，不会误报。
 				if lyricsPending && retryCount == lyricRetryLogAfter {
-					log.Detail("songID/mid 已重试 %d 次仍未就绪，继续补取…", retryCount)
+					log.Detail("songID/mid still not ready after %d retries; continuing backfill…", retryCount)
 				}
 			}
 		}
@@ -362,15 +391,15 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			if lastMemProgress > 0 {
 				// 回跳：进度回退超过 2s
 				if meta.ProgressMs+2000 < lastMemProgress {
-					log.Info("检测到回跳: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
+					log.Info("Seek-back detected: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
 					seekDetected = true
 				}
 				// 前跳：进度前进量超出实际经过时间 2s 以上
 				if !seekDetected && meta.ProgressMs > lastMemProgress {
 					advance := meta.ProgressMs - lastMemProgress
-					elapsed := uint32(time.Since(anchorTime).Milliseconds())
+					elapsed := uint32(sampleTime.Sub(anchorTime).Milliseconds())
 					if advance > elapsed+2000 {
-						log.Info("检测到前跳: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
+						log.Info("forward seek detected: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
 						seekDetected = true
 					}
 				}
@@ -393,41 +422,28 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 					})
 				}
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
-				log.Info("恢复 @ %.2fs", float32(meta.ProgressMs)/1000.0)
+				log.Info("resumed @ %.2fs", float32(meta.ProgressMs)/1000.0)
 			}
 			anchorProgressMs = meta.ProgressMs
-			anchorTime = time.Now()
+			anchorTime = sampleTime
 			lastMemProgress = meta.ProgressMs
 		}
 
-		// --- 本地时钟插值 ---
-		elapsed := time.Since(anchorTime)
-		interpolatedMs := float32(anchorProgressMs) + float32(elapsed.Milliseconds())
-
-		// 暂停检测：快速计时器停滞超过阈值
-		if elapsed.Seconds() > pauseTimeoutSec && !isPaused && lastName != "" {
+		// 暂停检测：快速计时器停滞超过阈值。停滞时长量到本轮读数的时刻（见 sampleTime），不量到当前时刻。
+		if sampleTime.Sub(anchorTime).Seconds() > pauseTimeoutSec && !isPaused && lastName != "" {
 			isPaused = true
-			interpolatedMs = float32(anchorProgressMs)
 			posSec := float32(anchorProgressMs) / 1000.0
 			p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{
 				Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
 			})
 			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentTitle})
-			log.Info("暂停 @ %.2fs", float32(anchorProgressMs)/1000.0)
+			log.Info("paused @ %.2fs", float32(anchorProgressMs)/1000.0)
 		}
 
-		if isPaused {
-			interpolatedMs = float32(anchorProgressMs)
-		}
-
-		// 钳位
-		durationMs := float32(meta.DurationMs)
-		if durationMs > 0 && interpolatedMs > durationMs {
-			interpolatedMs = durationMs
-		}
-
-		progressSec := interpolatedMs / 1000.0
-		matchTime := progressSec + offsetSec
+		// --- 本地时钟插值 ---
+		// 未判暂停时为锚点加自锚点起经过的时间，暂停中即锚点位置；不超过时长。
+		progressSec := player.LivePosition(float32(anchorProgressMs)/1000.0, anchorTime, time.Now(), !isPaused, float32(meta.DurationMs)/1000.0)
+		matchTime := player.LyricMatchTime(progressSec, offsetSec)
 
 		// 歌词行匹配
 		trueIdx := -1
@@ -449,7 +465,22 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				offsetSec, progressSec, currentDurationSec,
 			))
 		}
+
+		// 位置采样（见 BaseEmitter.EmitPositionSample）：已认领歌曲且未判暂停时按固定间隔报一次，校准
+		// 服务端缓存里的位置——不足 pauseTimeoutSec 的停顿与 2s 以内的跳变只重锚、不发事件，无歌词的歌
+		// 又没有歌词行可推。传 progressSec，与上面 lyric_update 的 position 同一个量；offset 只进了
+		// matchTime，这里不带。
+		if lastName != "" && !isPaused {
+			p.EmitPositionSample(time.Now(), progressSec, currentDurationSec)
+		}
 	}
+}
+
+// rereadSameSong 判断取词之后重读到的元数据能否当作本轮的读数：读成功，且歌名仍是 name（已认领的
+// 那一首）。比较与轮询循环的换歌判据一致（只比歌名、逐字相等）；空闲或过渡态漏进来的占位串、空串
+// 都与已认领的歌名不同，不采用。
+func rereadSameSong(fresh *SongMetadata, err error, name string) bool {
+	return err == nil && fresh != nil && name != "" && fresh.Name == name
 }
 
 // shouldDeferForSongMid 判断本次换歌是否**可能**需要等 songMid 就绪。
@@ -533,8 +564,8 @@ func applyDetailedOffset(lines []lyricLine, offsetSec float32) {
 func detailedFlag(lines []lyricLine) string {
 	for _, l := range lines {
 		if len(l.Detailed.Words) > 0 {
-			return i18n.T("是")
+			return i18n.T("yes")
 		}
 	}
-	return i18n.T("否")
+	return i18n.T("no")
 }

@@ -399,7 +399,7 @@ func (c *Capturer) shimInjectLoop() {
 		send("Page.enable", nil)
 		send("Page.addScriptToEvaluateOnNewDocument", map[string]any{"source": glShimJS})
 		send("Runtime.evaluate", map[string]any{"expression": glShimJS})
-		log.Detail("已尽早注册 preserveDrawingBuffer shim（document-start，免后续 reload）")
+		log.Detail("Registered preserveDrawingBuffer shim early (document-start; avoids later reload)")
 		// 保持连接存活以维持 addScript 注册；阻塞读到连接断（网易云退出/重启）→ 重连后重注
 		conn.SetReadDeadline(time.Time{})
 		for {
@@ -418,7 +418,7 @@ func (c *Capturer) Run() {
 	go c.shimInjectLoop()                        // 尽早 document-start 注册 shim（早于页面加载，免后续 reload）
 	go c.pollShowingLoop()                       // 独立轮询「特效是否在显示」，与帧流互不干扰
 	go c.windowStateLoop()                       // 最小化检测 + park 策略
-	log.Info("特效捕获模式: %s", c.mode)
+	log.Info("Effect capture mode: %s", c.mode)
 	loggedSessionErr := false // 本轮故障是否已记录（避免网易云重启/不可用时每 2s 刷屏）
 	for {
 		if !c.sink.HasEffectSubscribers() {
@@ -441,7 +441,7 @@ func (c *Capturer) Run() {
 		if err != nil {
 			// 网易云重启/未运行属预期（取词 player 负责拉起），仅本轮故障首次记录一次，恢复后再记
 			if !loggedSessionErr {
-				log.Detail("特效捕获暂停（网易云不可用，自动重连中）: %v", err)
+				log.Detail("Effect capture paused (NetEase Cloud Music unavailable, auto-reconnecting): %v", err)
 				loggedSessionErr = true
 			}
 			time.Sleep(2 * time.Second)
@@ -533,7 +533,7 @@ func (c *Capturer) RestoreChrome() {
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	var discard json.RawMessage
 	conn.ReadJSON(&discard) // 等回执，确保 eval 送达后再关闭
-	log.Info("已还原网易云菜单（优雅退出）")
+	log.Info("Restored NetEase Cloud Music menu bars (graceful shutdown)")
 }
 
 // devToolsPage CDP /json 返回的页面项
@@ -643,7 +643,7 @@ func (c *Capturer) purelayerSession() error {
 	// preserveDrawingBuffer。此前「连上时已有歌则 reload」会在网易云启动期触发 Page.reload → 卡死/中断播放，
 	// 已移除。极少数 shim 注册晚于自动恢复歌的边角情况：该歌可能略闪，切歌/切模式重建 canvas 即恢复，绝不卡死。
 
-	log.Success("纯层捕获已启动（注入抓帧 q%d 原生分辨率 fps%d）", quality, captureFPS)
+	log.Success("Pure-layer capture started (injected grab q%d, native resolution, fps%d)", quality, captureFPS)
 
 	// 维持连接：参数热更（gen 变）/ 无订阅者暂停退出 / 连接断重连
 	t := time.NewTicker(400 * time.Millisecond)
@@ -765,7 +765,7 @@ func (c *Capturer) session() error {
 		"format": "jpeg", "quality": quality, "maxWidth": maxW, "maxHeight": maxH, "everyNthFrame": 1,
 	})
 	conn.SetReadDeadline(time.Time{}) // 清除设置阶段的读超时，帧循环无限阻塞读
-	log.Success("特效截帧已开始（%dx%d q%d scale%.2f）", maxW, maxH, quality, scale)
+	log.Success("Effect screencast started (%dx%d q%d scale%.2f)", maxW, maxH, quality, scale)
 
 	// 读循环阻塞，无读超时（gorilla 读超时会废连接）；
 	// 由 watcher 协程在「无订阅者」或「参数变更」时关闭连接来打断读循环。

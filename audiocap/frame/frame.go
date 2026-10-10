@@ -1,6 +1,6 @@
 // Package frame 定义 helper→主服务 stdout 的自包含音频帧线格式（v1）及其增量解码器，并提供
 // 帧时间戳所用的 QPC 毫秒换算。纯 Go、无平台依赖，可在 CI 运行（布局与校验见
-// docs/audio-waveform-peak-design.md §3，分帧重对齐见 audio-waveform-capture-design.md §2.5）。
+// doc/design/audio-waveform-peak-design.md §3，分帧重对齐见 audio-waveform-capture-design.md §2.5）。
 //
 // 线格式 v1（全部 encoding/binary.LittleEndian，无对齐填充；括号内为帧内偏移）：
 //

@@ -9,20 +9,32 @@ import (
 	"Metabox-Nexus-PlayerCap/audiocap/dsp"
 )
 
+// 整帧的测试参数：48000 Hz 下 25 帧每秒，每帧 1920 个样本。
+const (
+	testSR  = 48000
+	testHop = 1920
+)
+
 func TestParseControlCapture(t *testing.T) {
-	// 恰 6 字段正常：norm=1→true、target 为负（-14 合法）
-	got, err := parseControl("capture 123 kugou 1 -14 30")
+	// 恰 7 字段正常：norm=1→true、target 为负（-14 合法）、末字段为帧率。帧率取 30 而非默认的 25，
+	// maxGain 取 12 与帧率不同：parseControl 把帧率写死为 25 即红（隔离副本，实测）。
+	got, err := parseControl("capture 123 kugou 1 -14 12 30")
 	if err != nil {
 		t.Fatalf("capture 正常应无错: %v", err)
 	}
-	if want := (control{op: "capture", pid: 123, player: "kugou", norm: true, target: -14, maxGain: 30}); got != want {
+	if want := (control{op: "capture", pid: 123, player: "kugou", norm: true, target: -14, maxGain: 12, fps: 30}); got != want {
 		t.Fatalf("capture 正常: got %+v want %+v", got, want)
 	}
 
 	// 多余空白容忍（strings.Fields 归一）；norm=0 → false
-	if got, err := parseControl("  capture   42   wesing 0 -20 12 "); err != nil ||
-		got != (control{op: "capture", pid: 42, player: "wesing", norm: false, target: -20, maxGain: 12}) {
+	if got, err := parseControl("  capture   42   wesing 0 -20 12   60 "); err != nil ||
+		got != (control{op: "capture", pid: 42, player: "wesing", norm: false, target: -20, maxGain: 12, fps: 60}) {
 		t.Fatalf("空白容忍: got %+v err %v", got, err)
+	}
+
+	// 帧率下界：1 合法（范围钳制在配置层，此处只拒绝算不出每帧样本数的值）
+	if got, err := parseControl("capture 1 p 0 0 0 1"); err != nil || got.fps != 1 {
+		t.Fatalf("fps=1 应合法: got %+v err %v", got, err)
 	}
 
 	// norm 字段语义：仅 "1" → true，其余（"0"/"2"/"x"）一律 false（按 ==1 判定）
@@ -30,7 +42,7 @@ func TestParseControlCapture(t *testing.T) {
 		field string
 		want  bool
 	}{{"1", true}, {"0", false}, {"2", false}, {"x", false}} {
-		got, err := parseControl("capture 1 p " + tc.field + " -14 12")
+		got, err := parseControl("capture 1 p " + tc.field + " -14 12 25")
 		if err != nil {
 			t.Fatalf("norm=%q 应解析成功: %v", tc.field, err)
 		}
@@ -52,20 +64,27 @@ func TestParseControlStop(t *testing.T) {
 }
 
 func TestParseControlInvalid(t *testing.T) {
-	// 多举反例/负路径：均须报 error
+	// 多举反例/负路径：均须报 error。去掉 parseControl 里的 fps < 1 判定后，fps 为 0 与为负的两条不再
+	// 报错（隔离副本，实测）：0 会让 captureLoop 算帧间隔时除零。字段数仍按 6 判定时，7 字段的正常
+	// 命令被拒（TestParseControlCapture 红，实测）。
 	for _, bad := range []string{
-		"",                             // 空行
-		"   ",                          // 全空白
-		"capture 123 kugou",            // 字段数 3（旧格式，现非法）
-		"capture 123 kugou 1 -14",      // 字段数 5
-		"capture 123 kugou 1 -14 30 x", // 字段数 7
-		"capture abc kugou 1 -14 30",   // pid 非数字
-		"capture -1 kugou 1 -14 30",    // pid 负号（ParseUint 拒）
-		"capture 123 kugou 1 xx 30",    // target 非数字
-		"capture 123 kugou 1 -14 yy",   // maxGain 非数字
-		"stop",                         // 缺 player（字段数 1）
-		"stop a b",                     // 字段过多（字段数 3）
-		"resume kugou",                 // 未知命令
+		"",                                // 空行
+		"   ",                             // 全空白
+		"capture 123 kugou",               // 字段数 3（最初的格式）
+		"capture 123 kugou 1 -14",         // 字段数 5
+		"capture 123 kugou 1 -14 30",      // 字段数 6（无帧率的旧格式，现非法）
+		"capture 123 kugou 1 -14 30 25 x", // 字段数 8
+		"capture abc kugou 1 -14 30 25",   // pid 非数字
+		"capture -1 kugou 1 -14 30 25",    // pid 负号（ParseUint 拒）
+		"capture 123 kugou 1 xx 30 25",    // target 非数字
+		"capture 123 kugou 1 -14 yy 25",   // maxGain 非数字
+		"capture 123 kugou 1 -14 30 0",    // fps 为 0
+		"capture 123 kugou 1 -14 30 -25",  // fps 为负
+		"capture 123 kugou 1 -14 30 25.5", // fps 非整数
+		"capture 123 kugou 1 -14 30 fast", // fps 非数字
+		"stop",                            // 缺 player（字段数 1）
+		"stop a b",                        // 字段过多（字段数 3）
+		"resume kugou",                    // 未知命令
 	} {
 		if _, err := parseControl(bad); err == nil {
 			t.Errorf("应报错但没报: %q", bad)
@@ -111,62 +130,59 @@ func TestAccumulatePeaks(t *testing.T) {
 }
 
 func TestWindow(t *testing.T) {
-	// 非空的静音包不计入样本与峰值
+	// 非空的静音包不计入样本、峰值与新增样本数
 	var silent window
 	silent.add([]float32{0.9, 0.9}, 2, true)
-	if b, p := silent.take(); len(b) != 0 || p != ([2]float32{}) {
-		t.Fatalf("静音包不应计入: batch=%v peaks=%v", b, p)
+	if len(silent.batch) != 0 || silent.peaks != ([2]float32{}) || silent.fresh != 0 {
+		t.Fatalf("静音包不应计入: %+v", silent)
 	}
 
-	// 非静音包：batch 为降混样本，peaks 为降混前按声道的峰值
+	// 非静音包：batch 为降混样本，peaks 为降混前按声道的峰值，fresh 为降混样本数
 	var w window
 	w.add([]float32{0.2, -0.4, 0.6, 0}, 2, false)
-	b, p := w.take()
-	assertClose(t, "batch", b, []float32{-0.1, 0.3})
-	if want := ([2]float32{0.6, 0.4}); p != want {
-		t.Fatalf("peaks: got %v want %v", p, want)
+	assertClose(t, "batch", w.batch, []float32{-0.1, 0.3})
+	if want := ([2]float32{0.6, 0.4}); w.peaks != want {
+		t.Fatalf("peaks: got %v want %v", w.peaks, want)
+	}
+	if w.fresh != 2 {
+		t.Fatalf("fresh: got %d want 2（降混后的样本数，不是交织样本数）", w.fresh)
 	}
 
-	// 取出即清零：否则 peak 退化为自激活以来的历史最大值
-	if b, p := w.take(); len(b) != 0 || p != ([2]float32{}) {
-		t.Fatalf("take 后应清零: batch=%v peaks=%v", b, p)
-	}
-
-	// 两次 take 之间的多个包：样本按序追加、峰值逐包并入，中间的静音包不计入。
+	// 多个包：样本按序追加、峰值逐包并入、fresh 累加，中间的静音包不计入。
 	// 声道 0 的峰值取自 B、声道 1 的取自 A，只保留最后一包的峰值即红。
 	var m window
 	m.add([]float32{0.2, -0.4, 0.6, 0}, 2, false)
 	m.add([]float32{0.9, 0.9}, 2, true)
 	m.add([]float32{-0.9, 0.1, 0.1, 0.3}, 2, false)
-	b, p = m.take()
-	assertClose(t, "多包 batch", b, []float32{-0.1, 0.3, -0.4, 0.2})
-	if want := ([2]float32{0.9, 0.4}); p != want {
-		t.Fatalf("多包 peaks: got %v want %v", p, want)
+	assertClose(t, "多包 batch", m.batch, []float32{-0.1, 0.3, -0.4, 0.2})
+	if want := ([2]float32{0.9, 0.4}); m.peaks != want {
+		t.Fatalf("多包 peaks: got %v want %v", m.peaks, want)
+	}
+	if m.fresh != 4 {
+		t.Fatalf("多包 fresh: got %d want 4", m.fresh)
 	}
 
 	// 非有限采样（NaN、±Inf）按 0 参与降混与取峰，batch 与 peaks 不出现 NaN 或无穷大；两声道各含非有限值与有限值。
 	var nf window
 	nan, inf := float32(math.NaN()), float32(math.Inf(1))
 	nf.add([]float32{nan, 0.2, -0.8, inf, -inf, 0.6}, 2, false)
-	b, p = nf.take()
-	assertFinite(t, "非有限采样 batch", b)
-	assertFinite(t, "非有限采样 peaks", p[:])
-	assertClose(t, "非有限采样 batch", b, []float32{0.1, -0.4, 0.3})
-	if want := ([2]float32{0.8, 0.6}); p != want {
-		t.Fatalf("非有限采样 peaks: got %v want %v", p, want)
+	assertFinite(t, "非有限采样 batch", nf.batch)
+	assertFinite(t, "非有限采样 peaks", nf.peaks[:])
+	assertClose(t, "非有限采样 batch", nf.batch, []float32{0.1, -0.4, 0.3})
+	if want := ([2]float32{0.8, 0.6}); nf.peaks != want {
+		t.Fatalf("非有限采样 peaks: got %v want %v", nf.peaks, want)
 	}
 
 	// 有限值不动，包括绝对值大于 1 的。
 	var big window
 	big.add([]float32{1.5, -2}, 2, false)
-	b, p = big.take()
-	assertClose(t, "超过 1 的 batch", b, []float32{-0.25})
-	if want := ([2]float32{1.5, 2}); p != want {
-		t.Fatalf("超过 1 的 peaks: got %v want %v", p, want)
+	assertClose(t, "超过 1 的 batch", big.batch, []float32{-0.25})
+	if want := ([2]float32{1.5, 2}); big.peaks != want {
+		t.Fatalf("超过 1 的 peaks: got %v want %v", big.peaks, want)
 	}
 
-	// 边界值与次正规数、负零也是有限值，逐位不动。add 就地改写入参，故比对入参；另比对 take 的
-	// peaks，使改为拷贝后清洗时仍能拦住误伤边界值。
+	// 边界值与次正规数、负零也是有限值，逐位不动。add 就地改写入参，故比对入参；另比对 peaks，
+	// 使改为拷贝后清洗时仍能拦住误伤边界值。
 	edge := []float32{math.MaxFloat32, -math.MaxFloat32, math.SmallestNonzeroFloat32, -math.SmallestNonzeroFloat32, float32(math.Copysign(0, -1)), 0.5}
 	bits := make([]uint32, len(edge))
 	for i, v := range edge {
@@ -179,13 +195,13 @@ func TestWindow(t *testing.T) {
 			t.Fatalf("有限值 edge[%d] 被改写: got %#08x want %#08x", i, math.Float32bits(v), bits[i])
 		}
 	}
-	if _, ep := e.take(); ep != ([2]float32{math.MaxFloat32, math.MaxFloat32}) {
-		t.Fatalf("边界值 peaks: got %v want 两侧均为 MaxFloat32", ep)
+	if e.peaks != ([2]float32{math.MaxFloat32, math.MaxFloat32}) {
+		t.Fatalf("边界值 peaks: got %v want 两侧均为 MaxFloat32", e.peaks)
 	}
 	var sub window
 	sub.add([]float32{math.SmallestNonzeroFloat32, -math.SmallestNonzeroFloat32}, 2, false)
-	if _, sp := sub.take(); sp != ([2]float32{math.SmallestNonzeroFloat32, math.SmallestNonzeroFloat32}) {
-		t.Fatalf("次正规数 peaks: got %v want 两侧均为 SmallestNonzeroFloat32", sp)
+	if sub.peaks != ([2]float32{math.SmallestNonzeroFloat32, math.SmallestNonzeroFloat32}) {
+		t.Fatalf("次正规数 peaks: got %v want 两侧均为 SmallestNonzeroFloat32", sub.peaks)
 	}
 }
 
@@ -315,32 +331,32 @@ func TestGainFactorUnity(t *testing.T) {
 
 func TestNormalizerSeedAndApply(t *testing.T) {
 	const target, maxGain = -14, 12
-	nz := newNormalizer(true, target, maxGain)
-	if nz.seeded || nz.emaMS != 0 {
-		t.Fatalf("构造后应未播种: seeded=%v emaMS=%v", nz.seeded, nz.emaMS)
+	nz := newNormalizer(true, target, maxGain, testSR)
+	if nz.seenN != 0 || nz.emaMS != 0 {
+		t.Fatalf("构造后应尚无估计: seenN=%v emaMS=%v", nz.seenN, nz.emaMS)
 	}
 	// 首帧 RMS=0.1 → emaMS = 0.1² = 0.01（播种），RMS/Bins 按 g 缩放
 	g := gainFactor(0.1, target, maxGain)
 	r := &dsp.Result{RMS: 0.1, Bins: []float32{0.2, 0.4}}
-	nz.Apply(r)
-	if !nz.seeded || !approx(nz.emaMS, 0.01) {
-		t.Fatalf("首帧播种后 seeded=%v emaMS=%v want true/0.01", nz.seeded, nz.emaMS)
+	nz.Apply(r, testHop)
+	if nz.seenN != testHop || !approx(nz.emaMS, 0.01) {
+		t.Fatalf("首帧播种后 seenN=%v emaMS=%v want %d/0.01", nz.seenN, nz.emaMS, testHop)
 	}
 	if !approx(float64(r.RMS), 0.1*g) {
 		t.Fatalf("RMS 缩放=%v want %v", r.RMS, 0.1*g)
 	}
 	assertClose(t, "bins 缩放", r.Bins, []float32{float32(0.2 * g), float32(0.4 * g)})
 
-	// 次帧 RMS=0.2 → 走 EMA 递推（而非重新播种）
-	nz.Apply(&dsp.Result{RMS: 0.2})
-	if want := normAlpha*0.04 + (1-normAlpha)*0.01; !approx(nz.emaMS, want) {
-		t.Fatalf("次帧 emaMS=%v want %v（应走 EMA 递推）", nz.emaMS, want)
+	// 次帧 RMS=0.2 → 起步期内取两帧功率的平均（不重新播种；功率为 4 倍，不到重新起步的门槛）
+	nz.Apply(&dsp.Result{RMS: 0.2}, testHop)
+	if want := (0.01 + 0.04) / 2; !approx(nz.emaMS, want) {
+		t.Fatalf("次帧 emaMS=%v want %v（应为两帧的平均）", nz.emaMS, want)
 	}
 
 	// 恒定输入收敛稳定：持续 RMS=0.1 多帧后 emaMS 稳在 0.01
-	nz2 := newNormalizer(true, target, maxGain)
+	nz2 := newNormalizer(true, target, maxGain, testSR)
 	for i := 0; i < 500; i++ {
-		nz2.Apply(&dsp.Result{RMS: 0.1})
+		nz2.Apply(&dsp.Result{RMS: 0.1}, testHop)
 	}
 	if !approx(nz2.emaMS, 0.01) {
 		t.Fatalf("恒定输入收敛 emaMS=%v want≈0.01", nz2.emaMS)
@@ -348,30 +364,30 @@ func TestNormalizerSeedAndApply(t *testing.T) {
 }
 
 func TestNormalizerDisabledPassthrough(t *testing.T) {
-	nz := newNormalizer(false, -14, 12)
+	nz := newNormalizer(false, -14, 12, testSR)
 	r := &dsp.Result{RMS: 0.3, Bins: []float32{0.1, 0.5, 0.9}}
-	nz.Apply(r)
+	nz.Apply(r, testHop)
 	if r.RMS != 0.3 {
 		t.Fatalf("disabled 不应改 RMS: %v", r.RMS)
 	}
 	assertClose(t, "disabled bins 逐位不变", r.Bins, []float32{0.1, 0.5, 0.9})
 	// disabled 下连续 Apply，EMA 字段完全不被触碰
-	nz.Apply(&dsp.Result{RMS: 0.9})
-	if nz.seeded || nz.emaMS != 0 {
-		t.Fatalf("disabled 不应动 EMA: seeded=%v emaMS=%v", nz.seeded, nz.emaMS)
+	nz.Apply(&dsp.Result{RMS: 0.9}, testHop)
+	if nz.seenN != 0 || nz.warmN != 0 || nz.emaMS != 0 {
+		t.Fatalf("disabled 不应动估计: seenN=%v warmN=%v emaMS=%v", nz.seenN, nz.warmN, nz.emaMS)
 	}
 	// 历史未污染：此刻切 enable，仍从当前帧重新播种
 	nz.enabled = true
-	nz.Apply(&dsp.Result{RMS: 0.1})
-	if !nz.seeded || !approx(nz.emaMS, 0.01) {
-		t.Fatalf("enable 后应从当前帧播种: seeded=%v emaMS=%v", nz.seeded, nz.emaMS)
+	nz.Apply(&dsp.Result{RMS: 0.1}, testHop)
+	if nz.seenN == 0 || !approx(nz.emaMS, 0.01) {
+		t.Fatalf("enable 后应从当前帧播种: seenN=%v emaMS=%v", nz.seenN, nz.emaMS)
 	}
 }
 
 func TestNormalizerApplyReturnsGain(t *testing.T) {
 	// 未启用：返回 1，r 逐位不变
 	r := &dsp.Result{RMS: 0.3, Bins: []float32{0.1, 0.5}}
-	if g := newNormalizer(false, -14, 12).Apply(r); g != 1 {
+	if g := newNormalizer(false, -14, 12, testSR).Apply(r, testHop); g != 1 {
 		t.Fatalf("disabled 应返回 1, got %v", g)
 	}
 	if math.Float32bits(r.RMS) != math.Float32bits(0.3) ||
@@ -381,7 +397,7 @@ func TestNormalizerApplyReturnsGain(t *testing.T) {
 
 	// 启用：首帧返回值即施到 RMS 上的增益
 	r = &dsp.Result{RMS: 0.01}
-	g := newNormalizer(true, -14, 30).Apply(r)
+	g := newNormalizer(true, -14, 30, testSR).Apply(r, testHop)
 	if want := float32(gainFactor(0.01, -14, 30)); g != want {
 		t.Fatalf("首帧增益: got %v want %v", g, want)
 	}
@@ -396,33 +412,34 @@ func TestNormalizerIgnoresNonFiniteRMS(t *testing.T) {
 	const target, maxGain = -14, 12
 	nan, inf := float32(math.NaN()), float32(math.Inf(1))
 
-	// 已播种：非有限帧按当前 EMA 施增益，且之后的有限帧与「跳过那两帧」时结果相等。
-	nz := newNormalizer(true, target, maxGain)
-	ref := newNormalizer(true, target, maxGain)
-	g0 := nz.Apply(&dsp.Result{RMS: 0.1})
-	ref.Apply(&dsp.Result{RMS: 0.1})
+	// 已播种：非有限帧按当前估计施增益，且之后的有限帧与「跳过那两帧」时结果相等（非有限帧若计入
+	// 累计样本数，起步期内下一帧的权重就不同）。
+	nz := newNormalizer(true, target, maxGain, testSR)
+	ref := newNormalizer(true, target, maxGain, testSR)
+	g0 := nz.Apply(&dsp.Result{RMS: 0.1}, testHop)
+	ref.Apply(&dsp.Result{RMS: 0.1}, testHop)
 	for _, v := range []float32{nan, inf} {
-		if g := nz.Apply(&dsp.Result{RMS: v}); g != g0 {
+		if g := nz.Apply(&dsp.Result{RMS: v}, testHop); g != g0 {
 			t.Fatalf("RMS=%v 时增益 = %v, 期望按当前 EMA 得 %v", v, g, g0)
 		}
 	}
-	g, want := nz.Apply(&dsp.Result{RMS: 0.2}), ref.Apply(&dsp.Result{RMS: 0.2})
+	g, want := nz.Apply(&dsp.Result{RMS: 0.2}, testHop), ref.Apply(&dsp.Result{RMS: 0.2}, testHop)
 	if math.IsNaN(float64(g)) || math.IsInf(float64(g), 0) || g != want {
 		t.Fatalf("非有限帧之后的增益 = %v, 期望 %v", g, want)
 	}
 
 	// 未播种：返回 1、不碰 r，之后首个有限帧照常播种。
-	nz = newNormalizer(true, target, maxGain)
+	nz = newNormalizer(true, target, maxGain, testSR)
 	r := &dsp.Result{RMS: nan, Bins: []float32{0.5}}
-	if g := nz.Apply(r); g != 1 || r.Bins[0] != 0.5 {
+	if g := nz.Apply(r, testHop); g != 1 || r.Bins[0] != 0.5 {
 		t.Fatalf("未播种时 RMS=NaN: 增益 = %v, bins = %v, 期望 1、[0.5]", g, r.Bins)
 	}
-	if nz.seeded {
-		t.Fatalf("RMS=NaN 不应播种")
+	if nz.seenN != 0 || nz.warmN != 0 {
+		t.Fatalf("RMS=NaN 不应播种，也不应计入累计样本数: seenN=%v warmN=%v", nz.seenN, nz.warmN)
 	}
-	nz.Apply(&dsp.Result{RMS: 0.1})
-	if !nz.seeded || !approx(nz.emaMS, 0.01) {
-		t.Fatalf("首个有限帧应播种: seeded=%v emaMS=%v", nz.seeded, nz.emaMS)
+	nz.Apply(&dsp.Result{RMS: 0.1}, testHop)
+	if nz.seenN == 0 || !approx(nz.emaMS, 0.01) {
+		t.Fatalf("首个有限帧应播种: seenN=%v emaMS=%v", nz.seenN, nz.emaMS)
 	}
 }
 
@@ -430,12 +447,12 @@ func TestNormalizerEmptyBins(t *testing.T) {
 	// nil / 空 bins 均不得 panic；RMS 仍正常缩放
 	g := gainFactor(0.1, -14, 12)
 	rNil := &dsp.Result{RMS: 0.1, Bins: nil}
-	newNormalizer(true, -14, 12).Apply(rNil)
+	newNormalizer(true, -14, 12, testSR).Apply(rNil, testHop)
 	if !approx(float64(rNil.RMS), 0.1*g) {
 		t.Fatalf("nil bins 下 RMS=%v want %v", rNil.RMS, 0.1*g)
 	}
 	rEmpty := &dsp.Result{RMS: 0.1, Bins: []float32{}}
-	newNormalizer(true, -14, 12).Apply(rEmpty)
+	newNormalizer(true, -14, 12, testSR).Apply(rEmpty, testHop)
 	if len(rEmpty.Bins) != 0 || !approx(float64(rEmpty.RMS), 0.1*g) {
 		t.Fatalf("空 bins 下 bins=%v RMS=%v", rEmpty.Bins, rEmpty.RMS)
 	}
@@ -448,7 +465,7 @@ func TestNormalizerBinsMayExceedOne(t *testing.T) {
 		t.Fatalf("测试前提失效：期望 g>1, got %v", g)
 	}
 	r := &dsp.Result{RMS: 0.1, Bins: []float32{1.0, 0.8}}
-	newNormalizer(true, -14, 12).Apply(r)
+	newNormalizer(true, -14, 12, testSR).Apply(r, testHop)
 	if !(r.Bins[0] > 1) {
 		t.Fatalf("bin=1.0 施增益后应 >1（不钳）, got %v", r.Bins[0])
 	}

@@ -81,12 +81,12 @@ func ID() string {
 	idOnce.Do(func() {
 		guid, err := readMachineGUID()
 		if err != nil {
-			log.Warn("读取 MachineGuid 失败: %v，本次运行不带客户端标识（不影响版本检查与自动更新）", err)
+			log.Warn("Failed to read MachineGuid: %v; this run proceeds without a client identifier (version check and auto-update are unaffected)", err)
 			return
 		}
 		idCached = derive(guid)
 		if idCached == "" {
-			log.Warn("MachineGuid 为空，本次运行不带客户端标识（不影响版本检查与自动更新）")
+			log.Warn("MachineGuid is empty; this run proceeds without a client identifier (version check and auto-update are unaffected)")
 		}
 	})
 	return idCached

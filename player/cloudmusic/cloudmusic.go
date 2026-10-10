@@ -46,19 +46,50 @@ func New(offsetMs, pollMs int) *CloudMusicPlayer {
 	}
 }
 
+// baseRealClock 是 runSession 的位置时钟：在走时位置 = BaseRealTime 加上自 AnchorTime 起经过的时间，
+// 否则为 BaseRealTime；不钳时长。读写都按调用方给的时刻，不在内部取当前时刻。时钟只有一条时间线：
+// 对外位置、seek 检测与冻结都取 at，只有行匹配取 lineAt（doc/design/cloudmusic-dom-clock-sync-design.md §3.4）。
 type baseRealClock struct {
 	BaseRealTime        float32
 	AnchorTime          time.Time
 	LastKnownLyricIndex int
 	Playing             bool
+
+	// lineFloor 是行匹配下限：对表回拨时记下回拨前行匹配所用的位置，时钟走过它之前行匹配不低于它，
+	// 行号因此不随回拨回退。零值即没有下限（时钟读数不为负）。
+	lineFloor float32
 }
 
-func (c *baseRealClock) GetCurrent() float32 {
-	if !c.Playing {
-		return c.BaseRealTime
+// at 返回 t 时刻的时钟读数。
+func (c *baseRealClock) at(t time.Time) float32 {
+	return player.LivePosition(c.BaseRealTime, c.AnchorTime, t, c.Playing, 0)
+}
+
+// lineAt 返回 t 时刻行匹配用的读数：at 与行匹配下限的较大者。只供行匹配。
+func (c *baseRealClock) lineAt(t time.Time) float32 {
+	return max(c.at(t), c.lineFloor)
+}
+
+// adjust 把 t 时刻的读数改到 want（对表）。回拨时把回拨前行匹配所用的位置记为下限。
+func (c *baseRealClock) adjust(want float32, t time.Time) {
+	if want < c.at(t) {
+		c.lineFloor = c.lineAt(t)
 	}
-	elapsed := float32(time.Since(c.AnchorTime).Seconds())
-	return c.BaseRealTime + elapsed
+	c.BaseRealTime, c.AnchorTime = want, t
+}
+
+// jump 把 t 时刻的读数置为 pos（seek 检测），清掉下限：跳转后行号跟着位置走。
+func (c *baseRealClock) jump(pos float32, t time.Time) {
+	c.BaseRealTime, c.AnchorTime, c.lineFloor = pos, t, 0
+}
+
+// setPlaying 让时钟在 t 时刻起走或冻结。冻结在时钟读数（at）而不是下限：playback_pause 的位置要与
+// 其它对外事件同一条时间线；下限保留，恢复后行匹配仍取较大者，行号不回退。
+func (c *baseRealClock) setPlaying(playing bool, t time.Time) {
+	if playing == c.Playing {
+		return
+	}
+	c.BaseRealTime, c.AnchorTime, c.Playing = c.at(t), t, playing
 }
 
 func normalizeSongIdentity(value string) string {
@@ -114,7 +145,7 @@ func (p *CloudMusicPlayer) Start() {
 	// 0. Patch Windows registry auto-start
 	watchdog.PatchRegistryAutoStart()
 
-	p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("网易云音乐未启动"), Reason: player.ReasonProcessNotRunning})
+	p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("NetEase Cloud Music not running"), Reason: player.ReasonProcessNotRunning})
 
 	warnedUnsupported := false // v2 警告只打一次（它是永久状态，每轮打就是新的刷屏）
 
@@ -143,7 +174,7 @@ func (p *CloudMusicPlayer) Start() {
 			//
 			// 只打一次（用户选的 A 方案）：v2 是**永久状态**，每轮打就是新的刷屏。
 			if !warnedUnsupported {
-				log.Warn("%s（%s）—— 已跳过网易云取词与特效镜像；如需使用请升级到 v%d 及以上",
+				log.Warn("%s (%s) — skipped NetEase lyric capture and effect mirroring; upgrade to v%d or later to use them",
 					unsupported.Error(), unsupported.ExePath, 3)
 
 				// 这是个「预期之外」的事件：我们只支持 v3+，而这台机器上装的是 v2。
@@ -158,17 +189,17 @@ func (p *CloudMusicPlayer) Start() {
 				warnedUnsupported = true
 			}
 			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
-				Status: "standby", Detail: fmt.Sprintf(i18n.T("网易云音乐 v%s 不支持（需 v3+）"), unsupported.Version), Reason: player.ReasonVersionUnsupported,
+				Status: "standby", Detail: fmt.Sprintf(i18n.T("NetEase Cloud Music v%s unsupported (requires v3+)"), unsupported.Version), Reason: player.ReasonVersionUnsupported,
 			})
 			time.Sleep(unsupportedRecheck)
 			continue
 		}
 		warnedUnsupported = false // 版本变了（升级/换装）→ 下次再是 v2 可以再警告一次
 		if err != nil {
-			log.Error("Watchdog 错误: %v", err)
+			log.Error("watchdog error: %v", err)
 		}
 		if restarted {
-			log.Info("已重启网易云音乐，等待 5s...")
+			log.Info("restarted NetEase Cloud Music, waiting 5s...")
 			time.Sleep(5 * time.Second)
 		}
 
@@ -178,13 +209,13 @@ func (p *CloudMusicPlayer) Start() {
 			continue
 		}
 
-		log.Info("CDP 连接成功，开始监听播放状态")
+		log.Info("CDP connected, monitoring playback state")
 		atomic.StoreInt32(&p.connected, 1) // 供特效捕获器门控：网易云已连上才截帧
 		p.runSession(client)
 		atomic.StoreInt32(&p.connected, 0)
-		log.Info("会话结束，等待网易云音乐重新启动...")
+		log.Info("session ended, waiting for NetEase Cloud Music to restart...")
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("网易云音乐已退出"), Reason: player.ReasonProcessExited})
+		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("NetEase Cloud Music has exited"), Reason: player.ReasonProcessExited})
 		p.Emit(player.EventClearSongData, nil)
 	}
 }
@@ -204,6 +235,23 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 	var isPureMusic bool
 	var cdpLyricsOK bool // CDP 已成功获取歌词，跳过 Redux fallback
 	var songDuration float32
+	var dom domSync    // 按 DOM 跳秒对表：上一拍的观测
+	var pending untold // 校准改动了时钟而前端尚不知道的量
+
+	// emitPos 发出带位置的对外事件（all_lyrics、lyric_update、playback_pause、playback_resume）。前端据它
+	// 落锚到此刻的时钟读数，此前的校准都已包含在内，未告知量随之清零。**本包这四种事件只许经它发出**
+	// （✅ player/cloudmusicanchor_lint_test.go）：绕过它发一条，未告知量不清零，随后会多发一条由校准
+	// 触发的 playback_resume。
+	emitPos := func(evtType string, data interface{}) {
+		p.Emit(evtType, data)
+		pending.anchored()
+	}
+
+	// posNow 返回此刻的时钟读数，供带位置的对外事件与位置采样取 position。下游按事件到达的时刻落锚
+	// （服务端 UpdatePlayerState 记 PositionAt，前端自收到起按墙钟插值），所以取发出那一刻的读数，不取
+	// 本拍的 now：两者之间隔着阻塞调用（Redux 歌词晚到时的 ExtractTlyricLines）时，按 now 取的位置到达时
+	// 已落后一个阻塞时长，直到下一条带位置的事件。没有阻塞的拍上两者只差微秒。
+	posNow := func() float32 { return clock.at(time.Now()) }
 
 	ticker := time.NewTicker(EffectivePollInterval(p.pollMs))
 	defer ticker.Stop()
@@ -217,7 +265,11 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		case <-ticker.C:
 		}
 
+		// sent / got 紧贴这次 Extract 取：DOM 进度是在两者之间读到的，对表按它们算跳秒发生的区间
+		// （domSync.observe）。
+		sent := time.Now()
 		data, err := client.Extract()
+		got := time.Now()
 		if err != nil {
 			// "no root" 是启动期 #root 未就绪的预期噪声，原样静默（别扩大这条过滤面：
 			// 'null: no root' / 'null: no react container' / 'null: store not found' 三串同生于
@@ -226,9 +278,9 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if !strings.Contains(err.Error(), "no root") {
 				if should, repeat, dur := errLog.next(err.Error(), time.Now()); should {
 					if repeat {
-						log.Warn("提取错误持续 %s（仍在重试）: %v", dur.Round(time.Second), err)
+						log.Warn("Extraction error persisting for %s (still retrying): %v", dur.Round(time.Second), err)
 					} else {
-						log.Warn("提取错误: %v", err)
+						log.Warn("Extraction error: %v", err)
 					}
 				}
 			}
@@ -242,6 +294,13 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		if data == nil || data.CurPlaying == nil {
 			continue
 		}
+
+		// 一拍里用到两个时刻，不能合成一个：
+		//   - now 配与 DOM 读数成对的读写：起走与冻结、行匹配、seek 检测里与 DOM 比的量及置位、对表、通知的
+		//     限频。取 got，即读到 DOM 进度的时刻；换歌那一拍在分支之后重取（见分支末尾）。改配「用到它时」
+		//     的时刻，本拍里阻塞调用的耗时会被算成时钟与界面进度的偏差。
+		//   - 对外事件的 position 与位置采样取发出那一刻的读数（posNow）：下游按到达的时刻落锚。
+		now := got
 
 		// Detect song change by DOM song name
 		songName := data.DomSongName
@@ -270,12 +329,13 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			isPureMusic = false
 			cdpLyricsOK = false
 			songDuration = 0
-			clock = baseRealClock{LastKnownLyricIndex: -1}
+			clock = baseRealClock{LastKnownLyricIndex: -1} // 行匹配下限随之清掉
+			pending.anchored()                             // 上一首的未告知量不带到新歌
 			lastSongChangeTime = time.Now()
 			currentSongName = songName
 			currentSongArtist = songArtist
 
-			log.Info("♪ 歌曲: %s - %s", songName, songArtist)
+			log.Info("♪ song: %s - %s", songName, songArtist)
 
 			// 先强制 Redux 获取当前歌词数据，确保 Redux Store 更新到最新歌曲
 			client.ForceFetchLyricsInRedux()
@@ -300,14 +360,14 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				if retryErr == nil && snapshotMatchesCurrentSong(retryData, songName, songArtist) && retryData.CurPlaying.ID != "" {
 					activeSongID = retryData.CurPlaying.ID
 					data = retryData
-					log.Info("重试获取 Redux ID 成功: %s", activeSongID)
+					log.Info("retried Redux ID successfully: %s", activeSongID)
 				} else {
-					log.Info("当前歌曲的 Redux 快照暂未对齐，等待后续补齐歌词和封面")
+					log.Info("Redux snapshot for current song not yet aligned; lyrics and cover will be filled in later")
 				}
 			}
 			matchedRedux = snapshotMatchesCurrentSong(data, songName, songArtist)
 			if activeSongID != "" {
-				log.Info("使用 Redux ID: %s", activeSongID)
+				log.Info("using Redux ID: %s", activeSongID)
 			}
 			if activeSongID == "" {
 				targetDurationMs := 0
@@ -316,9 +376,9 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 				if foundID, searchErr := lyric.SearchSongID(songName, songArtist, targetDurationMs); searchErr == nil && foundID != "" {
 					activeSongID = foundID
-					log.Info("Redux ID 为空，搜索匹配网易云 ID: %s (duration=%dms)", activeSongID, targetDurationMs)
+					log.Info("Redux ID empty, searched matching NetEase ID: %s (duration=%dms)", activeSongID, targetDurationMs)
 				} else if searchErr != nil {
-					log.Warn("Redux ID 为空，搜索网易云 ID 失败: %v", searchErr)
+					log.Warn("Redux ID empty, NetEase ID search failed: %v", searchErr)
 				}
 			}
 
@@ -359,17 +419,17 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if activeSongID != "" {
 				lrcResult, err := client.FetchLyricsViaCDP(activeSongID)
 				if err != nil {
-					log.Warn("歌词获取失败: %v", err)
+					log.Warn("lyric fetch failed: %v", err)
 				} else if lrcResult.PureMusic || lrcResult.NoLyric {
 					// CDP 返回纯音乐，用 Go HTTP API 二次确认
-					log.Info("CDP 返回纯音乐(ID=%s)", activeSongID)
+					log.Info("CDP reported pure music (ID=%s)", activeSongID)
 					// 判据必须是 hasRealText 而不是 len()：ParseLRC 会保留 intentional blank
 					// （正文为空、表示此刻清空歌词的行），一首只有 blank 的 lrc 行数 > 0 却
 					// 一个字都没有 —— 按行数判就会误判成「有歌词」、置 cdpLyricsOK 关掉 Redux
 					// fallback，OBS 整首空白且不走下面的「标记纯音乐」清屏路径。
 					// 与 resolveCDPLyrics 同一判据，别让这两条分支再分叉。
 					if apiLyrics, err2 := lyric.FetchLyrics(activeSongID, offsetSec); err2 == nil && hasRealText(apiLyrics) {
-						log.Info("API 二次确认(ID=%s)有 %d 行歌词，使用 API 歌词；逐字：%s", activeSongID, len(apiLyrics), lyricDetailedFlag(apiLyrics))
+						log.Info("API recheck (ID=%s) found %d lyric lines, using API lyrics; per-character: %s", activeSongID, len(apiLyrics), lyricDetailedFlag(apiLyrics))
 						for _, l := range apiLyrics {
 							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
 								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, RomaText: l.RomaText, TextDetailed: l.TextDetailed,
@@ -377,18 +437,18 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						}
 						cdpLyricsOK = true
 					} else {
-						log.Info("API 二次确认(ID=%s)也无歌词，标记纯音乐", activeSongID)
+						log.Info("API recheck (ID=%s) found no lyrics either, marking as pure music", activeSongID)
 						isPureMusic = true
 						if matchedRedux && data.CurPlaying.Track.Duration > 0 {
 							songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 						}
-						playTime := clock.GetCurrent()
+						playTime := posNow()
 						progress := player.ClampProgress(playTime, songDuration)
-						p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+						emitPos(player.EventAllLyrics, &player.AllLyricsData{
 							Title: songTitle, Duration: songDuration, Position: playTime, Progress: progress,
 							Lyrics: []player.LyricLine{}, Count: 0,
 						})
-						p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+						emitPos(player.EventLyricUpdate, &player.LyricUpdate{
 							Index: -1, Text: "", Timestamp: 0, Position: playTime, Progress: progress,
 						})
 					}
@@ -396,7 +456,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					parsed, ok := resolveCDPLyrics(lrcResult.Lrc, lrcResult.Tlyric, lrcResult.Romalrc, lrcResult.Yrc, offsetSec)
 					if ok {
 						cdpLyricsOK = true
-						log.Info("歌词加载完成(CDP): %d 行 (ID=%s)；逐字：%s", len(parsed), activeSongID, lyricDetailedFlag(parsed))
+						log.Info("lyrics loaded (CDP): %d lines (ID=%s); per-character: %s", len(parsed), activeSongID, lyricDetailedFlag(parsed))
 						for _, l := range parsed {
 							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
 								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, RomaText: l.RomaText, TextDetailed: l.TextDetailed,
@@ -407,7 +467,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 						// 标签（[ti:]/[ar:]）而无时间戳行。**不置 cdpLyricsOK**，交给下面的 Redux
 						// fallback（:379 用 Redux 歌词，:407 兜底标记纯音乐清屏）；置了会挡住 fallback，
 						// activeLyrics 保持空、前端整首歌停在上一首。
-						log.Warn("CDP 歌词解析出 0 行 (ID=%s)，交给 Redux fallback", activeSongID)
+						log.Warn("CDP lyrics parsed to 0 lines (ID=%s), deferring to Redux fallback", activeSongID)
 					}
 				}
 			}
@@ -416,7 +476,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if activeSongID == "" && matchedRedux && len(data.Lyrics) > 0 {
 				activeLyrics = data.Lyrics
 				cdpLyricsOK = true
-				log.Info("Redux ID 为空，直接使用 Redux 歌词: %d 行；逐字：否", len(activeLyrics))
+				log.Info("Redux ID empty, using Redux lyrics directly: %d lines; per-character: no", len(activeLyrics))
 				// 通过独立 CDP 评估读取 Redux 中的翻译歌词
 				if tmap := client.ExtractTlyricLines(); tmap != nil {
 					applyTlyricMap(activeLyrics, tmap)
@@ -433,7 +493,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				if songDuration == 0 && matchedRedux && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
-				playTime := clock.GetCurrent()
+				playTime := posNow()
 				progress := player.ClampProgress(playTime, songDuration)
 
 				// 网易云对没有歌词的歌返回一行「纯音乐，请欣赏」而非空歌词，归一成 index:-1。
@@ -447,19 +507,19 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				// activeLyrics 必须一起清：它是后续轮询的输入，不清的话 all_lyrics 说
 				// count:0、轮询却仍按那一行发 index:0。
 				if player.IsPureMusicOnly(lyricItems) {
-					log.Info("平台只返回提示语「%s」，按无歌词处理", lyricItems[0].Text)
+					log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
 					pureHint := lyricItems[0].Text
 					activeLyrics = nil
 					isPureMusic = true
-					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+					emitPos(player.EventAllLyrics, &player.AllLyricsData{
 						Title: songTitle, Duration: songDuration, Position: playTime, Progress: progress,
 						Lyrics: []player.LyricLine{}, Count: 0,
 					})
-					p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+					emitPos(player.EventLyricUpdate, &player.LyricUpdate{
 						Index: -1, Text: pureHint, Timestamp: 0, Position: playTime, Progress: progress,
 					})
 				} else {
-					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+					emitPos(player.EventAllLyrics, &player.AllLyricsData{
 						Title: songTitle, Duration: songDuration, Position: playTime, Progress: progress,
 						Lyrics: lyricItems, Count: len(lyricItems),
 					})
@@ -470,14 +530,25 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if data.PlayingState == 2 {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
 			}
+
+			// 上面的取词是阻塞的（实测 459～696ms），时钟在它之后才由 0 起走，同改动前：换歌后的落后量
+			// 「分支耗时 − 起播延迟」是对表设计的起点（设计 §1.2）。起点若配 got（分支之前），时钟会超前
+			// 一个分支耗时，每次换歌都在约 1s 后误报一次回跳。这一拍本就不参与对表（domSample.sameSong）。
+			now = time.Now()
 		}
+
+		// lateLyrics 发出本拍补发的歌词事件（非换歌拍的 all_lyrics 与紧随的 index:-1 的 lyric_update），由
+		// 下面两个分支之一设置，在对表之后调用（见调用处）。两个分支至多一个成立：前一个成立后 isPureMusic
+		// 为真或 activeLyrics 非空，后一个的条件不再成立。状态（activeLyrics、isPureMusic、songDuration）仍在
+		// 分支里就地更新，本拍的行匹配要用；位置在发出时才取。
+		var lateLyrics func()
 
 		// Redux lyrics appeared later（切歌 tick 跳过，避免旧歌词回写覆盖新歌词）
 		// 等待 ForceFetchLyricsInRedux 完成后再接受 Redux 歌词（冷却 1.5 秒防止旧歌词被误采纳）
 		if !songChanged && !isPureMusic && !cdpLyricsOK && len(data.Lyrics) > 0 && len(data.Lyrics) != len(activeLyrics) && time.Since(lastSongChangeTime) > 1*time.Second {
 			if snapshotMatchesCurrentSong(data, currentSongName, currentSongArtist) && (activeSongID == "" || data.CurPlaying.ID == activeSongID || data.CurPlaying.ID == "") {
 				activeLyrics = data.Lyrics
-				log.Info("歌词加载完成(Redux): %d 行；逐字：否", len(activeLyrics))
+				log.Info("lyrics loaded (Redux): %d lines; per-character: no", len(activeLyrics))
 
 				// 通过独立 CDP 评估读取 Redux 中的翻译歌词
 				if tmap := client.ExtractTlyricLines(); tmap != nil {
@@ -494,64 +565,67 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
-				playTime := clock.GetCurrent()
-				progress := player.ClampProgress(playTime, songDuration)
 
 				// 同 :420 —— Redux 里同样可能只有那一行提示语。
 				// 文案与那边逐字一致（AGENTS.md §6.1）：来源是 Redux 这件事，上面那条
 				// 「歌词加载完成(Redux)」已经说了；这里再分叉一版措辞只会让 grep 漏掉一半。
 				if player.IsPureMusicOnly(lyricItems) {
-					log.Info("平台只返回提示语「%s」，按无歌词处理", lyricItems[0].Text)
+					log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
 					pureHint := lyricItems[0].Text
 					activeLyrics = nil
 					isPureMusic = true
-					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-						Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
-						Lyrics: []player.LyricLine{}, Count: 0,
-					})
-					p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-						Index: -1, Text: pureHint, Timestamp: 0, Position: playTime, Progress: progress,
-					})
+					lateLyrics = func() {
+						playTime := posNow()
+						progress := player.ClampProgress(playTime, songDuration)
+						emitPos(player.EventAllLyrics, &player.AllLyricsData{
+							Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
+							Lyrics: []player.LyricLine{}, Count: 0,
+						})
+						emitPos(player.EventLyricUpdate, &player.LyricUpdate{
+							Index: -1, Text: pureHint, Timestamp: 0, Position: playTime, Progress: progress,
+						})
+					}
 				} else {
-					p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-						Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
-						Lyrics: lyricItems, Count: len(lyricItems),
-					})
+					lateLyrics = func() {
+						playTime := posNow()
+						progress := player.ClampProgress(playTime, songDuration)
+						emitPos(player.EventAllLyrics, &player.AllLyricsData{
+							Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
+							Lyrics: lyricItems, Count: len(lyricItems),
+						})
+					}
 				}
 			}
 		}
 
 		// 超时兜底：CDP 失败且 Redux fallback 超时后仍无歌词，清空前端
 		if !songChanged && !isPureMusic && !cdpLyricsOK && len(activeLyrics) == 0 && time.Since(lastSongChangeTime) > 3*time.Second {
-			log.Info("歌词获取超时，标记纯音乐并清空前端")
+			log.Info("lyric fetch timed out, marking pure music and clearing frontend")
 			isPureMusic = true
 			if songDuration == 0 && snapshotMatchesCurrentSong(data, currentSongName, currentSongArtist) && data.CurPlaying != nil && data.CurPlaying.Track.Duration > 0 {
 				songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 			}
-			playTime := clock.GetCurrent()
-			progress := player.ClampProgress(playTime, songDuration)
-			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-				Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
-				Lyrics: []player.LyricLine{}, Count: 0,
-			})
-			p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-				Index: -1, Text: "", Timestamp: 0, Position: playTime, Progress: progress,
-			})
+			lateLyrics = func() {
+				playTime := posNow()
+				progress := player.ClampProgress(playTime, songDuration)
+				emitPos(player.EventAllLyrics, &player.AllLyricsData{
+					Title: currentSongTitle, Duration: songDuration, Position: playTime, Progress: progress,
+					Lyrics: []player.LyricLine{}, Count: 0,
+				})
+				emitPos(player.EventLyricUpdate, &player.LyricUpdate{
+					Index: -1, Text: "", Timestamp: 0, Position: playTime, Progress: progress,
+				})
+			}
 		}
 
-		// Update clock
+		// Update clock：非在播转在播时起走，在播转非在播时冻结在时钟读数。
 		isPlaying := (data.PlayingState == 2)
-		if !clock.Playing && isPlaying {
-			clock.Playing = true
-			clock.AnchorTime = time.Now()
-		} else if clock.Playing && !isPlaying {
-			clock.BaseRealTime += float32(time.Since(clock.AnchorTime).Seconds())
-			clock.Playing = false
-		}
+		clock.setPlaying(isPlaying, now)
 
-		// Find current lyric（应用 offset，使用 displayStart 边界）
+		// Find current lyric（应用 offset，使用 displayStart 边界）。**只有这里取 lineAt**：对表回拨之后、
+		// 时钟走过回拨前的位置之前，行匹配不低于回拨前的位置，行号不因回拨回退；其余各处一律取 at。
 		trueLineIdx := -1
-		currentTime := clock.GetCurrent() + offsetSec
+		currentTime := player.LyricMatchTime(clock.lineAt(now), offsetSec)
 		for i := len(activeLyrics) - 1; i >= 0; i-- {
 			ds := player.LyricDisplayStart(activeLyrics[i].Time, activeLyrics[i].TextDetailed)
 			if currentTime >= ds {
@@ -560,10 +634,13 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			}
 		}
 
-		// Seek detection — 切歌后短暂抑制，等待 DOM 进度条刷新到新歌曲
+		// Seek detection — 切歌后短暂抑制，等待 DOM 进度条刷新到新歌曲。与 DOM 比的是 now 时刻的时钟读数
+		// （at）：拿行匹配下限去比，会把对表的回拨量算成偏差。它发的 playback_resume 排在对表之前，但判了
+		// seek 的这一拍不对表。
+		settled := time.Since(lastSongChangeTime) > 500*time.Millisecond
 		seeked := false
-		if data.DomTimeSec >= 0 && clock.Playing && time.Since(lastSongChangeTime) > 500*time.Millisecond {
-			prevPlayTime := clock.GetCurrent()
+		if data.DomTimeSec >= 0 && clock.Playing && settled {
+			prevPlayTime := clock.at(now)
 			diff := float32(data.DomTimeSec) - prevPlayTime
 			absDiff := diff
 			if absDiff < 0 {
@@ -577,16 +654,40 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if absDiff > threshold {
 				targetPlayTime := float32(data.DomTimeSec)
 				if targetPlayTime+0.01 < prevPlayTime {
-					log.Info("检测到回跳: %.2fs → %.2fs", prevPlayTime, targetPlayTime)
+					log.Info("Seek-back detected: %.2fs → %.2fs", prevPlayTime, targetPlayTime)
 				} else if targetPlayTime > prevPlayTime+0.01 {
-					log.Info("检测到前跳: %.2fs → %.2fs", prevPlayTime, targetPlayTime)
+					log.Info("forward seek detected: %.2fs → %.2fs", prevPlayTime, targetPlayTime)
 				}
-				clock.BaseRealTime = float32(data.DomTimeSec)
-				clock.AnchorTime = time.Now()
-				pos := clock.GetCurrent()
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: pos, Progress: player.ClampProgress(pos, songDuration)})
+				clock.jump(targetPlayTime, now) // 置位并清掉行匹配下限：跳转后行号跟着位置走
+				pos := posNow()
+				emitPos(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: pos, Progress: player.ClampProgress(pos, songDuration)})
 				seeked = true
 			}
+		}
+
+		// 按 DOM 跳秒对表（doc/design/cloudmusic-dom-clock-sync-design.md §3，实测与取值的来历见 AGENTS.md §7.9）。
+		// 必须在 seek 检测之后：判了 seek 的那一拍时钟刚被置成整秒值，不对表；也必须每拍都调 observe，
+		// 不可用的拍要把上一拍顶掉。行匹配在此之前已算好，校准后的时钟从下一拍起进入行匹配。
+		// 单次校准量达到门槛时打一行日志、不受通知限频约束：直播时 stderr 是唯一的现场记录，跳秒时刻
+		// 不稳会表现为这一行反复出现。
+		before := clock.at(now)
+		synced := dom.observe(domSample{
+			sent: sent, got: got, sec: data.DomTimeSec,
+			playing: clock.Playing, sameSong: !songChanged && settled, seeked: seeked,
+		}, before)
+		if d := synced - before; d != 0 {
+			clock.adjust(synced, now)
+			pending.add(d)
+			if d >= syncNotifySec || d <= -syncNotifySec {
+				log.Info("synced to UI progress: %.2fs → %.2fs", before, synced)
+			}
+		}
+
+		// 本拍补发的歌词事件在对表之后才发出：位置是校准后的读数，本拍的校准量随之清零，拍末的通知检查不会
+		// 再为它另发一条 playback_resume。放回对表之前（分支里就地发出），同一拍会先后落锚两次（AGENTS.md
+		// §3.2）。排在状态变化之前，与推迟之前的先后相同。
+		if lateLyrics != nil {
+			lateLyrics()
 		}
 
 		// State change
@@ -595,15 +696,15 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if data.PlayingState == 2 {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentSongTitle})
 				if !seeked {
-					playTime := clock.GetCurrent()
-					log.Info("恢复 @ %.2fs", playTime)
-					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
+					playTime := posNow()
+					log.Info("resumed @ %.2fs", playTime)
+					emitPos(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
 				}
 			} else {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentSongTitle})
-				playTime := clock.GetCurrent()
-				p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
-				log.Info("暂停 @ %.2fs", playTime)
+				playTime := posNow()
+				emitPos(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
+				log.Info("paused @ %.2fs", playTime)
 			}
 		}
 
@@ -612,13 +713,34 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			if trueLineIdx != lastLineIdx {
 				lastLineIdx = trueLineIdx
 				currentLine := activeLyrics[trueLineIdx]
-				// clock.GetCurrent() 是插值出的实时位置，进 Position、并据它算 Progress；play_time 由
-				// BuildLyricUpdate 按歌词时间轴算（原先为取它而构造了整个 LyricLine）。
-				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
+				// posNow() 是发出这一刻的时钟读数（本拍对表之后的值），进 Position、并据它算 Progress；它不取
+				// 行匹配下限，否则前端会被锚回回拨前的时间线。play_time 由 BuildLyricUpdate 按歌词时间轴算
+				// （原先为取它而构造了整个 LyricLine）。
+				emitPos(player.EventLyricUpdate, player.BuildLyricUpdate(
 					trueLineIdx, currentLine.Time, currentLine.Text, currentLine.SubText, currentLine.RomaText,
-					currentLine.TextDetailed, offsetSec, clock.GetCurrent(), songDuration,
+					currentLine.TextDetailed, offsetSec, posNow(), songDuration,
 				))
 			}
+		}
+
+		// 由校准触发的通知：在播、未告知量达到门槛、且距上一次这样的通知不短于限频间隔时发一条
+		// playback_resume，位置取发出这一刻的时钟读数。必须排在行号变化的 lyric_update 之后：本拍对表之后
+		// 只要发过带位置的对外事件（补发的歌词、状态变化、行号变化），未告知量已被清零，这里不会再发；排在
+		// 对表之前的只有换歌分支与 seek 检测，那两种拍不对表。所以它不与任何带位置的事件同拍
+		// （AGENTS.md §3.2 的同拍去重）。
+		if isPlaying && pending.due(now) {
+			pos := posNow()
+			emitPos(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: pos, Progress: player.ClampProgress(pos, songDuration)})
+		}
+
+		// 位置采样（见 BaseEmitter.EmitPositionSample）：播放中、本曲的 all_lyrics 已发出（有歌词，或已判
+		// 纯音乐）之后按固定间隔报一次。本播放器的时钟会被对表改动而不发事件（未达通知门槛的校准），
+		// 服务端缓存的位置由其后的 lyric_update 与这里的采样带到。时刻与位置成对取在发出这一刻（服务端
+		// 以到达的时刻为采样时刻），与上面 lyric_update 的 position 同一个量：不取行匹配下限；offset 只进了
+		// currentTime，这里不带。它是内部事件，不清未告知量。
+		if isPlaying && (len(activeLyrics) > 0 || isPureMusic) {
+			t := time.Now()
+			p.EmitPositionSample(t, clock.at(t), songDuration)
 		}
 	}
 }
@@ -668,8 +790,8 @@ const extractErrRepeat = 60 * time.Second
 // 复读一次「仍在重试」，Extract 成功后重置（下次故障可再记一次）。
 //
 // **为什么不能每 tick 打**：poll 默认 30，被上面的 `<50ms→100ms` 抬到 100ms → **10 行/秒**。
-// 日志走 stderr 且不落盘（AGENTS §0），几分钟就把控制台回滚缓冲冲干净，**连带冲掉另外
-// 三个播放器的全部日志** —— 而那是直播出问题时唯一的现场证据。这是本条真正的危害。
+// 日志走 stderr 且不落盘（AGENTS §0），几分钟就把控制台回滚缓冲冲干净，**连带冲掉其余
+// 播放器的全部日志** —— 而那是直播出问题时唯一的现场证据。这是本条真正的危害。
 //
 // **为什么也不能彻底静默**：同上，它是唯一的现场证据。「一次都不打」和「10 行/秒」一样坏。
 //
@@ -719,10 +841,10 @@ func hasRealText(lines []lyric.LyricLine) bool {
 func lyricDetailedFlag(lines []lyric.LyricLine) string {
 	for _, line := range lines {
 		if len(line.TextDetailed.Words) > 0 {
-			return i18n.T("是")
+			return i18n.T("yes")
 		}
 	}
-	return i18n.T("否")
+	return i18n.T("no")
 }
 
 // applyTlyricMap applies a tlyric timestamp map (ms -> text) to extracted lyrics.

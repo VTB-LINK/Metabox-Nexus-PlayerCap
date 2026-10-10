@@ -119,10 +119,10 @@ func (r *Router) Run() {
 					newHash := hashEventData(evt.Type, evt.Data)
 					delete(r.switchSkipHashes, evt.Type)
 					if newHash == oldHash {
-						routerLog.Detail("抑制重复事件 [%s] (player=%s, hash=%x)", evt.Type, evt.PlayerName, newHash)
+						routerLog.Detail("suppress duplicate event [%s] (player=%s, hash=%x)", evt.Type, evt.PlayerName, newHash)
 						switched = true
 					} else {
-						routerLog.Detail("放行新内容事件 [%s] (player=%s, old=%x, new=%x)", evt.Type, evt.PlayerName, oldHash, newHash)
+						routerLog.Detail("pass new-content event [%s] (player=%s, old=%x, new=%x)", evt.Type, evt.PlayerName, oldHash, newHash)
 					}
 					if len(r.switchSkipHashes) == 0 {
 						r.switchSkipPlayer = ""
@@ -153,7 +153,7 @@ func (r *Router) switchTo(newPlayer string) bool {
 	// 同步到 server（供新 WS 连接使用）
 	r.server.SetActivePlayer(newPlayer)
 	if old != newPlayer && newPlayer != "" {
-		routerLog.Info("播放器切换: [%s] → [%s]，推送完整状态", old, newPlayer)
+		routerLog.Info("player switch: [%s] → [%s], pushing full state", old, newPlayer)
 		sentHashes := r.server.NotifySubscribersFullState(old, newPlayer)
 		// 不抑制 status_update：状态变更是关键事件，loading→playing 极快时会被错误吞掉
 		delete(sentHashes, player.EventStatusUpdate)
@@ -182,7 +182,7 @@ func (r *Router) updatePlayerState(ps *playerState, normalized, playerName, grou
 	switch normalized {
 	case "playing":
 		if ps.status != "playing" {
-			routerLog.Info("%s播放器 [%s] → playing", groupLabel, playerName)
+			routerLog.Info("%[1]s player [%[2]s] → playing", groupLabel, playerName)
 		}
 		if !wasActive {
 			ps.activeAt = time.Now()
@@ -194,7 +194,7 @@ func (r *Router) updatePlayerState(ps *playerState, normalized, playerName, grou
 	case "loading":
 		if ps.status != "loading" {
 			ps.loadingAt = time.Now()
-			routerLog.Info("%s播放器 [%s] → loading", groupLabel, playerName)
+			routerLog.Info("%[1]s player [%[2]s] → loading", groupLabel, playerName)
 		}
 		if !wasActive {
 			ps.activeAt = time.Now()
@@ -206,14 +206,14 @@ func (r *Router) updatePlayerState(ps *playerState, normalized, playerName, grou
 	case "paused":
 		if ps.status != "paused" {
 			ps.pausedAt = time.Now()
-			routerLog.Info("%s播放器 [%s] → paused", groupLabel, playerName)
+			routerLog.Info("%[1]s player [%[2]s] → paused", groupLabel, playerName)
 		}
 		ps.status = "paused"
 		// activated 保持不变
 
 	case "idle":
 		if ps.status != "idle" {
-			routerLog.Info("%s播放器 [%s] → idle", groupLabel, playerName)
+			routerLog.Info("%[1]s player [%[2]s] → idle", groupLabel, playerName)
 		}
 		ps.status = "idle"
 		ps.activated = false
@@ -223,6 +223,16 @@ func (r *Router) updatePlayerState(ps *playerState, normalized, playerName, grou
 // updateRouting 根据事件更新 activePlayer
 // 返回 true 表示发生了播放器切换（已推送完整状态，调用方应跳过本条事件的普通广播）
 func (r *Router) updateRouting(evt player.Event) bool {
+	// 位置采样不参与路由评估：它每隔几秒到达一次，只校准缓存里的位置，不代表播放器状态有变。
+	// 放它进来，下面 default 分支会在「无活跃播放器」时拿它重评估普通组。
+	//
+	// 按事件类型本身判断，不查 server 的 internalEvents 表：另一种内部事件 clear_song_data 至今
+	// 照常进入 default 分支，这里不改它。它在该播放器刚报过非活跃状态之后发出，推断那次重评估的
+	// 输入与上一次相同、是空操作，但没有穷举各状态组合，不为两者待遇一致而动一条承重路径。
+	if evt.Type == player.EventPositionSample {
+		return false
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -235,12 +245,12 @@ func (r *Router) updateRouting(evt player.Event) bool {
 			normalized := normalizeStatus(msg.Status)
 			if isPrior {
 				ps := r.priorStates[evt.PlayerName]
-				r.updatePlayerState(ps, normalized, evt.PlayerName, i18n.T("优先"), &r.priorLastPlaying)
+				r.updatePlayerState(ps, normalized, evt.PlayerName, i18n.T("prior"), &r.priorLastPlaying)
 				switched = r.evaluatePriorGroup()
 			} else {
 				ns := r.normalStates[evt.PlayerName]
 				if ns != nil {
-					r.updatePlayerState(ns, normalized, evt.PlayerName, i18n.T("普通"), &r.normalLastPlaying)
+					r.updatePlayerState(ns, normalized, evt.PlayerName, i18n.T("normal"), &r.normalLastPlaying)
 				}
 				if !r.priorGroupBlocking() {
 					switched = r.evaluateNormalGroup()
@@ -326,7 +336,7 @@ func (r *Router) evaluatePriorGroup() bool {
 		if !r.priorGroupPaused {
 			r.priorGroupPaused = true
 			r.priorGroupPauseAt = time.Now()
-			routerLog.Info("优先组全员非活跃，存在 holding，开始组级倒计时 %ds", r.cfg.PriorPlayerExpire)
+			routerLog.Info("prior group all inactive, holding present, starting group-level countdown %ds", r.cfg.PriorPlayerExpire)
 		}
 		return false
 	}
@@ -340,7 +350,7 @@ func (r *Router) evaluatePriorGroup() bool {
 		}
 	}
 	r.normalGroupPaused = false
-	routerLog.Info("优先组全员 inert，释放到普通组")
+	routerLog.Info("prior group all inert, releasing to normal group")
 	return r.evaluateNormalGroup()
 }
 
@@ -368,7 +378,7 @@ func (r *Router) evaluateNormalGroup() bool {
 		if !r.normalGroupPaused {
 			r.normalGroupPaused = true
 			r.normalGroupPauseAt = time.Now()
-			routerLog.Info("普通组全员非活跃，存在 holding，开始组级倒计时 %ds", r.cfg.PriorPlayerExpire)
+			routerLog.Info("normal group all inactive, holding present, starting group-level countdown %ds", r.cfg.PriorPlayerExpire)
 		}
 		return false
 	}
@@ -401,7 +411,7 @@ func (r *Router) clearActivePlayer() bool {
 	}
 	r.activePlayer = ""
 	r.server.SetActivePlayer("")
-	routerLog.Info("清除活跃播放器: [%s] → (空)", old)
+	routerLog.Info("clear active player: [%s] → (none)", old)
 	r.server.NotifySubscribersClear(old)
 	// 清除切换抑制（不再有 activePlayer）
 	r.switchSkipPlayer = ""
@@ -416,14 +426,14 @@ func expireGroupPlayers(states map[string]*playerState, expire time.Duration, ex
 	for name, ps := range states {
 		// Loading 超时 → 强制 idle
 		if ps.status == "loading" && time.Since(ps.loadingAt) >= expire {
-			routerLog.Warn("%s播放器 [%s] loading 超时 (%ds)，标记为 idle", groupLabel, name, expireSec)
+			routerLog.Warn("%[1]s player [%[2]s] loading timeout (%[3]ds), marking idle", groupLabel, name, expireSec)
 			ps.status = "idle"
 			ps.activated = false
 			changed = true
 		}
 		// Paused activated 超时 → 静默清除 activated（变 inert）
 		if ps.status == "paused" && ps.activated && time.Since(ps.pausedAt) >= expire {
-			routerLog.Info("%s播放器 [%s] 暂停超时 (%ds)，清除 activated", groupLabel, name, expireSec)
+			routerLog.Info("%[1]s player [%[2]s] paused timeout (%[3]ds), clearing activated", groupLabel, name, expireSec)
 			ps.activated = false
 			changed = true
 		}
@@ -452,13 +462,13 @@ func (r *Router) watchExpire() {
 			expire := time.Duration(r.cfg.PriorPlayerExpire) * time.Second
 
 			// === 优先组 per-player 超时 ===
-			if expireGroupPlayers(r.priorStates, expire, r.cfg.PriorPlayerExpire, i18n.T("优先")) {
+			if expireGroupPlayers(r.priorStates, expire, r.cfg.PriorPlayerExpire, i18n.T("prior")) {
 				r.evaluatePriorGroup()
 			}
 
 			// 优先组组级超时
 			if r.priorGroupPaused && time.Since(r.priorGroupPauseAt) >= expire {
-				routerLog.Warn("优先组暂停超时 (%ds)", r.cfg.PriorPlayerExpire)
+				routerLog.Warn("prior group paused timeout (%ds)", r.cfg.PriorPlayerExpire)
 				forceGroupInert(r.priorStates)
 				r.priorGroupPaused = false
 				// 强制 normal 组 holding 为 inert（与 evaluatePriorGroup 全员 inert 路径一致）
@@ -468,7 +478,7 @@ func (r *Router) watchExpire() {
 			}
 
 			// === 普通组 per-player 超时（仅在 prior 不阻挡时评估切换）===
-			if expireGroupPlayers(r.normalStates, expire, r.cfg.PriorPlayerExpire, i18n.T("普通")) {
+			if expireGroupPlayers(r.normalStates, expire, r.cfg.PriorPlayerExpire, i18n.T("normal")) {
 				if !r.priorGroupBlocking() {
 					r.evaluateNormalGroup()
 				}
@@ -477,7 +487,7 @@ func (r *Router) watchExpire() {
 			// 普通组组级超时（仅在 prior 不阻挡时生效）
 			if r.normalGroupPaused && time.Since(r.normalGroupPauseAt) >= expire {
 				if !r.priorGroupBlocking() {
-					routerLog.Warn("普通组暂停超时 (%ds)", r.cfg.PriorPlayerExpire)
+					routerLog.Warn("normal group paused timeout (%ds)", r.cfg.PriorPlayerExpire)
 					forceGroupInert(r.normalStates)
 					r.normalGroupPaused = false
 					r.clearActivePlayer()

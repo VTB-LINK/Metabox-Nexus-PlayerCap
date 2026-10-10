@@ -118,7 +118,7 @@ func FetchSongDetail(songID string) (*SongDetail, error) {
 			CoverUrl: s.Album.PicUrl,
 			Duration: s.Duration,
 		}
-		log.Detail("歌曲详情: %s - %s, 封面: %s", detail.Name, detail.Artist, detail.CoverUrl)
+		log.Detail("song detail: %s - %s, cover: %s", detail.Name, detail.Artist, detail.CoverUrl)
 		return detail, nil
 	}
 
@@ -160,17 +160,17 @@ func FetchLyrics(songID string, offsetSec float32) ([]LyricLine, error) {
 	MergeTlyric(lines, apiResp.Tlyric.Lyric)
 	MergeRomalrc(lines, apiResp.Romalrc.Lyric)
 	MergeYRC(lines, apiResp.Yrc.Lyric, offsetSec)
-	log.Info("歌词加载完成(API): %d 行 (ID=%s)；逐字：%s", len(lines), songID, detailedFlag(lines))
+	log.Info("lyrics loaded (API): %d lines (ID=%s); per-character: %s", len(lines), songID, detailedFlag(lines))
 	return lines, nil
 }
 
 func detailedFlag(lines []LyricLine) string {
 	for _, line := range lines {
 		if len(line.TextDetailed.Words) > 0 {
-			return i18n.T("是")
+			return i18n.T("yes")
 		}
 	}
-	return i18n.T("否")
+	return i18n.T("no")
 }
 
 // SearchSongID searches NetEase API by song name (+ optional artist) and returns the song ID.
@@ -234,13 +234,13 @@ func SearchSongID(songName string, artist string, targetDurationMs int) (string,
 		}
 		if targetDurationMs > 0 {
 			if !durationWithinTolerance(s.Duration, targetDurationMs, 0.05) {
-				log.Detail("搜索: 跳过 %s (ID: %s, duration=%dms, target=%dms)", s.Name, id, s.Duration, targetDurationMs)
+				log.Detail("search: skipped %s (ID: %s, duration=%dms, target=%dms)", s.Name, id, s.Duration, targetDurationMs)
 				continue
 			}
-			log.Detail("搜索: 名称/歌手/时长匹配 %s (ID: %s, duration=%dms)", s.Name, id, s.Duration)
+			log.Detail("search: name/artist/duration match %s (ID: %s, duration=%dms)", s.Name, id, s.Duration)
 			return id, nil
 		}
-		log.Detail("搜索: 名称/歌手匹配 %s (ID: %s)", s.Name, id)
+		log.Detail("search: name/artist match %s (ID: %s)", s.Name, id)
 		return id, nil
 	}
 
@@ -249,13 +249,13 @@ func SearchSongID(songName string, artist string, targetDurationMs int) (string,
 	}
 
 	if exactNameFallback != "" {
-		log.Detail("搜索: 使用精确歌名兜底 (ID: %s)", exactNameFallback)
+		log.Detail("search: falling back to exact song-name match (ID: %s)", exactNameFallback)
 		return exactNameFallback, nil
 	}
 
 	// Fallback to first result
 	id := fmt.Sprintf("%d", searchResp.Result.Songs[0].ID)
-	log.Detail("搜索: 使用首个结果 %s (ID: %s)", searchResp.Result.Songs[0].Name, id)
+	log.Detail("search: using first result %s (ID: %s)", searchResp.Result.Songs[0].Name, id)
 	return id, nil
 }
 

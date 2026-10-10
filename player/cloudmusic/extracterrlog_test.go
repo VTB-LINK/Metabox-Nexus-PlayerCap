@@ -28,7 +28,7 @@ func TestExtractErrLogFirstAlwaysLogs(t *testing.T) {
 // TestExtractErrLogSuppressesFlood 钉死本条核心：同一错误在窗口内必须被压制。
 //
 // 缺陷背景：原实现每 tick 打一次。poll 默认 30 被 `<50ms→100ms` 抬到 100ms → **10 行/秒**，
-// 几分钟就把控制台回滚缓冲冲干净，连带冲掉另外三个播放器的全部日志。
+// 几分钟就把控制台回滚缓冲冲干净，连带冲掉其余播放器的全部日志。
 //
 // 变异自证：把 next 改成恒返回 true 即红。
 func TestExtractErrLogSuppressesFlood(t *testing.T) {

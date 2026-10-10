@@ -96,7 +96,7 @@ func EnsureDebugMode() (bool, error) {
 		}
 	}
 
-	log.Warn("发现 %s 未启用调试/保活参数，正在重启...", TargetProcessName)
+	log.Warn("%s running without debug/keepalive flags; restarting...", TargetProcessName)
 
 	if exePath == "" {
 		// Fallback to standard path
@@ -104,12 +104,12 @@ func EnsureDebugMode() (bool, error) {
 	}
 
 	// Kill all instances
-	log.Info("正在终止 %d 个进程...", len(pidsToKill))
+	log.Info("Terminating %d process(es)...", len(pidsToKill))
 	exec.Command("taskkill", "/F", "/IM", TargetProcessName).Run()
 	time.Sleep(2 * time.Second)
 
 	// Restart with debug + keepalive flags
-	log.Info("正在重启 %s （%s）", exePath, strings.Join(LaunchFlags, " "))
+	log.Info("Restarting %s (%s)", exePath, strings.Join(LaunchFlags, " "))
 	cmd := exec.Command(exePath, LaunchFlags...)
 	err = cmd.Start()
 	if err != nil {

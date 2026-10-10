@@ -1,5 +1,5 @@
 // Package manager 是主服务侧的音频捕获管理器：进程发现 + 订阅门控 + 在播预热、经 Job Object
-// 监管 helper 子进程、退避重启、帧活性看门狗、stdout 解复用（见 docs/audio-waveform-capture-design.md
+// 监管 helper 子进程、退避重启、帧活性看门狗、stdout 解复用（见 doc/design/audio-waveform-capture-design.md
 // §3.1/§5/§6）。
 //
 // 本文件（gating.go，无 build tag）只放**无平台依赖的纯决策**：AudioSink 接口、门控函数

@@ -58,16 +58,54 @@ type PlayerState struct {
 	AllLyrics   []LyricItem
 	Title       string
 	Duration    float32
-	Position    float32 // 整曲实时播放位置（秒）；喂 all_lyrics 的 position
+	Position    float32 // 最近一次记录的整曲播放位置（秒）；对外经 livePosition 外推后喂 position
 	Progress    float32
+	// PositionAt 是 Position/Progress 的采样时刻（time.Now()，Sub 走单调时钟），零值 = 尚无采样。
+	// 写入点：lyric_update、all_lyrics、playback_pause/resume、position_sample，以及 status_update 的
+	// 冻结与重启时钟。position_sample 是播放中的周期校准（issue #70）：没有歌词行在推时别的采样点都
+	// 不出现，而各播放器的本地时钟会在不发事件的情况下偏离墙钟，不校准则外推值的偏差随时长累计。
+	PositionAt time.Time
+	// PositionFromPause 标记最近一次位置采样来自 playback_pause，为真时 livePosition 不外推。
+	// 各播放器的 playback_pause 只在判定暂停时发出、不兼作 seek，其位置即暂停点；kugou、sodamusic、
+	// qqmusic、applemusic 先发 pause 后发 paused 状态，照常外推会把两事件之间的间隔计入补发位置与
+	// 离开 playing 时的冻结值。lyric_update、all_lyrics、playback_resume、position_sample 采样，
+	// 进入 playing 与 clear_song_data 时清除。
+	PositionFromPause bool
 
 	// per-player 通道无活跃自动隐藏（issue #47）。IdleHidden 是叠加在缓存之上的「视图隐藏」标志，
 	// 只影响 per-player 传输（/{player}/*），绝不影响根路径（§3.4）；缓存本身照常保持新鲜（§2.7）。
-	// 播放器一恢复，UpdatePlayerState 即解除隐藏：HTTP/重连立刻取回缓存；已在线的 WS/SSE 则由恢复后的
-	// 实时事件自然复原（下一条 lyric_update 到达前可能仍空白）。
+	// 播放器一恢复，UpdatePlayerState 即解除隐藏：HTTP/重连立刻取回缓存；已在线的 WS/SSE 由
+	// NotifySubscribers 在其后第一条触发补发的事件上补发整套缓存（见 IdleResumePending）。
 	LastEventAt time.Time // 最近一次非内部事件的时刻，供无活跃巡检计时
 	IdleHidden  bool      // 该 per-player 通道当前是否处于无活跃隐藏态
+	// IdleResumePending 表示隐藏已解除、整套缓存尚未补发给该通道的订阅者（issue #69）。
+	// UpdatePlayerState 在解除隐藏时置位；NotifySubscribers 遇到触发补发的事件（idleResumeTrigger）
+	// 时取走。其间到达的不触发的事件照常下发、不动它，故它可以跨多条事件保留。
+	IdleResumePending bool
 }
+
+// livePosition 返回 now 时刻对外给出的 position 与 progress，供连接补发（buildInitEvents）与
+// HTTP all_lyrics / lyric_update 快照使用。调用方须持 s.mu。
+//
+// 缓存只在采样事件到达时写入，原样补发会落后「距上次采样的时长」（无歌词歌曲可落后整首）。
+// 状态为 playing、已有采样且该采样不来自 playback_pause（见 PositionFromPause）时按经过时间外推，
+// duration>0 时钳到 [0,duration]；其余情况给最后记录的值。progress 由外推后的 position 经
+// ClampProgress 重算，duration<=0 时为 0，不产生 NaN。
+func (ps *PlayerState) livePosition(now time.Time) (position, progress float32) {
+	if ps.PositionAt.IsZero() || ps.PositionFromPause || ps.Status == nil || ps.Status.Status != "playing" {
+		return ps.Position, ps.Progress
+	}
+	position = ps.Position + float32(now.Sub(ps.PositionAt).Seconds())
+	if ps.Duration > 0 {
+		position = player.ClampFloat32(position, 0, ps.Duration)
+	}
+	return position, player.ClampProgress(position, ps.Duration)
+}
+
+// capabilities 是 /service-status 顶层 capabilities 的取值，供前端按字段探测后端行为（旧后端无此字段）。
+//   - init_position_live：连接补发与 HTTP all_lyrics / lyric_update 快照中的 position/progress
+//     已外推到发送时刻（PlayerState.livePosition）。
+var capabilities = []string{"init_position_live"}
 
 // ServiceInfo 服务配置信息
 type ServiceInfo struct {
@@ -169,12 +207,22 @@ func (s *Server) unsubscribe(sub *subscriber) {
 // 溯源：65d9e80 把 WesingCap 时代的 Server.ClearSongData() **方法**（清缓存 + 广播空数据）
 // 重构成**事件**，职责未变但从此要过 NotifySubscribers——内部信号于是泄漏到了公开 API 表面。
 // 同期的文档原话「服务端不会主动发送清空歌词的消息」在重构前为真，之后成假且无人订正。
+//
+// position_sample 是播放中的周期性位置采样（issue #70，player.BaseEmitter.EmitPositionSample），
+// 唯一职责是校准缓存里的位置（UpdatePlayerState 的位置分支）。它同样不外发，也不计作播放器活动：
+// UpdatePlayerState 对本表里的事件不刷新 LastEventAt、不解除无活跃隐藏。
+//
+// 本表只管「不广播、不计活动」。路由评估是另一回事，两种内部事件在那里待遇不同，见
+// Router.updateRouting 开头的注释。
 var internalEvents = map[string]bool{
-	player.EventClearSongData: true,
+	player.EventClearSongData:  true,
+	player.EventPositionSample: true,
 }
 
 // NotifySubscribers 向匹配的订阅者推送事件
 // skipRoot=true 时跳过根订阅者（播放器切换后避免与 FullState 重复）
+// 该播放器的 per-player 通道解除无活跃隐藏后，在第一条触发补发的事件上先向其订阅者投整套缓存
+// （idleResumeTrigger、inFullState）；根订阅者不受影响。
 func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
 	// 内部事件不外发。调用方（router.Run）在此之前已调过 UpdatePlayerState，
 	// 缓存清空照常发生——这里拦掉的只是「广播」这一步。
@@ -196,9 +244,24 @@ func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
 		wsEvt.Data = struct{}{}
 	}
 
-	s.mu.RLock()
+	// 该播放器的通道刚解除无活跃隐藏、本事件又触发补发：取走标志，稍后先投整套缓存（issue #69）。
+	s.mu.Lock()
 	active := s.activePlayer
-	s.mu.RUnlock()
+	resume := false
+	if ps := s.playerStates[evt.PlayerName]; ps != nil && ps.IdleResumePending && idleResumeTrigger(evt) {
+		ps.IdleResumePending = false
+		resume = true
+	}
+	s.mu.Unlock()
+
+	// 整套在这里组装：取的是本事件写入缓存之后的状态，位置外推到此刻。本事件自身随后是否还要单发，
+	// 见 inFullState。
+	var full []WSEvent
+	skipEvt := false
+	if resume {
+		full = s.buildInitEvents(evt.PlayerName, false)
+		skipEvt = inFullState(full, evt)
+	}
 
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
@@ -212,6 +275,21 @@ func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
 		} else if sub.player != evt.PlayerName {
 			// Per-player 订阅者：仅推送对应播放器的事件
 			continue
+		} else {
+			// 整套只投给该播放器的 per-player 订阅者，根订阅者不在其列（§3.4）；与本事件在同一次
+			// 持锁内入队，二者之间不会插入别的事件。
+			for _, e := range full {
+				if !sub.matchesType(e.Type) {
+					continue
+				}
+				select {
+				case sub.ch <- e:
+				default:
+				}
+			}
+			if skipEvt {
+				continue
+			}
 		}
 		if !sub.matchesType(evt.Type) {
 			continue
@@ -221,6 +299,48 @@ func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
 		default:
 		}
 	}
+}
+
+// idleResumeTrigger 报告 evt 是否触发「解除无活跃隐藏之后的整套补发」（issue #69）。
+//
+// 解除隐藏本身不看事件类型（UpdatePlayerState：任何对外事件）。补发要挑事件：各播放器在进程退出、
+// 未启动、无歌处都是先发状态、后发 clear_song_data，wesing 轮询结束时还先发一条 lyric_idle。
+// 在这些事件上补发，推出去的是即将被清掉的上一首——clear_song_data 不外发，两条 SSE 也收不到
+// 状态事件，旧歌名与旧歌词会一直留在画面上。所以只有活跃状态（按 normalizeStatus 归为 playing 或
+// loading）与带内容的事件触发；其余的照常下发，标志留给其后第一条触发的事件。
+//
+// 新增事件类型默认不触发：要让它触发，须确认它不会先于 clear_song_data 发出。
+func idleResumeTrigger(evt player.Event) bool {
+	switch evt.Type {
+	case player.EventStatusUpdate:
+		msg, ok := evt.Data.(*player.StatusInfo)
+		if !ok {
+			return false
+		}
+		st := normalizeStatus(msg.Status)
+		return st == "playing" || st == "loading"
+	case player.EventSongInfoUpdate, player.EventAllLyrics, player.EventLyricUpdate,
+		player.EventPlaybackPause, player.EventPlaybackResume:
+		return true
+	}
+	return false
+}
+
+// inFullState 报告触发补发的事件 evt 是否已由整套 full 带出、不必再单发。
+//
+// 比照根路径 switchSkip 的规则：song_info_update、all_lyrics、lyric_update 与整套里同类型那条的
+// 内容哈希相同才算（缓存刚由它写入，正常情况下相同；缓存里没有该类型的条目或内容不同时照发）；
+// status_update 不比对，整套之后照常再发一次；其余类型不在整套里。
+func inFullState(full []WSEvent, evt player.Event) bool {
+	switch evt.Type {
+	case player.EventSongInfoUpdate, player.EventAllLyrics, player.EventLyricUpdate:
+		for _, e := range full {
+			if e.Type == evt.Type {
+				return hashEventData(e.Type, e.Data) == hashEventData(evt.Type, evt.Data)
+			}
+		}
+	}
+	return false
 }
 
 // NotifySubscribersFullState 向根订阅者推送指定播放器的完整缓存
@@ -310,6 +430,10 @@ func (s *Server) buildInitEvents(playerName string, honorHidden bool) []WSEvent 
 		return nil
 	}
 
+	// 只取一次当前时刻：all_lyrics 与 lyric_update 必须带同一个外推位置。前端用 lyric_update 的
+	// position 校正时钟，两条不一致时后到的那条会把时钟拉偏。
+	pos, prog := ps.livePosition(time.Now())
+
 	var events []WSEvent
 	if ps.Status != nil {
 		events = append(events, WSEvent{Type: "status_update", Player: target, Data: ps.Status})
@@ -322,13 +446,17 @@ func (s *Server) buildInitEvents(playerName string, honorHidden bool) []WSEvent 
 			Title:    ps.Title,
 			Lyrics:   ps.AllLyrics,
 			Duration: ps.Duration,
-			Position: ps.Position,
-			Progress: ps.Progress,
+			Position: pos,
+			Progress: prog,
 			Count:    len(ps.AllLyrics),
 		}})
 	}
 	if ps.LyricUpdate != nil {
-		events = append(events, WSEvent{Type: "lyric_update", Player: target, Data: ps.LyricUpdate})
+		// 发副本、只替换 position/progress：发布出去的缓存结构体视为不可变（见 handleAllLyrics 上方注释），
+		// 且这里只持读锁，原地改是数据竞争，还会把外推值写回缓存、下次补发重复计入经过时长。
+		lu := *ps.LyricUpdate
+		lu.Position, lu.Progress = pos, prog
+		events = append(events, WSEvent{Type: "lyric_update", Player: target, Data: &lu})
 	}
 	return events
 }
@@ -458,7 +586,7 @@ func (s *Server) sweepIdleHide(now time.Time) {
 			if now.Sub(ps.LastEventAt) >= time.Duration(thr)*time.Second {
 				ps.IdleHidden = true
 				// 与根路径「清除活跃播放器」日志对齐：清屏是可见输出变化，需留现场证据（§1.2）。
-				serverLog.Info("per-player [%s] 无活跃达 %ds，推送清屏隐藏", name, thr)
+				serverLog.Info("per-player [%s] inactive for %ds, pushing clear-screen hide", name, thr)
 				// 带上停下那一刻的整曲进度：SSE 清行的 lyric_update(index:-1) 需要它，
 				// 且它与最后一条 all_lyrics.progress 一致、不制造自相矛盾的事件（见 player/lyricupdate_lint_test.go）。
 				toClear = append(toClear, idleClearTarget{name: name, progress: ps.Progress})
@@ -532,18 +660,38 @@ func (s *Server) getPlayerState(playerName string) *PlayerState {
 func (s *Server) UpdatePlayerState(evt player.Event) {
 	s.mu.Lock()
 	ps := s.getPlayerState(evt.PlayerName)
+	now := time.Now()
 
 	// 任何对外真实事件都视为该 per-player 通道的一次活跃：刷新计时锚点、解除无活跃隐藏态。
-	// 内部事件（clear_song_data）是「停止/清缓存」信号、不算活跃，不重置计时（否则会推迟隐藏）。
+	// 内部事件不算活跃，不重置计时（否则会推迟隐藏）：clear_song_data 是「停止/清缓存」信号，
+	// position_sample 只是播放中的位置校准。
+	// 解除时记下「整套缓存待补发」，由 NotifySubscribers 取走；这里仍然只写缓存、不向订阅通道投递。
 	if !internalEvents[evt.Type] {
-		ps.LastEventAt = time.Now()
-		ps.IdleHidden = false
+		ps.LastEventAt = now
+		if ps.IdleHidden {
+			ps.IdleHidden = false
+			ps.IdleResumePending = true
+		}
 	}
 
 	switch evt.Type {
 	case player.EventStatusUpdate:
 		if msg, ok := evt.Data.(*player.StatusInfo); ok {
-			ps.Status = &StatusMessage{Status: msg.Status, Detail: msg.Detail}
+			// 进出 playing 时重新采样位置：离开时按旧状态外推到此刻写回（冻结），进入时只把采样时刻
+			// 重置为此刻（从冻结位置起走）。各播放器状态事件与 pause/resume 的先后不一（wesing 先发
+			// 状态再发 resume），不冻结则两事件之间的补发会把暂停时长计入位置。尚无采样时不动。
+			// 进入 playing 不保留先到的 playback_resume 的采样时刻：resume 兼作 seek（cloudmusic 暂停中
+			// 拖动进度也发），保留会把其后的暂停时长计入位置。
+			wasPlaying := ps.Status != nil && ps.Status.Status == "playing"
+			isPlaying := msg.Status == "playing"
+			if wasPlaying != isPlaying && !ps.PositionAt.IsZero() {
+				ps.Position, ps.Progress = ps.livePosition(now)
+				ps.PositionAt = now
+				if isPlaying {
+					ps.PositionFromPause = false
+				}
+			}
+			ps.Status = &StatusMessage{Status: msg.Status, Detail: msg.Detail, Reason: msg.Reason}
 		}
 	case player.EventSongInfoUpdate:
 		if msg, ok := evt.Data.(*player.SongInfo); ok {
@@ -558,6 +706,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 				Index: msg.Index, Text: msg.Text, SubText: msg.SubText, RomaText: msg.RomaText,
 				Timestamp: msg.Timestamp, PlayTime: msg.PlayTime,
 				Position: msg.Position, Progress: msg.Progress, TextDetailed: msg.TextDetailed,
+				RomaTextDetailed: msg.RomaTextDetailed,
 			}
 			// 同步更新 Position 与 Progress 缓存，保持 FullState 时效性。
 			//
@@ -571,6 +720,8 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 			// 行上会早于行时间戳数秒，拿它当 all_lyrics 的整曲位置会自相矛盾。position 无歧义。
 			ps.Position = msg.Position
 			ps.Progress = msg.Progress
+			ps.PositionAt = now
+			ps.PositionFromPause = false
 		}
 	case player.EventAllLyrics:
 		if msg, ok := evt.Data.(*player.AllLyricsData); ok {
@@ -579,7 +730,22 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 			ps.Duration = msg.Duration
 			ps.Position = msg.Position
 			ps.Progress = msg.Progress
+			ps.PositionAt = now
+			ps.PositionFromPause = false
 			ps.LyricUpdate = nil // 新歌词到达，旧 lyric_update 已失效；避免中途连入的客户端收到上一首的歌词行
+		}
+	case player.EventPlaybackPause, player.EventPlaybackResume, player.EventPositionSample:
+		// 暂停、恢复与 seek（kugou 等以 playback_resume 报 seek）都带精确位置，同样是采样点。
+		// pause 的位置即暂停点，标记后不外推（见 PositionFromPause）。
+		//
+		// position_sample 是播放中的周期校准，只在本地判定为播放中时发出，与 resume 一样清除暂停标记：
+		// paused 状态与 playback_resume 都被 Emit 丢弃时，状态始终是 playing 而标记一直为真，位置会
+		// 冻结在暂停点，下一条采样把它清掉。除这四个位置字段外，采样不动别的缓存。
+		if msg, ok := evt.Data.(*player.PlaybackTimeInfo); ok {
+			ps.Position = msg.Position
+			ps.Progress = msg.Progress
+			ps.PositionAt = now
+			ps.PositionFromPause = evt.Type == player.EventPlaybackPause
 		}
 	case player.EventClearSongData:
 		ps.SongInfo = nil
@@ -589,6 +755,8 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 		ps.Duration = 0
 		ps.Position = 0
 		ps.Progress = 0
+		ps.PositionAt = time.Time{}
+		ps.PositionFromPause = false
 	}
 	s.mu.Unlock()
 }
@@ -670,7 +838,7 @@ func (s *Server) Start(addr string, readyCh chan struct{}) error {
 	if err != nil {
 		return err
 	}
-	serverLog.Info("服务启动: %s", addr)
+	serverLog.Info("service started: %s", addr)
 	if readyCh != nil {
 		close(readyCh)
 	}
@@ -701,7 +869,7 @@ func (s *Server) handleWS(playerName string) http.HandlerFunc {
 		}
 
 		sub := s.subscribe(playerName, nil, true, conn.RemoteAddr().String())
-		serverLog.Info("WS 连接: %s player=%q (total: %d)", conn.RemoteAddr(), playerName, s.wsCount())
+		serverLog.Info("WS connected: %s player=%q (total: %d)", conn.RemoteAddr(), playerName, s.wsCount())
 
 		// 发送初始缓存状态
 		for _, evt := range s.buildInitEvents(playerName, true) {
@@ -723,7 +891,7 @@ func (s *Server) handleWS(playerName string) http.HandlerFunc {
 			for evt := range sub.ch {
 				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteJSON(evt); err != nil {
-					serverLog.Warn("WS 写入失败，关闭连接: %s player=%q: %v", conn.RemoteAddr(), playerName, err)
+					serverLog.Warn("WS write failed, closing connection: %s player=%q: %v", conn.RemoteAddr(), playerName, err)
 					conn.Close() // 解阻塞读循环，交由下面既有的清理路径注销
 					return
 				}
@@ -742,7 +910,7 @@ func (s *Server) handleWS(playerName string) http.HandlerFunc {
 		close(sub.ch)
 		conn.Close()
 		<-done
-		serverLog.Info("WS 断开: %s player=%q (total: %d)", conn.RemoteAddr(), playerName, s.wsCount())
+		serverLog.Info("WS disconnected: %s player=%q (total: %d)", conn.RemoteAddr(), playerName, s.wsCount())
 	}
 }
 
@@ -780,6 +948,7 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 
 	data := struct {
 		Version           string      `json:"version"`
+		Capabilities      []string    `json:"capabilities"`
 		Addr              string      `json:"addr"`
 		NowTime           string      `json:"now_time"`
 		ConfigSources     []string    `json:"config_sources"`
@@ -794,6 +963,7 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		WSConnected       interface{} `json:"ws_connected"`
 	}{
 		Version:           info.Version,
+		Capabilities:      capabilities,
 		Addr:              info.Addr,
 		NowTime:           time.Now().Format(time.RFC3339),
 		ConfigSources:     info.Sources,
@@ -897,12 +1067,13 @@ func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 		s.mu.RLock()
 		var data *AllLyrics
 		if ps := s.playerStates[pn]; ps != nil && ps.AllLyrics != nil {
+			pos, prog := ps.livePosition(time.Now())
 			data = &AllLyrics{
 				Title:    ps.Title,
 				Lyrics:   ps.AllLyrics,
 				Duration: ps.Duration,
-				Position: ps.Position,
-				Progress: ps.Progress,
+				Position: pos,
+				Progress: prog,
 				Count:    len(ps.AllLyrics),
 			}
 		}
@@ -926,8 +1097,10 @@ func (s *Server) handleLyricUpdate(playerName string) http.HandlerFunc {
 
 		s.mu.RLock()
 		var data *LyricUpdate
-		if ps := s.playerStates[pn]; ps != nil {
-			data = ps.LyricUpdate
+		if ps := s.playerStates[pn]; ps != nil && ps.LyricUpdate != nil {
+			lu := *ps.LyricUpdate // 发副本，理由见 buildInitEvents
+			lu.Position, lu.Progress = ps.livePosition(time.Now())
+			data = &lu
 		}
 		s.mu.RUnlock()
 
@@ -1002,7 +1175,7 @@ func (s *Server) handleSSE(playerName string, eventTypes ...string) http.Handler
 
 		sub := s.subscribe(playerName, eventTypes, false, r.RemoteAddr)
 		defer s.unsubscribe(sub)
-		serverLog.Info("SSE 订阅: path=%s player=%q eventTypes=%v", r.URL.Path, playerName, eventTypes)
+		serverLog.Info("SSE subscribe: path=%s player=%q eventTypes=%v", r.URL.Path, playerName, eventTypes)
 
 		// 发送初始缓存（仅匹配 eventTypes 的事件）
 		for _, evt := range s.buildInitEvents(playerName, true) {

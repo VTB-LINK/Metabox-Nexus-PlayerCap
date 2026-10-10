@@ -11,7 +11,10 @@ package server
 // 测它即测全部缓存出口。
 //
 // 变异自证：把 UpdatePlayerState EventLyricUpdate 分支里的 `RomaText: msg.RomaText` 删掉，
-// 本文件两条测试即红（roma 变空串）；sub_text 那条并列守着翻译轨不被一起丢。
+// 本文件前两条测试即红（roma 变空串）；sub_text 那条并列守着翻译轨不被一起丢。
+//
+// roma_text_detailed（逐字音译）是后来加的字段，走的是同一处手复制，同样会漏：
+// 把那里的 `RomaTextDetailed: msg.RomaTextDetailed` 删掉，TestLyricUpdateCachePreservesRomaTextDetailed 即红。
 
 import (
 	"encoding/json"
@@ -83,5 +86,34 @@ func TestLyricUpdateCacheWireEmitsRomaText(t *testing.T) {
 	}
 	if !strings.Contains(got, `"sub_text":"向夜晚奔去"`) {
 		t.Errorf("wire 上缺 sub_text 原值，实得: %s", got)
+	}
+}
+
+// TestLyricUpdateCachePreservesRomaTextDetailed 缓存回放保住逐字音译：字段是新加的，手复制处最容易漏。
+func TestLyricUpdateCachePreservesRomaTextDetailed(t *testing.T) {
+	s := NewServer([]string{"wesing"})
+	s.UpdatePlayerState(player.Event{
+		PlayerName: "wesing",
+		Type:       player.EventLyricUpdate,
+		Data: &player.LyricUpdate{
+			Index: 4, Text: "ひかり", RomaText: "hi ka ri",
+			Timestamp: 13.711, PlayTime: 13.511, Position: 13.8, Progress: 0.05,
+			RomaTextDetailed: player.LyricTextDetailed{Timestamp: 13.711, PlayTime: 13.511, Duration: 0.95, Words: []player.LyricTextDetailedWord{
+				{Timestamp: 13.711, PlayTime: 13.511, Duration: 0.2, Text: "hi "},
+				{Timestamp: 13.911, PlayTime: 13.711, Duration: 0.49, Text: "ka "},
+				{Timestamp: 14.401, PlayTime: 14.201, Duration: 0.26, Text: "ri "},
+			}},
+		},
+	})
+	lu := initLyricUpdate(t, s, "wesing")
+	if n := len(lu.RomaTextDetailed.Words); n != 3 || lu.RomaTextDetailed.Words[1].Text != "ka " {
+		t.Fatalf("roma_text_detailed 经缓存回放后剩 %d 个音节，期望 3 个——UpdatePlayerState 手复制漏搬 RomaTextDetailed", n)
+	}
+	b, err := json.Marshal(lu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"roma_text_detailed":{"timestamp":13.711`) {
+		t.Errorf("wire 上缺 roma_text_detailed 原值，实得: %s", b)
 	}
 }

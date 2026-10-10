@@ -8,7 +8,7 @@
 // 真实响应里不可能出现的东西：
 //
 //	"play_time": 45.2, "progress": 0        // 播了 45 秒，进度 0——不可能
-//	"timestamp": 9.0,  "play_time": 9.15    // play_time = timestamp - offset，恒小于它
+//	"timestamp": 9.0,  "play_time": 9.15    // play_time = timestamp + offset，offset 为负时小于它
 //	"何也もかもが手から零れ落ちる"                // 日语里没有「何也もかも」，打字错
 //
 // 这些错误 gofmt 不管、JSON 解析通过、人眼扫一遍也看不出。重写文档时**我自己又编了一个**

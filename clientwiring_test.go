@@ -95,7 +95,7 @@ func TestCheckAndUpdateUsesTheAnnotatedRequest(t *testing.T) {
 
 // TestMainStartsHeartbeat 钉死心跳真的被起起来了。
 //
-// 同样是 AST 断言：main() 跑起来会绑端口、起五个采集 goroutine，测不了。
+// 同样是 AST 断言：main() 跑起来会绑端口、给每个播放器起一个采集 goroutine，测不了。
 // 能守住的形状：startDailyHeartbeat 定义得好好的、测试全绿，但没人调它 ——
 // 长期挂机的机器一天都不上报，而这个缺失在日志里也看不出来（它本来就只打 Detail）。
 func TestMainStartsHeartbeat(t *testing.T) {

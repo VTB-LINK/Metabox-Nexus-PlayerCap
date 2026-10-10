@@ -2,8 +2,10 @@ package player
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode"
 )
 
@@ -50,6 +52,10 @@ type LyricLine struct {
 	SubText      string            `json:"sub_text"`
 	RomaText     string            `json:"roma_text"`
 	TextDetailed LyricTextDetailed `json:"text_detailed"`
+	// RomaTextDetailed 是 roma_text 的逐字（逐音节）时间轴，形状同 TextDetailed，零值序列化为 {}。
+	// 目前只有 wesing 提供。它是一条独立的数组，单元与 TextDetailed 不一一对应：一个汉字可以拆成
+	// 多个音节，空格可以单独占一个单元。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后赋值。
+	RomaTextDetailed LyricTextDetailed `json:"roma_text_detailed"`
 }
 
 // SongInfo 歌曲信息
@@ -81,13 +87,14 @@ const (
 	ReasonVersionUnsupported = "version_unsupported" // 播放器版本不受支持
 	ReasonInstallNotFound    = "install_not_found"   // 未找到安装
 	ReasonNoAdmin            = "no_admin"            // 未取得管理员权限
+	ReasonNoSong             = "no_song"             // 进程在跑，但没有歌曲在播放或已加载
 )
 
 // LyricUpdate 歌词更新。
 //
 // 三个时间量别混：
-//   - Timestamp —— 歌词行的原始时间戳（歌词时间轴上的点，未减 offset）
-//   - PlayTime  —— 本行的**播出时间**（displayStart - offset）；index==-1 无行可播出，为 0
+//   - Timestamp —— 歌词行的原始时间戳（歌词时间轴上的点，不含 offset）
+//   - PlayTime  —— 本行的**播出时间**（displayStart + offset）；index==-1 无行可播出，为 0
 //   - Position  —— **整曲实时播放位置**（秒，= Progress×Duration），每条都带、与 index 无关
 type LyricUpdate struct {
 	Index        int               `json:"index"`
@@ -99,13 +106,17 @@ type LyricUpdate struct {
 	Position     float32           `json:"position"`
 	Progress     float32           `json:"progress"`
 	TextDetailed LyricTextDetailed `json:"text_detailed"`
+	// RomaTextDetailed 是 roma_text 的逐字（逐音节）时间轴，形状同 TextDetailed，零值序列化为 {}。
+	// 目前只有 wesing 提供。它是一条独立的数组，单元与 TextDetailed 不一一对应：一个汉字可以拆成
+	// 多个音节，空格可以单独占一个单元。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后赋值。
+	RomaTextDetailed LyricTextDetailed `json:"roma_text_detailed"`
 }
 
 // PlaybackTimeInfo 播放暂停/恢复（含 seek）事件载荷。
 //
-// Position 是**整曲实时播放位置**（秒），不是歌词行的 play_time——它不减 offset，与
+// Position 是**整曲实时播放位置**（秒），不是歌词行的 play_time——它不含 offset，与
 // progress×duration 同量。此前字段名叫 play_time，与「歌词行播出时间」的 play_time 撞名却
-// 语义相反（实测暂停事件的 play_time 逐毫秒吻合 progress×duration、无需减 offset），
+// 语义相反（实测暂停事件的 play_time 逐毫秒吻合 progress×duration、不含 offset），
 // 3.0 正式版起改名 position 并补上 progress。
 type PlaybackTimeInfo struct {
 	Position float32 `json:"position"`
@@ -115,7 +126,8 @@ type PlaybackTimeInfo struct {
 // AllLyricsData 完整歌词。
 //
 // Position 是**整曲实时播放位置**（秒，= Progress×Duration）；顶层无「行」概念，故不设
-// 歌词行的 play_time——逐行 play_time 在 lyrics[i] 内。每次 WS 连接拿到的都是当下位置。
+// 歌词行的 play_time——逐行 play_time 在 lyrics[i] 内。连接补发与 HTTP 快照中，播放中的
+// position/progress 由服务端外推到发送时刻（server 包的 PlayerState.livePosition）。
 type AllLyricsData struct {
 	Title    string      `json:"title,omitempty"`
 	Duration float32     `json:"duration"`
@@ -180,6 +192,10 @@ const (
 	EventPlaybackResume = "playback_resume"
 	EventLyricIdle      = "lyric_idle"
 	EventClearSongData  = "clear_song_data"
+	// EventPositionSample 是播放中的位置采样：只供服务端校准缓存里的整曲位置，不对外广播、不计作
+	// 播放器活动、不参与路由评估（server 包的 internalEvents 与 Router.updateRouting）。
+	// 载荷 *PlaybackTimeInfo，position 与 lyric_update 等对外事件同一口径。
+	EventPositionSample = "position_sample"
 	EventPlayerSwitch   = "player_switch"
 	EventPlayerClear    = "player_clear"
 )
@@ -215,6 +231,9 @@ type BaseEmitter struct {
 	// 用裸 uint64 + sync/atomic 包函数而非 atomic.Uint64/sync.Mutex：后两者含 noCopy，
 	// 而 NewBaseEmitter 是值返回、会被各播放器按值嵌入，vet 的 copylocks 会报。
 	songGen uint64
+
+	// lastSampleAt 是上一条位置采样发出的时刻（EmitPositionSample）。只由播放器的轮询循环读写。
+	lastSampleAt time.Time
 }
 
 // NewBaseEmitter 创建 BaseEmitter
@@ -236,6 +255,38 @@ func (b *BaseEmitter) Emit(evtType string, data interface{}) {
 	case b.EventCh <- Event{PlayerName: b.PlayerName, Type: evtType, Data: data}:
 	default:
 	}
+}
+
+// PositionSampleInterval 是播放中相邻两条位置采样（EventPositionSample）的间隔。
+//
+// 服务端在两次采样之间按墙钟外推整曲位置（server 包的 PlayerState.livePosition），采样把外推值的偏差
+// 限制为一个间隔内累计的量。5 秒与系统媒体传输控件对时间线属性的建议更新间隔、RTCP 的最小发送间隔
+// 相同；取值的依据与各间隔下的偏差见 doc/design/position-sample-and-idle-resume-design.md §5.4。
+const PositionSampleInterval = 5 * time.Second
+
+// EmitPositionSample 在播放中报一次整曲位置采样（EventPositionSample），距上一条不足
+// PositionSampleInterval 时什么都不做。**每个播放器都要在轮询循环里调用它**，否则没有歌词行在推的
+// 时段（无歌词的歌、长间奏）服务端拿不到任何采样：本地时钟在不发事件的情况下偏离墙钟（短于暂停
+// 门槛的停顿、门槛以内的小幅跳变被静默重锚），连接补发与 HTTP 快照的位置会随时长累计偏差。
+//
+// 调用条件：本曲的 all_lyrics 已发出，且本地判定为播放中（已向服务端报过 playing）。暂停中不调
+// （位置已由 playback_pause 给定）；换歌后 all_lyrics 发出之前不调（缓存里的时长与歌词还是上一首的）。
+//
+// position 必须与本播放器 lyric_update、all_lyrics、playback_pause / playback_resume 里的 position
+// 同一口径：整曲实时位置，单位秒，**不含 offset**。把歌词行匹配用的「位置 - offset」（LyricMatchTime）传进来，缓存的
+// 位置会整体平移一个 offset。position 非有限或为负时不发，也不占用间隔。
+//
+// now 由调用方给出（会话测试注入假时钟）。只应由播放器的轮询循环调用（单写者）。
+func (b *BaseEmitter) EmitPositionSample(now time.Time, position, duration float32) {
+	if now.Sub(b.lastSampleAt) < PositionSampleInterval {
+		return
+	}
+	// 接受式判定：NaN 的任何比较都为 false，写成拒绝式会放它过去（理由见 ClampProgress）。
+	if !(position >= 0 && position <= math.MaxFloat32) {
+		return
+	}
+	b.lastSampleAt = now
+	b.Emit(EventPositionSample, &PlaybackTimeInfo{Position: position, Progress: ClampProgress(position, duration)})
 }
 
 // NewSongGen 标记「换歌了」：递增代次并返回新代次。**只应由播放器的轮询循环在检测到
@@ -292,7 +343,7 @@ func ClampFloat32(v, min, max float32) float32 {
 
 // ClampProgress 返回 playTime/duration 的播放进度，钳在 [0,1]；duration 非正时返回 0。
 //
-// 四个播放器共用。原先 cloudmusic 与 kugou 各存一份逐字相同的私有副本，wesing 与 qqmusic
+// 各播放器共用。原先 cloudmusic 与 kugou 各存一份逐字相同的私有副本，wesing 与 qqmusic
 // 则把它手写展开成 `p := float32(0); if d > 0 { p = ClampFloat32(x/d, 0, 1) }`——同一个
 // 判据散在四处，改一处就会分叉。
 //
@@ -309,13 +360,28 @@ func ClampProgress(playTime, duration float32) float32 {
 	return ClampFloat32(playTime/duration, 0, 1)
 }
 
-// AdjustLyricPlayTime returns the offset-adjusted lyric timestamp in seconds.
+// offset 是延迟量（issue #54）：正值 = 歌词延后，负值 = 提前。它只经本文件的两个函数生效，
+// 符号也只写在这两处：AdjustLyricPlayTime 把它加到歌词时间轴上，LyricMatchTime 把它从播放位置里
+// 减掉。各播放器不得自行对 offset 做加减（✅ player/offsetsign_lint_test.go）。
+
+// AdjustLyricPlayTime 返回歌词时间轴上的时刻 timestamp 的播出时间（秒）：timestamp + offset，下限 0。
 func AdjustLyricPlayTime(timestamp, offsetSec float32) float32 {
-	adjusted := timestamp - offsetSec
+	adjusted := timestamp + offsetSec
 	if adjusted < 0 {
 		return 0
 	}
 	return adjusted
+}
+
+// LyricMatchTime 返回歌词行匹配用的时刻（秒）：整曲实时位置 position 减去 offset。某行的时间戳不大于
+// 它时该行已到播出时间：「位置 - offset >= 时间戳」与 AdjustLyricPlayTime 的「播出时间 = 时间戳 + offset」
+// 是同一个 offset 的两种用法，符号必须相反。
+//
+// **各播放器的行匹配都必须经由它**。六家里只有 applemusic 有离线会话测试，其余五家自行写这道算式而
+// 写反时没有用例会红，表现为该播放器 lyric_update 的发出时刻与其 play_time 相差两倍 offset。
+// 返回值只用于行匹配：对外事件的 position 与位置采样传的是 position 本身，不含 offset。
+func LyricMatchTime(position, offsetSec float32) float32 {
+	return position - offsetSec
 }
 
 // LyricDisplayStart returns the earliest time a line should appear.
@@ -327,16 +393,16 @@ func LyricDisplayStart(lineTime float32, detailed LyricTextDetailed) float32 {
 	return lineTime
 }
 
-// LyricPlayTime 返回一行歌词的播出时间：`displayStart - offset`，下限 0。
+// LyricPlayTime 返回一行歌词的播出时间：`displayStart + offset`，下限 0。
 //
-// 这是 play_time 的**唯一公式**，四个播放器的 all_lyrics 与 lyric_update 都必须经由它，
+// 这是 play_time 的**唯一公式**，各播放器的 all_lyrics 与 lyric_update 都必须经由它，
 // 否则同一行会在两个事件里拿到两个值。它被单拎出来，是因为 lyric_update 只需要这一个
 // 数值、不需要整个 LyricLine——而此前 cloudmusic 正是为了取它而构造了一整个 LyricLine，
-// 另外三家则干脆绕过公式直接发「当前实时播放位置」，四家四种写法。
+// qqmusic / wesing / kugou 则干脆绕过公式直接发「当前实时播放位置」，四家四种写法。
 //
 // 注意它取的是 displayStart 而非 lineTime：逐字时间轴早于行时间戳时（网易云 YRC 的长引子
 // 行，如 "A-A-All"：YRC 首字 10.92s 而 LRC 行标 14.58s），本行按第一个字发声的时刻上屏，
-// 故 play_time 那时**不等于** `timestamp - offset`。这是刻意的，见 LyricDisplayStart。
+// 故 play_time 那时**不等于** `timestamp + offset`。这是刻意的，见 LyricDisplayStart。
 func LyricPlayTime(lineTime float32, detailed LyricTextDetailed, offsetSec float32) float32 {
 	return AdjustLyricPlayTime(LyricDisplayStart(lineTime, detailed), offsetSec)
 }
@@ -365,12 +431,12 @@ func IsPureMusicOnly(lyrics []LyricLine) bool {
 	return len(lyrics) == 1 && pureMusicHints[lyrics[0].Text]
 }
 
-// BuildLyricUpdate 构造 lyric_update 载荷。**四个播放器都必须经由它**。
+// BuildLyricUpdate 构造 lyric_update 载荷。**各播放器都必须经由它**。
 //
 // 它存在的唯一理由是把这三个易错的量锁在一处：
 //
-//	PlayTime —— 本行的**播出时间**（displayStart - offset），与 all_lyrics 里同一行逐字节相同
-//	Position —— **整曲实时播放位置**（playPos 原值，秒），与 play_time 语义相反、不减 offset
+//	PlayTime —— 本行的**播出时间**（displayStart + offset），与 all_lyrics 里同一行逐字节相同
+//	Position —— **整曲实时播放位置**（playPos 原值，秒），与 play_time 语义相反、不含 offset
 //	Progress —— Position / 总时长，钳在 [0,1]
 //
 // PlayTime 来自歌词时间轴、Position/Progress 来自实时时钟，常规行上只差一个轮询滞后（毫秒级），

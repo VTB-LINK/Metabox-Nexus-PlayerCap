@@ -17,7 +17,7 @@ import (
 // 列表 —— 在 Sentry 里看着就像「主播反复在改配置」，而实际上他什么都没动。
 // 本仓库在 config 的 clampPolls 与 router 的 evaluateGroup 里已经各踩过一次这个坑。
 //
-// 用 14 个 key（正是 main.go 那份清单的规模：6 个全局 + 4 个播放器 ×2）——
+// 用 14 个 key（6 个全局键，加 wesing / kugou / qqmusic / cloudmusicv3 各 2 个专属键）——
 // key 越多，「随机顺序恰好等于字典序」的概率越低，这个门禁就越不容易假绿。
 //
 // 变异自证：删掉 collectAppInfo 里的 sort.Strings 即红。
