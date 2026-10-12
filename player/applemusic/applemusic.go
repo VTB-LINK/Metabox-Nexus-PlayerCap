@@ -25,7 +25,6 @@ package applemusic
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -1144,9 +1143,12 @@ func (s *session) staleCover(np mem.NowPlaying, h uint64) bool {
 	return h == s.prevCover && np.Album != s.prevAlbum && s.now().Sub(s.songChangedAt) < coverHold
 }
 
+// setCover 记下这张图并生成 cover_base64（规范为 800×800，见 player.CoverDataURI）。在轮询 goroutine 里同步
+// 做：换封面的那一轮多出缩放的耗时，期间不推歌词行，当轮末尾按当前时钟补推。h 是原始字节的哈希，换图判定
+// （applyCover、staleCover）都按原始字节，不受规范化影响。
 func (s *session) setCover(np mem.NowPlaying, h uint64) {
 	s.song.coverHash = h
-	s.song.coverURI = "data:" + np.CoverMIME + ";base64," + base64.StdEncoding.EncodeToString(np.Cover)
+	s.song.coverURI = player.CoverDataURI("AppleMusic", np.Cover, np.CoverMIME)
 	s.needCover = false
 }
 

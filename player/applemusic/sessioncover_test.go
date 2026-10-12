@@ -3,7 +3,11 @@ package applemusic
 // 本文件只测会话里的封面：随歌曲信息一起发、晚到或换了就补发一条、不把别的歌的图配上来。
 
 import (
+	"bytes"
 	"encoding/base64"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +32,58 @@ func TestSessionCoverWithAnnounce(t *testing.T) {
 	const want = "data:image/jpeg;base64,5Zu+54mH5a2X6IqC" // base64("图片字节")
 	if si[0].CoverBase64 != want || si[0].Cover != "" {
 		t.Fatalf("cover_base64=%q cover=%q，want %q 与空 URL", si[0].CoverBase64, si[0].Cover, want)
+	}
+}
+
+// 存储里是一张真实的 1200² JPEG：宣告的 cover_base64 是规范化之后的 800×800 JPEG（issue #101）。之后存储在
+// 新地址重建、图不变：盯梢发现、全扫重认，不重复补发——换图判定按原始字节的哈希，与规范化之后的字节无关。
+// （现有各用例的封面是假字节，规范化原样退回，断言不变。）
+//
+// 变异自证：setCover 改回把原字节直接拼成 data URI 的旧写法，宣告的封面解出 1200×1200 而红；setCover 记下的
+// 哈希改成按规范化之后的 data URI 算，存储重建后被当成换了图、补发一条而红。
+func TestSessionCoverNormalizedTo800(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 1200, 1200))
+	for y := 0; y < 1200; y++ {
+		for x := 0; x < 1200; x++ {
+			img.SetRGBA(x, y, color.RGBA{uint8(x / 5), uint8(y / 5), uint8((x + y) / 10), 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t)
+	first := storeOf("真封面", "专辑", buf.String())
+	h.f.songs = []mem.NowPlaying{first}
+	h.setTwin(200, 10, true)
+	h.run(5 * time.Second)
+	si := songInfos(h.evs)
+	if len(si) != 1 {
+		t.Fatalf("应只发一条 song_info_update，got %d", len(si))
+	}
+	b64, ok := strings.CutPrefix(si[0].CoverBase64, "data:image/jpeg;base64,")
+	if !ok {
+		t.Fatalf("cover_base64 应是 image/jpeg 的 data URI，got 前缀 %q", si[0].CoverBase64[:min(len(si[0].CoverBase64), 30)])
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg, format, err := image.DecodeConfig(bytes.NewReader(raw)); err != nil || format != "jpeg" || cfg.Width != 800 || cfg.Height != 800 {
+		t.Fatalf("宣告的封面应为 800×800 的 JPEG，got %s %dx%d %v", format, cfg.Width, cfg.Height, err)
+	}
+
+	from, scans := h.mark(), h.f.scans
+	again := first
+	again.Addr += 0x1000
+	again.Sig = append([]byte("rebuilt:"), first.Sig...)
+	h.f.songs = []mem.NowPlaying{again}
+	h.run(5 * time.Second)
+	if h.f.scans == scans {
+		t.Fatal("前置：存储换了地址应触发全扫")
+	}
+	if n := len(songInfos(h.since(from))); n != 0 {
+		t.Fatalf("同一张图不应重复补发，got %d 条 song_info_update", n)
 	}
 }
 

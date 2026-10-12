@@ -3,7 +3,6 @@
 package manager
 
 import (
-	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -24,20 +23,27 @@ func createKillOnCloseJob() (windows.Handle, error) {
 			LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 		},
 	}
-	_, err = windows.SetInformationJobObject(
-		job,
-		windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)),
-		uint32(unsafe.Sizeof(info)),
-	)
-	// info 的地址以 uintptr 传入上面的调用，KeepAlive 确保它在调用返回前不被 GC 回收/移动
-	//（照本仓 helper_windows.go QPC 处的 uintptr(unsafe.Pointer(&x)) + runtime.KeepAlive 范式）。
-	runtime.KeepAlive(&info)
+	// 转换须就地写在实参里，见 setJobInformation。
+	err = setJobInformation(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
 	if err != nil {
 		windows.CloseHandle(job)
 		return 0, err
 	}
 	return job, nil
+}
+
+// setJobInformation 调 windows.SetInformationJobObject。
+//
+// uintptrescapes：x/sys 的 SetInformationJobObject 是不带该指令的 Go 函数，直接交给它的
+// uintptr(unsafe.Pointer(&x)) 不会让 x 上堆；转换与系统调用之间若 goroutine 栈增长，栈被整体搬走，
+// 已转成整数的地址不随之修正，内核读到旧栈上的内容。本指令使调用点就地转换的 x 逃逸到堆并保活至本调用
+// 返回；先存进变量再传则不受保护。由 jobobject_lint_test.go 守。
+//
+//go:uintptrescapes
+func setJobInformation(job windows.Handle, class uint32, info uintptr, size uint32) error {
+	_, err := windows.SetInformationJobObject(job, class, info, size)
+	return err
 }
 
 // assignToJob 把进程句柄 proc 赋入 job。proc 须带 PROCESS_SET_QUOTA | PROCESS_TERMINATE 权限。

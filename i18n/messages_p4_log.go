@@ -307,4 +307,32 @@ var p4LogMessages = map[string]string{
 	"%d play-time candidates; using 0x%08X [%s]":                                                                                                              "播放时间候选 %d 处，选用 0x%08X [%s]",
 	"Play-time address 0x%08X is stalled while another one advances; switching to 0x%08X":                                                                     "播放时间地址 0x%08X 停着而另一处在走，改用 0x%08X",
 	"Romanization attached: %d/%d lines":                                                                                                                      "音译已配上: %d/%d 行",
+
+	// 封面规范化为 800×800（player/cover.go 的 CoverDataURI，issue #101）
+	"[%s] cover not normalized, sent as is: %v":              "[%s] 封面未规范化，原样发出: %v",
+	"[%s] cover resized %dx%d → 800x800 (%d → %d bytes, %v)": "[%s] 封面已缩放 %dx%d → 800x800（%d → %d 字节，%v）",
+
+	// —— spotify：watchdog（带调试端口重启 / 自启项）、CDP、会话日志 ——
+	"%s is running without %s; restarting it with the debug and anti-throttling flags (playback resumes automatically)":                                                                  "%s 未带 %s 在运行，正带调试与防节流参数重启它（播放会自动恢复）",
+	"%s is running without the anti-throttling flags; restarting it once with them so progress keeps updating while the window is minimized or covered (playback resumes automatically)": "%s 未带防节流参数在运行，正带上它们重启一次，使窗口最小化或被遮挡时进度仍持续更新（播放会自动恢复）",
+	"%s still lacks the debug or anti-throttling flags after our restart; not restarting it again during this run (progress may slow down while the window is minimized or covered)":     "%s 重启后仍缺调试或防节流参数，本次运行不再重启它（窗口最小化或被遮挡时进度可能变慢）",
+	"Starting %s %s": "启动 %s %s",
+	"Spotify restarted with the debug port on %d":                                                         "Spotify 已带调试端口重启（端口 %d）",
+	"taskkill returned: %v":                                                                               "taskkill 返回: %v",
+	"Spotify autostart already carries the launch flags":                                                  "Spotify 自启项已带全部启动参数",
+	"Patched Spotify autostart flags: %s":                                                                 "已修补 Spotify 自启参数: %s",
+	"Network.enable failed; lyric access token capture is unavailable this session: %v":                   "Network.enable 失败，本会话抓不到歌词 token: %v",
+	"Spotify does not support the remote debugging port; lyric capture is unavailable (reason: %v)":       "这一版 Spotify 不支持远程调试端口，取不到歌词（原因: %v）",
+	"Spotify CLI not found (%v); lyrics are unavailable this session, playback state still works":         "未找到 Spotify CLI（%v）：本会话没有歌词，播放状态照常",
+	"play/pause icon not recognised; falling back to position-advance detection":                          "播放/暂停图标不认识，改用「位置是否推进」判定播放态",
+	"position %.2fs right after the song change looks stale; anchoring at 0":                              "换歌瞬间的位置读数 %.2fs 像是旧值，锚到 0",
+	"play state from the page icon disagrees with spotify_cli (page=%v cli=%v); check the icon constants": "页面图标与 spotify_cli 的播放态不一致（页面=%v CLI=%v），请检查图标常量",
+	"Lyrics loaded: %d lines (provider %s, %s)":                                                           "歌词加载完成: %d 行（来源 %s，%s）",
+	"No lyrics for this track yet; will retry while it plays":                                             "这首歌暂时没有歌词，播放期间会重试",
+	"Lyrics arrived late; re-sending all_lyrics (%d lines)":                                               "歌词迟到，重发 all_lyrics（%d 行）",
+	"spotify_cli now-playing failed: %v":                                                                  "spotify_cli now-playing 失败: %v",
+	"Lyrics unavailable: %s":                                                                              "歌词取不到: %s",
+	"Lyrics still unavailable: %s":                                                                        "歌词仍然取不到: %s",
+	"Lyrics has no line-level timing (syncType %s); keeping this track without lyrics":                    "歌词没有行级时间轴（syncType %s），本首按无歌词处理",
+	"Large cover unavailable; falling back to the page's cover URL":                                       "大尺寸封面取不到，改用页面上的封面地址",
 }

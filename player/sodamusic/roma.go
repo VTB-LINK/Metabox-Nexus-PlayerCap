@@ -26,15 +26,21 @@ import (
 // **为什么要字级对齐**：汽水与酷狗**断行边界不同**（实测 BoA - Only One：酷狗 2 行 vs 汽水
 // 3 行等 M:N）。纯行级归一化文本匹配对断行不同的行整段对不上、留空（实测 56/65≈86%）。字级
 // 对齐把酷狗音译**保留到字**，按**字序**贴到汽水主歌词的字上，再按汽水行边界重拼成行级
-// RomaText，从而覆盖断行差异段。**主歌词永远是汽水、不可变**，我们只往汽水行写 roma_text。
+// RomaText，从而覆盖断行差异段。**主歌词永远是汽水、不可变**，我们只往汽水行写 roma_text 与
+// roma_text_detailed。
+//
+// **逐字音译（RomaDetailed）**：字级对齐接受的行同时产出，文本取酷狗的音译片段、时间一律取汽水自己
+// 主歌词的字（酷狗的时间轴属于另一个曲库的另一份音频，不用）。两边的字切分不保证一一对应，按公共
+// 边界分组（见 groupRomaUnits、charRomaDetailed）。走行级回落配上的行不知道音译的哪一段对着哪个字，
+// 不产逐字。
 
 // maxAlignRunes 是字级对齐（LCS）两侧序列的规模上限。LCS 是 O(n*m) 时空，一首歌的主歌词
 // 撑死几百个字，2000 已是极宽的余量；真超了（异常 / 拼接错的超长轨）就跳过字级、只走行级
 // 回落，绝不让一次借音译吃掉一大块内存。每首歌只跑一次、非热路径（AGENTS §0.1 稳定优先）。
 const maxAlignRunes = 2000
 
-// mergeKugouRoma 把酷狗行的音译对齐、搬进汽水行的 RomaText，就地改写 sodaLines，返回对齐
-// 上的总行数（字级 + 行级）。分层降级见 mergeKugouRomaStats。
+// mergeKugouRoma 把酷狗行的音译对齐、搬进汽水行的 RomaText（字级对齐的行连同 RomaDetailed），
+// 就地改写 sodaLines，返回对齐上的总行数（字级 + 行级）。分层降级见 mergeKugouRomaStats。
 func mergeKugouRoma(sodaLines []krc.Line, kugouLines []klyric.Line) int {
 	return mergeKugouRomaStats(sodaLines, kugouLines).matched
 }
@@ -59,8 +65,12 @@ type romaMergeStats struct {
 // 空。故合并结果是行级单独结果的**超集**：行级能填的行合并后一定也填了，字级只多不少。
 // 酷狗无字级音译（老 KRC / LRC 回落）时第一层自动空转，整体退回纯行级 = 引入本改动前的现状。
 //
-// **只写 RomaText，绝不碰 Text（主歌词）/ SubText（翻译）/ Detailed（逐字）**——三轨独立，
-// 任一层失败 / 未命中 / 对不上一律安全降级为「该行留空」，绝不 panic、绝不波及主歌词与翻译。
+// **只写 RomaText 与 RomaDetailed，绝不碰 Text（主歌词）/ SubText（翻译）/ Detailed（逐字）**——
+// 三轨独立，任一层失败 / 未命中 / 对不上一律安全降级为「该行留空」，绝不 panic、绝不波及主歌词与翻译。
+//
+// RomaDetailed 与 RomaText 成对写：字级对齐的行写上逐字音译（拿不到时是零值），行级回落的行写零值。
+// 后者不是多余的——这一行原先若带着别处来的逐字音译（平台的 KRC 内嵌 type=0 轨时由 krc 解析填上），
+// RomaText 被换掉之后它就对不上了。两层都不中的行两个字段都不动。
 func mergeKugouRomaStats(sodaLines []krc.Line, kugouLines []klyric.Line) romaMergeStats {
 	var st romaMergeStats
 	if len(sodaLines) == 0 || len(kugouLines) == 0 {
@@ -87,12 +97,13 @@ func mergeKugouRomaStats(sodaLines []krc.Line, kugouLines []klyric.Line) romaMer
 	}
 
 	for i := range sodaLines {
-		// 字级优先；字级没覆盖的行回落行级；两层都不中则留空。**只写 RomaText**。
-		if r, ok := charRoma[i]; ok {
-			sodaLines[i].RomaText = r
+		// 字级优先；字级没覆盖的行回落行级；两层都不中则留空。**只写 RomaText 与 RomaDetailed**。
+		if c, ok := charRoma[i]; ok {
+			sodaLines[i].RomaText = c.roma
+			sodaLines[i].RomaDetailed = c.detailed
 			st.charLines++
 			if st.sample == "" {
-				st.sample = fmt.Sprintf("[%s] → [%s]", sodaLines[i].Text, r)
+				st.sample = fmt.Sprintf("[%s] → [%s]", sodaLines[i].Text, c.roma)
 			}
 			continue
 		}
@@ -102,6 +113,7 @@ func mergeKugouRomaStats(sodaLines []krc.Line, kugouLines []klyric.Line) romaMer
 		}
 		if r, ok := romaByText[key]; ok {
 			sodaLines[i].RomaText = r
+			sodaLines[i].RomaDetailed = player.LyricTextDetailed{}
 			st.lineLines++
 		}
 	}
@@ -118,9 +130,15 @@ type runeRef struct {
 // lcsPair 是 LCS 对齐出的一对下标（a=汽水 rune 下标，b=酷狗 rune 下标）。
 type lcsPair struct{ a, b int }
 
+// charAligned 是字级对齐给一行汽水主歌词的结果。
+type charAligned struct {
+	roma     string                   // 重拼的行级音译
+	detailed player.LyricTextDetailed // 逐字音译；拿不到时为零值（见 charRomaDetailed）
+}
+
 // alignCharLevel 按**字序**把酷狗音译对齐到汽水主歌词的字，再按汽水行边界重拼行级音译，返回
-// 「汽水行 slice 下标 → 重拼行级 RomaText」，只含**整行每字都对齐上、且用到的酷狗 token 无一
-// 跨行**的行。酷狗无字级音译 / 汽水无字 / 规模超限 → 返回 nil（交给行级回落，不劣化）。
+// 「汽水行 slice 下标 → 重拼行级 RomaText 与逐字音译」，只含**整行每字都对齐上、且用到的酷狗
+// token 无一跨行**的行。酷狗无字级音译 / 汽水无字 / 规模超限 → 返回 nil（交给行级回落，不劣化）。
 //
 // 算法（双方是「同一首歌的主歌词字序」，仅断行 / 个别字 / 标点不同）：
 //  1. 酷狗侧展平成字级 rune 序列，每 rune 标注所属 token（token 携带该字的音译片段）。只收
@@ -135,7 +153,9 @@ type lcsPair struct{ a, b int }
 //     的 token 无一跨行（no straddle，保证不把同一 token 的音译重复贴到相邻两行）。满足则把该行
 //     用到的 token 的音译片段按序 Join + TrimSpace 作为该行重拼音译；否则该行不产字级、回落。
 //     断行差异（M:N）主场景恰好满足：文本逐字相同、只断行不同 → 每行全覆盖、token 不跨行。
-func alignCharLevel(sodaLines []krc.Line, kugouLines []klyric.Line) map[int]string {
+//  6. 被接受的行另由 charRomaDetailed 构造逐字音译（各 rune 对到的 token 见 lineRuneToks）；它拿不到
+//     时该行照样接受，只是没有逐字。
+func alignCharLevel(sodaLines []krc.Line, kugouLines []klyric.Line) map[int]charAligned {
 	// ── 酷狗侧：token 音译 + 字级 rune 序列（只收字级可靠的行）──
 	var tokenRoma []string // tokenRoma[t] = 第 t 个字的音译片段（未 Trim，保留排版空格）
 	var kugouRunes []runeRef
@@ -194,10 +214,14 @@ func alignCharLevel(sodaLines []krc.Line, kugouLines []klyric.Line) map[int]stri
 	tokenLines := make(map[int]map[int]bool) // tokenID → set(汽水行下标)：判 straddle
 	lineAligned := make([]int, len(sodaLines))
 	lineTokens := make([][]int, len(sodaLines)) // 汽水行 → 有序去重的 token 序列（同 token 的字连续）
+	// 汽水行 → 该行对齐上的各个 rune 依次对到的 token。pairs 按汽水 rune 升序，整行每个 rune 都对齐上
+	// 的行（下面的接受判据）里，它与该行归一化后的 rune 一一对应。
+	lineRuneToks := make([][]int, len(sodaLines))
 	for _, p := range pairs {
 		li := sodaRunes[p.a].id
 		tok := kugouRunes[p.b].id
 		lineAligned[li]++
+		lineRuneToks[li] = append(lineRuneToks[li], tok)
 		if tokenLines[tok] == nil {
 			tokenLines[tok] = make(map[int]bool)
 		}
@@ -209,7 +233,7 @@ func alignCharLevel(sodaLines []krc.Line, kugouLines []klyric.Line) map[int]stri
 	}
 
 	// ── 接受判据：full coverage + no straddle ──
-	out := make(map[int]string)
+	out := make(map[int]charAligned)
 	for li := 0; li < len(sodaLines); li++ {
 		total := lineRuneTotal[li]
 		if total == 0 || lineAligned[li] != total {
@@ -233,9 +257,114 @@ func alignCharLevel(sodaLines []krc.Line, kugouLines []klyric.Line) map[int]stri
 		if roma == "" {
 			continue
 		}
-		out[li] = roma
+		out[li] = charAligned{
+			roma:     roma,
+			detailed: charRomaDetailed(sodaLines[li], lineRuneToks[li], tokenRoma, roma),
+		}
 	}
 	return out
+}
+
+// romaGroup 是逐字音译的一个单元在分组阶段的样子：占汽水主歌词这一行的第 firstWord..lastWord 个字，
+// 文本由 toks 这些酷狗 token 的音译片段依次拼成。
+type romaGroup struct {
+	firstWord, lastWord int
+	toks                []int
+}
+
+// groupRomaUnits 把一行按「公共边界」切成组，每组日后是逐字音译的一个单元。
+//
+// runeWord[k]、runeTok[k] 是这一行归一化后的第 k 个 rune 所属的汽水字下标与酷狗 token 下标，两者
+// 等长、都不减。汽水的字切分与酷狗的 token 切分不保证一一对应（一个 token 可以跨几个汽水字，一个
+// 汽水字里也可以落进几个 token），时间只有汽水的字有、音译片段只有 token 有，所以一个单元必须同时
+// 由整数个字与整数个 token 组成：相邻两个 rune 之间，当且仅当汽水字变了**且** token 也变了才是组边界。
+// 只变其一的地方切不开——切了就得把一个字的时间或一个 token 的音译拆成两半。
+//
+//	汽水字 [君][だけ][を]、token [君][だ][け][を] → 三组：君 / だけ（两个 token 的片段相接）/ を
+//	汽水字 [あい][うえ]、token [あ][いう][え]     → 一组：四个 rune 之间没有一处是两边同时换的
+//
+// 各组的 toks 首尾相接、不重不漏，正是这一行用到的 token 序列，所以各单元的文本拼起来就是重拼行级
+// 音译时拼的那一串。
+func groupRomaUnits(runeWord, runeTok []int) []romaGroup {
+	var groups []romaGroup
+	for k, w := range runeWord {
+		tok := runeTok[k]
+		if k == 0 || (w != runeWord[k-1] && tok != runeTok[k-1]) {
+			groups = append(groups, romaGroup{firstWord: w, lastWord: w, toks: []int{tok}})
+			continue
+		}
+		g := &groups[len(groups)-1]
+		g.lastWord = w
+		if g.toks[len(g.toks)-1] != tok {
+			g.toks = append(g.toks, tok)
+		}
+	}
+	return groups
+}
+
+// charRomaDetailed 给字级对齐接受的一行汽水主歌词 line 构造逐字音译。runeToks 是这一行归一化后的
+// 各个 rune 依次对到的酷狗 token，tokenRoma 是各 token 的音译片段，romaText 是这一行重拼出的行级音译。
+//
+// 每组（groupRomaUnits）一个单元：文本是组内各 token 的音译片段依次相接（原样，不 Trim）；起始是
+// 组内第一个汽水字的起始，时长算到组内最后一个汽水字结束；PlayTime 取第一个汽水字的——汽水主歌词
+// 在借音译之前已由 parseSodaLyrics 套过 offset。行级的三项取这一行主歌词逐字的。夹在组与组之间、
+// 归一化后不剩 rune 的字（标点、空格）不属于任何组，单元的时间不含它。
+//
+// 拿不到就返回零值，这一行只留行级的 RomaText：
+//   - 这一行汽水没有逐字，或由各个字的文本归一化得到的 rune 序列与由行文本得到的不同——对齐是按
+//     行文本做的，对不上就无从知道哪个 rune 属于哪个字；
+//   - player.BuildRomaDetailed 的约定不成立：各单元拼起来去掉首尾空白不等于 romaText，或时间轴
+//     不合法（单元的起始回退、时长为负）。文本为空的单元由它去掉。
+func charRomaDetailed(line krc.Line, runeToks []int, tokenRoma []string, romaText string) player.LyricTextDetailed {
+	var textRunes []rune
+	for _, r := range line.Text {
+		if nr, ok := normLyricRune(r); ok {
+			textRunes = append(textRunes, nr)
+		}
+	}
+	words := line.Detailed.Words
+	runeWord := make([]int, 0, len(textRunes))
+	for wi, w := range words {
+		for _, r := range w.Text {
+			nr, ok := normLyricRune(r)
+			if !ok {
+				continue
+			}
+			if len(runeWord) >= len(textRunes) || textRunes[len(runeWord)] != nr {
+				return player.LyricTextDetailed{}
+			}
+			runeWord = append(runeWord, wi)
+		}
+	}
+	// 两个个数都须等于行文本的 rune 个数。各个字的 rune 可能比行文本的少，上面那道判断只拦得住多出来
+	// 的与对不上的。runeToks 的个数由 alignCharLevel 的接受判据保证（整行每个 rune 都对齐上），这里
+	// 再核对一遍，下面按下标取用时不依赖那个保证。
+	if len(runeWord) != len(textRunes) || len(runeToks) != len(textRunes) {
+		return player.LyricTextDetailed{}
+	}
+
+	groups := groupRomaUnits(runeWord, runeToks)
+	units := make([]player.LyricTextDetailedWord, 0, len(groups))
+	for _, g := range groups {
+		first, last := words[g.firstWord], words[g.lastWord]
+		var text strings.Builder
+		for _, tok := range g.toks {
+			text.WriteString(tokenRoma[tok])
+		}
+		units = append(units, player.LyricTextDetailedWord{
+			Timestamp: first.Timestamp,
+			PlayTime:  first.PlayTime,
+			// 先减后加：只占一个字的组得到的就是那个字的时长，不带浮点舍入。
+			Duration: (last.Timestamp - first.Timestamp) + last.Duration,
+			Text:     text.String(),
+		})
+	}
+	return player.BuildRomaDetailed(player.LyricTextDetailed{
+		Timestamp: line.Detailed.Timestamp,
+		PlayTime:  line.Detailed.PlayTime,
+		Duration:  line.Detailed.Duration,
+		Words:     units,
+	}, romaText)
 }
 
 // lcsPairs 求 x、y 两 rune 序列的最长公共子序列，返回配对下标（按 x、y 升序、彼此保序）。

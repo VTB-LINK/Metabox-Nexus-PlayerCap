@@ -17,8 +17,8 @@ import (
 	"time"
 )
 
-// realPlayers 是出货构建里注册的六个播放器。本包的测试二进制不 import 播放器包，注册表里没有它们。
-var realPlayers = []string{"wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic", "applemusic"}
+// realPlayers 是出货构建里注册的七个播放器。本包的测试二进制不 import 播放器包，注册表里没有它们。
+var realPlayers = []string{"wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic", "applemusic", "spotify"}
 
 // useRealPlayers 把 realPlayers 登记进注册表（已登记的不重复登记）。注册表只增不减，同包其它测试不依赖
 // 它为空。

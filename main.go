@@ -15,6 +15,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
 	"Metabox-Nexus-PlayerCap/player/qqmusic"
 	"Metabox-Nexus-PlayerCap/player/sodamusic"
+	"Metabox-Nexus-PlayerCap/player/spotify"
 	"Metabox-Nexus-PlayerCap/player/wesing"
 	"Metabox-Nexus-PlayerCap/server"
 	"Metabox-Nexus-PlayerCap/taskbar"
@@ -85,7 +86,7 @@ func main() {
 	cfg := config.Load(Version)
 
 	// 播放器注册表（新增播放器只需在此追加）
-	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName, applemusic.PlayerName}
+	playerNames := []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName, applemusic.PlayerName, spotify.PlayerName}
 
 	// 网易云特效最小化策略（config 静态读取）。Win11 下 park 屏外保活失效（DWM 停止合成不可见窗口），
 	// 故无论 config 配什么，Win11 一律强制 fadeout。
@@ -221,6 +222,7 @@ func main() {
 	kp := kugou.New(cfg.GetPlayerOffset("kugou"), cfg.GetPlayerPoll("kugou"))
 	sp := sodamusic.New(cfg.GetPlayerOffset("sodamusic"), cfg.GetPlayerPoll("sodamusic"))
 	ap := applemusic.New(cfg.GetPlayerOffset("applemusic"), cfg.GetPlayerPoll("applemusic"))
+	spfy := spotify.New(cfg.GetPlayerOffset("spotify"), cfg.GetPlayerPoll("spotify"))
 
 	// 创建路由器
 	router := server.NewRouter(&cfg, srv, playerNames)
@@ -230,6 +232,7 @@ func main() {
 	router.Register(kp)
 	router.Register(sp)
 	router.Register(ap)
+	router.Register(spfy)
 
 	// 启动播放器 goroutines
 	//
@@ -242,6 +245,7 @@ func main() {
 	go func() { defer telemetry.Guard(); kp.Start() }()
 	go func() { defer telemetry.Guard(); sp.Start() }()
 	go func() { defer telemetry.Guard(); ap.Start() }()
+	go func() { defer telemetry.Guard(); spfy.Start() }()
 
 	// 启动时若发现上次崩溃遗留的「网易云屏外泊车」状态，立即还原窗口
 	park.RestoreOrphaned()
@@ -301,6 +305,7 @@ var playerPollIntervals = map[string]func(pollMs int) time.Duration{
 	qqmusic.PlayerName:    qqmusic.EffectivePollInterval,
 	sodamusic.PlayerName:  sodamusic.EffectivePollInterval,
 	applemusic.PlayerName: applemusic.EffectivePollInterval,
+	spotify.PlayerName:    spotify.EffectivePollInterval,
 }
 
 // effectiveEffectStrategy 返回网易云特效最小化策略的生效值：Windows 11 上 park 屏外保活失效，一律降为

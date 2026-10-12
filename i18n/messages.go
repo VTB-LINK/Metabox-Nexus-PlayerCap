@@ -85,6 +85,9 @@ var chinese = map[string]string{
 	"Apple Music has exited":                                 "Apple Music 已退出",
 	"Apple Music not playing":                                "Apple Music 未在播放",
 	"Cannot read the Apple Music process (Apple Music may be running as administrator)": "无权读取 Apple Music 进程（Apple Music 可能以管理员身份运行）",
+	"Spotify not running or not connected":                                              "Spotify 未启动或未连上",
+	"Spotify CDP disconnected":                                                          "Spotify CDP 已断开",
+	"Spotify version unsupported (remote debugging unavailable)":                        "Spotify 版本不支持（无法打开远程调试端口）",
 
 	// —— P4c enum：被当数据注入日志的值（在源头经 i18n.T）——
 	"yes":    "是",  // detailedFlag：本批歌词含逐字

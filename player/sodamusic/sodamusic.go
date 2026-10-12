@@ -524,10 +524,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 				line := currentLyrics[trueIdx]
 				// interpSec 进 Position/算 Progress；play_time 由 BuildLyricUpdate 按歌词时间轴算。
 				// words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传。
-				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-					trueIdx, line.Time, line.Text, line.SubText, line.RomaText, line.Detailed,
-					offsetSec, interpSec, currentDurationSec,
-				))
+				p.Emit(player.EventLyricUpdate, lineUpdate(trueIdx, line, offsetSec, interpSec, currentDurationSec))
 			}
 		}
 
@@ -638,8 +635,9 @@ func isProgressValid(progressSec, durationSec float32) bool {
 }
 
 // toLyricLines 把解析结果映射成对外 LyricLine（subText/romaText/detailed 透传给 BuildLyricLine）。
-// RomaText 是内嵌 KRC type=0 音译轨（平台下发则由 ParsePlainKRC 填、无则空），与 SubText（独立
-// tlyric 翻译）是两条独立轨、互不覆盖。
+// RomaText 是内嵌 KRC type=0 音译轨（平台下发则由 ParsePlainKRC 填、无则空）或事后从酷狗借来的
+// （见 roma.go），与 SubText（独立 tlyric 翻译）是两条独立轨、互不覆盖。逐字音译（RomaDetailed）
+// 进 roma_text_detailed：BuildLyricLine 不填它，这里赋值。
 func toLyricLines(lines []krc.Line, offsetSec float32) []player.LyricLine {
 	if len(lines) == 0 {
 		return []player.LyricLine{}
@@ -647,8 +645,18 @@ func toLyricLines(lines []krc.Line, offsetSec float32) []player.LyricLine {
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
 		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec)
+		out[i].RomaTextDetailed = l.RomaDetailed
 	}
 	return out
+}
+
+// lineUpdate 把一行歌词映射成 lyric_update 的载荷，字段口径同 toLyricLines：两者取自同一份
+// currentLyrics，同一行的逐字音译在 all_lyrics 与 lyric_update 里相同。借来的音译补发时主循环先换掉
+// currentLyrics、再重发 all_lyrics，其后的 lyric_update 取的就是带逐字音译的那一份。
+func lineUpdate(index int, l krc.Line, offsetSec, playPos, duration float32) *player.LyricUpdate {
+	u := player.BuildLyricUpdate(index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec, playPos, duration)
+	u.RomaTextDetailed = l.RomaDetailed
+	return u
 }
 
 // applyDetailedOffset 把 offset 同时作用到行级与逐字的 play_time。
@@ -656,15 +664,20 @@ func toLyricLines(lines []krc.Line, offsetSec float32) []player.LyricLine {
 // **必须在解析之后、存进 currentLyrics 之前套一次**：BuildLyricLine/BuildLyricUpdate 只算行级
 // play_time，TextDetailed 原样透传（对照 kugou.go 的同名函数）。漏了这步逐字高亮会整体偏一个
 // offset 而行级却对，症状极像"前端没对齐"。只对新解析的歌词套一次，别重复套。
+//
+// 逐字音译（RomaDetailed）一并套：平台的 KRC 若内嵌 type=0 轨，krc 解析出的逐字音译同样没填 PlayTime。
+// 从酷狗借来的那一份不经这里——它构造时直接取汽水主歌词各个字已套过 offset 的 PlayTime（roma.go 的
+// charRomaDetailed），两条路得到的值相同。
 func applyDetailedOffset(lines []krc.Line, offsetSec float32) {
 	for i := range lines {
-		d := &lines[i].Detailed
-		if len(d.Words) == 0 {
-			continue
-		}
-		d.PlayTime = player.AdjustLyricPlayTime(d.Timestamp, offsetSec)
-		for j := range d.Words {
-			d.Words[j].PlayTime = player.AdjustLyricPlayTime(d.Words[j].Timestamp, offsetSec)
+		for _, d := range []*player.LyricTextDetailed{&lines[i].Detailed, &lines[i].RomaDetailed} {
+			if len(d.Words) == 0 {
+				continue
+			}
+			d.PlayTime = player.AdjustLyricPlayTime(d.Timestamp, offsetSec)
+			for j := range d.Words {
+				d.Words[j].PlayTime = player.AdjustLyricPlayTime(d.Words[j].Timestamp, offsetSec)
+			}
 		}
 	}
 }

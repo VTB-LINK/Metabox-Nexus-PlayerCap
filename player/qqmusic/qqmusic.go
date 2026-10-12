@@ -459,11 +459,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			line := currentLyrics[trueIdx]
 
 			// progressSec 是实时插值位置，进 Position、并据它算 Progress；play_time 由 BuildLyricUpdate 按
-			// 歌词时间轴算。逐字（TextDetailed）的 offset 已在 applyDetailedOffset 里套过。
-			p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-				trueIdx, line.Time, line.Text, line.SubText, line.RomaText, line.Detailed,
-				offsetSec, progressSec, currentDurationSec,
-			))
+			// 歌词时间轴算。逐字（TextDetailed）与逐字音译（RomaTextDetailed）的 offset 已在
+			// applyDetailedOffset 里套过。
+			p.Emit(player.EventLyricUpdate, lineUpdate(trueIdx, line, offsetSec, progressSec, currentDurationSec))
 		}
 
 		// 位置采样（见 BaseEmitter.EmitPositionSample）：已认领歌曲且未判暂停时按固定间隔报一次，校准
@@ -529,12 +527,22 @@ func (g *midWaitGate) wait(songName string, now time.Time, window time.Duration)
 func (g *midWaitGate) reset() { g.name = "" }
 
 // toLyricLines converts internal lyricLine to player.LyricLine
+// 逐字音译（RomaDetailed）进 roma_text_detailed：BuildLyricLine 不填它，这里赋值。
 func toLyricLines(lines []lyricLine, offsetSec float32) []player.LyricLine {
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
 		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec)
+		out[i].RomaTextDetailed = l.RomaDetailed
 	}
 	return out
+}
+
+// lineUpdate 把一行歌词映射成 lyric_update 的载荷，字段口径同 toLyricLines：两者取自同一份
+// currentLyrics，同一行的逐字音译在 all_lyrics 与 lyric_update 里相同。
+func lineUpdate(index int, l lyricLine, offsetSec, playPos, duration float32) *player.LyricUpdate {
+	u := player.BuildLyricUpdate(index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec, playPos, duration)
+	u.RomaTextDetailed = l.RomaDetailed
+	return u
 }
 
 // applyDetailedOffset 把 offset 同时作用到行级与逐字的 play_time。
@@ -545,13 +553,15 @@ func toLyricLines(lines []lyricLine, offsetSec float32) []player.LyricLine {
 // 不在这儿套就没有第二次机会。
 func applyDetailedOffset(lines []lyricLine, offsetSec float32) {
 	for i := range lines {
-		d := &lines[i].Detailed
-		if len(d.Words) == 0 {
-			continue
-		}
-		d.PlayTime = player.AdjustLyricPlayTime(d.Timestamp, offsetSec)
-		for j := range d.Words {
-			d.Words[j].PlayTime = player.AdjustLyricPlayTime(d.Words[j].Timestamp, offsetSec)
+		// 主歌词的逐字与音译的逐字各是一条时间轴（解析时都没填 PlayTime），都要套。
+		for _, d := range []*player.LyricTextDetailed{&lines[i].Detailed, &lines[i].RomaDetailed} {
+			if len(d.Words) == 0 {
+				continue
+			}
+			d.PlayTime = player.AdjustLyricPlayTime(d.Timestamp, offsetSec)
+			for j := range d.Words {
+				d.Words[j].PlayTime = player.AdjustLyricPlayTime(d.Words[j].Timestamp, offsetSec)
+			}
 		}
 	}
 }

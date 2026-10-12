@@ -20,4 +20,5 @@
 *.syso binary
 *.ico  binary
 *.png  binary
+*.jpeg binary
 *.exe  binary

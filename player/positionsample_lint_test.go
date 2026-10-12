@@ -40,9 +40,9 @@ func TestPlayersEmitPositionSample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("扫描源码失败: %v", err)
 	}
-	// 零命中自检：一个播放器包都认不出来时，下面的断言恒真。现有六家。
-	if players < 6 {
-		t.Fatalf("只认出 %d 个调用 NewBaseEmitter 的包，应不少于 6 个——门禁的判据失效了", players)
+	// 零命中自检：一个播放器包都认不出来时，下面的断言恒真。现有七家。
+	if players < 7 {
+		t.Fatalf("只认出 %d 个调用 NewBaseEmitter 的包，应不少于 7 个——门禁的判据失效了", players)
 	}
 	if len(missing) > 0 {
 		t.Errorf("以下播放器包没有调用 EmitPositionSample：\n  %s\n\n"+

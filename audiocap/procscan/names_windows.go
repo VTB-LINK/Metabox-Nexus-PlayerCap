@@ -11,6 +11,8 @@ import (
 	"Metabox-Nexus-PlayerCap/player/qqmusic"
 	"Metabox-Nexus-PlayerCap/player/sodamusic"
 	sodawd "Metabox-Nexus-PlayerCap/player/sodamusic/watchdog"
+	"Metabox-Nexus-PlayerCap/player/spotify"
+	spotifywd "Metabox-Nexus-PlayerCap/player/spotify/watchdog"
 	"Metabox-Nexus-PlayerCap/player/wesing"
 )
 
@@ -25,7 +27,8 @@ var PlayerProcess = map[string]string{
 	kugou.PlayerName:      kugouwd.TargetProcessName,   // "kugou" → "KuGou.exe"
 	sodamusic.PlayerName:  sodawd.TargetProcessName,    // "sodamusic" → "SodaMusic.exe"
 	applemusic.PlayerName: applemusic.AudioProcessName, // "applemusic" → "AMPLibraryAgent.exe"：出声的不是 AppleMusic.exe，见该常量
+	spotify.PlayerName:    spotifywd.TargetProcessName, // "spotify" → "Spotify.exe"：播放由主进程（CEF 浏览器进程）自己走 WASAPI，子进程都在它的进程树里
 }
 
 // Players 是稳定顺序的播放器名列表（供 manager 遍历门控）。
-var Players = []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName, applemusic.PlayerName}
+var Players = []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName, applemusic.PlayerName, spotify.PlayerName}

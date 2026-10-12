@@ -99,7 +99,7 @@ CharElement +0x04      = float 字起始秒（绝对）   ← 逐字
 CharElement +0x08      = float 字时长秒           ← 逐字
 ```
 
-**LyricHost 里不止一条歌词轨**（`roma.go` 头注释，2026-10-09 真机）：`FindLyricHost` 返回的子结构是轨 0（主歌词），其后每隔 `0x70` 是下一条，虚表相同；每条轨 `+0x04` 是一个 CString，内容是这条轨的歌词文件路径（主歌词 `…\<mid>.qrc`，音译 `…\<mid>_Roma.qrc`），`+0x48`/`+0x4C` 是行向量的 begin / end。音译轨与主歌词逐行对应（行数相同、行起始时间逐位相等），纯英文行有的是单独一个空格、有的照抄原文；这条轨在不在与界面上的音译开关无关（关掉后照样在，同日实测）。`LoadRoma` 按路径认轨、按行号 + 行起始时间逐行配到 `RomaText`，任何一步对不上都只是这一行没有音译 ✅ `roma_test.go`（实测）。**认轨要核对它是不是这首歌的**：路径以 `_Roma.qrc` 结尾还不够，去掉 `_Roma` 后得与主歌词轨的路径相同。音译轨会是上一首留下的（§7.1 的又一例）——2026-10-09 真机，从带音译的《红日》切到不带音译的《爱丫爱丫》，主歌词轨换成了新歌，音译轨原封不动留着《红日》的路径与 113 行；只看后缀会认下它，行号相同、起始时间也相同的行（不少歌的第 0 行都从 0 秒起）就配上了上一首的音译，随 `all_lyrics` 留到整首结束。一行里有单元读不出（元素指针、文本指针、文本本身）就整行不配，不把其余的拼成缺字的音译——歌词每首只加载一次，配上了不会重读。宣告前的等待（`wesing.go` 的 `waitRoma`，最多 1 秒）只留给「这首歌的音译轨登记了、行向量却还是空的」：它卡在 `status_update` / `song_info_update` / `all_lyrics` 之前，同一次真机上旧实现见音译轨在、配上 0 行就等，白等满了 1 秒；没有音译轨、是别的歌的、有行而一行没配上（每行只有一个空格的纯英文歌）都立刻返回 ✅ `romawait_test.go`（实测）。「主歌词先解析出来、音译稍后」这种时序本身没有在真机上见过。音译轨自己的字级单元连同时间进 `RomaDetailed` → 对外的 `roma_text_detailed`（形状同 `text_detailed`，其余五家恒为 `{}`）：它与主歌词的字级单元**不一一对应**（「僕」一个单元，音译是 `bo`、`ku` 两个；主歌词带尾空格的字，音译里空格单独占一个单元、时长对半分），所以是独立的一条数组，不能挂到主歌词的每个字上；时间轴不合法的行只留行级的 `RomaText`。这个字段在 `player.LyricLine` / `player.LyricUpdate` 上，`BuildLyricLine` / `BuildLyricUpdate` 不填，由播放器构造后赋值；服务端缓存的手复制（`UpdatePlayerState`）与内容哈希（`dedup.go`）都要带上它 ✅ `server/romatext_cache_test.go`、`server/dedup_test.go`、`player/eventjson_test.go`（实测）。**两处别再踩**：① 向量是 `{begin, end, 容量末尾}`，`+0x50` 是容量末尾——`LoadLyrics` 一直把它当 end 读（真机 69 行读成 94 项），多出来的堆残留全靠后面的合法性判据挡掉（issue #46 就是这么来的），`LoadRoma` 用的是 `+0x4C`；② `LyricEntry` 只有 `0x20` 字节，`+0x30` 已经是相邻的下一个 `LyricEntry`，不是「第二条字符向量」。CString 是 ATL 式的：指针指向字符，字符数在指针前 12 字节。轨 1 在实测的三首歌上都是空的，是不是翻译轨没有验证过。
+**LyricHost 里不止一条歌词轨**（`roma.go` 头注释，2026-10-09 真机）：`FindLyricHost` 返回的子结构是轨 0（主歌词），其后每隔 `0x70` 是下一条，虚表相同；每条轨 `+0x04` 是一个 CString，内容是这条轨的歌词文件路径（主歌词 `…\<mid>.qrc`，音译 `…\<mid>_Roma.qrc`），`+0x48`/`+0x4C` 是行向量的 begin / end。音译轨与主歌词逐行对应（行数相同、行起始时间逐位相等），纯英文行有的是单独一个空格、有的照抄原文；这条轨在不在与界面上的音译开关无关（关掉后照样在，同日实测）。`LoadRoma` 按路径认轨、按行号 + 行起始时间逐行配到 `RomaText`，任何一步对不上都只是这一行没有音译 ✅ `roma_test.go`（实测）。**认轨要核对它是不是这首歌的**：路径以 `_Roma.qrc` 结尾还不够，去掉 `_Roma` 后得与主歌词轨的路径相同。音译轨会是上一首留下的（§7.1 的又一例）——2026-10-09 真机，从带音译的《红日》切到不带音译的《爱丫爱丫》，主歌词轨换成了新歌，音译轨原封不动留着《红日》的路径与 113 行；只看后缀会认下它，行号相同、起始时间也相同的行（不少歌的第 0 行都从 0 秒起）就配上了上一首的音译，随 `all_lyrics` 留到整首结束。一行里有单元读不出（元素指针、文本指针、文本本身）就整行不配，不把其余的拼成缺字的音译——歌词每首只加载一次，配上了不会重读。宣告前的等待（`wesing.go` 的 `waitRoma`，最多 1 秒）只留给「这首歌的音译轨登记了、行向量却还是空的」：它卡在 `status_update` / `song_info_update` / `all_lyrics` 之前，同一次真机上旧实现见音译轨在、配上 0 行就等，白等满了 1 秒；没有音译轨、是别的歌的、有行而一行没配上（每行只有一个空格的纯英文歌）都立刻返回 ✅ `romawait_test.go`（实测）。「主歌词先解析出来、音译稍后」这种时序本身没有在真机上见过。音译轨自己的字级单元连同时间进 `RomaDetailed` → 对外的 `roma_text_detailed`（形状同 `text_detailed`；qqmusic、kugou、sodamusic、cloudmusicv3 的逐字音译另有来源，共同的约定在 `player.BuildRomaDetailed`，见 §4；applemusic 恒为 `{}`）：它与主歌词的字级单元**不一一对应**（「僕」一个单元，音译是 `bo`、`ku` 两个；主歌词带尾空格的字，音译里空格单独占一个单元、时长对半分），所以是独立的一条数组，不能挂到主歌词的每个字上；时间轴不合法的行只留行级的 `RomaText`。这个字段在 `player.LyricLine` / `player.LyricUpdate` 上，`BuildLyricLine` / `BuildLyricUpdate` 不填，由播放器构造后赋值；服务端缓存的手复制（`UpdatePlayerState`）与内容哈希（`dedup.go`）都要带上它 ✅ `server/romatext_cache_test.go`、`server/dedup_test.go`、`player/eventjson_test.go`（实测）。**两处别再踩**：① 向量是 `{begin, end, 容量末尾}`，`+0x50` 是容量末尾——`LoadLyrics` 一直把它当 end 读（真机 69 行读成 94 项），多出来的堆残留全靠后面的合法性判据挡掉（issue #46 就是这么来的），`LoadRoma` 用的是 `+0x4C`；② `LyricEntry` 只有 `0x20` 字节，`+0x30` 已经是相邻的下一个 `LyricEntry`，不是「第二条字符向量」。CString 是 ATL 式的：指针指向字符，字符数在指针前 12 字节。轨 1 在实测的三首歌上都是空的，是不是翻译轨没有验证过。
 
 `+0x04`/`+0x08` 就是 wesing 逐字的来源（见 §6.2）。**2026-07-18 实测跨进程重启一致**：基址随 ASLR 变（无所谓，链的第 1、5 步靠模块枚举 + AOB 扫堆重新定位），但上面所有**结构体内偏移不变**。合法性判据：首字起始 ≈ 行起始、行内 `+0x04` 单调不减、`+0x08` ∈ [0,100)——任一破即整行退回行级（`reader.go` 的 `wordsOK`），不推半截错位的逐字。垃圾防护复用行级同一个 `IsPlausiblePlayTime`（接受式，拒 NaN/Inf，见 §3.7）。
 
@@ -249,7 +249,7 @@ Apple Music for Windows（`AppleMusic.exe`，微软商店 MSIX）是 WinUI3 原�
 
 **4. 歌名 / 歌手 / 专辑 / 封面：整条解析属性存储。** Apple Music 交给 SMTC 的是 Windows 序列化属性存储（MS-PROPSTORE），链形态固定（`propstore.go` 头注释）：`64440492` 媒体类别（可缺）> `F29F85E0` 标题（#2）+ 封面（#27，VT_STREAM）> `56A3372E`「歌手 — 专辑」> `6FE41453` 应用名「Apple Music」> …，以 StorageSize=0 收尾。只认同一条链里同时有 System.Music 段与应用名段、且完整收尾的；`System.Music.Artist` 按第一个 ` — `（U+2014）拆。**为什么不用锚点 + 众数**：`"1SPS"`+Title 锚点在同进程还命中 Windows 设置搜索的属性存储（审查方真机 18 个候选里 17 个是「聚焦;Windows 聚焦;图像;…」这类关键词串）。✅ `nowplaying_test.go`（只去掉应用名段判据、只去掉 Music 段判据、或去掉收尾判据，均红，实测）。
 
-封面流是 `[流名字节数][流名 UTF-16][补齐到 4 字节][长度][图片字节]`；只收首尾标记对得上的 JPEG / PNG、不超过 5MB，拷出扫描缓冲再用（缓冲在下一块内存时被覆盖）。随 `song_info_update` 的 `cover_base64`（data URI）发出，`cover` 恒为空串。✅ `mem/cover_test.go`（去掉补齐、直接引用缓冲、去掉结尾校验或大小上限、去掉长度检查，均红，实测）。`server/dedup.go` 的 song_info 哈希因此要含 `cover_base64` 的**内容**：没有 URL，只看「有无」会把补发的封面判成重复 ✅ `TestSongInfoHashIncludesCoverContent`（实测）。
+封面流是 `[流名字节数][流名 UTF-16][补齐到 4 字节][长度][图片字节]`；只收首尾标记对得上的 JPEG / PNG、不超过 5MB，拷出扫描缓冲再用（缓冲在下一块内存时被覆盖）✅ `mem/cover_test.go`（去掉补齐、直接引用缓冲、去掉结尾校验或大小上限、去掉长度检查，均红，实测）。`setCover` 经 `player.CoverDataURI` 规范为 800×800 后随 `song_info_update` 的 `cover_base64`（data URI）发出，`cover` 恒为空串；缩放在轮询 goroutine 里同步做，换封面的那一轮多出它的耗时（本机 1200² 的 JPEG 约 75ms），其间不推歌词行、当轮末尾按当前时钟补推；`coverHash` 与 `staleCover` 按原始字节 ✅ `TestSessionCoverNormalizedTo800`（`setCover` 改回直接拼 data URI、哈希改按规范化之后的 data URI 算，均红，实测）。`server/dedup.go` 的 song_info 哈希因此要含 `cover_base64` 的**内容**：没有 URL，只看「有无」会把补发的封面判成重复 ✅ `TestSongInfoHashIncludesCoverContent`（实测）。
 
 多份存储时 `pickNowPlaying` 按（标题, 歌手, 专辑）归并，依次比：不是上一首期间就在的完整副本数（`prevChains` 记着上一首期间见过的地址与内容；就地改写的内容变了，同样算新的）、带封面的完整副本数、完整副本数、歌手非空（加载占位的歌手是空的）、不是上一首期间就在的副本数、票数、是否当前曲目、字典序。完整副本排在票数前是真机逼出来的：残留着早先一首的 2 份非完整副本、当前歌只有 1 份完整副本时，按票数挑三次换歌三次宣告错。带封面那一档也是（2026-10-09）：《过火》播放中内存里另有一份《crossing field》不带封面的完整副本，服务这时重启——确认位置结构之前的全扫两份都算新的，确认之后两份又都是上一首期间就在的，都是各一份完整副本、各一票——落到字典序，宣告成 crossing field；连续运行时同一首从头再放、加载超时清屏后重新宣告同理。它不排第一位：换歌的头一瞬间可能只有新歌不带封面的副本是新的，上一首带封面的还没被改写，这时该取新的。✅ `TestPickNowPlaying`（每一档各有一例，删掉即红，实测）、`TestPickNowPlayingCoveredFull`、`TestSessionCoveredStoreAnnouncedOverCoverlessResidue`（删掉带封面那一档、挪到第一位、写成替换完整副本数一档、计数不要求完整、判新只看地址，各有用例变红，实测）。换歌 `confirmAt`（1.5s）后再全扫一次核对标题；`titleConfirmWindow`（3s）内读到另一个标题按「首扫读到的是上一首」纠正并把这期间记到旧标题名下的歌词文档转给新标题，3s 之外则是时长相同的下一首、按新歌重来 ✅ `TestSessionCorrectedTitleKeepsLyrics`、`TestSessionSameDurationChangeDetectedByStore`（实测）。
 
@@ -336,6 +336,78 @@ Apple Music for Windows（`AppleMusic.exe`，微软商店 MSIX）是 WinUI3 原�
 **轮询间隔配大后校准自动变弱**，不设上限也不报错：250ms 时落后量在 `L` ± 0.25s；1000ms 时 `u` 约 1s，只纠正落在区间之外的偏差；2000ms 时每拍秒数加 2，没有跳秒，不校准，同改动前。✅ `TestReplayPollIntervals`（实测）
 
 **前提与实现后的回归**（2026-10-09，数据在设计 §10.2 末与 issue #77 的评论）。本方案的前提是跳秒时刻稳：前台与窗口最小化时读数都稳定在一档（±1ms）或 200 / 300ms 两档之间，最长 140 秒；窗口被遮挡、泊在屏外时没有量过（`watchdog.LaunchFlags` 关了后台定时器节流与渲染降级，按理不变，推断）。前提不成立时限频只保证不刷事件，不保证位置准。`Extract` 的往返耗时常态 0～2ms，换歌那一拍 39～156ms；页面卡顿时见过一次约 1.3s，其间 DOM 停在 0。拖动之后 DOM 有时 0.1s 内就跳秒、有时停住约 1 秒（后者时钟走到整秒会误报一次回跳，其后的跳秒校回）。单曲循环没有测过。`L`、通知门槛与限频间隔的取值来自实现前的两次实测，回归里未见需要调整；离线测试只守逻辑。网易云页面里有更细的进度来源（原生回调 `audioplayer.onPlayProgress`），取用它要往页面里挂东西（§0 第 1 条），另见 issue #82。
+
+---
+
+### 7.10 spotify：CEF 远程调试端口 + DOM 取数（`player/spotify/`）
+
+Spotify 桌面版（`Spotify.exe`）是 CEF 应用：它有个 JSON 端点 `/json/version`、有个 CDP WS 端点，`/json/list` 里那个 `type=page`、URL 含 `xpui.app.spotify.com` 的目标就是 xpui 播放页面（`player/spotify/cdp/client.go` 的 `pageURLMarker`），页面上有完整的 DOM。取数形态因此是「CDP + DOM」：**不注入任何 JS、不打补丁、不写别人的内存**，只在页面上跑 `Runtime.evaluate` 读现成的元素与事件。全部机制实测于 **Spotify 1.3.4.258 / libcef 151.3.18（2026-10）**。
+
+**端口 9223，且三个数都不能撞。** `--remote-debugging-port=9223`（`watchdog.DebugFlag`；9223 同时写在 `watchdog.DebugPort` 与 `cdp.debugPort` 两处，改一处就是两条会话对不上，与 cloudmusic 把 9222 写两处同形）。选它是因为 **9222 是网易云、12233 是酷狗、9229 是汽水**：两个调试端口撞在一起时，先起来的那个占住端口、后一个的 watchdog 会以为「端口没起来」而**反复重启自己的播放器**。
+
+**拿端口只有一条路：带 flag 重启。** flag 必须是**启动时**的命令行参数——实测在已运行的实例上再执行一次 `Spotify.exe --remote-debugging-port=9222`，单实例逻辑只把窗口激活，端口不开（进程数不变、无监听端口）。所以 `EnsureDebugMode` 与 cloudmusic/watchdog 同形：`taskkill /F /IM Spotify.exe` → 等进程退干净（`exitWait` 8s）→ 用 exe 路径带 `LaunchFlags` 拉起 → 轮询 `http://127.0.0.1:9223/json/version` 直到 200（`portWait` 25s，实测冷启动 3~6s）。
+
+**防后台节流参数与 cloudmusic 同款，四个都要带。** `LaunchFlags` = `DebugFlag` + `--disable-backgrounding-occluded-windows` + `--disable-renderer-backgrounding` + `--disable-background-timer-throttling` + `--disable-features=CalculateNativeWinOcclusion`。实测（Spotify 1.3.4.258）：只带调试口时，窗口最小化满 6 分钟后进度读数降到约每分钟一次；被最大化窗口盖住几秒内降到约每 2 秒一次、6 分钟时约每分钟一次，歌词行因此错过。带上这四个参数后，两种场景 6 分钟内都保持每秒更新。四个参数各自的作用没有拆分验证，故整组都带。**判据：主进程缺调试口或缺保活标记 `--disable-backgrounding-occluded-windows`（`keepaliveMarker`）都要重启，端口已通也不例外**——只带调试口的实例（例如由只补过调试口的自启项拉起的）端口是通的，按「端口通即返回」会逃过修复，一直在后台被节流。两者俱备时端口通返回 nil、未起返回 `ErrPortNotReady`。
+
+**一次服务运行内只为补参数杀一次。** 重启后新实例的主进程命令行若仍缺参数（被启动器改写等），`decideRestart` 在「本次运行已重启过」且实例仍带调试口或端口已通时判为不再重启，只 Warn 一次、按端口通与否返回 nil 或 `ErrPortNotReady`；否则每一轮都会再杀一次用户的 Spotify。缺调试口且端口不通的实例（例如用户自己从开始菜单重开）对我们没有用处，仍照常重启。cloudmusic/watchdog 没有这道保护：它只看保活标记，缺了每轮都杀。✅ `player/spotify/watchdog/watchdog_test.go` 经包级函数变量（`scanFn` / `portUpFn` / `supportsFlagFn` / `killFn` / `startFn`）离线驱动 `EnsureDebugMode`，钉住各判定与「版本闸不过绝不杀」「重启后仍缺只杀一次」。
+
+**杀之前先验版本（issue #40 的教训）。** `SupportsDebugFlag(exePath)` 打开 `Spotify.dll`、**分块流式**搜 ASCII 串 `remote-debugging-port`（不把 43MB 的 DLL 整个读进内存，块间保留 `len(needle)-1` 字节重叠以免跨块漏命中）。判据是**字节**而不是版本号：这是 Spotify 私有的隐藏 flag，名字出现在它自己的 flag 描述串表里（实测串形如 `…remote-app-config\0user-agent-product\0remote-debugging-port\0show-console…`，从 `Spotify.dll` 的 flag 描述串表里读到）。读不到、或文件不可读 → 返回 `ErrVersionUnsupported`，**不动用户的进程**（`EnsureDebugMode` 里这道闸在 `taskkill` 之前，`SupportsDebugFlag` 出错也不动它）。上层把它当近乎永久的状态：只 Warn 一次、报 `standby` + `version_unsupported`、30s 重探一次（用户升级后自动恢复、不必重启服务）。放晚一步的代价是「杀了主播的播放器，换来一个永远连不上的端口」。
+
+**重启是用户可见但非破坏性的动作**：`taskkill` 后带 flag 拉起，Spotify 会自己恢复曲目与位置（本次实测：回到同一首歌、同一位置，处于暂停态）。故与 cloudmusic 的重启同级，打 Warn 留痕，并写明原因：缺调试口时为 `Spotify.exe is running without --remote-debugging-port=9223; restarting it with the debug and anti-throttling flags (playback resumes automatically)`，只缺防节流参数时为 `Spotify.exe is running without the anti-throttling flags; restarting it once with them …`。
+
+**注册表自启项：只在值已存在时补参数。** `PatchRegistryAutoStart` 读 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `Spotify` 值——**值不存在（用户没把 Spotify 设为自启）就什么都不做**：绝不替用户创建一条自启项。改写由纯函数 `patchAutostartValue` 完成：按空白分隔的完整参数项判断 `LaunchFlags` 缺哪几项，只在末尾追加或就地并入，原值其余字节不动（exe 路径带引号、可能含空格）；全部已有则不写、只记一条 Info。`--disable-features` 特殊处理：Chromium 的同名开关以最后一个为准，值里已有 `--disable-features=X,Y` 时把 `CalculateNativeWinOcclusion` 并入最后一个的列表，而不是再追加一个把原列表覆盖掉。✅ `watchdog_test.go` 用 HKCU 下的临时键（测试结束删除）测薄的注册表读写层，不碰真实 Run 键。改的只有这一个值，不打补丁、不写别人的 DLL（Spotify 的 `libcef.dll` 旁边有 `.sig` 签名文件，动它有被完整性校验拒绝的风险，本包不碰，§0.1）。
+
+**主进程 = 命令行里不含 `--type=` 的那个 `Spotify.exe`**（`scanProcesses`）。CEF 的 GPU/渲染/网络/存储/崩溃回收子进程都带 `--type=`。判「已经带着我们的参数在跑」只看主进程，且按空白分隔的完整参数项比较（`hasToken`）：**调试口必须是整个 `--remote-debugging-port=9223` 而不是只匹配 flag 名**——Spotify 也可能被别的工具（或我们上一次探测）以 `=9222` 启动，只匹配名字会把它判成「已带 flag」而转去等一个永远不会开的 9223，于是永远不修复；子串匹配同样会把 `=92230` 误判为已带。
+
+#### 7.10.1 位置来自 `--progress-bar-transform`，不是 `<input value>`
+
+`Snapshot()` 一次 `Runtime.evaluate` 拿回标题、歌手、封面、时长、位置、播放态（`cdp/snapshotJS`）：
+
+- **标题 / 歌手**：`[data-testid="context-item-info-title"]` 的 `textContent`、`[data-testid="context-item-info-artist"]` 的全部文本（多个歌手用 ` / ` 连起来）。
+- **封面**：`[data-testid="cover-art-image"]` 的 `currentSrc || src`，形如 `https://i.scdn.co/image/` + 档位码 + 图片 hash，页面给的是 300×300 的 DEFAULT 档（档位码 `ab67616d00001e02`）。对外的 `cover` 原样用它；`cover_base64` 由 `largeCoverURL` 把档位码换成 LARGE 档 `ab67616d0000b273`（640×640）去下载，取不到再用原 URL 下载（`runCoverFetch`）。依据是项目负责人给的 album 元数据口径（`/metadata/4/album/<gid>` 的 `cover_group.image` 恰好三条，size 为 SMALL / DEFAULT / LARGE，SMALL 的档位码是 `ab67616d00004851`）与真机实测（2026-10，10 张不同专辑三档全部 200，尺寸依次为 64 / 300 / 640，同一 hash 换档位码 10/10 成立）：没有第四档，档位码也不能由尺寸反推。✅ `player/spotify/cover_test.go`。
+- **时长**：`[data-testid="playback-progressbar"] input` 的 `max`，单位毫秒。
+- **位置**：`[data-testid="progress-bar"]` 的 inline style 里 `--progress-bar-transform` 的**浮点百分比** × 上面那个时长。**两个反例，都实测过，别换回去**：
+  - **`<input value>` 只有 5 秒粒度**（实测 +5000/步），拿它当位置等于每 5 秒跳一次。
+  - **`aria-label` 会随系统语言变**（中文环境是「播放/暂停」），故播放态**不能**看它。
+- **播放/暂停**：播放按钮 `[data-testid="control-button-playpause"]` 里 `svg path` 的 `d` 前缀——两个**图标常量**（`iconPlayingPrefix` / `iconPausedPrefix`，Encore 图标、语言无关）。按钮显示的是「点一下会做什么」：正在播放时是两根竖条（暂停图标）。两条都对不上时 `state` 为 `unknown`，上层退回「位置有没有在推进」（`stallWindow` 2.5s，比 1Hz 采样周期大出余量）并只 Warn 一次。
+
+**`clockRaw` 那道闸是承重的**：百分比在换歌/页面重渲染的瞬间可能读到 0 或旧值，而时钟对「本轮没有有效采样」与「有效采样」的处理完全不同（前者不落锚、只按翻转窗口外推，后者落锚）。位置为 NaN / 负 / 超过时长 1.05 倍时一律折算成「本轮无采样」。
+
+**读数还要再减掉一个「动画超前量」（`progressLeadSec` = 1.0s，`truePositionSec`）。** 播放中进度条会在 1 秒内**动画**到下一个点位，所以写进 style 的是**动画目标**（当前位置 + 1s），暂停时没有动画、写的就是当前位置。两次独立实测（Spotify 1.3.4.258，2026-10）：① 播放中界面那个 mm:ss 文本恒等于 `floor(transform 换算值) - 1`，一暂停就对上了（同一首歌：播放中 transform=154.041s / 文本 2:33；暂停后 transform=153.977s / 文本仍是 2:33）；② 时长 279.000s 的曲子在 transform 打到 100%（=279.0s）之后 **1323ms** 才换歌，而同一瞬间界面时间是 4:38（278s）——若 transform 就是真实位置，它应当在换歌那一刻才到 100%。故**播放中真实位置 = transform 换算值 − 1.0s，暂停时原样不校正**，减成负数时取 0（刚开播的第一个读数可能小于超前量）；残差 ±0.3s（换歌那一瞬间的界面延迟无法从外部测准）由 `spotify-offset` 吸收，它跟随全局 -200、经项目负责人确认不单独对齐（§14「已知并接受」）。
+
+三处别改：**判据必须用「读到这个读数那一刻」的播放态**（暂停后再出现的读数没有超前，用播放中的规则去减会把位置拽回去 1 秒）；**别把这条校正搬进 `clock.go`**（它只作用于「读数 → 位置」这一步，进时钟会让外推与落锚口径分叉）；**播放倍速（`spotify_cli speed`）非 1x 时这条常数会失准**（动画 1 秒覆盖的内容长度随倍速变），未实测，故代码不猜。✅ `player/spotify/position_test.go` 钉住它的作用条件（删掉播放态判据、把减改成加、去掉下限，各有用例变红）。
+
+#### 7.10.2 歌词：CLI 取 URI + 旁观 Bearer + 页面 HTTP 缓存兜底
+
+歌词取自 Spotify 自家的 spclient `color-lyrics/v2`（`player/spotify/lyric/`）。端点照抄 App 自己的请求形状：`https://spclient.wg.spotify.com/color-lyrics/v2/track/%s?format=json&vocalRemoval=false&market=from_token`。实测：**带 Bearer 时任意曲目都 200，连 `/image/` 段都不需要；不带 Bearer 一律 401，与 cookie 无关**。响应里的行级时间戳是**字符串**（`"18300"`），实测 `syncType` 全是 `LINE_SYNCED`、`provider` 实测为 MusixMatch；`UNSYNCED`（每行 `startTimeMs` 都是 0）返回 0 行，按「没有歌词」处理。
+
+取词的钥匙是**曲目 URI**，而**页面 DOM 里没有当前曲目的 URI**（只有专辑/歌手链接与队列项），于是三条路径：
+
+1. **URI 经随 Spotify 安装的官方 CLI 取一次**：`spotify_cli.exe now-playing --format json`（`watchdog.ReadNowPlaying`），只解 `currently_playing.uri` 与 `is_playing` 两个字段（CLI 的输出会随版本增删字段，多出来的不该让我们失败）。实测约 250ms（进程启动 + 与 App 的本地连接），**只在换歌时调一次**，预算 5s。CLI 路径优先取运行中实例的同目录，其次 `%APPDATA%\Spotify`；找不到就整场没有歌词（标题/歌手/进度照常）并 Warn 一次。
+2. **Bearer 不注入 JS**：从 CDP 已经在推送的 `Network.requestWillBeSent` 事件里**旁观**页面自己对 spclient 的请求头（`authorization: Bearer …`，实测长 515 字符；另照抄 `app-platform` / `spotify-app-version` 两个头）。这是只读的——不改请求、不改响应、不往页面里挂东西。所以读循环不能是「同步读写 RPC」那套（收不到事件），而是一个读 goroutine 按 id 派发：带 `id` 的是 RPC 回复，不带的是事件（`cdp/client.go` 的 `readLoop`）。`Network.enable` 失败只 Warn、不致命（还有下面第三条）。
+3. **没有 token 时走页面的 HTTP 缓存**：App 自己取过的歌词响应是 `public, max-age=3600`，用**完全相同**的 URL 在页面里 `fetch` 就命中缓存、不需要 token（`FetchViaPageCache`；URL 从 `performance.getEntriesByType('resource')` 里按 `/color-lyrics/v2/track/<id>/` 找）。换一个 URL（哪怕只差 `/image/` 段）就是另一次真实请求 → 401，所以只认完全相同的 URL。这条专治「服务刚起来、App 还空闲没发过请求」的窗口。
+
+页面里的两次 `fetch`（带 Bearer 的 `FetchLyrics` 与第 3 条的 `FetchViaPageCache`）各带一个 `AbortController`，预算 `lyricsFetchBudget`（3s，读 body 也算在内），到点按「这次没取到」返回、会话保留。它必须比 `Runtime.evaluate` 的 `evalTimeout`（5s）短出余量：表达式撞上 `evalTimeout` 会关掉整条 CDP 会话，真机上给页面加 8s 网络延迟时，约每 12s 一圈 `standby` 加清空歌曲信息再重连。✅ `cdp/client_test.go`（本机有 node 时另以桩 `fetch` 跑生成的 JS）。
+
+**取 URI 与取词都不在轮询 goroutine 上做**（issue #107）：三层取词串行最坏约 11s（直取 `lyricsTimeout` 5s + 页面两层各 3s），同步等就这么久不读位置、不发事件，暂停与 seek 跟着晚到（真机：给页面加 8s 延迟后切歌，换歌到首条 `all_lyrics` 约 6.4s）。换歌那一拍只发状态、起封面与取词两个 goroutine，并立刻以空歌词发 `all_lyrics`（与「还没拿到」同形，位置就是这一拍的读数）；取词在 `runLyricsJob` 里依次做 CLI、直取、页面、缓存，每一步之前查是否已作废，结果经容量为 1 的通道交回，轮询循环在每一拍开头非阻塞地收取并落地（`settleLyrics` 判定：拿到即重发 `all_lyrics`；没拿到发 `index: -1` 的 `lyric_update`，没取到响应且有 URI 时按下文补取）。会话状态（歌词、行号、补取节奏、时钟）仍只由轮询 goroutine 读写，不加锁。`lyricsJobs` 记代次与在飞：同一时刻至多一次当前代次的取词在飞，换歌或会话结束时作废它（取消 ctx、代次前进），迟到的结果代次对不上即丢弃；被作废的 goroutine 做完手上那一步（各有预算）即退出，送结果时等到被收走或被作废为止，不会挂住。`♪ Song` 那行日志因此在取到 URI 之后由 `runLyricsJob` 打出；页面图标与 CLI 的播放态对照随结果交回、由轮询循环只告警一次。✅ `player/spotify/lyricsjob_test.go`（CLI、直取经包级 seam 换桩，CDP 会话换成实现 `lyricsClient` 的桩）。
+
+三条都没取到响应 → 这一首还没有歌词；有 URI 时轮询循环按 `lyricsRetryInterval`（5s）补取（补取同样经 `runLyricsJob`，不读 CLI；上一次还在飞时不起新的，也不把这一拍记作尝试），超过 `lyricsGiveUp`（90s）后把节奏降到 `lyricsRetrySlow`（30s）继续、直到换歌，下一首从 5s 重新起步（节奏收在 `lyricsRetry` 里、由 `start` 复位；它曾是会话级变量、换歌不复位，真机上下一首换歌后 +29.8s 才第一次补取）—— **刻意不在某个时刻彻底放弃**：真机上「手里还没有 Bearer」可以持续几分钟（App 只在换歌或用户碰界面时才发 API 请求，我们只能旁观），那时补取仍然值钱。响应取到了但平台没有行级时间轴（`syncType` 为 `UNSYNCED` 或零行，或只有纯音乐提示语）则当场停手，不再白问：换歌那次取到这样的响应就不起补取（留痕打 `Lyrics has no line-level timing …`，只有提示语时打提示语那条），补取时取到就停；三层一样，页面缓存给的响应也算（`fetchLyrics` 解析成功而没有可用的行时返回响应与「没有行级歌词」的诊断，不当成取不到）。补取成功的「歌词迟到」会重发一次 `all_lyrics`。
+
+#### 7.10.3 位置时钟与轮询下限
+
+页面上的位置与播放态都是 **~1Hz** 更新的（实测 2026-10：`--progress-bar-transform` 的变化间隔 962~1026ms），两次更新之间那个值一直是旧的。故 `clock.go` 是**独立实现的第四份位置时钟**，两处照抄的是已经踩过坑的结论：
+
+- **边沿落锚（照 sodamusic，§7.7.1）**：只在采样值**变化**的那一刻落锚，两次采样之间按本地墙钟外推。每轮都落锚会把外推清零，位置与歌词行匹配一起退化成 1s 阶梯。
+- **翻转窗口（照 applemusic，§7.8）**：读数不跳时最多允许推进 `samplePeriodSec + flipLagMax`（1.0 + 0.35s），避免页面卡住时凭空往前冲、翻过好几行歌词。窗口的基准取 `lastRaw` 与 `anchorPos` 的较大者——暂停时锚点冻结在 `lastRaw` 之后，恢复那一刻必须以冻结值为基准，否则恢复后前一秒被旧读数卡住。
+- **seek 优先于暂停恢复**：`observe` 一拍只返回一个事件（`evSeek` / `evResume` / `evPause` / `evNone`）。seek 只在旧态为播放时判，所以不会与恢复同拍，`playback_resume` 一拍至多一条（§3.2 那条守卫在这里由类型保证）。**seek 与暂停同拍时要补发暂停**：时钟只报 `evSeek`、播放态已记成暂停，下一拍不会再报；只发 resume 的话服务端仍是 playing、位置继续外推。`clockEmits` 把迁移翻译成事件序列，这种情形发 resume 再发 `playback_pause` 与 `paused`，位置都是跳变后的读数（真机用 CLI 同时下发 seek 与 pause，6 次中 5 次落在同一拍）。向前阈值 1.5s、向后 1.0s。
+- **drift 先算、lastRaw 后更新**：读数停更不足一个翻转窗口时两种顺序结果相同；停更超过窗口之后，先更新会让 drift 对照不受钳制的墙钟外推而不是已对外报出的位置，停更期间的前跳与停更结束时读数追上来都不再报 seek。
+- **换歌那一拍的位置读数**：非本会话第一首时，读数大于 `trackStartGraceSec`（5s）就夹到 0（页面仍有极小概率先换标题、后换进度条）。会话第一首不夹——服务在中途启动是最常见的开播姿势。
+- **随歌词发出的位置按发送时刻外推**：取词不阻塞轮询循环（§7.10.2），换歌那一拍的 `all_lyrics` 紧跟在本拍落锚之后发出，歌词落地时补发的 `all_lyrics` 与 `index: -1` 用的时钟最迟在上一拍更新过，`clk.liveAt(time.Now())` 即是当时的位置。**这依赖轮询间隔不超过翻转窗口**：`spotify-poll` 配得大于 `samplePeriodSec + flipLagMax`（1.35s）时，外推被钳在上一拍读数之后 1.35s，歌词落地时补发的 `all_lyrics` 的位置最多落后（轮询间隔 − 1.35s）；同一配置下每条 `lyric_update` 的位置本来就受同样的钳制。默认 200ms 轮询不受影响。没有为这个边缘配置重排循环，未处理。取词曾在轮询 goroutine 上同步做（合计 0.8~2.0s），那时要在取词后重读一次页面、换锚（`freshReading` / `clock.reanchor` / `rereadWithinGrace`），否则位置落后取词耗时、下一拍还会把正常推进误判成前跳；异步之后没有这段落后，这套随之删除。
+- **时长晚到**：换歌那一拍时长读到 0（页面刚渲染）时，之后第一次读到有效时长就补上并重发一次 `all_lyrics`（`durationArrived`，照 sodamusic 的「时长补取」：只补从未取到的，不追后续变化）。
+
+**轮询下限 `EffectivePollInterval`：低于 200ms 抬到 200ms。** 依据是**数据源的分辨率，不是单次调用的开销**：页面 1Hz 更新，两次之间反复去问只是重复读同一个值，轮询买到的只有「新采样落地后多久被发现」这段相位（≤ 一个轮询间隔），位置精度由本地时钟外推提供、与轮询频率无关。200ms 与 sodamusic 取同一个值、同一理由（相位平均值 ~100ms，而每秒 5 次 `Runtime.evaluate` 往返、每次 1~3ms，打在主播的浏览器进程上可以忽略）。函数登记在 `main.go` 的 `playerPollIntervals`，轮询循环与 `/service-status` 的 `config_effective` 共用它。
+
+**音频波形的目标进程就是 `Spotify.exe`**（`audiocap/procscan` 的 `PlayerProcess`）：播放走主进程（CEF 浏览器进程）自己的 WASAPI，全部子进程都在它的进程树里，故不需要 applemusic 那种「映射到另一个出声进程」的例外（§7.8 第 8 条）。
 
 ---
 

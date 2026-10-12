@@ -33,6 +33,8 @@ type LyricLine struct {
 	SubText      string
 	RomaText     string
 	TextDetailed player.LyricTextDetailed
+	// RomaTextDetailed 是 RomaText 的逐字时间轴，由 FillRomaDetailed 填；配不上的行为零值。
+	RomaTextDetailed player.LyricTextDetailed
 }
 
 type SongDetail struct {
@@ -160,6 +162,7 @@ func FetchLyrics(songID string, offsetSec float32) ([]LyricLine, error) {
 	MergeTlyric(lines, apiResp.Tlyric.Lyric)
 	MergeRomalrc(lines, apiResp.Romalrc.Lyric)
 	MergeYRC(lines, apiResp.Yrc.Lyric, offsetSec)
+	FillRomaDetailed(lines)
 	log.Info("lyrics loaded (API): %d lines (ID=%s); per-character: %s", len(lines), songID, detailedFlag(lines))
 	return lines, nil
 }

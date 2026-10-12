@@ -55,6 +55,11 @@ type lyricLine struct {
 	// Detailed 逐字时间轴（QRC 才有；LRC 源为零值，序列化成 {}）。
 	// 此处 PlayTime 尚未套 offset，由 applyDetailedOffset 统一处理。
 	Detailed player.LyricTextDetailed
+	// RomaDetailed 音译的逐字时间轴，进 wire 的 roma_text_detailed。音译轨与主歌词同为 QRC，字级
+	// 时间是音译轨自带的，由 mergeRoma 连同 RomaText 一起从配上的那一行音译带过来；音译轨不是 QRC、
+	// 或那一行不满足 player.BuildRomaDetailed 的约定时为零值。PlayTime 同 Detailed，由
+	// applyDetailedOffset 一并套。
+	RomaDetailed player.LyricTextDetailed
 }
 
 // transToleranceMs 是翻译行与主歌词行配对时允许的最大时间差。配对本身由 alignByTime 按
@@ -562,6 +567,13 @@ const romaToleranceMs = 20
 // 万一某版本回普通 LRC，则走 re 分支。两种都不必在此分叉判断。
 //
 // 匹配不上或音译缺失一律保持 RomaText 为空：音译是纯增量，任何情况下都不能反过来影响主歌词。
+//
+// 逐字音译（RomaDetailed）与 RomaText 取自配上的同一行音译：parseLRC 的 qqRe 分支本就解析出了它的
+// 字级时间，行级的起始与时长是音译轨这一行自己的行头。它与 RomaText 的差别只在一处——行文本是去掉
+// 全部字级时间戳之后的整行，字级单元不含最后一个时间戳之后的残留，两者对不上的行由
+// player.BuildRomaDetailed 判为零值、只留行级；音译轨是普通 LRC 时没有字级单元，同样为零值。
+// 同一行音译会配给不止一行主歌词（上面的已知未修），BuildRomaDetailed 每次返回新分配的切片，各行
+// 互不共享。
 func mergeRoma(lines []lyricLine, romaLRC string) {
 	if romaLRC == "" || len(lines) == 0 {
 		return
@@ -592,6 +604,7 @@ func mergeRoma(lines []lyricLine, romaLRC string) {
 			continue
 		}
 		lines[i].RomaText = romaLines[best].Text
+		lines[i].RomaDetailed = player.BuildRomaDetailed(romaLines[best].Detailed, romaLines[best].Text)
 	}
 }
 

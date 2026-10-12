@@ -3,7 +3,8 @@
 // 帧流交给主服务（见 doc/design/audio-waveform-capture-design.md §2）。
 //
 // 本文件只放**无平台依赖的纯函数**（控制行解析、降混、按声道峰值累加、非静音样本窗口 window、
-// 按样本数分帧 framer 与出帧循环 pumpFrames、丢最旧入队 enqueue、限时等待 waitTimeout、音量归一化），
+// 按样本数分帧 framer 与出帧循环 pumpFrames、数据不连续日志的限频 discLog、丢最旧入队 enqueue、
+// 诊断日志的非阻塞投递 sendDiag 与日志循环 diagLoop、限时等待 waitTimeout、音量归一化），
 // CI 可跑测试；捕获/写/控制的编排在 helper_windows.go（//go:build windows），端到端须在真机 Windows 上验。
 package helper
 
@@ -254,6 +255,65 @@ func pumpFrames(read readFunc, now func() time.Time, done <-chan struct{}, fr *f
 	}
 }
 
+// discLogInterval 是同一路捕获两行数据不连续日志之间的最短间隔。
+const discLogInterval = 10 * time.Second
+
+// discLog 为一路捕获的数据不连续日志限频：输入 wasapi.Capturer.Discontinuities 的累计值，首次出现即报，
+// 此后距上次报出满 discLogInterval 才把其间累计的次数一并报出。报出的日志投递失败时经 report 退回待报，
+// 下次到期或 flush 时补报。零值可用；非并发安全，每路捕获各持一个。
+type discLog struct {
+	seen     uint64    // 上次观察到的累计值
+	pending  uint64    // 已观察到、尚未报出的次数
+	last     time.Time // 上次报出（含投递失败的那次）的时刻
+	reported bool      // 本路是否报出过
+}
+
+// observe 并入累计值 total，返回此刻应报出的次数，0 即不报；报出时清零待报并记下 now。total 小于上次
+// 观察值视为计数重置，按从 0 起的增量计入。now 早于上次报出的时刻（时钟回拨）按未到期处理。
+func (d *discLog) observe(total uint64, now time.Time) uint64 {
+	if total >= d.seen {
+		d.pending = satAdd(d.pending, total-d.seen)
+	} else {
+		d.pending = satAdd(d.pending, total)
+	}
+	d.seen = total
+	if d.pending == 0 || (d.reported && now.Sub(d.last) < discLogInterval) {
+		return 0
+	}
+	n := d.pending
+	d.pending, d.last, d.reported = 0, now, true
+	return n
+}
+
+// flush 返回尚未报出的次数并清零，供捕获结束时补报。
+func (d *discLog) flush() uint64 {
+	n := d.pending
+	d.pending = 0
+	return n
+}
+
+// restore 把未能报出的 n 次加回待报。不动 last：投递失败的那次已记为一次报出，重试仍按 discLogInterval
+// 限频，日志写端持续不可写时也不会每读一个包就重试一次。
+func (d *discLog) restore(n uint64) {
+	d.pending = satAdd(d.pending, n)
+}
+
+// report 把 observe 或 flush 返回的 n 次经 send 投递；n 为 0 不投递，send 返回 false（投递失败）时把 n
+// 退回待报。
+func (d *discLog) report(n uint64, send func(n uint64) bool) {
+	if n > 0 && !send(n) {
+		d.restore(n)
+	}
+}
+
+// satAdd 返回 a+b，溢出时取 math.MaxUint64。
+func satAdd(a, b uint64) uint64 {
+	if a > math.MaxUint64-b {
+		return math.MaxUint64
+	}
+	return a + b
+}
+
 // enqueue 把帧非阻塞入队：满则丢最旧再放；仍满（并发生产者刚补满）则丢本帧。永不阻塞采集
 // goroutine——这是「采集排空与写解耦」的承重点（§2.5）。纯 channel 逻辑、无平台依赖，故放此。
 func enqueue(ch chan []byte, f []byte) {
@@ -269,6 +329,28 @@ func enqueue(ch chan []byte, f []byte) {
 	select { // 再试一次；仍满则丢本帧
 	case ch <- f:
 	default:
+	}
+}
+
+// diagChanCap 是采集 goroutine 投递诊断日志的有界队列容量。
+const diagChanCap = 8
+
+// sendDiag 把一条诊断非阻塞投递到 ch，返回是否投递成功：满或无人接收即丢本条、返回 false，永不阻塞。
+// 采集 goroutine 不直接写 stderr：stderr 并入主控制台，控制台写可能阻塞，阻塞会冻住采集排空，与帧经
+// enqueue 解耦同理（§2.5）。
+func sendDiag(ch chan<- string, msg string) bool {
+	select {
+	case ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+// diagLoop 把 ch 中的诊断逐条交给 out，直到 ch 关闭且排空。out 阻塞只卡本 goroutine。
+func diagLoop(ch <-chan string, out func(string)) {
+	for msg := range ch {
+		out(msg)
 	}
 }
 

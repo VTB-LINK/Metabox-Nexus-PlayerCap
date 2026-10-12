@@ -112,7 +112,7 @@ func capture(pid uint32, includeTree bool, seconds int, wavPath string) error {
 	return nil
 }
 
-// drainLoop 采集 seconds 秒：循环 wasapi.Read（每次一个 packet，内部等事件、超时也返回），每 ~200ms
+// drainLoop 采集 seconds 秒：循环 wasapi.Read（每次一个 packet，队列空时内部等事件、超时也返回），每 ~200ms
 // 打印一段统计。返回总帧数与静音帧数。
 func drainLoop(c *wasapi.Capturer, seconds int, sink func([]float32)) (total, silentTotal uint64) {
 	start := time.Now()

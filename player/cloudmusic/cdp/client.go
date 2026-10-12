@@ -126,6 +126,8 @@ type ExtractedLyric struct {
 	SubText      string                   `json:"subText"`
 	RomaText     string                   `json:"romaText"`
 	TextDetailed player.LyricTextDetailed `json:"textDetailed"`
+	// RomaTextDetailed 是 RomaText 的逐字时间轴（lyric.FillRomaDetailed 的结果）；Redux 提取的行没有，为零值。
+	RomaTextDetailed player.LyricTextDetailed `json:"romaTextDetailed"`
 }
 
 const jsPayload = `(() => {
@@ -548,18 +550,15 @@ func (c *Client) FetchLyricsViaCDP(songID string) (*LyricFetchResult, error) {
 	return &LyricFetchResult{Lrc: parsed.Lrc, Tlyric: parsed.Tlyric, Romalrc: parsed.Romalrc, Yrc: parsed.Yrc}, nil
 }
 
-// FetchCoverViaCDP uses the app's own fetch to get album cover URL by song ID
+// FetchCoverViaCDP uses the app's own fetch to get album cover URL by song ID.
+// 返回 picUrl 原样，尺寸参数由调用方经 normalizeNeteaseCoverURL 统一补。
 func (c *Client) FetchCoverViaCDP(songID string) (string, error) {
 	js := fmt.Sprintf(`(async () => {
 		try {
 			const r = await fetch('https://music.163.com/api/song/detail/?ids=[%s]&id=%s');
 			const d = await r.json();
 			if (d.songs && d.songs.length > 0 && d.songs[0].album && d.songs[0].album.picUrl) {
-				let url = d.songs[0].album.picUrl;
-				if (url && !url.includes('param=')) {
-					url += (url.includes('?') ? '&' : '?') + 'param=800y800';
-				}
-				return url;
+				return d.songs[0].album.picUrl;
 			}
 			return '';
 		} catch(e) { return 'err:' + e.message; }

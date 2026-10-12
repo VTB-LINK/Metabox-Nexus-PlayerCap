@@ -58,7 +58,7 @@ var bannerUnits = map[string]string{
 // bannerConfigLines 把 buildConfigEcho 的三件套排成启动横幅的配置行（每行以换行结尾）：全局键按
 // bannerGlobalLines 分行，随后每个播放器一行，最后一行是图例。键名以「播放器名-」开头的键归该播放器
 // 那一行、去掉前缀列出（cloudmusicv3-effect-strategy 因此列在 cloudmusicv3 行），各播放器都有的键在前。
-// 播放器名互为前缀时这一归属会判错，现有六家没有这种情形。
+// 播放器名互为前缀时这一归属会判错，现有七家没有这种情形。
 //
 // rejected 是因类型不符而被拒的原值（Config.RejectedValues），按完整键名查：只在写错的那个键自己那一项上
 // 列出，继承全局键的每播放器项不带全局键的原值。

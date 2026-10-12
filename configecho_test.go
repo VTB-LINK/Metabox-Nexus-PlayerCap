@@ -17,7 +17,7 @@ import (
 	"Metabox-Nexus-PlayerCap/server"
 )
 
-var echoPlayers = []string{"wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic", "applemusic"}
+var echoPlayers = []string{"wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic", "applemusic", "spotify"}
 
 // echoEntries 按序列化顺序取出 OrderedMap 的键与值（数值解为 float64）。
 func echoEntries(t *testing.T, om *server.OrderedMap) ([]string, map[string]any) {
@@ -90,6 +90,7 @@ func TestConfigEchoPlayerPollFloors(t *testing.T) {
 		"kugou-poll":        {30, 30},
 		"sodamusic-poll":    {30, 200},
 		"applemusic-poll":   {30, 50},
+		"spotify-poll":      {30, 200},
 	} {
 		if w[key] != want[0] || e[key] != want[1] {
 			t.Errorf("%s 写下/生效=%v/%v，期望 %v/%v", key, w[key], e[key], want[0], want[1])
@@ -117,6 +118,7 @@ func TestConfigEchoClampedPoll(t *testing.T) {
 		"kugou-poll":        {5, 10},
 		"sodamusic-poll":    {5, 200},
 		"applemusic-poll":   {5, 50},
+		"spotify-poll":      {5, 200},
 	} {
 		if w[key] != want[0] || e[key] != want[1] {
 			t.Errorf("%s 写下/生效=%v/%v，期望 %v/%v", key, w[key], e[key], want[0], want[1])

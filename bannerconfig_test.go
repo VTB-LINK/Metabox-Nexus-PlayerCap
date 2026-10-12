@@ -196,6 +196,7 @@ func TestBannerGolden(t *testing.T) {
    播放器: kugou (offset=-200ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: sodamusic (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    播放器: applemusic (offset=-200ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
+   播放器: spotify (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b
 `},
 		{"模板生成的 config.yml", stockEchoConfig(), false, i18n.Chinese, `   监听: *addr=0.0.0.0:8765
@@ -210,6 +211,7 @@ func TestBannerGolden(t *testing.T) {
    播放器: kugou (*offset=-430ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: sodamusic (*offset=-340ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    播放器: applemusic (*offset=-400ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
+   播放器: spotify (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b
 `},
 		{"覆盖较多（Windows 11）", overriddenEchoConfig(t), true, i18n.Chinese, `   监听: *addr=127.0.0.1:9000
@@ -224,6 +226,7 @@ func TestBannerGolden(t *testing.T) {
    播放器: kugou (offset=250ms poll=5ms → 10ms idle-hide=15s *audio-normalize=true)
    播放器: sodamusic (offset=250ms *poll=30ms → 200ms idle-hide=15s audio-normalize=false)
    播放器: applemusic (*offset=400ms poll=5ms → 50ms idle-hide=15s audio-normalize=false)
+   播放器: spotify (offset=250ms poll=5ms → 200ms idle-hide=15s audio-normalize=false)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b
 `},
 		{"覆盖较多（Windows 11），英文界面", overriddenEchoConfig(t), true, i18n.English, `   Listening: *addr=127.0.0.1:9000
@@ -238,6 +241,7 @@ func TestBannerGolden(t *testing.T) {
    Player: kugou (offset=250ms poll=5ms → 10ms idle-hide=15s *audio-normalize=true)
    Player: sodamusic (offset=250ms *poll=30ms → 200ms idle-hide=15s audio-normalize=false)
    Player: applemusic (*offset=400ms poll=5ms → 50ms idle-hide=15s audio-normalize=false)
+   Player: spotify (offset=250ms poll=5ms → 200ms idle-hide=15s audio-normalize=false)
    * = set explicitly (config.yml or command line); a → b = written a, in effect b
 `},
 	}
@@ -316,7 +320,7 @@ func TestBannerPlacesEveryKey(t *testing.T) {
 	}
 }
 
-// TestBannerDefaultHasNoMarks 内置默认配置：没有任何显式标记；「→」只出现在三个被播放器层下限抬高的
+// TestBannerDefaultHasNoMarks 内置默认配置：没有任何显式标记；「→」只出现在四个被播放器层下限抬高的
 // poll 上（各播放器继承全局写下的 30），图例在最后一行。
 //
 // 变异自证（隔离副本，实测）：标记判断取反 → 每项都带 *，红；不显示写下的值（只列生效值）→ 没有箭头，红；
@@ -331,8 +335,8 @@ func TestBannerDefaultHasNoMarks(t *testing.T) {
 	if strings.Contains(body, "*") {
 		t.Errorf("默认配置不该有显式标记：\n%s", body)
 	}
-	if got := strings.Count(body, "→"); got != 3 {
-		t.Errorf("默认配置应恰有 3 处「→」（cloudmusicv3、sodamusic、applemusic 的 poll），实得 %d 处：\n%s", got, body)
+	if got := strings.Count(body, "→"); got != 4 {
+		t.Errorf("默认配置应恰有 4 处「→」（cloudmusicv3、sodamusic、applemusic、spotify 的 poll），实得 %d 处：\n%s", got, body)
 	}
 	wantBannerLines(t, lines,
 		playerLine("wesing", "poll=30ms"),
@@ -340,7 +344,8 @@ func TestBannerDefaultHasNoMarks(t *testing.T) {
 		playerLine("qqmusic", "poll=30ms"),
 		playerLine("kugou", "poll=30ms"),
 		playerLine("sodamusic", "poll=30ms → 200ms"),
-		playerLine("applemusic", "poll=30ms → 50ms"))
+		playerLine("applemusic", "poll=30ms → 50ms"),
+		playerLine("spotify", "poll=30ms → 200ms"))
 }
 
 // TestBannerMarksExactlyTheExplicitKey 每个键分别显式设置：横幅上恰好该键一项带 *。键集合取自

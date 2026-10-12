@@ -3,6 +3,7 @@ package cloudmusic
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -382,7 +383,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 			}
 
-			// 封面优先使用 Redux 中的专辑封面 URL（高清），否则使用 CDP 接口或 DOM 封面
+			// 封面依次取 DOM 底栏图、Redux 的专辑封面、/api/song/detail 的专辑封面，取得到的后者覆盖前者
 			if matchedRedux && data.CurPlaying != nil && data.CurPlaying.Track.Album.PicUrl != "" {
 				songCover = data.CurPlaying.Track.Album.PicUrl
 			}
@@ -391,6 +392,10 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					songCover = detailCover
 				}
 			}
+			// 三条来源统一请求 800 档；下面两条 song_info_update 带的是同一个改写后的 URL，前端按它判断是否同一首。
+			// 改写前的留作下载兜底，见 fetchCoverWithFallback。
+			rawCover := songCover
+			songCover = normalizeNeteaseCoverURL(songCover)
 
 			songTitle := songName + " - " + songArtist
 			currentSongTitle = songTitle
@@ -402,18 +407,19 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 			})
 
 			// 异步获取封面 base64，完成后补发 song_info_update。
-			// 带代次守卫：下载最长 5s，其间可能已换歌；迟到的回写若无守卫会把这首歌的
+			// 带代次守卫：下载最长 5s（退回原 URL 时再加 5s），其间可能已换歌；迟到的回写若无守卫会把这首歌的
 			// 标题+封面盖在下一首上，且 song_info_update 只在换歌分支发一次，整首歌不自愈。
 			coverGen := p.NewSongGen()
-			go func(gen uint64, name, artist, title, cover string) {
+			go func(gen uint64, name, artist, title, cover, rawCover string) {
 				defer telemetry.Guard()
-				if b64 := player.FetchCoverBase64("CloudMusic", cover, 5*time.Second); b64 != "" {
+				fetch := func(u string) string { return player.FetchCoverBase64("CloudMusic", u, 5*time.Second) }
+				if b64 := fetchCoverWithFallback(fetch, cover, rawCover); b64 != "" {
 					p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
 						Name: name, Singer: artist, Title: title,
 						Cover: cover, CoverBase64: b64,
 					})
 				}
-			}(coverGen, songName, songArtist, songTitle, songCover)
+			}(coverGen, songName, songArtist, songTitle, songCover, rawCover)
 
 			// Fetch lyrics via CDP using Redux ID
 			if activeSongID != "" {
@@ -430,11 +436,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					// 与 resolveCDPLyrics 同一判据，别让这两条分支再分叉。
 					if apiLyrics, err2 := lyric.FetchLyrics(activeSongID, offsetSec); err2 == nil && hasRealText(apiLyrics) {
 						log.Info("API recheck (ID=%s) found %d lyric lines, using API lyrics; per-character: %s", activeSongID, len(apiLyrics), lyricDetailedFlag(apiLyrics))
-						for _, l := range apiLyrics {
-							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
-								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, RomaText: l.RomaText, TextDetailed: l.TextDetailed,
-							})
-						}
+						activeLyrics = append(activeLyrics, toExtracted(apiLyrics)...)
 						cdpLyricsOK = true
 					} else {
 						log.Info("API recheck (ID=%s) found no lyrics either, marking as pure music", activeSongID)
@@ -457,11 +459,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					if ok {
 						cdpLyricsOK = true
 						log.Info("lyrics loaded (CDP): %d lines (ID=%s); per-character: %s", len(parsed), activeSongID, lyricDetailedFlag(parsed))
-						for _, l := range parsed {
-							activeLyrics = append(activeLyrics, cdp.ExtractedLyric{
-								Index: l.Index, Time: l.Time, Text: l.Text, SubText: l.SubText, RomaText: l.RomaText, TextDetailed: l.TextDetailed,
-							})
-						}
+						activeLyrics = append(activeLyrics, toExtracted(parsed)...)
 					} else {
 						// CDP 声称有歌词（非 PureMusic/NoLyric），但解析出 0 行——lrc 只含元数据
 						// 标签（[ti:]/[ar:]）而无时间戳行。**不置 cdpLyricsOK**，交给下面的 Redux
@@ -485,10 +483,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 
 			// Broadcast all lyrics（仅在有普通歌词时发送，避免空歌词 + Redux 补发导致双发）
 			if len(activeLyrics) > 0 {
-				lyricItems := make([]player.LyricLine, len(activeLyrics))
-				for i, l := range activeLyrics {
-					lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.TextDetailed, offsetSec)
-				}
+				lyricItems := toLyricItems(activeLyrics, offsetSec)
 
 				if songDuration == 0 && matchedRedux && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
@@ -555,13 +550,10 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 					applyTlyricMap(activeLyrics, tmap)
 				}
 
-				// 补发全量歌词给前端
-				lyricItems := make([]player.LyricLine, len(activeLyrics))
-				for i, l := range activeLyrics {
-					// Redux fallback 路径不产音译：l.RomaText 恒空（Redux 提取的 ExtractedLyric
-					// 不含 romaText），这里透传即空串，roma_text 契约上仍在、不污染 sub_text。
-					lyricItems[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.TextDetailed, offsetSec)
-				}
+				// 补发全量歌词给前端。Redux fallback 路径不产音译：RomaText 恒空（Redux 提取的
+				// ExtractedLyric 不含 romaText），透传即空串，roma_text 契约上仍在、不污染 sub_text；
+				// 逐字音译同样没有，为零值。
+				lyricItems := toLyricItems(activeLyrics, offsetSec)
 				if songDuration == 0 && data.CurPlaying.Track.Duration > 0 {
 					songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 				}
@@ -716,10 +708,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				// posNow() 是发出这一刻的时钟读数（本拍对表之后的值），进 Position、并据它算 Progress；它不取
 				// 行匹配下限，否则前端会被锚回回拨前的时间线。play_time 由 BuildLyricUpdate 按歌词时间轴算
 				// （原先为取它而构造了整个 LyricLine）。
-				emitPos(player.EventLyricUpdate, player.BuildLyricUpdate(
-					trueLineIdx, currentLine.Time, currentLine.Text, currentLine.SubText, currentLine.RomaText,
-					currentLine.TextDetailed, offsetSec, posNow(), songDuration,
-				))
+				emitPos(player.EventLyricUpdate, lineUpdate(trueLineIdx, currentLine, offsetSec, posNow(), songDuration))
 			}
 		}
 
@@ -755,6 +744,59 @@ func getArtists(artists []struct {
 	return strings.Join(names, " / ")
 }
 
+// normalizeNeteaseCoverURL 把网易云图床（*.music.126.net）的封面 URL 改为请求 800 档：查询串里键名为
+// thumbnail 的参数把值改成 800y800，其余参数与顺序原样，不补 param；没有 thumbnail 也没有 param 的补
+// param=800y800；有 param 而没有 thumbnail 的不动。其他主机、非 http(s)、解析失败的原样返回。
+//
+// thumbnail（与 imageView 同组）和 param 是两套图片处理参数，并存时 CDN 听哪个没有样本，故有 thumbnail 时
+// 只在同一套参数里改值：页面脚本取 DOM 底栏图时已把它改成 300y300（cdp/client.go 的 jsPayload），这里同法
+// 改成 800y800。不带尺寸参数时取到的是原图，尺寸不定，超过 FetchCoverBase64 的 5MB 上限就没有 cover_base64。
+func normalizeNeteaseCoverURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !strings.HasSuffix(strings.ToLower(u.Hostname()), ".music.126.net") {
+		return raw
+	}
+	// 在原串上只改查询串，其余逐字保留；不经 url.Values，它的 Encode 会给参数重新排序。
+	rest, frag, hasFrag := strings.Cut(raw, "#")
+	base, query, _ := strings.Cut(rest, "?")
+	parts := strings.Split(query, "&")
+	hasThumb, hasParam := false, false
+	for i, kv := range parts {
+		switch key, _, _ := strings.Cut(kv, "="); key {
+		case "thumbnail":
+			parts[i], hasThumb = "thumbnail=800y800", true
+		case "param":
+			hasParam = true
+		}
+	}
+	switch {
+	case hasThumb:
+		query = strings.Join(parts, "&")
+	case !hasParam:
+		if query != "" {
+			query += "&"
+		}
+		query += "param=800y800"
+	default:
+		return raw
+	}
+	out := base + "?" + query
+	if hasFrag {
+		out += "#" + frag
+	}
+	return out
+}
+
+// fetchCoverWithFallback 先用改写后的 URL（normalized）取封面，取不到且改写过时再用改写前的 raw 取一次。
+// normalizeNeteaseCoverURL 的写法没有真机验证过，CDN 不认时退回改写前的 URL，结果不比改写前差。
+// 两次都在封面 goroutine 里、各有自己的超时，不挡对外事件。
+func fetchCoverWithFallback(fetch func(string) string, normalized, raw string) string {
+	if b64 := fetch(normalized); b64 != "" || normalized == raw {
+		return b64
+	}
+	return fetch(raw)
+}
+
 // resolveCDPLyrics 解析 CDP 返回的歌词并判定是否算「拿到了可用歌词」。
 //
 // ok 为真会让调用方置 cdpLyricsOK，从而关掉 Redux fallback——所以它**必须在解析出真正
@@ -778,7 +820,37 @@ func resolveCDPLyrics(lrc, tlyric, romalrc, yrc string, offsetSec float32) (pars
 	lyric.MergeTlyric(parsed, tlyric)
 	lyric.MergeRomalrc(parsed, romalrc)
 	lyric.MergeYRC(parsed, yrc, offsetSec)
+	lyric.FillRomaDetailed(parsed)
 	return parsed, true
+}
+
+// toExtracted 把解析出的歌词行（CDP 取词、HTTP API）搬进轮询用的内部结构。两个结构体的字段完全一致
+// 才能这样转换：给其中一个加字段而漏了另一个，这里编译不过。
+func toExtracted(lines []lyric.LyricLine) []cdp.ExtractedLyric {
+	out := make([]cdp.ExtractedLyric, len(lines))
+	for i, l := range lines {
+		out[i] = cdp.ExtractedLyric(l)
+	}
+	return out
+}
+
+// toLyricItems 把内部的歌词行映射成对外的 LyricLine（all_lyrics 用）。BuildLyricLine 不填逐字音译，
+// 在这里补上。
+func toLyricItems(lyrics []cdp.ExtractedLyric, offsetSec float32) []player.LyricLine {
+	items := make([]player.LyricLine, len(lyrics))
+	for i, l := range lyrics {
+		items[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.TextDetailed, offsetSec)
+		items[i].RomaTextDetailed = l.RomaTextDetailed
+	}
+	return items
+}
+
+// lineUpdate 把一行歌词映射成 lyric_update 的载荷，字段口径同 toLyricItems。index 是这一行在当前歌词
+// 里的下标（行匹配的结果），不取 l.Index。
+func lineUpdate(index int, l cdp.ExtractedLyric, offsetSec, playPos, duration float32) *player.LyricUpdate {
+	u := player.BuildLyricUpdate(index, l.Time, l.Text, l.SubText, l.RomaText, l.TextDetailed, offsetSec, playPos, duration)
+	u.RomaTextDetailed = l.RomaTextDetailed
+	return u
 }
 
 // hasRealText 判断解析结果里有没有**实词**行。intentional blank（Text 为空、表示此刻清空

@@ -14,7 +14,6 @@ type SongInfo struct {
 	Mid    string // 歌曲 MID
 	Name   string // 歌曲名
 	Singer string // 歌手名
-	Cover  string // 封面 base64（data:image/jpeg;base64,...）
 }
 
 // FindSongInfo 从进程内存中搜索当前歌曲的 JSON 信息

@@ -20,6 +20,7 @@
 | 酷狗音乐 | `kugou` | CDP 远程调试 |
 | 汽水音乐 | `sodamusic` | CDP 远程调试 |
 | Apple Music | `applemusic` | 进程内存读取 |
+| Spotify | `spotify` | CDP 远程调试（页面 DOM + 官方 CLI） |
 
 ### 能力对照
 
@@ -33,17 +34,25 @@
 | 酷狗音乐 `kugou` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ⚠ |
 | 汽水音乐 `sodamusic` | ✔ | ✔ | ✔ | ⚠ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | 🚫 |
 | Apple Music `applemusic` | ⚠ | ⚠ | ⚠ | 🚫 | ✔ | ✔ | ⚠ | ✔ | ✔ | ✔ | 🚫 |
+| Spotify `spotify` | 🚫 | ✔ | 🚫 | 🚫 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | 🚫 |
 
 <details>
 <summary>⚠ 与 🚫 各项的原因</summary>
 
 `✔` 表示能取到；某首歌有没有逐字、翻译、音译，取决于平台是否提供。
-「本地文件」指播放本地音频文件时能否取到歌词，标 `🚫` 的五家暂不支持，下面不逐个列出。
+「音译歌词」一列指行级音译（`roma_text`）。逐字音译（`roma_text_detailed`，音译的逐字时间轴）由全民K歌、QQ 音乐、酷狗音乐、汽水音乐提供，网易云音乐只在一字一音的歌（如粤语歌）上提供：
+全民K歌与 QQ 音乐取音译自带的字级时间，酷狗音乐、汽水音乐与网易云音乐的时间取自主歌词的字；Apple Music 恒为 `{}`。各家的限制见下。
+有行级音译的行不一定有逐字音译，没有时为 `{}`。
+「本地文件」指播放本地音频文件时能否取到歌词，标 `🚫` 的六家暂不支持，下面不逐个列出。
 
 **全民K歌 `wesing`**
 
 - 翻译歌词 `🚫`：平台无翻译歌词。
 - 进度/跳转 `⚠`：只报回跳与重播，向前跳转不报。
+
+**网易云音乐 `cloudmusicv3`**
+
+- 逐字音译只有一字一音的歌（如粤语歌）才有：平台的音译只有逐行的，没有字级时间。带逐字歌词的行里，每个字各是一个逐字单元、音节数与汉字数相等时，把音节按顺序配上各个字的时间。日文、韩文歌整首为 `{}`，中英混排等对不上的行为 `{}`。
 
 **酷狗音乐 `kugou`**
 
@@ -51,28 +60,39 @@
 
 **汽水音乐 `sodamusic`**
 
-- 音译歌词 `⚠`：平台无音译歌词，改用酷狗的音译按歌名与时长匹配补上，不保证每首都有、都准。
+- 音译歌词 `⚠`：平台无音译歌词，改用酷狗的音译按歌名与时长匹配补上，不保证每首都有、都准。逐字音译只有按字对齐上的行才有。
 
 **Apple Music `applemusic`**
 
 - 逐字 / 逐行 / 翻译歌词 `⚠`：歌词取自 Apple Music 的进程内存，换歌后可能晚几秒才出现，少数情况下取不到或配错；
   逐字只有平台提供逐字的歌才有。详见 [doc/core.md](doc/core.md) 的 Apple Music 一节。
-- 音译歌词 `🚫`：平台无音译歌词。
+- 音译歌词 `🚫`：平台无音译歌词，逐字音译同样恒为 `{}`。
 - 封面 `⚠`：只有封面图片数据（`cover_base64`），没有封面 URL；换歌时封面可能稍晚补发。
+
+**Spotify `spotify`**
+
+- 逐字歌词 `🚫`：Spotify 自家的歌词接口返回行级时间轴（`syncType=LINE_SYNCED`）。真机上抓到的每一份
+  响应里 `syllables` 都是空数组，**没有一份逐字样本**，其时间基准（绝对还是相对行首）因此未经验证 ——
+  按「绝不盲干」的规矩，不猜它的语义，只发行级歌词。
+- 翻译 / 音译歌词 `🚫`：平台的歌词载荷里没有译文与音译轨。
+- 需要 Spotify 桌面版以 `--remote-debugging-port=9223` 加四个防后台节流参数（与网易云同一组）启动，
+  才有歌词与进度、且窗口最小化或被遮挡时进度仍每秒更新：程序会自动把缺的参数补进用户的自启项；
+  发现 Spotify 正在跑却缺其中任何一项时，会**带全部参数重启它**（与网易云同一策略，播放会自动恢复；
+  只带调试端口的实例也会重启一次）。这一版 Spotify 若不认识调试端口参数，则报「版本不支持」并降级，绝不重启。
 
 </details>
 
 ## 功能特性
 
-- ✅ **多播放器支持** — 同时监控六个播放器，按优先级自动切换输出
+- ✅ **多播放器支持** — 同时监控七个播放器，按优先级自动切换输出
 - ✅ **自动等待进程** — 播放器未启动时持续等待，启动后自动接入
 - ✅ **进程断线重连** — 播放器退出后回到等待状态，重新启动后自动恢复
 - ✅ **跨重启稳定** — 不依赖固定的内存地址，播放器重启后重新定位
 - ✅ **酷狗自动接入** — 自动检测并修补 `libcef.dll` 以开启 CDP 端口，按需提权并重启酷狗
-- ✅ **歌曲信息提取** — 歌名、歌手、封面 URL 与封面 Base64
+- ✅ **歌曲信息提取** — 歌名、歌手、封面 URL 与封面 Base64（统一为 800×800；不是 JPEG / PNG、宽或高超过 1600 等处理不了的原样发出）
 - ✅ **实时歌词推送** — 广播当前歌词行与播放进度，轮询频率可调
 - ✅ **逐字歌词** — 每个字的时间戳与持续时间（`text_detailed`），可做卡拉 OK 式逐字高亮
-- ✅ **翻译与音译歌词** — 译文（`sub_text`）与音译（`roma_text`），各播放器的支持情况见能力对照
+- ✅ **翻译与音译歌词** — 译文（`sub_text`）、音译（`roma_text`）与逐字音译（`roma_text_detailed`），各播放器的支持情况见能力对照
 - ✅ **UTF-8 文本** — 歌词与歌曲信息以 UTF-8 编码传输，不限语种
 - ✅ **时间偏移** — 全局与 per-player 的 offset（毫秒），正值=延后、负值=提前
 - ✅ **暂停/恢复检测** — 暂停与恢复时广播对应事件
@@ -182,11 +202,11 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 | `-<player>-idle-hide` | *(沿用 `-per-player-idle-hide`)* | 指定播放器的无活跃自动隐藏（秒，`0`=关） |
 | `-<player>-audio-normalize` | *(沿用 `-audio-normalize`)* | 指定播放器的归一化开关 |
 
-> `<player>` ∈ `wesing` / `cloudmusicv3` / `qqmusic` / `kugou` / `sodamusic` / `applemusic`，未设置时沿用全局值。
+> `<player>` ∈ `wesing` / `cloudmusicv3` / `qqmusic` / `kugou` / `sodamusic` / `applemusic` / `spotify`，未设置时沿用全局值。
 > 例：`-cloudmusicv3-offset -300`、`-wesing-idle-hide 15`、`-qqmusic-audio-normalize false`。
 >
 > 越界的取值自动钳到边界。各播放器另有自己的轮询下限，低于它的取值会被抬高：cloudmusicv3 低于 50 抬到 100、
-> qqmusic 低于 30 抬到 50、sodamusic 低于 200 抬到 200、applemusic 低于 50 抬到 50。
+> qqmusic 低于 30 抬到 50、sodamusic 低于 200 抬到 200、applemusic 低于 50 抬到 50、spotify 低于 200 抬到 200。
 > 实际生效的值见启动横幅与 `/service-status` 的 `config_effective`。
 
 ### 配置文件
@@ -216,6 +236,7 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
    播放器: kugou (*offset=-430ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: sodamusic (*offset=-340ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    播放器: applemusic (*offset=-400ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
+   播放器: spotify (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b
 ===========================================================
 ```

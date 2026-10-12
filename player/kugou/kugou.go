@@ -405,7 +405,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			currentName = name
 			currentSinger = singer
 			currentTitle = buildTitle(name, singer)
-			currentCover = strings.Replace(info.Cover, "/stdmusic/120/", "/stdmusic/800/", 1)
+			currentCover = normalizeKugouCoverURL(info.Cover)
 
 			log.Info("♪ Song: %s - %s (hash: %s)", currentName, currentSinger, info.Hash)
 
@@ -514,16 +514,9 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 		}
 
 		// ── 封面延迟到达（VIP 歌曲首次播放时封面为空，稍后才填入）──
-		// 仅将 URL 送入 channel，由封面 goroutine 统一下载并发送（不额外发事件）
-		if info.Cover != "" && info.Cover != currentCover {
-			currentCover = info.Cover
+		if cover, changed := offerLateCover(coverCh, currentCover, info.Cover); changed {
+			currentCover = cover
 			log.Info("Cover URL updated: %s", currentCover)
-			if coverCh != nil {
-				select {
-				case coverCh <- currentCover:
-				default:
-				}
-			}
 		}
 
 		// ── 播放状态变化检测 ──
@@ -602,12 +595,9 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				line := currentLyrics[trueIdx]
 				// interpSec 是插值出的实时位置，进 Position、并据它算 Progress；play_time 由 BuildLyricUpdate
 				// 按歌词时间轴算。KRC 源有逐字（line.Detailed）、翻译（line.SubText）与音译
-				// （line.RomaText，type=0 轨），LRC 回落三者皆空。音译与翻译各自透传、互不覆盖。
-				// words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传。
-				p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(
-					trueIdx, line.Time, line.Text, line.SubText, line.RomaText, line.Detailed,
-					offsetSec, interpSec, currentDurationSec,
-				))
+				// （line.RomaText 及其逐字 line.RomaDetailed，type=0 轨），LRC 回落四者皆空。音译与翻译
+				// 各自透传、互不覆盖。words 的 play_time 已在 applyDetailedOffset 里套过 offset，这里透传。
+				p.Emit(player.EventLyricUpdate, lineUpdate(trueIdx, line, offsetSec, interpSec, currentDurationSec))
 			}
 		}
 
@@ -657,6 +647,33 @@ func rereadSameSong(fresh *cdp.PlayInfo, err error, hash string) bool {
 	return err == nil && fresh != nil && hash != "" && fresh.Hash == hash
 }
 
+// normalizeKugouCoverURL 把 getPlayInfo 给的封面 URL 换成 800 档：路径里的 /stdmusic/120/ 换成 /stdmusic/800/。
+// 只换查询串与片段之前的部分；其余尺寸段与路径没见过样本，原样返回。
+func normalizeKugouCoverURL(u string) string {
+	end := strings.IndexAny(u, "?#")
+	if end < 0 {
+		end = len(u)
+	}
+	return strings.Replace(u[:end], "/stdmusic/120/", "/stdmusic/800/", 1) + u[end:]
+}
+
+// offerLateCover 处理封面延迟到达：本轮读到的 raw 换成 800 档后与 current 不同，就送进 coverCh（满则丢），
+// 返回它与 true；否则返回 current 与 false。只送 URL，由封面 goroutine 统一下载并发送，不额外发事件。
+//
+// 比较必须用换档之后的值：换歌时记下的 current 已是 800 档，拿原样的读数比，换歌那一轮紧接着就会
+// 把它改回 120 档并打一条「Cover URL updated」；VIP 歌曲首播封面晚到时送进 coverCh 的也会是 120 档。
+func offerLateCover(coverCh chan<- string, current, raw string) (string, bool) {
+	cover := normalizeKugouCoverURL(raw)
+	if cover == "" || cover == current {
+		return current, false
+	}
+	select {
+	case coverCh <- cover: // coverCh 为 nil 时走 default
+	default:
+	}
+	return cover, true
+}
+
 // isProgressValid 判断 progressSec 是否在合理的播放范围内（[0, duration*1.05]）。
 // 用于过滤 getPlayInfo 偶发返回的异常值。
 func isProgressValid(progressSec, durationSec float32) bool {
@@ -676,10 +693,19 @@ func toLyricLines(lines []klyric.Line, offsetSec float32) []player.LyricLine {
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
 		// SubText（翻译）与 RomaText（音译，KRC type=0 轨）各自透传给 BuildLyricLine，互不覆盖；
-		// LRC 回落时二者皆空。
+		// LRC 回落时二者皆空。逐字音译（RomaDetailed）进 roma_text_detailed。
 		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec)
+		out[i].RomaTextDetailed = l.RomaDetailed
 	}
 	return out
+}
+
+// lineUpdate 把一行歌词映射成 lyric_update 的载荷，字段口径同 toLyricLines：两者取自同一份
+// currentLyrics，同一行的逐字音译在 all_lyrics 与 lyric_update 里相同。
+func lineUpdate(index int, l klyric.Line, offsetSec, playPos, duration float32) *player.LyricUpdate {
+	u := player.BuildLyricUpdate(index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec, playPos, duration)
+	u.RomaTextDetailed = l.RomaDetailed
+	return u
 }
 
 // applyDetailedOffset 把 offset 同时作用到行级与逐字的 play_time。
@@ -692,13 +718,15 @@ func toLyricLines(lines []klyric.Line, offsetSec float32) []player.LyricLine {
 // 只对新取回的歌词调用一次：伴唱模式复用 currentLyrics 那条路上的歌词已经套过了，重复套会翻倍。
 func applyDetailedOffset(lines []klyric.Line, offsetSec float32) {
 	for i := range lines {
-		d := &lines[i].Detailed
-		if len(d.Words) == 0 {
-			continue
-		}
-		d.PlayTime = player.AdjustLyricPlayTime(d.Timestamp, offsetSec)
-		for j := range d.Words {
-			d.Words[j].PlayTime = player.AdjustLyricPlayTime(d.Words[j].Timestamp, offsetSec)
+		// 主歌词的逐字与音译的逐字各是一条时间轴（krc 解析时都没填 PlayTime），都要套。
+		for _, d := range []*player.LyricTextDetailed{&lines[i].Detailed, &lines[i].RomaDetailed} {
+			if len(d.Words) == 0 {
+				continue
+			}
+			d.PlayTime = player.AdjustLyricPlayTime(d.Timestamp, offsetSec)
+			for j := range d.Words {
+				d.Words[j].PlayTime = player.AdjustLyricPlayTime(d.Words[j].Timestamp, offsetSec)
+			}
 		}
 	}
 }
@@ -731,7 +759,7 @@ type kugouSongInfoResp struct {
 // fetchCoverFromAPI 通过酷狗公开 API 获取歌曲封面 URL。
 // 对于 CDP 未提供封面的曲目（伴奏、无专辑封面等），
 // API 会返回歌手头像（imgUrl / trans_param.union_cover），
-// 其中 {size} 占位符替换为 400。
+// 其中 {size} 占位符替换为 800。
 func fetchCoverFromAPI(hash string) string {
 	url := "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=" + hash
 	resp, err := kugouAPIClient.Get(url)

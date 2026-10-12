@@ -26,7 +26,6 @@ package wasapi
 
 import (
 	"fmt"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -69,10 +68,11 @@ const (
 
 	vtBlob = 0x0041 // VT_BLOB (=65)
 
-	audclntSharemodeShared          = 0
-	audclntStreamflagsLoopback      = 0x00020000
-	audclntStreamflagsEventCallback = 0x00040000
-	audclntBufferflagsSilent        = 0x2
+	audclntSharemodeShared              = 0
+	audclntStreamflagsLoopback          = 0x00020000
+	audclntStreamflagsEventCallback     = 0x00040000
+	audclntBufferflagsDataDiscontinuity = 0x1
+	audclntBufferflagsSilent            = 0x2
 
 	wfmtExtensible = 0xFFFE // WAVE_FORMAT_EXTENSIBLE
 
@@ -123,14 +123,16 @@ type audioclientActivationParams struct {
 
 // PROPVARIANT（x64）：vt(2) + 3×WORD 保留(6) = 8 字节头，union 从偏移 8 起（8 字节对齐）。
 // 这里只用 BLOB{ cbSize(ULONG,@8) + 4 字节 pad + pBlobData(BYTE*,@16) }；sizeof=24。
+// pBlobData 用 unsafe.Pointer 而非 uintptr：GC 与逃逸分析看得见这条引用，所指对象随 pv 上堆，
+// 地址不因栈增长而失效。
 type propVariant struct {
-	vt        uint16  // 0
-	_         uint16  // 2  wReserved1
-	_         uint16  // 4  wReserved2
-	_         uint16  // 6  wReserved3
-	cbSize    uint32  // 8  blob.cbSize
-	_         uint32  // 12 pad，令 pBlobData 8 字节对齐
-	pBlobData uintptr // 16 blob.pBlobData
+	vt        uint16         // 0
+	_         uint16         // 2  wReserved1
+	_         uint16         // 4  wReserved2
+	_         uint16         // 6  wReserved3
+	cbSize    uint32         // 8  blob.cbSize
+	_         uint32         // 12 pad，令 pBlobData 8 字节对齐
+	pBlobData unsafe.Pointer // 16 blob.pBlobData
 }
 
 // WAVEFORMATEXTENSIBLE 扁平手排：C 里 WAVEFORMATEX 恰 18 字节，但 Go 单独定义会因 uint32 对齐被 pad 到
@@ -277,6 +279,13 @@ func failed(hr uintptr) bool { return uint32(hr)&0x80000000 != 0 }
 
 // comCall 调 obj 接口 vtable 第 idx 个方法，this 作为隐式首参。obj 是 unsafe.Pointer（指向 C 内存），
 // *(**[64]uintptr)(obj) 先解一层得到 vtable 基址再索引 —— 全程无 uintptr→Pointer 转换。
+//
+// uintptrescapes：调用点就地写的 uintptr(unsafe.Pointer(&x)) 使 x 逃逸到堆并保活至本调用返回。没有它，
+// x 留在栈上（unsafe.Pointer 规则 4 的保活与不移动只对汇编实现的函数成立），本函数入口或其中的
+// make/append 若触发栈增长，栈被整体搬走，已转成整数的地址不随之修正，COM 写出参会写到旧栈上。
+// 转换须就地写在实参里，先存进变量再传则不受保护。由 comcall_lint_test.go 守。
+//
+//go:uintptrescapes
 func comCall(obj unsafe.Pointer, idx int, args ...uintptr) uintptr {
 	vtbl := *(**[64]uintptr)(obj)
 	all := make([]uintptr, 0, len(args)+1)
@@ -318,7 +327,7 @@ func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer
 	pv := propVariant{
 		vt:        vtBlob,
 		cbSize:    uint32(unsafe.Sizeof(params)),
-		pBlobData: uintptr(unsafe.Pointer(&params)),
+		pBlobData: unsafe.Pointer(&params),
 	}
 	devPath, err := windows.UTF16PtrFromString(virtualAudioDeviceProcessLoopback)
 	if err != nil {
@@ -338,11 +347,8 @@ func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer
 		uintptr(unsafe.Pointer(h)),
 		uintptr(unsafe.Pointer(&asyncOp)),
 	)
-	// proc.Call 是普通 Go 函数（非 syscall 的编译器特例），不会自动延长这些 Go 指针实参指向对象的存活期；
-	// pv.pBlobData 又以 uintptr 持有 &params（GC 不可见）。故对同步段被消费的 blob/设备路径显式保活至此。
-	runtime.KeepAlive(&params)
-	runtime.KeepAlive(&pv)
-	runtime.KeepAlive(devPath)
+	// proc.Call（x/sys/windows）带 //go:uintptrescapes：上面就地转换的指针实参逃逸到堆并保活至调用返回；
+	// params 经 pv.pBlobData 随 pv 一并保活。
 
 	if asyncOp != nil {
 		releaseUnknown(asyncOp) // 完成经 handler.event 跟踪，不用操作对象
@@ -375,13 +381,15 @@ func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer
 // Capturer：可复用的进程 loopback 捕获器
 // ---------------------------------------------------------------------------
 
-// Capturer 持有一路已激活并启动的进程 loopback 捕获。字段只在 Activate 内填充、Close 内清空。
+// Capturer 持有一路已激活并启动的进程 loopback 捕获。COM 与句柄字段只在 Activate 内填充、Close 内
+// 清空；discontinuities 只由 Read 累加。
 // completion handler 不在此持有：它在 Activate 成功路径内即经引用计数归零而回收（见
 // activateProcessLoopbackClient），激活期一过便与本对象无关。
 type Capturer struct {
-	client        unsafe.Pointer // IAudioClient*
-	captureClient unsafe.Pointer // IAudioCaptureClient*
-	event         windows.Handle // 采集事件（auto-reset，SetEventHandle 绑定）
+	client          unsafe.Pointer // IAudioClient*
+	captureClient   unsafe.Pointer // IAudioCaptureClient*
+	event           windows.Handle // 采集事件（auto-reset，SetEventHandle 绑定）
+	discontinuities uint64         // 带 AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY 的 packet 数，见 Discontinuities
 }
 
 // Activate 对 pid（含/不含子进程树）激活进程 loopback，按固定 48k/2ch/f32 初始化并启动采集，返回就绪的
@@ -418,10 +426,9 @@ func Activate(pid uint32, includeTree bool) (*Capturer, error) {
 		flags,
 		uintptr(int64(captureBufDur100ns)),
 		0,
-		uintptr(unsafe.Pointer(&format)),
+		uintptr(unsafe.Pointer(&format)), // comCall 的 uintptrescapes 使 format 上堆并保活至调用返回
 		0,
 	)
-	runtime.KeepAlive(&format) // format 以 uintptr 传入，保活至调用返回
 	if failed(hr) {
 		c.Close()
 		return nil, fmt.Errorf("IAudioClient.Initialize 失败: 0x%08X", uint32(hr))
@@ -457,8 +464,23 @@ func Activate(pid uint32, includeTree bool) (*Capturer, error) {
 	return c, nil
 }
 
-// Read 等一次采集事件（上限 readTimeoutMs）后取「一个」packet，把交织 f32 写入 dst，返回写入帧数、
-// 该 packet 是否静音、错误。
+// awaitPacket 返回队列里下一个 packet 的帧数：先 resetEvent 非阻塞地吞掉残留信号，再 size 查队列，
+// 有包即返回；无包才 waitEvent 阻塞等一次，醒来或超时后再查一次。返回 0 表示暂无新 packet。
+//
+// 采集事件是 auto-reset、不计数：读线程耽搁时队列积下多个 packet 而信号只有一个，每次先等事件就
+// 只能每个引擎周期消化一个，积压不减。先吞信号再查，积压消化完后的那次等待不会被陈旧信号立刻唤醒成
+// 假空读；吞信号之前到的 packet 已在队列里、紧随其后的 size 看得到，之后到的会重新置位事件，不丢。
+func awaitPacket(resetEvent, waitEvent func(), size func() (uint32, error)) (uint32, error) {
+	resetEvent()
+	if n, err := size(); err != nil || n > 0 {
+		return n, err
+	}
+	waitEvent()
+	return size()
+}
+
+// Read 取「一个」packet，把交织 f32 写入 dst，返回写入帧数、该 packet 是否静音、错误。队列里有包时
+// 直接取、不等事件；队列为空才等一次采集事件（上限 readTimeoutMs），见 awaitPacket。
 //
 // dst 容量语义（承重，务必看）：
 //   - Read 每次至多消费一个 WASAPI packet（事件驱动共享模式下即一个引擎周期，约 10ms，48k/2ch 下
@@ -470,19 +492,27 @@ func Activate(pid uint32, includeTree bool) (*Capturer, error) {
 //
 // 返回 (0, false, nil) 表示本次无数据（事件超时或引擎暂无新 packet）——静音/前奏/暂停时的正常情形；
 // keepalive 补零策略在调用方，不在此。
+//
+// 取到的 packet 带 AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY 时只累加计数（见 Discontinuities），
+// 不影响返回值：样本照常写出。
 func (c *Capturer) Read(dst []float32) (frames int, silent bool, err error) {
 	if c == nil || c.captureClient == nil {
 		return 0, false, fmt.Errorf("Read 在已关闭的 Capturer 上调用")
 	}
-	// 超时也继续尝试取包（drain-regardless，不完全信任事件；返回值无需处理）。
-	windows.WaitForSingleObject(c.event, readTimeoutMs)
-
-	var packet uint32
-	if hr := comCall(c.captureClient, idxCaptureNextPacket, uintptr(unsafe.Pointer(&packet))); failed(hr) {
-		return 0, false, fmt.Errorf("GetNextPacketSize 失败: 0x%08X", uint32(hr))
-	}
-	if packet == 0 {
-		return 0, false, nil
+	// 等待的返回值无需处理：超时也再查一次队列，不完全信任事件。
+	packet, err := awaitPacket(
+		func() { windows.WaitForSingleObject(c.event, 0) },
+		func() { windows.WaitForSingleObject(c.event, readTimeoutMs) },
+		func() (uint32, error) {
+			var n uint32
+			if hr := comCall(c.captureClient, idxCaptureNextPacket, uintptr(unsafe.Pointer(&n))); failed(hr) {
+				return 0, fmt.Errorf("GetNextPacketSize 失败: 0x%08X", uint32(hr))
+			}
+			return n, nil
+		},
+	)
+	if err != nil || packet == 0 {
+		return 0, false, err
 	}
 
 	var pData unsafe.Pointer
@@ -496,6 +526,9 @@ func (c *Capturer) Read(dst []float32) (frames int, silent bool, err error) {
 		return 0, false, fmt.Errorf("GetBuffer 失败: 0x%08X", uint32(hr))
 	}
 
+	if bufFlags&audclntBufferflagsDataDiscontinuity != 0 {
+		c.discontinuities++
+	}
 	silent = bufFlags&audclntBufferflagsSilent != 0
 	n := int(numFrames) * Channels
 	if n > len(dst) {
@@ -512,6 +545,11 @@ func (c *Capturer) Read(dst []float32) (frames int, silent bool, err error) {
 	comCall(c.captureClient, idxCaptureRelBuffer, uintptr(numFrames))
 	return n / Channels, silent, nil
 }
+
+// Discontinuities 返回自 Activate 以来 Read 取到的、带 AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY 的
+// packet 数。按 WASAPI 文档，该标志表示本 packet 与前一 packet 的设备位置不连续，起因可能是流状态
+// 切换或时序故障，其间可能丢了一段数据。计数不加锁，须与 Read 在同一 goroutine 调用。
+func (c *Capturer) Discontinuities() uint64 { return c.discontinuities }
 
 // Close 对称释放捕获侧资源：Stop 流 → Release IAudioCaptureClient → Release IAudioClient →
 // CloseHandle 采集事件，逐项置 nil/0。按字段守卫、可安全多次调用（幂等），半成品状态亦安全。

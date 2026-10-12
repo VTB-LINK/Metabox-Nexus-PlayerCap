@@ -863,6 +863,7 @@ prior-player:
 # - kugou
 # - sodamusic
 # - applemusic
+# - spotify
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
@@ -922,6 +923,15 @@ applemusic-offset: -400
 # applemusic-poll: 50     # 低于 50 会被静默抬到 50（每轮只读 24 字节；位置的跳变与歌词行都在这一轮里发现、推出，调慢歌词跟着晚）
 # applemusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # applemusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
+
+# Spotify 配置（CDP 接入：watchdog 让它带 --remote-debugging-port=9223 重启，状态从页面 DOM 读）
+#
+# offset 暂不写实测值：它是「平台报的位置与实际出声之间的差」，要靠真机听感/录制对齐才敢填。
+# 不写即跟随全局 offset（-200）；对齐之后再把下面这行改成具体值（并评估 DefaultConfig 的回退值）。
+# spotify-offset: -200
+# spotify-poll: 200       # 低于 200 会被静默抬到 200（页面上的位置与播放态本来就是 ~1Hz 更新，调快买不到精度）
+# spotify-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# spotify-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 `
 
 // versionPlaceholder 是模板里版本键取值的占位符，由 templateContent 换成盖章值。

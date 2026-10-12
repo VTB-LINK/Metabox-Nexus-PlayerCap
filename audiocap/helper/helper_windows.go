@@ -4,6 +4,7 @@ package helper
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -61,8 +62,9 @@ type capture struct {
 // 在 shutdownGrace 内未全部退出时不返回，直接 os.Exit(0)。
 //
 // 并发拓扑：本 goroutine=控制/读 stdin；每个被 capture 的 player 一个采集 goroutine（各自
-// LockOSThread+MTA，COM 亲和）；单个写 goroutine 从有界 channel 取帧写 stdout。三者经
-// done channel、有界帧 channel、WaitGroup 编排关停；卡死不返回的采集 goroutine 由限时退出进程回收。
+// LockOSThread+MTA，COM 亲和）；单个写 goroutine 从有界 channel 取帧写 stdout；单个日志 goroutine
+// 从有界 channel 取采集侧投递的诊断写 stderr。四者经 done channel、有界帧与诊断 channel、WaitGroup
+// 编排关停；卡死不返回的采集 goroutine 由限时退出进程回收。
 //
 // 遥测无需传 DSN：DSN 是编译期 ldflags 注入的包级变量，helper 与主服务同一 exe → DSN 天然一致，
 // telemetry.Init(Options{}) 已用对（helper 短路早于主服务 init，故 helper 自己 Init，见 §2.1）。
@@ -87,6 +89,16 @@ func Run(stdin io.Reader, stdout io.Writer) {
 		writeLoop(stdout, frames)
 	}()
 
+	// 日志 goroutine（单个）：采集 goroutine 经 sendDiag 投递诊断，写 stderr 的阻塞只卡这里。
+	diag := make(chan string, diagChanCap)
+	var diagWG sync.WaitGroup
+	diagWG.Add(1)
+	go func() {
+		defer telemetry.Guard()
+		defer diagWG.Done()
+		diagLoop(diag, func(s string) { log.Print(s) })
+	}()
+
 	// 控制 goroutine = 本 goroutine：逐行读 stdin。active 只被本 goroutine 读写 → 无需锁。
 	var capWG sync.WaitGroup
 	active := map[string]*capture{}
@@ -109,7 +121,7 @@ func Run(stdin io.Reader, stdout io.Writer) {
 			go func(ctl control, done <-chan struct{}) {
 				defer telemetry.Guard()
 				defer capWG.Done()
-				captureLoop(ctl, done, frames)
+				captureLoop(ctl, done, frames, diag)
 			}(ctl, c.done)
 		case "stop":
 			if c, ok := active[ctl.player]; ok {
@@ -124,9 +136,10 @@ func Run(stdin io.Reader, stdout io.Writer) {
 
 	// stdin EOF/错误 → 关停所有捕获、排空、干净收尾。
 	// 关停顺序（防 send-on-closed-channel）：先关所有 done → 等所有采集 goroutine 退出
-	//（此后再无人向/从 frames 收发）→ 才 close(frames) → 等写 goroutine 排空剩余帧退出。
-	// 等待至多 shutdownGrace：超时即直接退出进程，且不 close(frames)——卡住的 goroutine 若恢复
-	// 会向 frames 发送，关闭后发送即 panic。
+	//（此后再无人向/从 frames 收发）→ 才 close(frames) → 等写 goroutine 排空剩余帧退出 →
+	// close(diag) → 限时等日志 goroutine 排空。
+	// 等采集 goroutine 至多 shutdownGrace：超时即直接退出进程，且不 close(frames)、不 close(diag)——
+	// 卡住的 goroutine 若恢复会向二者发送，关闭后发送即 panic。
 	for _, c := range active {
 		close(c.done)
 	}
@@ -136,6 +149,10 @@ func Run(stdin io.Reader, stdout io.Writer) {
 	}
 	close(frames)
 	writeWG.Wait()
+	// 诊断的发送方只有采集 goroutine，此时已全部退出。至多等 shutdownGrace：写 stderr 卡住时不再等，
+	// 剩余诊断随进程退出丢弃。
+	close(diag)
+	waitTimeout(&diagWG, shutdownGrace)
 }
 
 // writeLoop 把帧字节写到 stdout，直到 frames 关闭且排空，或写失败（父读端已关）。
@@ -164,7 +181,10 @@ func writeLoop(w io.Writer, frames <-chan []byte) {
 //
 // ctl.norm/target/maxGain 为音量归一化参数：构造该路独立的 Normalizer（持独立 EMA），逐帧经
 // encodeFrame 施于真音频帧（keepalive 零帧不经此路，不更新 EMA，避免静音后恢复过冲）。
-func captureLoop(ctl control, done <-chan struct{}, frames chan []byte) {
+//
+// 读包循环运行期间的诊断（数据不连续）经 sendDiag 投递到 diag，由 Run 的日志 goroutine 写 stderr，
+// 本 goroutine 不同步写日志。
+func captureLoop(ctl control, done <-chan struct{}, frames chan []byte, diag chan<- string) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -188,14 +208,28 @@ func captureLoop(ctl control, done <-chan struct{}, frames chan []byte) {
 	}
 	defer c.Close()
 
-	if err := pumpCapture(c.Read, time.Now, ctl, atomic.AddUint32(&epochCounter, 1), done, frames); err != nil {
+	// 数据不连续只记日志，不影响分帧与 keepalive：read 原样返回 c.Read 的结果。日志非阻塞投递，
+	// 写 stderr 的阻塞（如控制台处于选择状态）不会冻住读包循环；队列满时本条丢弃、次数退回待报，
+	// 下次限频到期时补报。
+	var disc discLog
+	send := func(n uint64) bool {
+		return sendDiag(diag, fmt.Sprintf("[helper][%s] WASAPI 报告数据不连续（DATA_DISCONTINUITY）%d 次，本路累计 %d 次：可能丢了一段音频，不是错误", ctl.player, n, c.Discontinuities()))
+	}
+	read := func(dst []float32) (int, bool, error) {
+		n, silent, err := c.Read(dst)
+		disc.report(disc.observe(c.Discontinuities(), time.Now()), send)
+		return n, silent, err
+	}
+	if err := pumpCapture(read, time.Now, ctl, atomic.AddUint32(&epochCounter, 1), done, frames); err != nil {
 		log.Printf("[helper][%s] 读取失败: %v", ctl.player, err)
 	}
+	// 捕获已结束：补报投递失败时次数退回 disc 后不再重试，这些次数不会出现在日志里。
+	disc.report(disc.flush(), send)
 }
 
 // pumpCapture 把 read 读到的包按 ctl 的参数分帧、分析、归一化、编码后入队 frames，直到 done 关闭
-// （返回 nil）或读包出错（返回该错误）。captureLoop 在激活成功后以 Capturer.Read 与 time.Now 调用；
-// 两者可注入，本函数不触碰 WASAPI。
+// （返回 nil）或读包出错（返回该错误）。captureLoop 在激活成功后以包了数据不连续计数的 Capturer.Read
+// 与 time.Now 调用；两者可注入，本函数不触碰 WASAPI。
 func pumpCapture(read readFunc, now func() time.Time, ctl control, epoch uint32, done <-chan struct{}, frames chan []byte) error {
 	analyzer := dsp.New(fftSize)
 	nz := newNormalizer(ctl.norm, ctl.target, ctl.maxGain, wasapi.SampleRate) // 每路一个，持独立 EMA

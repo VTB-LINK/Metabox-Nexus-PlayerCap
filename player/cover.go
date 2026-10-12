@@ -17,13 +17,14 @@ import (
 
 var coverLog = logger.New("Cover")
 
-// FetchCoverBase64 下载封面图片并返回 base64 编码的 data URI。
+// FetchCoverBase64 下载封面图片，经 CoverDataURI 规范为 800×800 后返回 data URI。
 // playerName 用于日志前缀标识调用来源；timeout 控制 HTTP 下载超时，超时则返回空字符串（不阻塞主流程）。
 //
 // SSRF 加固（issue #12）：只接受 http/https scheme；并在拨号回调里对「实际要连的 IP」拒绝
 // 回环/内网/链路本地/unspecified 地址。校验落在 DNS 解析之后、connect 之前，对每个候选 IP 逐一
-// 检查，天然避开「先 LookupIP 再 Get」的 TOCTOU / DNS-rebinding 窗口。出错一律返回空串（降级，
-// 沿用本函数既有风格）。不设代理：封面走公网 CDN 直连，经代理会绕过下面的内网 IP 校验。
+// 检查，天然避开「先 LookupIP 再 Get」的 TOCTOU / DNS-rebinding 窗口。下载出错一律返回空串（降级，
+// 沿用本函数既有风格）；规范化失败时原字节照发（见 CoverDataURI）。不设代理：封面走公网 CDN 直连，
+// 经代理会绕过下面的内网 IP 校验。
 func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration) string {
 	if coverURL == "" {
 		return ""
@@ -35,25 +36,10 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 		return ""
 	}
 
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			// Control 在 DNS 解析之后、connect 之前对每个候选 IP 调一次：命中内网/非法地址即拒绝。
-			DialContext: (&net.Dialer{
-				Timeout: timeout,
-				Control: func(_, address string, _ syscall.RawConn) error {
-					host, _, err := net.SplitHostPort(address)
-					if err != nil {
-						return err
-					}
-					if ip := net.ParseIP(host); ip == nil || isBlockedCoverIP(ip) {
-						return fmt.Errorf("封面拒绝连接内网/非法地址: %s", address)
-					}
-					return nil
-				},
-			}).DialContext,
-		},
-	}
+	// 每次下载都是一个独立的客户端（独立的 Transport）：不回收的话，对端保活时空闲连接与它的两个 goroutine 会一直留着
+	// （Transport 默认没有空闲超时，Body.Close 与 Client.Timeout 都不清理空闲连接）。
+	client := newCoverClient(timeout)
+	defer client.CloseIdleConnections()
 	resp, err := client.Get(coverURL)
 	if err != nil {
 		return ""
@@ -88,9 +74,50 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 		mimeType = ct
 	}
 
-	encoded := base64.StdEncoding.EncodeToString(body)
 	coverLog.Detail("[%s] cover fetched (%d bytes → base64)", playerName, len(body))
-	return "data:" + mimeType + ";base64," + encoded
+	return CoverDataURI(playerName, body, mimeType)
+}
+
+// newCoverClient 构造封面下载用的 HTTP 客户端。做成包级变量只为测试能换成直连 httptest 回环服务的客户端
+// （生产值的拨号检查拒绝回环地址），生产代码不改它。
+var newCoverClient = func(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			// Control 在 DNS 解析之后、connect 之前对每个候选 IP 调一次：命中内网/非法地址即拒绝。
+			DialContext: (&net.Dialer{
+				Timeout: timeout,
+				Control: func(_, address string, _ syscall.RawConn) error {
+					host, _, err := net.SplitHostPort(address)
+					if err != nil {
+						return err
+					}
+					if ip := net.ParseIP(host); ip == nil || isBlockedCoverIP(ip) {
+						return fmt.Errorf("封面拒绝连接内网/非法地址: %s", address)
+					}
+					return nil
+				},
+			}).DialContext,
+		},
+	}
+}
+
+// CoverDataURI 把封面图片规范为 800×800 后编成 data URI（issue #101），b 为空时返回空串。cover_base64 一律经它
+// 生成。已是 800×800 的 JPEG / PNG 原字节发出、MIME 按格式改正；其余 JPEG / PNG 拉伸到 800×800、编码为 JPEG。
+// 处理不了的（读不出头、格式不在白名单、尺寸超限、CMYK、JPEG 扫描次数超限、解码或编码失败）原字节、原 mime
+// 发出，并打一条警告。在调用方的 goroutine 里同步执行：本机缩放一张 1200² 的 JPEG 约 75ms（BenchmarkNormalizeCover）。
+func CoverDataURI(playerName string, b []byte, mime string) string {
+	if len(b) == 0 {
+		return ""
+	}
+	start := time.Now()
+	out, outMIME, w, h, err := normalizeCover(b, mime)
+	if err != nil {
+		coverLog.Warn("[%s] cover not normalized, sent as is: %v", playerName, err)
+	} else if w != coverSide || h != coverSide {
+		coverLog.Detail("[%s] cover resized %dx%d → 800x800 (%d → %d bytes, %v)", playerName, w, h, len(b), len(out), time.Since(start))
+	}
+	return "data:" + outMIME + ";base64," + base64.StdEncoding.EncodeToString(out)
 }
 
 // isBlockedCoverIP 判断目标 IP 是否属于封面下载 SSRF 防护必须拒绝的范围（issue #12）：

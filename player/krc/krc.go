@@ -38,17 +38,22 @@ type Line struct {
 	// 语义上 RomaWords[j] 对应 Detailed.Words[j] 那个字的音译（酷狗 KRC「按行号+字级位置对齐」，
 	// 见 parseRomanizationWords）。**纯内部字段、不进 wire**：krc.Line 从不被直接序列化（下游一律
 	// 经 player.BuildLyricLine 显式搬字段进 player.LyricLine），故新增它对 kugou/sodamusic/all
-	// 的 wire 零影响；对外产物仍只有行级 RomaText。它与 RomaText 同源（都来自 type=0 轨）、
-	// 只是一个未 Join、一个 Join，互不影响：kugou 只读行级 RomaText，字级供汽水借音译用。
+	// 的 wire 零影响。它与 RomaText 同源（都来自 type=0 轨）、只是一个未 Join、一个 Join，
+	// 互不影响。
 	//
-	// 它只为一件事存在：汽水借酷狗音译时按**字序**对齐、跨断行差异重拼行级 RomaText（见
-	// sodamusic/roma.go）。是否可用由调用方按 len(RomaWords)==len(Detailed.Words) 自行判定——
-	// 相等才逐字配对，不等（老 KRC / 异常轨 / 片段数与字数不符）则该行不参与字级、回落行级或
-	// 留空，绝不臆测配对。
+	// 用它的有两处：本包由它与 Detailed 构造 RomaDetailed（见 romaDetailed）；汽水借酷狗音译时按
+	// **字序**对齐、跨断行差异重拼行级 RomaText（见 sodamusic/roma.go）。是否可用都按
+	// len(RomaWords)==len(Detailed.Words) 判定——相等才逐字配对，不等（老 KRC / 异常轨 / 片段数与
+	// 字数不符）则该行不参与字级、回落行级或留空，绝不臆测配对。
 	RomaWords []string
 	// Detailed 逐字时间轴。PlayTime 此处不填，由调用方按 offset 统一套
 	// （见 kugou.go / sodamusic 的 applyDetailedOffset）。
 	Detailed player.LyricTextDetailed
+	// RomaDetailed 音译的逐字时间轴，进 wire 的 roma_text_detailed（由调用方赋给 RomaTextDetailed）。
+	// 片段数与字数相等的行才有（见 romaDetailed），其余为零值、只留行级的 RomaText。type=0 轨的片段
+	// 自己不带时间，第 j 个单元的时间取 Detailed.Words[j] 的。Words 是另行分配的切片，不与 Detailed
+	// 共享。PlayTime 同 Detailed，此处不填，由调用方的 applyDetailedOffset 一并套。
+	RomaDetailed player.LyricTextDetailed
 }
 
 var (
@@ -126,26 +131,50 @@ func ParsePlainKRC(krc string) []Line {
 			romaText = roma[rawIdx]
 		}
 		// 同一 rawIdx 口径取本行的逐字音译片段。行级 romaText 与字级 romaWords 同源不同形，
-		// 各存各的：kugou 只用 romaText，汽水字级对齐用 romaWords。缺轨则为 nil，安全。
+		// 各存各的：romaText 进 roma_text，romaWords 供下面构造逐字音译、供汽水字级对齐。
+		// 缺轨则为 nil，安全。
 		var romaWordFrags []string
 		if rawIdx < len(romaWords) {
 			romaWordFrags = romaWords[rawIdx]
 		}
+		detailed := player.LyricTextDetailed{
+			Timestamp: lineTimestamp,
+			Duration:  lineDuration,
+			Words:     words,
+		}
 		lines = append(lines, Line{
-			Index:     len(lines),
-			Time:      lineTimestamp,
-			Text:      plain,
-			SubText:   sub,
-			RomaText:  romaText,
-			RomaWords: romaWordFrags,
-			Detailed: player.LyricTextDetailed{
-				Timestamp: lineTimestamp,
-				Duration:  lineDuration,
-				Words:     words,
-			},
+			Index:        len(lines),
+			Time:         lineTimestamp,
+			Text:         plain,
+			SubText:      sub,
+			RomaText:     romaText,
+			RomaWords:    romaWordFrags,
+			Detailed:     detailed,
+			RomaDetailed: romaDetailed(detailed, romaWordFrags, romaText),
 		})
 	}
 	return lines
+}
+
+// romaDetailed 由一行主歌词的逐字 detailed 与 type=0 轨这一行的逐字片段 frags 构造逐字音译。
+//
+// 片段数与字数相等才构造：第 j 个单元的文本是 frags[j] 原样（不 Trim，词间的空格是数据的一部分），
+// 起始与时长取 detailed.Words[j] 的；行级的起始与时长取 detailed 的。片段数与字数不符的行（每行只有
+// 一个片段的老 KRC、异常轨）不臆测配对，返回零值。其余约定（空片段不成单元、各单元拼起来去掉首尾
+// 空白等于 romaText、时间轴合法）由 player.BuildRomaDetailed 把关，不成立同样返回零值。
+func romaDetailed(detailed player.LyricTextDetailed, frags []string, romaText string) player.LyricTextDetailed {
+	if len(frags) != len(detailed.Words) {
+		return player.LyricTextDetailed{}
+	}
+	units := make([]player.LyricTextDetailedWord, len(frags))
+	for j, w := range detailed.Words {
+		units[j] = player.LyricTextDetailedWord{Timestamp: w.Timestamp, Duration: w.Duration, Text: frags[j]}
+	}
+	return player.BuildRomaDetailed(player.LyricTextDetailed{
+		Timestamp: detailed.Timestamp,
+		Duration:  detailed.Duration,
+		Words:     units,
+	}, romaText)
 }
 
 // parseWords 从 KRC 行体解析逐字片段。行体形如：
@@ -229,7 +258,8 @@ func parseRomanization(krc string) []string {
 // 无 type=0 轨 → nil；某行无片段则该项为空/ nil 切片。
 //
 // 与 parseRomanization（行级 Join）**同源、同 [start,dur] 行号口径、互不影响**：行级那条
-// 给 kugou 直接显示，字级这条给汽水借音译按字序对齐用（见 sodamusic/roma.go）。刻意**不复用**
+// 进 roma_text，字级这条供构造逐字音译（romaDetailed）、供汽水借音译按字序对齐（见
+// sodamusic/roma.go）。刻意**不复用**
 // parseLanguageTrack——那个函数把每行 Join 成单串是行级路径的承重语义（kugou 依赖、有门禁钉死），
 // 这里恰恰要的是 Join 之前的原始片段，故单开一份只多一次 base64+json（每首歌一次，非热路径）。
 //

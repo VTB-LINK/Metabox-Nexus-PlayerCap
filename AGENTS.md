@@ -4,7 +4,7 @@
 本文件只放最高约束与各章索引，第 1～14 章各在 `agent-doc/` 下的一个文件里。
 
 这个服务在主播直播时跑在播控机上，OBS 从它拉歌词、特效与音频波形 overlay。**它挂了 = 直播事故。**
-它对接六个没有公开歌词 API 的音乐播放器（五个国产播放器与 Apple Music for Windows），手段是内存扫描 / CDP / 二进制补丁 / 代码注入，
+它对接七个没有公开歌词 API 的音乐播放器（五个国产播放器、Apple Music for Windows 与 Spotify 桌面版），手段是内存扫描 / CDP / 二进制补丁 / 代码注入，
 因此运行在一组脆弱假设之上。质量优先级：**稳定 > 正确 > 简洁 > 功能完整度**。
 
 ---
@@ -50,7 +50,7 @@
 | §4 规矩的守卫状况 | [agent-doc/04-守卫状况.md](agent-doc/04-守卫状况.md) | 哪些规矩有自动门禁、哪些靠人守、门禁的盲区 |
 | §5 怎么加东西 | [agent-doc/05-怎么加东西.md](agent-doc/05-怎么加东西.md) | 加播放器、加配置项、加端点的步骤 |
 | §6 日志与文案规范 | [agent-doc/06-日志与文案.md](agent-doc/06-日志与文案.md) | 日志格式、允许直接打印的例外、i18n 约定 |
-| §7 Windows 机制 | [agent-doc/07-Windows机制.md](agent-doc/07-Windows机制.md) | 内存读写原语、NewCallback、park、canvas 只读，以及 wesing、sodamusic、applemusic、cloudmusicv3 各自的机制 |
+| §7 Windows 机制 | [agent-doc/07-Windows机制.md](agent-doc/07-Windows机制.md) | 内存读写原语、NewCallback、park、canvas 只读，以及 wesing、sodamusic、applemusic、cloudmusicv3、spotify 各自的机制 |
 | §8 写完跑什么 | [agent-doc/08-写完跑什么.md](agent-doc/08-写完跑什么.md) | 四道门禁、改了 config / logger / i18n 必跑的、CI 实际覆盖什么 |
 | §9 验证方法学 | [agent-doc/09-验证方法学.md](agent-doc/09-验证方法学.md) | 测试怎样才算数、破坏性验证的做法、「已验证」的使用门槛 |
 | §10 提交前 | [agent-doc/10-提交前.md](agent-doc/10-提交前.md) | 提交策略、commit message 的门槛、工作树卫生 |

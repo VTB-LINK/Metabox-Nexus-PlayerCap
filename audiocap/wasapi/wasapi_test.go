@@ -68,6 +68,17 @@ func TestCompletionHandlerLayout(t *testing.T) {
 	check(t, "activateCompleted", unsafe.Offsetof(v.activateCompleted), 3*unsafe.Sizeof(uintptr(0)))
 }
 
+// GetBuffer 的 packet 标志按位判定，值同 audioclient.h 的 _AUDCLNT_BUFFERFLAGS（按 MinGW-w64 的该头文件
+// 核对）；写错即误判静音或漏计不连续。
+func TestBufferFlagValues(t *testing.T) {
+	if audclntBufferflagsDataDiscontinuity != 0x1 {
+		t.Errorf("AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY=%#x, 期望 0x1", audclntBufferflagsDataDiscontinuity)
+	}
+	if audclntBufferflagsSilent != 0x2 {
+		t.Errorf("AUDCLNT_BUFFERFLAGS_SILENT=%#x, 期望 0x2", audclntBufferflagsSilent)
+	}
+}
+
 func TestGUIDSize(t *testing.T) {
 	if got := unsafe.Sizeof(windows.GUID{}); got != 16 {
 		t.Fatalf("sizeof(GUID)=%d, 期望 16", got)

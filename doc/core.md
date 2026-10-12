@@ -44,7 +44,11 @@ PlayerCap (cloudmusicv3 模块)
 ├─ JS 求值 → React Fiber 遍历 → 提取 Redux + DOM 状态
 ├─ 切歌时强制 Redux 刷新歌词，优先使用当前歌曲 Redux ID
 ├─ DOM / Redux 双重校验，避免旧歌词、旧封面串到新歌
-├─ 网易云 API / CDP 获取歌词（LRC 解析）+ 封面
+├─ 网易云 API / CDP 获取歌词（LRC 解析）+ 封面（DOM 底栏图、Redux、/api/song/detail 三个来源都改为请求
+│  800 档：带 thumbnail 的把它的值改成 800y800，没有 thumbnail 也没有 param 的补 param=800y800；未真机验证，
+│  改写后的 URL 下载不到时退回改写前的 URL 再下载一次）；音译只有逐行的 romalrc → roma_text，没有字级时间；
+│  一字一音的歌（粤语）里，逐字单元恰为一个汉字、音节数与汉字数相等的行，把音节按顺序配上各个字的
+│  时间 → roma_text_detailed；带逐字歌词的行里出现假名或谚文的歌（日文、韩文歌）整首为 {}
 ├─ 本地时钟锚定 + seek 检测；界面进度（DOM 整秒值）跳秒的那一拍对表，保留约 0.3s 的落后量，
 │  校准量达到 0.2s 时发 playback_resume
 ├─ Redux 播放状态（playingState）变化 → 暂停/恢复事件
@@ -64,7 +68,8 @@ PlayerCap (qqmusic 模块)
 ├─ 进程内存扫描定位 QQMusic.dll + QQMusic_GFWrapper.dll
 ├─ AOB Hook 注入（伴奏滑块）
 ├─ 快速计时器锚点 + 本地时钟实时线性插值
-├─ QQ 音乐 API 获取歌词（QRC 3DES 解密）+ 专辑封面
+├─ QQ 音乐 API 获取歌词（QRC 3DES 解密）+ 专辑封面；音译轨同为 QRC，按行起始时间配到主歌词上 → roma_text，
+│  音译轨自带的字级单元连同时间 → roma_text_detailed
 ├─ 快速计时器异常跳变检测 seek（支持前跳 / 回跳）
 ├─ 快速计时器停滞检测 → 暂停/恢复事件
 └─ 播放中每 5 秒向服务端报一次位置采样（内部事件 position_sample，不外发），校准连接补发与 HTTP 快照的位置
@@ -85,8 +90,11 @@ PlayerCap (kugou 模块)
 ├─ WebSocket CDP 客户端连接 desktop-popup 页面（端口 12233）
 ├─ JS 求值调用 SuperCall 获取播放信息
 ├─ hash 变化检测切歌，filename 拆分歌名 + 歌手
-├─ 酷狗歌词 API 获取歌词（hash 优先，必要时按歌名/歌手/时长解析 canonical hash）
-├─ CDP 封面 URL + 酷狗公开 API 兜底获取封面，异步下载 Base64
+├─ 酷狗歌词 API 获取歌词（hash 优先，必要时按歌名/歌手/时长解析 canonical hash）；
+│  KRC 内嵌的 type=0 轨按行号对齐 → roma_text，它按字给出的音译片段配上主歌词同一位置那个字的时间
+│  → roma_text_detailed（片段数与该行字数相等的行）
+├─ CDP 封面 URL（路径里的 /stdmusic/120/ 换成 800 档，换歌与封面晚到时都换）+ 酷狗公开 API 兜底
+│  （{size} 取 800）获取封面，异步下载 Base64
 ├─ 本地时钟锚定 + 100ns progress 单位换算 + seek 检测
 ├─ 伴唱/伴奏等同曲 hash 变化时复用同名同歌手歌词
 ├─ 播放中每 5 秒向服务端报一次位置采样（内部事件 position_sample，不外发），校准连接补发与 HTTP 快照的位置
@@ -114,6 +122,9 @@ PlayerCap (sodamusic 模块)
 ├─ 时长比歌名晚到时给 2 秒宽限，避免 all_lyrics 带着 duration=0 出去让进度条整首归零
 ├─ 歌词是平台已解密的明文 KRC，复用 player/krc 解析出逐字，连解密都省
 ├─ 翻译来自 translations.cn 的独立 tlyric LRC，按绝对时间戳（±10ms）合并进 sub_text
+├─ 音译借自酷狗（按歌名 + 时长匹配，异步补发）：酷狗的音译片段按字序对到主歌词上、重拼成 roma_text，
+│  对不上的行退回整行文本匹配；按字对齐上的行另出 roma_text_detailed，文本取酷狗的片段、
+│  时间取汽水自己主歌词的字（两边字的切分不同处，相邻的字并成一个单元）
 ├─ 封面 URL 由 cover_url 的 {urls,uri,template_prefix} 拼成 800×800，异步下载 Base64
 ├─ 本地时钟外推：进度源只有 1Hz，仅在采样变化时落锚、两次采样之间按墙钟推进
 │  —— 每轮都落锚等于没有外推，position 会退化成 1 秒阶梯、歌词整体滞后
@@ -199,7 +210,7 @@ PlayerCap (applemusic 模块)
 ├─ 换歌时歌词已在内存（或留存里有）就同一次全扫配好再宣告；不在就先发空的 all_lyrics，头 3s 约每 0.4s、到 15s 约每 1.2s
 │  找一次，找到即补发；15s 仍没有才发 index:-1（每首至多一次），之后退避到 60s 一次继续找
 │  —— 自然播完切到下一首时歌词在开播后 0.3~0.5s 才到；审查方见过 10s 以上才到的
-├─ TTML 用 encoding/xml 解析：Word 型的 <span> 为逐字；译文进 sub_text；roma_text 恒空
+├─ TTML 用 encoding/xml 解析：Word 型的 <span> 为逐字；译文进 sub_text；roma_text 恒空、roma_text_detailed 恒为 {}
 │  —— 时间写法：时钟值 [h:][m:]ss.mmm（冒号超过三段的拒绝），或不含冒号、带度量后缀 h / m / min / s / ms 的偏移值
 │     （真机见过整份文档写成 begin="1.127s"）
 │  —— 没有时间的 <span>（背景人声 ttm:role="x-bg"）当容器，内层逐字 span 各自成词；span 之间的空白并入前一个词；
@@ -207,7 +218,8 @@ PlayerCap (applemusic 模块)
 │  —— 译文取 <text> 内全部文字（含内嵌 <span>）；多个 <translation> 时同一 itunes:key 先到先得，
 │     第一种语言缺的 key 由后面的语言补上
 │  —— 只有一行「纯音乐，请欣赏」的 TTML 按无歌词：all_lyrics 为空列表，index:-1 的 lyric_update 带这行文本
-├─ 封面：随 song_info_update 的 cover_base64（data URI）发出，cover 恒为空串。宣告时还没有图的先不带图、到了补发；
+├─ 封面：经 player.CoverDataURI 规范为 800×800 后随 song_info_update 的 cover_base64（data URI）发出，cover 恒为空串；
+│  缩放在轮询 goroutine 里同步做（本机 1200² 的 JPEG 约 75ms），其间不推歌词行。宣告时还没有图的先不带图、到了补发；
 │  换歌后存储里的图有时还是上一首的（约 0.4s 后才换）：与上一首那张相同而专辑不同时先不发，换了补发；
 │  加载超时清屏后仍记着最近一次发出的图与专辑，清屏后的新歌照此比对
 ├─ 位置结构已确认、歌名歌词封面都已取到后，稳态播放零全扫
@@ -232,6 +244,47 @@ PlayerCap (applemusic 模块)
 │     闪现约 220ms 的拖动会连发三条 playback_resume、把原位置的歌词行又推一遍
 │  —— 暂停中拖动一次可能先后推出目标与实际落点两处的歌词行：目标值的读数先停约 1.1s，之后才落到靠前 3~10s 处
 └─ 进程退出（GetExitCodeProcess 判活）→ standby + process_exited，重新附加后重新发现位置结构（重启后地址变）
+```
+
+### Spotify（CDP + 页面 DOM + 平台歌词）
+
+```
+Spotify.exe 进程（CEF；主进程与全部子进程共用一个映像名）
+├─ --remote-debugging-port=9223（CEF 远程调试端口）与四个防后台节流参数（与网易云同一组），
+│  由 PlayerCap 的 watchdog 保证带上：不带后者时，窗口最小化或被遮挡后进度读数降到约每分钟一次
+├─ xpui.app.spotify.com/index.html 页面 → DOM：歌名、歌手、封面 img.src、
+│  [data-testid="progress-bar"] 的 --progress-bar-transform 浮点百分比 × <input max>（毫秒时长）、
+│  播放 / 暂停按钮 svg path 的图标常量
+├─ CDP 推送的 Network.requestWillBeSent 事件 → 页面自己发出的 Authorization: Bearer（旁观所得）
+└─ spotify_cli.exe（随 Spotify 安装的官方 CLI）→ 当前曲目 URI（页面 DOM 里没有）
+
+PlayerCap (spotify 模块)
+├─ watchdog：没在跑就报 waiting_process（detail「Spotify 未启动或未连上」）并继续等待，不代用户启动
+├─ watchdog：在跑但主进程缺调试端口或缺防节流参数时（端口已通也算），先在 Spotify.dll 的字节里流式搜
+│  ASCII 串 remote-debugging-port 验这一版认不认这个 flag——它只认启动时的命令行，在已运行的实例上再执行一次
+│  带参数的 Spotify.exe 打不开端口，故认得就杀掉并带全部参数重启（重启是用户可见的动作：当前播放中断数秒，
+│  Spotify 会自己恢复曲目与位置；一次服务运行内重启后仍缺参数、但仍带调试端口或端口已通时不再重启）；
+│  搜不到即报「版本不支持（无法打开远程调试端口）」且不动用户的进程，之后每 30 秒重探一次
+├─ 缺的参数补进 HKCU\...\Run\Spotify 自启项（值不存在=用户没设自启，则什么都不做）
+├─ WebSocket CDP 连 9223，Runtime.evaluate 读页面 DOM，**不注入任何 JS**；
+│  会话断开发 standby + cdp_disconnected，退避后重连
+├─ 换歌按歌名 + 歌手归一化后的稳定键检测；页面上没有曲目（歌名为空）时保持静默、不发状态（不产生 waiting_song）
+├─ 歌词：Spotify 自家的 spclient color-lyrics/v2（行级 LINE_SYNCED，provider 实测 MusixMatch）
+│  —— 取词钥匙是曲目 URI：页面 DOM 里没有当前曲目的 URI，经 spotify_cli.exe now-playing --format json
+│     取一次（实测约 250ms，只在换歌时调）
+│  —— 三条路径：Go 侧带 Bearer 直取（真机实测稳定 403）→ 页面里带 Bearer 取（与 App 同源同头，实测可用）
+│     → 页面的 HTTP 缓存兜底（只对 App 在本页面会话里真的取过的曲目有效）；Bearer 从 CDP 事件旁观得到
+├─ 取 URI 与取词在独立的 goroutine 里做、不阻塞轮询：换歌时先以空歌词发 all_lyrics，取到即补发；
+│  没取到响应则每 5 秒补取一次，90 秒后降到每 30 秒一次、直到换歌（不放弃），拿到即补发 all_lyrics；
+│  取到了响应但没有行级时间轴（UNSYNCED 或零行）则不补取
+├─ 位置：播放中真实位置 = 页面读数 − 1.0s（进度条 1 秒动画的超前量，实测；暂停时没有动画、不减），
+│  再由本地时钟在两次 ~1Hz 采样之间外推；轮询下限 200ms（低于 200 抬到 200）
+├─ 播放 / 暂停按按钮 svg path 的图标常量判定（与系统语言无关）；图标常量不认识时退回「位置有没有在推进」
+├─ 位置跳变（seek / 回跳）报一次 playback_resume；封面先发只带 URL（页面上的 300×300 档）的 song_info_update，
+│  再把 URL 里的档位码换成 640×640 档异步下载 base64 后补发（取不到退回页面上的 URL），两条的 cover 都是页面上的 URL
+├─ 只有行级歌词：sub_text / roma_text 恒空，text_detailed 与 lyrics_detailed 恒为 {} / []（无逐字、无翻译、无音译）
+├─ 两个不能用的读数：<input value> 只有 5 秒粒度；按钮 aria-label 随系统语言变——位置与播放态都不取它们
+└─ 标题顺序「歌名 - 歌手」；音频波形的捕获目标是主进程 Spotify.exe（子进程都在它的进程树里）
 ```
 
 ### 音频波形（WASAPI 进程级 loopback，全部播放器通用）

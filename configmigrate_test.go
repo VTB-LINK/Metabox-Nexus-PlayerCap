@@ -69,6 +69,7 @@ func TestLoadMigratesV3Config(t *testing.T) {
 	want := map[string]any{
 		"offset": float64(-200), "wesing-offset": float64(0), "cloudmusicv3-offset": float64(-500),
 		"qqmusic-offset": float64(-200), "kugou-offset": float64(-200), "sodamusic-offset": float64(-200), "applemusic-offset": float64(-200),
+		"spotify-offset": float64(-200),
 	}
 	if got := echoOffsets(t, &cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("回显的 offset = %v，期望 %v", got, want)

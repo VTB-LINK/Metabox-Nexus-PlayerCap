@@ -79,7 +79,7 @@ if len(os.Args) >= 2 && os.Args[1] == "--audio-capture-helper" {
 
 ### 2.2 捕获机制：纯 Go 进程级 WASAPI loopback
 
-复用 `audiocap/wasapi/wasapi_windows.go` 的已验内核（spike 原在 `tools/audioprobe`）：`ActivateAudioInterfaceAsync` + `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` + 手写 `IActivateAudioInterfaceCompletionHandler` 回调 vtable（要点：VT_BLOB=`0x0041`、结构体扁平化手排偏移、`NewCallback` 全部包级 var 无捕获合 §0.4、pin map 钉 GC、`KeepAlive`、超时 ABANDON 不 UAF；详见该文件注释）。
+复用 `audiocap/wasapi/wasapi_windows.go` 的已验内核（spike 原在 `tools/audioprobe`）：`ActivateAudioInterfaceAsync` + `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` + 手写 `IActivateAudioInterfaceCompletionHandler` 回调 vtable（要点：VT_BLOB=`0x0041`、结构体扁平化手排偏移、`NewCallback` 全部包级 var 无捕获合 §0.4、pin map 钉 GC、交给 COM 的 Go 变量地址就地转换并经 `comCall` 的 `//go:uintptrescapes` 上堆保活、超时 ABANDON 不 UAF；详见该文件注释）。
 
 - 格式硬编码 48000Hz/2ch/float32（进程 loopback 虚拟设备 `GetMixFormat` 返回 `E_NOTIMPL`；引擎把播放器侧任意采样率/位深/声道转成这个格式——**播放器「输出格式/频率转换/输出声道」怎么设都无所谓**）。
 - **`INCLUDE_TARGET_PROCESS_TREE` 是硬需求**：Chromium 系（cloudmusic/kugou/sodamusic）真正出声的是 **audio utility/service 子进程**（`--type=utility --utility-sub-type=audio`，主进程无 `--type=` 的那个的子进程），不是主进程本身。抓主进程 + 整棵树才覆盖到出声子进程。**Phase 1 需逐家实测**两点：① 主进程 + tree 确实覆盖出声子进程；② **先激活 loopback、后开始播放**时，晚生成的音频子进程能否被 tree 动态纳入。（结果见 §9）
@@ -99,7 +99,7 @@ helper 捕获 PCM 后就地算帧、只把帧写 stdout；主服务零音频处�
 ### 2.5 helper 内部：stdout 只写帧 + 采集与写解耦（承重）
 
 - **stdout 只承载帧、所有诊断一律走 stderr（红线）**：移植 audioprobe 内核时必须清除/改向其全部 `fmt.Printf`→stdout 的打印，否则任何杂散字节冲垮长度前缀分帧、主服务解析 desync/OOM/崩。分帧协议带**同步魔数**（布局见 §4 末条），主服务解析出界时可重新对齐——把污染降级为「丢几帧后自恢复」而非「解析器卡死」。
-- **采集排空与 stdout 写解耦（评审：helper→主背压是唯一未分析方向）**：helper 的采集是「醒来即排空所有 packet」的循环，若 stdout 写阻塞（主服务读端停顿或 Windows 管道 ~64KB 满）会卡住排空 → WASAPI 环缓冲溢出。故 helper 内用一个小的**有界 channel + drop-oldest** 把「采集排空」与「写 stdout」解耦；写端是单 goroutine 阻塞写，阻塞只卡它自己——父进程停顿或死亡时排空循环永不被冻住。
+- **采集排空与 stdout 写解耦（评审：helper→主背压是唯一未分析方向）**：helper 的采集是「醒来即排空所有 packet」的循环，若 stdout 写阻塞（主服务读端停顿或 Windows 管道 ~64KB 满）会卡住排空 → WASAPI 环缓冲溢出。故 helper 内用一个小的**有界 channel + drop-oldest** 把「采集排空」与「写 stdout」解耦；写端是单 goroutine 阻塞写，阻塞只卡它自己——父进程停顿或死亡时排空循环永不被冻住。WASAPI 以 packet 上的 `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` 报告它与前一 packet 不连续（按文档，起因可能是流状态切换或时序故障，其间可能丢段）：`Capturer.Read` 累计其次数，helper 按路限频（首次出现即报，此后至多每 10 秒一条，该路捕获结束时补报未报的次数），采集 goroutine 把日志非阻塞投递到有界队列，由单独的日志 goroutine 写 stderr（stderr 并入主控制台，控制台写可能阻塞，同样不能冻住排空）；队列满时本条投递失败，次数退回待报，下次限频到期或捕获结束时补报，日志写端持续不可写则最终仍可能没有记录；只作可观测，不改分帧与 keepalive；真实引擎何时置位尚无真机数据。
 
 ---
 

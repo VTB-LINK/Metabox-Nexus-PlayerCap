@@ -53,8 +53,12 @@ type LyricLine struct {
 	RomaText     string            `json:"roma_text"`
 	TextDetailed LyricTextDetailed `json:"text_detailed"`
 	// RomaTextDetailed 是 roma_text 的逐字（逐音节）时间轴，形状同 TextDetailed，零值序列化为 {}。
-	// 目前只有 wesing 提供。它是一条独立的数组，单元与 TextDetailed 不一一对应：一个汉字可以拆成
-	// 多个音节，空格可以单独占一个单元。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后赋值。
+	// wesing、qqmusic、kugou、sodamusic 提供，cloudmusicv3 只在一字一音的歌（粤语）上提供：wesing 与
+	// qqmusic 取音译轨自带的字级时间，kugou、sodamusic 与 cloudmusicv3 的时间取自主歌词的字
+	// （cloudmusicv3 的音译只有逐行的，逐字单元恰为一个汉字、音节数与汉字数相等的行才配得上）；
+	// applemusic 无音译，恒为零值。它是一条独立的数组，单元与 TextDetailed 不一一对应：一个汉字可以
+	// 拆成多个音节，空格可以单独占一个单元。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后
+	// 赋值（qqmusic、kugou、sodamusic、cloudmusicv3 共同的约定见 BuildRomaDetailed）。
 	RomaTextDetailed LyricTextDetailed `json:"roma_text_detailed"`
 }
 
@@ -107,8 +111,8 @@ type LyricUpdate struct {
 	Progress     float32           `json:"progress"`
 	TextDetailed LyricTextDetailed `json:"text_detailed"`
 	// RomaTextDetailed 是 roma_text 的逐字（逐音节）时间轴，形状同 TextDetailed，零值序列化为 {}。
-	// 目前只有 wesing 提供。它是一条独立的数组，单元与 TextDetailed 不一一对应：一个汉字可以拆成
-	// 多个音节，空格可以单独占一个单元。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后赋值。
+	// 哪几家提供、时间取自哪里，同 LyricLine.RomaTextDetailed：all_lyrics 的行与 lyric_update 取自
+	// 同一份歌词。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后赋值。
 	RomaTextDetailed LyricTextDetailed `json:"roma_text_detailed"`
 }
 
@@ -377,7 +381,7 @@ func AdjustLyricPlayTime(timestamp, offsetSec float32) float32 {
 // 它时该行已到播出时间：「位置 - offset >= 时间戳」与 AdjustLyricPlayTime 的「播出时间 = 时间戳 + offset」
 // 是同一个 offset 的两种用法，符号必须相反。
 //
-// **各播放器的行匹配都必须经由它**。六家里只有 applemusic 有离线会话测试，其余五家自行写这道算式而
+// **各播放器的行匹配都必须经由它**。七家里只有 applemusic 有离线会话测试，其余六家自行写这道算式而
 // 写反时没有用例会红，表现为该播放器 lyric_update 的发出时刻与其 play_time 相差两倍 offset。
 // 返回值只用于行匹配：对外事件的 position 与位置采样传的是 position 本身，不含 offset。
 func LyricMatchTime(position, offsetSec float32) float32 {
@@ -471,6 +475,48 @@ func BuildLyricLine(index int, lineTime float32, text, subText, romaText string,
 		RomaText:     romaText,
 		TextDetailed: detailed,
 	}
+}
+
+// BuildRomaDetailed 由候选的逐字音译 d 与这一行的行级音译 romaText 得出对外的 roma_text_detailed。
+// qqmusic、kugou、sodamusic、cloudmusicv3 共用，四家各自拼出候选（单元的文本与时间从哪来各不相同），
+// 约定只写在这里：
+//
+//   - text 为空串的单元去掉；只含空格的单元保留，它是排版的一部分。
+//   - 剩下各单元的 text 拼起来、去掉首尾空白，必须等于 romaText，且 romaText 非空。
+//   - 时间轴合法：行级与各单元的起始、时长都是有限的非负数，单元的起始在行内不回退。
+//
+// 任一条不成立就返回零值（序列化为 {}），这一行只留行级的 roma_text，不推半截错位的逐字。成立时
+// 返回的 Words 是新分配的切片，不与 d 共享。PlayTime 原样带过：候选里没套过 offset 的，由播放器的
+// applyDetailedOffset 套；cloudmusicv3 的候选取自已套过 offset 的逐字歌词，不再套。
+func BuildRomaDetailed(d LyricTextDetailed, romaText string) LyricTextDetailed {
+	if romaText == "" || !validDetailedTime(d.Timestamp) || !validDetailedTime(d.Duration) {
+		return LyricTextDetailed{}
+	}
+	words := make([]LyricTextDetailedWord, 0, len(d.Words))
+	var joined strings.Builder
+	var lastStart float32
+	for _, w := range d.Words {
+		if w.Text == "" {
+			continue
+		}
+		if !validDetailedTime(w.Timestamp) || !validDetailedTime(w.Duration) || w.Timestamp < lastStart {
+			return LyricTextDetailed{}
+		}
+		lastStart = w.Timestamp
+		joined.WriteString(w.Text)
+		words = append(words, w)
+	}
+	if strings.TrimSpace(joined.String()) != romaText {
+		return LyricTextDetailed{}
+	}
+	d.Words = words
+	return d
+}
+
+// validDetailedTime 报告 v 能不能作逐字时间轴上的起始或时长：有限的非负数。接受式判定，NaN 的任何
+// 比较都为 false（理由见 ClampProgress）；NaN 与无穷大进了载荷，json.Marshal 会报错。
+func validDetailedTime(v float32) bool {
+	return v >= 0 && v <= math.MaxFloat32
 }
 
 // ── 文本归一化工具（跨播放器共享） ──
