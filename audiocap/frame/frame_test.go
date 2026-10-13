@@ -257,6 +257,48 @@ func TestForwardCompatExtraHeader(t *testing.T) {
 	}
 }
 
+// TestSessionFlagsRoundTrip：会话信号两位与归一化位的各种组合按线上取值写在偏移 16，解码后原样还原。
+// 线上取值写字面量，不引用包常量。
+//
+// 变异自证（实测）：FlagSessionKnown 改为 1<<3，或 FlagSessionActive 改为 1<<1，均红。
+func TestSessionFlagsRoundTrip(t *testing.T) {
+	for _, c := range []struct {
+		flags uint32
+		wire  uint32
+	}{
+		{FlagSessionKnown, 0x2},
+		{FlagSessionKnown | FlagSessionActive, 0x6},
+		{FlagNormalized | FlagSessionKnown, 0x3},
+		{FlagNormalized | FlagSessionKnown | FlagSessionActive, 0x7},
+	} {
+		want := Frame{Player: "kugou", Flags: c.flags, Epoch: 2, TSMillis: 5, Bins: []float32{0.5}}
+		b := Encode(nil, want)
+		if got := binary.LittleEndian.Uint32(b[16:]); got != c.wire {
+			t.Fatalf("flags@16 = %#x, 期望 %#x", got, c.wire)
+		}
+		var d Decoder
+		d.Push(b)
+		got, ok, err := d.Next()
+		if err != nil || !ok || !reflect.DeepEqual(got, want) {
+			t.Fatalf("flags %#x 往返 got=%+v ok=%v err=%v", c.wire, got, ok, err)
+		}
+	}
+}
+
+// TestUnknownFlagsPassThrough：解码器不解释 flags，保留位原样交给调用方（manager 的 demux 据此透传，
+// 由消费者忽略不认识的位）。
+//
+// 变异自证（实测）：decodePayload 读 flags 时与 0x7 相与 → 红。
+func TestUnknownFlagsPassThrough(t *testing.T) {
+	const flags = 1<<31 | 1<<3 | FlagSessionActive
+	var d Decoder
+	d.Push(Encode(nil, Frame{Player: "kugou", Flags: flags}))
+	got, ok, err := d.Next()
+	if err != nil || !ok || got.Flags != flags {
+		t.Fatalf("flags = %#x ok=%v err=%v, 期望原样 %#x", got.Flags, ok, err, flags)
+	}
+}
+
 func TestQPCMillis(t *testing.T) {
 	const f = int64(10_000_000)
 	if got := QPCMillis(123, 0); got != 0 {

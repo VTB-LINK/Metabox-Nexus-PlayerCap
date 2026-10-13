@@ -285,6 +285,21 @@ var knownVersions = map[string]dllOffsets{
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
 	},
+	"22.76": {
+		// qqprobe 实测（32-bit x86，2026-10-14，构建目录 QQMusic2276.00.18.59）：
+		// 「享福 / 小思孩子」命中宽字符显示对象，时长 137223ms；会话 songID=621653818
+		// 与该曲已知 ID 一致。相较 22.71，Struct1 后移 0x2000，字段及会话相对偏移不变。
+		Struct1:           0xC7DCF0,
+		NameOff:           0x00,
+		SingerOff:         0x04,
+		AlbumOff:          0x08,
+		ProgressOff:       0x0C,
+		DurationOff:       0x10,
+		SongIDOff:         0x73C10,
+		SongIDDurCheckOff: 0x73C18,
+		UseWideStrings:    true,
+		SongMidFromHeap:   true,
+	},
 }
 
 // parseVer 把 "22.21" 解析成可比较的整数（major*1000+minor）。detectVersion 用

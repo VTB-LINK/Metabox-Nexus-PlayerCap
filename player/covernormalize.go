@@ -25,7 +25,8 @@ const (
 )
 
 // normalizeCover 是 CoverDataURI 的纯函数部分（不打日志）：已是 800×800 的 JPEG / PNG 原字节放行、MIME 按
-// 格式改正；其余 JPEG / PNG 拉伸到 800×800 编成 JPEG。处理不了的返回原字节、原 mime 与说明原因的错误。
+// 格式改正；其余 JPEG / PNG 居中裁成正方形（非正方形裁去长边两端）再缩放到 800×800 编成 JPEG。处理不了的
+// 返回原字节、原 mime 与说明原因的错误。
 // w、h 是源图尺寸（读不出头时为 0）。
 func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int, err error) {
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(b))
@@ -66,14 +67,24 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 		return b, mime, w, h, i18n.Errorf("CMYK JPEG is not re-encoded")
 	}
 
-	// 源矩形取整幅图：非正方形被拉伸（需求原文）。透明处按黑底：jpeg.Encode 读 RGBA 预乘后的像素、忽略 alpha。
+	// 源矩形取居中的正方形：非正方形裁去长边两端、等比缩放，不变形（issue #113）。一次重采样完成，不先缩放再裁。
+	// 透明处按黑底：jpeg.Encode 读 RGBA 预乘后的像素、忽略 alpha。
 	dst := image.NewRGBA(image.Rect(0, 0, coverSide, coverSide))
-	xdraw.BiLinear.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Src, nil)
+	xdraw.BiLinear.Scale(dst, dst.Bounds(), src, centerSquare(src.Bounds()), xdraw.Src, nil)
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: coverQuality}); err != nil {
 		return b, mime, w, h, i18n.Errorf("JPEG encode failed: %v", err)
 	}
 	return buf.Bytes(), "image/jpeg", w, h, nil
+}
+
+// centerSquare 返回 r 内居中的正方形：边长取宽高中较小者，长边两端各裁去一半。宽高之差为奇数时多出的 1 像素
+// 留在右侧（下侧）：偏移向下取整，所以裁切区最多比正中偏左（上）半个像素。
+func centerSquare(r image.Rectangle) image.Rectangle {
+	side := min(r.Dx(), r.Dy())
+	x0 := r.Min.X + (r.Dx()-side)/2
+	y0 := r.Min.Y + (r.Dy()-side)/2
+	return image.Rect(x0, y0, x0+side, y0+side)
 }
 
 // jpegScanBudget 在解码前限住 image/jpeg 的扫描次数：它对每个 SOS 都照做不误、没有上限，尺寸与字节上限

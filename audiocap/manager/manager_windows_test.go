@@ -720,6 +720,26 @@ func TestDemuxRecordsForward(t *testing.T) {
 	}
 }
 
+// TestDemuxPassesFlags 断言 demux 重编码转发时 flags 原样不动：归一化位、会话信号两位（issue #115）与一个
+// 保留位都透传给 sink，由消费者忽略不认识的位。
+//
+// 变异自证（实测）：demux 重编码前把 f.Flags 与 frame.FlagNormalized 相与 → 红。
+func TestDemuxPassesFlags(t *testing.T) {
+	const flags = frame.FlagNormalized | frame.FlagSessionKnown | frame.FlagSessionActive | 1<<31
+	sink := idleSink{ch: make(chan []byte, 1)}
+	m := New(sink, nil, nil, 25, "")
+	hp := &helperProc{cmd: &exec.Cmd{}, exited: make(chan struct{})}
+
+	m.demux(hp, bytes.NewReader(frame.Encode(nil, frame.Frame{Player: "kugou", Flags: flags, Epoch: 1})))
+
+	if len(sink.ch) != 1 {
+		t.Fatalf("sink 收到 %d 帧, 期望 1", len(sink.ch))
+	}
+	if f := decodeFrame(t, <-sink.ch); f.Flags != flags {
+		t.Fatalf("转发帧 flags = %#x, 期望原样 %#x", f.Flags, flags)
+	}
+}
+
 // slowSink 的 BroadcastAudioFrame 先拖延 delay，记下即将返回的时刻，再交给 idleSink，模拟广播本身拖延。
 type slowSink struct {
 	idleSink

@@ -2,7 +2,8 @@
 //
 // 为什么用 Spotify 自己的歌词而不是第三方源：它就是 App 里显示的那一份，与曲目一一对应、
 // 行级时间戳由平台校准过（provider 实测为 MusixMatch）。实测（2026-10）：
-//   - 带 Bearer 时任意曲目都能取：`/color-lyrics/v2/track/<base62 id>` 200，**连 /image/ 段都不需要**；
+//   - 带 Bearer 时有歌词的曲目都能取：`/color-lyrics/v2/track/<base62 id>` 200，**连 /image/ 段都不需要**；
+//     平台没有歌词的曲目回 404（2026-10-13 真机日志，见 IsNotFound）；
 //   - 不带 Bearer 一律 401，与 cookie 无关（HTTP-only cookie 在这一路上不被接受）；
 //   - syncType 实测全部是 LINE_SYNCED，lines[].syllables 恒为空数组。
 //
@@ -14,6 +15,7 @@ package lyric
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,6 +67,22 @@ type Response struct {
 	} `json:"lyrics"`
 }
 
+// StatusError 是歌词请求得到非 200 答复时的错误：Status 是 HTTP 状态码，Err 是给日志的本地化文案。
+// Go 直取（Fetch）与页面内取词（cdp 包）都返回它，上层以 IsNotFound 区分「平台没有这首歌的歌词」与其余失败。
+type StatusError struct {
+	Status int
+	Err    error
+}
+
+func (e *StatusError) Error() string { return e.Err.Error() }
+
+// IsNotFound 报告 err 是不是歌词请求得到的 HTTP 404。平台对没有歌词的曲目回 404（2026-10-13 真机日志，页面内取词）；
+// 401 / 403 / 400 / 5xx 与网络错误都不是。
+func IsNotFound(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Status == http.StatusNotFound
+}
+
 // TrackIDFromURI 从 "spotify:track:<id>" 里取出 <id>；不是曲目 URI 时返回空串。
 func TrackIDFromURI(uri string) string {
 	const prefix = "spotify:track:"
@@ -107,7 +125,7 @@ func Fetch(trackID, token, platform, version string, timeout time.Duration) (*Re
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, i18n.Errorf("lyrics endpoint returned HTTP %d", resp.StatusCode)
+		return nil, &StatusError{Status: resp.StatusCode, Err: i18n.Errorf("lyrics endpoint returned HTTP %d", resp.StatusCode)}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {

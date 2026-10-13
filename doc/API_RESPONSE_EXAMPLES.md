@@ -448,7 +448,7 @@
 
 \*\*\* applemusic 的歌词取自 Apple Music 进程内存里的 iTunes TTML。换歌时歌词还没进内存就先发 `lyrics: []` 的 `all_lyrics`，找到即补发；换歌 15 秒后仍没有才发 `index: -1`，之后按退避继续找（最长 60 秒一次），找到仍会补发。归属按「文档最近一次在内存里出现新副本时正在放哪首歌」认定，后一次覆盖前一次（真机上每次一首歌成为当前曲目，它的 TTML 都会出现新副本；预取的下一首歌词先记在当时那首名下，轮到它时改记过来）。归属认定后本服务留一份全文（至多 48 份），TTML 之后离开进程内存，再放那首歌仍带歌词；留存的那份只配给采用它时同一时长的曲目（同名同歌手而时长不同的另一个版本不用它，等自己的 TTML 进内存后补发），随本服务重启清空。本服务连上进程之前就已在内存里的 TTML 来历不明：没有再出现新副本的，只在其 `<body dur>` 比曲目时长长 0~6 秒时才用、且只给连上后的第一首（防止把更早的歌的残留歌词配给后来的歌）——连上时正在放的那首，歌词若比音频短就配不上；之后重播连上前播过的歌，内存里出现它的新副本即配上，副本一直没有变化的仍按上面的来历不明处理、多半按无歌词（2026-10-09 真机见过一次：TTML 比曲目短 9 秒，报了无歌词）。译文按 `itunes:key` 对齐到正文行（非行号、非时间戳），该曲无译文轨或该行无对应译文时 `sub_text` 为空；这一条用从进程内存抽取的真实 TTML 夹具验证过。TTML 带多种语言的译文时，每行取文档里先出现的那种，该行在其中没有译文的由后面的语言补上（合成用例验证）。逐字按行判定：该行有 `<span>` 才有 `text_detailed`，Line 型 TTML 整曲为 `{}`——这一条按代码，未在真机上逐首核对。
 
-\*\*\*\* spotify 的歌词取自 Spotify 自家的 `spclient` `color-lyrics/v2`（行级 `LINE_SYNCED`，provider 实测 MusixMatch），只有行级时间轴，故翻译、音译与逐字三项全空。取词钥匙是曲目 URI，而页面 DOM 里没有当前曲目的 URI（只有专辑 / 歌手链接与队列项），经随 Spotify 安装的官方 CLI（`spotify_cli.exe now-playing --format json`）取一次（实测约 250ms，只在换歌时调）。Bearer 不注入任何 JS，从 CDP 推送的 `Network.requestWillBeSent` 事件里旁观得到；取词三条路径：Go 侧带 Bearer 直取（真机实测稳定 403）→ 页面里带 Bearer 取（与 App 同源同头，实测可用）→ 页面的 HTTP 缓存兜底（不需要 token，但只对 App 在本页面会话里真的取过的曲目有效）。换歌时没拿到歌词的，每 5 秒补取一次，90 秒后降到每 30 秒一次、直到换歌（不放弃：真机上可能几分钟都抓不到 Bearer），拿到即补发一条完整的 `all_lyrics`。
+\*\*\*\* spotify 的歌词取自 Spotify 自家的 `spclient` `color-lyrics/v2`（行级 `LINE_SYNCED`，provider 实测 MusixMatch），只有行级时间轴，故翻译、音译与逐字三项全空。取词钥匙是曲目 URI，而页面 DOM 里没有当前曲目的 URI（只有专辑 / 歌手链接与队列项），经随 Spotify 安装的官方 CLI（`spotify_cli.exe now-playing --format json`）取一次（实测约 250ms，只在换歌时调）。Bearer 不注入任何 JS，从 CDP 推送的 `Network.requestWillBeSent` 事件里旁观得到；取词三条路径：Go 侧带 Bearer 直取（真机实测稳定 403）→ 页面里带 Bearer 取（与 App 同源同头，实测可用）→ 页面的 HTTP 缓存兜底（不需要 token，但只对 App 在本页面会话里真的取过的曲目有效）。换歌时没取到响应的，播放中每 5 秒补取一次，18 次（约 90 秒）后降到每 30 秒一次（真机上可能几分钟都抓不到 Bearer），累计约 10 分钟的播放时间仍取不到即停，暂停时不补取、不计次，拿到即补发一条完整的 `all_lyrics`；平台答复没有这首歌的歌词（HTTP 404）或没有行级时间轴时不补取。
 
 #### 歌词数组前几行可能是元数据
 
@@ -630,12 +630,12 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 
 | 平台 | 平台返回什么 | 我们发什么 |
 |---|---|---|
-| **qqmusic** | API 返回零行 | `index: -1`，`text: ""` |
+| **qqmusic** | API 返回零行（换歌时，或歌曲 ID 晚到、稍后补取时） | `index: -1`，`text: ""` |
 | **cloudmusicv3** | 一行「纯音乐，请欣赏」 | `index: -1`，**`text: "纯音乐，请欣赏"`** |
 | **kugou** | 一行「纯音乐，请欣赏」（与网易云一字不差） | 同上 |
 | **sodamusic** | 不下发 KRC（`lyrics.type` 非 `krc` 或内容为空） | `index: -1`，`text: ""` |
 | **applemusic** | 换歌 15 秒后进程内存里仍没有属于当前曲的 TTML（该曲无歌词，或歌词一直没进内存） | `index: -1`，`text: ""`，每首至多一次；之后按退避继续找，找到即补发 `all_lyrics`。配到的 TTML 只有一行「纯音乐，请欣赏」时不等 15 秒、宣告时即发，其余同 cloudmusicv3（按代码，未在真机见过） |
-| **spotify** | color-lyrics 返回零行（该曲无歌词、拿不到曲目 URI、没有 Bearer，或请求失败） | `index: -1`，`text: ""`，在换歌那次取词结束之后发出（换歌时先发的是空歌词的 `all_lyrics`，取词不阻塞）；提示语归一逻辑同样生效，尚未观测到它发出「纯音乐，请欣赏」这一行。有曲目 URI 而没取到响应（没有 Bearer 或请求失败）时每 5 秒补取一次，90 秒后降到每 30 秒一次、直到换歌，拿到即补发 `all_lyrics`；取到了响应但没有行级时间轴（`UNSYNCED` 或零行）则不补取 |
+| **spotify** | color-lyrics 返回零行或 HTTP 404（该曲无歌词）、拿不到曲目 URI、没有 Bearer，或请求失败 | `index: -1`，`text: ""`，在换歌那次取词结束之后发出（换歌时先发的是空歌词的 `all_lyrics`，取词不阻塞）；提示语归一逻辑同样生效，尚未观测到它发出「纯音乐，请欣赏」这一行。有曲目 URI 而没取到响应（没有 Bearer 或请求失败）时，播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间仍取不到即停（暂停时不补取），拿到即补发 `all_lyrics`；平台答复 HTTP 404、或取到了响应但没有行级时间轴（`UNSYNCED` 或零行）则不补取 |
 | **wesing** | —— | **不会出现**：K 歌平台曲库内所有歌都带词 |
 
 服务端已把七家**归一成 `index: -1`**，下游只需认这一个判据。但**平台的提示语原样保留在 `text` 里**——它是平台的数据，不是我们编的。如何处理该文本由下游决定（本项目自带的 `lyric_page.html` 忽略它）。
@@ -729,7 +729,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 
 **说明：**
 - 直接切歌（A→B）时，不会先返回空再返回 B，而是直接返回 B 的信息。applemusic 例外：换歌后加载超过 6 秒、或换歌后 10 秒仍取不到新歌标题时先清空（此期间返回 `data: {}`，状态为 `waiting_song`），认出 B 后再返回 B
-- `cover_base64` 统一为 800×800：源图已是 800×800 的 JPEG / PNG 原样发出，其余拉伸到 800×800（非正方形不裁切、不留边）并编码为 JPEG；处理不了的原样发出、尺寸不保证（规则见 `doc/openapi.yaml` 的 `SongInfo.cover_base64`）。`cover`（URL）指向的图不受影响
+- `cover_base64` 统一为 800×800：源图已是 800×800 的 JPEG / PNG 原样发出，其余居中裁成正方形（非正方形裁去长边两端、不留边）再缩放到 800×800 并编码为 JPEG；处理不了的原样发出、尺寸不保证（规则见 `doc/openapi.yaml` 的 `SongInfo.cover_base64`）。`cover`（URL）指向的图不受影响
 
 #### ⚠️ 每首歌会推**两条** `song_info_update`，第一条没有封面
 
@@ -752,7 +752,7 @@ ms=103195  红日   cover=有  cover_base64=232427     ← 第二条，188ms 后
 
 （背景：wesing 的内存同步不一致，封面偶尔会拿到上一首或拿不到，那是平台行为。）
 
-applemusic 的封面是进程内存里的图片字节，没有 URL：`cover` 恒为空串，图在 `cover_base64`（规范为 800×800 后通常是 `data:image/jpeg;base64,…`；内存里的图本就是 800×800 的 PNG 时是 `data:image/png;base64,…`）。多数歌随第一条一起到；换歌时内存里的图有时还是上一首的（约 0.4 秒后才换），这时第一条不带图、图换好后补第二条——同样是「拿到就用，没有就算」。
+applemusic 的封面是进程内存里的图片字节，没有 URL：`cover` 恒为空串，图在 `cover_base64`（规范为 800×800 后通常是 `data:image/jpeg;base64,…`；内存里的图本就是 800×800 的 PNG 时是 `data:image/png;base64,…`）。规范化在后台做（缩放一张图要几十到一百多毫秒，不挡歌词），所以多数歌的第一条不带图，缩放完紧接着补第二条带图的（按本机的缩放耗时估计在一两百毫秒内，未经真机测量）；与上一首同一张图（同专辑连着放、同一首重新宣告）时随第一条一起到。换歌时内存里的图有时还是上一首的（约 0.4 秒后才换），这时同样第一条不带图、图换好后再补——同样是「拿到就用，没有就算」，前端收到不带图的那条会先清空封面。
 
 spotify 的 `cover` 是页面上的图 URL（300×300），`cover_base64` 是同一张图 640×640 那一档异步下载后补发的（640 档取不到时改用 `cover` 本身下载），两样都有，两条的 `cover` 相同；页面上的 URL 取不到时不会发起下载，也就只有第一条（`cover: ""`、`cover_base64: ""`）。
 
@@ -801,12 +801,7 @@ Per-player 端点始终返回指定播放器的数据，不受路由切换影响
 
 ### 7. `/lyric_update-SSE` - 实时歌词推送
 
-**连接建立时：** 始终立即发送一条当前歌词状态（有歌词时发送歌词数据，无歌词时发送 `"data":{}`）。
-
-**初始发送（无歌词时）：**
-```
-data: {"type":"lyric_update","player":"wesing","data":{}}
-```
+**连接建立时：** 服务端已缓存该播放器的 `lyric_update` 时，立即补发一条；尚无缓存（播放器未启动，或还没推出第一行歌词）时不发送任何内容，不会发 `"data":{}`，第一条是之后实际产生的那条 `lyric_update`：歌词行，或平台没有歌词时 `index: -1` 的通知。无缓存时返回 `data: {}` 的是 HTTP 快照 `/lyric_update`。
 
 **初始发送（有歌词时）：**
 ```
@@ -822,8 +817,7 @@ data: {"type":"lyric_update","player":"wesing","data":{"index":4,"text":"深い�
 
 **完整生命周期示例：**
 ```
-（连接建立，当前无歌词）
-data: {"type":"lyric_update","player":"wesing","data":{}}
+（连接建立，当前无歌词：不发送任何内容）
 
 （用户开始播放歌曲）
 data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"男：摘一颗苹果","sub_text":"","roma_text":"","timestamp":18.326,"play_time":18.15,"position":18.15,"progress":0.05,"text_detailed":{},"roma_text_detailed":{}}}
@@ -853,12 +847,7 @@ eventSource.onmessage = (event) => {
 
 ### 8. `/song_info-SSE` - 实时歌曲信息推送
 
-**连接建立时：** 始终立即发送一条当前歌曲信息状态。
-
-**初始发送（无歌曲信息时）：**
-```
-data: {"type":"song_info_update","player":"wesing","data":{}}
-```
+**连接建立时：** 服务端已缓存该播放器的 `song_info_update` 时，立即补发一条；尚无缓存时不发送任何内容，不会发 `"data":{}`。无缓存时返回 `data: {}` 的是 HTTP 快照 `/song_info`。
 
 **初始发送（有歌曲信息时）：**
 ```
@@ -870,10 +859,11 @@ data: {"type":"song_info_update","player":"wesing","data":{"name":"晚风","sing
 data: {"type":"song_info_update","player":"wesing","data":{"name":"Winter Night Fantasy","singer":"Azuki Azusa","title":"Winter Night Fantasy - Azuki Azusa","cover":"http://...","cover_base64":"data:image/jpeg;base64,..."}}
 ```
 
-**歌曲结束/窗口关闭时：**
+**无活跃自动隐藏时：** 仅当为该播放器开启「无活跃自动隐藏」（`per-player-idle-hide` 或 `<player>-idle-hide` > 0）且其静默超过阈值，才会收到一条空的 `song_info_update`，用于清掉停留的封面与标题：
 ```
 data: {"type":"song_info_update","player":"wesing","data":{}}
 ```
+- 歌曲结束、窗口关闭本身不会发空的 `song_info_update`
 - 直接切歌（A→B）时，不会先发送空再发送 B，而是直接发送 B 的信息
 
 **特性：**
@@ -938,7 +928,7 @@ curl -N http://localhost:8765/cloudmusicv3/song_info-SSE
 
 **Per-player WebSocket：** `/wesing/ws`、`/cloudmusicv3/ws`、`/spotify/ws` — 始终接收指定播放器事件，不受路由切换影响。
 
-**连接建立时立即接收以下 4 条消息（始终全部发送，无数据时 data 为 {}）：**
+**连接建立时按下列顺序补发服务端已缓存的消息（最多 4 条；只补发有缓存的类型，没有缓存的不发，也不发 `data: {}`）。例外：根通道没有活跃播放器、或 per-player 通道处于无活跃隐藏态时，改为只发一条 `data: {}` 的 `player_clear`：**
 
 #### 1. `status_update` - 状态更新
 
@@ -984,14 +974,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 
 > 区分表中三类请用 `status_update` 的 `reason` 字段（依次为 `process_exited` / `cdp_disconnected` / `version_unsupported`），不要匹配 `detail`：`detail` 随界面语言变化（`i18n.T`），`reason` 永不本地化。
 
-**无状态时（服务刚启动尚未获取到状态）：**
-```json
-{
-  "type": "status_update",
-  "player": "wesing",
-  "data": {}
-}
-```
+**无状态时（服务刚启动尚未获取到状态）：** 连接时不补发这一条；HTTP 快照 `/status_update` 返回 `"data": {}`。
 
 #### 2. `song_info_update` - 歌曲信息更新
 
@@ -1010,16 +993,9 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 }
 ```
 
-**无歌曲信息时：**
-```json
-{
-  "type": "song_info_update",
-  "player": "wesing",
-  "data": {}
-}
-```
+**无歌曲信息时：** 连接时不补发这一条；HTTP 快照 `/song_info` 返回 `"data": {}`。
 
-**异步封面：** 部分播放器的封面 base64 通过异步 HTTP 下载获取。歌曲开始播放时会先发送一条**不含 `cover_base64`** 的 `song_info_update`（仅含 `cover` URL），待封面下载完成后再补发一条含 `cover_base64` 的完整版本。前端应使用最新收到的数据覆盖即可。
+**异步封面：** 部分播放器的封面 base64 通过异步 HTTP 下载获取。歌曲开始播放时会先发送一条 `cover_base64` 为空串 `""` 的 `song_info_update`（键始终存在，`cover` 是封面 URL），待封面下载完成后再补发一条 `cover_base64` 有值的完整版本。前端应使用最新收到的数据覆盖即可，判断有没有图看 `cover_base64` 是否为空串。
 
 **kugou** — 真实原文（2026-10-09 录制，`cover_base64` 已截断）。kugou 常见情况下每首歌只发一条，`cover`（URL）与 `cover_base64` 随同一条到；封面地址没能及时取到时，先发一条不带封面的，取到后再补发一条：
 ```json
@@ -1036,7 +1012,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 }
 ```
 
-**applemusic（封面晚到）** — 真实原文（2026-10-09 录制，同一首歌的两条，相隔 840 毫秒）。`cover` 恒为空串，图只在 `cover_base64`。第一条不带图：
+**applemusic（封面晚到）** — 真实原文（2026-10-09 录制，同一首歌的两条，相隔 840 毫秒；录于封面改为后台缩放之前，此后图不晚到的歌也是这样两条，第二条紧跟在缩放完之后）。`cover` 恒为空串，图只在 `cover_base64`。第一条不带图：
 ```json
 {
   "type": "song_info_update",
@@ -1300,7 +1276,7 @@ standby  '网易云音乐 v2.10.13.6067 不支持（需 v3+）'    ← 30.0 秒�
 
 > **示例已裁剪**：`lyrics` 实际 38 行（此处留 3），`count: 38` 是真实值。数值一律取自录制原文。
 >
-> `position: 0` / `progress: 0` 不是占位——这条录于切歌那一刻，歌刚开始。**WS 的 `all_lyrics` 主要在切歌时发**；歌词或时长晚到时也会在同一首歌中途补发一条完整的（如 sodamusic 时长晚到或音译补齐、applemusic 歌词晚到、spotify 时长晚到或歌词晚到——spotify 换歌时不等取词、先发一条空歌词的，取到即补发，所以有歌词的歌通常每次换歌都有两条；没取到响应则换歌后每 5 秒补取一次，90 秒后降到每 30 秒一次、直到换歌），此时 `position` 为当时的实时位置，前端以最新一条覆盖即可。
+> `position: 0` / `progress: 0` 不是占位——这条录于切歌那一刻，歌刚开始。**WS 的 `all_lyrics` 主要在切歌时发**；歌词或时长晚到时也会在同一首歌中途补发一条完整的（如 sodamusic 时长晚到或音译补齐、applemusic 歌词晚到、spotify 时长晚到或歌词晚到——spotify 换歌时不等取词、先发一条空歌词的，取到即补发，所以有歌词的歌通常每次换歌都有两条；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止），此时 `position` 为当时的实时位置，前端以最新一条覆盖即可。
 > 而 **HTTP 的 `/all_lyrics` 会给实时值**（它读缓存，跟着 `lyric_update` 走）。同一个端点名，两种传输的语义不同。
 >
 > wesing 的 `sub_text` 恒为 `""`——无翻译源（其曲库 mid 非 QQ 系，走不通 QQ 译源）；但**逐字有**，来自进程内存的卡拉OK字级时间，某行时间轴不合法时该行退回行级 `{}`。kugou 的翻译与逐字都有（KRC 源；回落行级 LRC 时 `sub_text` 为空、`text_detailed` / `lyrics_detailed` 为 `{}` / `[]`）。sodamusic 也都有，但无行级回落：KRC 解不出即整曲按无歌词处理。spotify 的 `sub_text` / `roma_text` 恒为 `""`、`text_detailed` 恒为 `{}`、`lyrics_detailed` 恒为 `[]`——自家 color-lyrics/v2 只有行级时间轴。
@@ -1784,7 +1760,7 @@ OBS/前端连接此端点，收到两类消息：
 
 ### `/cloudmusicv3/effect-ingest` — 帧回传（WebSocket，内部）
 
-注入网易云页面的抓帧脚本把特效 canvas 的 JPEG 字节推到此端点，后端门控后再广播给 `effect-ws` 订阅者。**非用户接口**，仅供注入脚本使用：写端需携带进程内一次性随机 token（`?t=...`，仅注入脚本经内部取址获得），校验不通过即 `403`；该端点不出现在 `/service-status` 广告表中。
+注入网易云页面的抓帧脚本把特效 canvas 的 JPEG 推到此端点：平时是二进制消息（JPEG 字节）；页面忙、`toBlob` 回调被拖住时当场编的帧是文本消息（`data:image/jpeg;base64,…`），由后端解码。后端门控后一律以二进制 JPEG 广播给 `effect-ws` 订阅者。**非用户接口**，仅供注入脚本使用：写端需携带进程内一次性随机 token（`?t=...`，仅注入脚本经内部取址获得），校验不通过即 `403`；该端点不出现在 `/service-status` 广告表中。
 
 ### 前端页面 URL 参数（`effect_display.html` / `effect_page.html`）
 
@@ -1826,13 +1802,14 @@ curl http://localhost:8765/service-status
 
 ### `/audio-ws` 与 `/<player>/audio-ws` — 波形帧订阅（WebSocket）
 
-每条消息恰为一帧二进制自包含音频帧（含 `player`、`flags`、`epoch`、毫秒时间戳、RMS、左右声道峰值 `peakL` / `peakR`、频谱 `bins`），`ws.binaryType='arraybuffer'` 后按 `/audio-ws` 的示例读取；不发送文本消息。`flags` 的 bit0 标记该路已启用音量归一化，空闲帧为 0。
+每条消息恰为一帧二进制自包含音频帧（含 `player`、`flags`、`epoch`、毫秒时间戳、RMS、左右声道峰值 `peakL` / `peakR`、频谱 `bins`），`ws.binaryType='arraybuffer'` 后按 `/audio-ws` 的示例读取；不发送文本消息。`flags` 的 bit0 标记该路已启用音量归一化，bit1、bit2 为 WASAPI 会话信号（见下）；空闲帧的 `flags` 为 0。
 
 - 根端点跟随活跃播放器。连接期间两种端点都持续有帧，捕获停止转为空闲帧时最多约 400 毫秒无帧；不含 `bins`（N = 0）的是空闲帧，表示当前无音频捕获：根端点无活跃播放器时其 `player` 为空串，其余情况为对应播放器名。
 - 目标播放器进程未运行、捕获未就绪、退避重试（单个播放器失败后最长 8 秒，捕获子进程崩溃后最长 16 秒，看门狗重启子进程不额外退避），或该播放器乃至全部捕获已放弃时，收到 `player` 为该播放器名的空闲帧，见 `/audio-ws`「收到空闲帧的情况」；持续约 1 秒以上一帧都收不到，表示连接或服务端异常。
 - per-player 端点只收该播放器的帧（含其空闲帧），不收 `player` 为空串的空闲帧。
 - 有音频数据时每秒的帧数由 `audio-frame-rate` 决定（默认 25，范围 15~60）；没有数据时静音帧约每 100 毫秒一帧，空闲帧每 100 毫秒一帧。
-- 播放器暂停或处于静音段时，收到 RMS、峰值与 `bins` 全为 0 的静音帧；按 WASAPI 机制推断，经 ASIO 或 WASAPI 独占模式输出时亦然，未实测。
+- 播放器暂停或处于静音段时，收到 RMS、峰值与 `bins` 全为 0 的静音帧；经 ASIO 或 WASAPI 独占模式输出时亦然（ASIO 已在 QQ 音乐 22.71 上实测；WASAPI 独占以测试程序实测，未在播放器上实测）。
+- 静音帧是真实静音还是捕获不到，看 `flags` 的 bit1、bit2（WASAPI 会话信号，只在有捕获时才有）：(1, 1) 为目标进程树有 Active 的 WASAPI 会话，共享模式下静音即真实静音，但不能排除 WASAPI 独占；(1, 0) 为没有任何 WASAPI 播放流（ASIO 等输出、暂停、卡在缓冲），捕获一定得不到声音，与播放中同时持续出现是走 ASIO 等方式输出的线索而非证明；(0, 0) 为未知（旧版本服务端、空闲帧、尚未检查完、结果过期、检查失败）。详见 `/audio-ws`「WASAPI 会话信号」。
 - 开启 `audio-normalize`（或 `<player>-audio-normalize`）后 RMS、峰值与 `bins` 乘以同一增益，可能大于 1，服务端不钳制；此时峰值大于 1 不代表真实削波。峰值不截断，未开启归一化时也可能略超 1；采样中的 NaN 与 ±Inf 按 0 计入，不会使这些值出现 NaN 或无穷大。
 - 连接时不补发缓存帧。
 
@@ -1852,12 +1829,14 @@ wscat -c "ws://localhost:8765/audio-ws"
 | `status_update` | `{"status":"...","detail":"..."}` | `{}` | `msg.data && msg.data.status` |
 | `song_info_update` | `{"name":"...","singer":"...","title":"...","cover":"...","cover_base64":"..."}` | `{}` | `msg.data && msg.data.title` |
 | `all_lyrics` | `{"title":"...","duration":N,"position":N,"progress":N,"count":N,"lyrics":[...],"lyrics_detailed":[...]}` | `{}` | `msg.data && msg.data.lyrics` |
-| `lyric_update` | `{"index":N,"text":"...","sub_text":"...","roma_text":"...","timestamp":N,...}` | `{}`（无缓存）或 `{"index":-1,"text":"",... }`（纯音乐） | `msg.data && msg.data.index !== undefined && msg.data.index !== -1` |
+| `lyric_update` | `{"index":N,"text":"...","sub_text":"...","roma_text":"...","timestamp":N,...}` | `{}`（HTTP 快照无缓存）或 `{"index":-1,"text":"",... }`（平台没有歌词） | `msg.data && msg.data.index !== undefined && msg.data.index !== -1` |
 | `lyric_idle` | — | `{}`（始终） | 收到即为空闲通知（前端自行决定是否响应） |
 | `playback_pause` | `{"position":N,"progress":N}` | — | 收到即为暂停 |
 | `playback_resume` | `{"position":N,"progress":N}` | — | 收到即为恢复 |
 | `player_switch` | `{"from":"...","to":"..."}` | — | 收到即为切换；`to` 为空时表示清除 |
 | `player_clear` | — | `{}`（始终） | 收到即清空显示 |
+
+> 表中的 `{}` 指 HTTP 快照无缓存时的返回。WS 与 SSE 连接建立时只补发有缓存的类型，没有缓存的不发，也不发 `data: {}`（根通道没有活跃播放器、或 per-player 通道处于无活跃隐藏态时，WS 改发一条 `data: {}` 的 `player_clear`）。`status_update`、`song_info_update`、`all_lyrics` 在 WS 与 SSE 上不会发空载荷，唯一的例外是开启无活跃自动隐藏的 per-player 通道静默超阈值后的清除（SSE 收到空的 `song_info_update`，见上文）。
 
 ---
 
@@ -1911,8 +1890,8 @@ wscat -c "ws://localhost:8765/audio-ws"
 **切歌**时各家发出的事件相同、顺序不同，下游不要依赖到达顺序：
 - wesing / qqmusic：`status_update`（`playing`）→ `song_info_update` → `all_lyrics` → `lyric_update`
 - cloudmusicv3：`song_info_update` → `all_lyrics`（无歌词时紧跟一条 `index: -1` 的 `lyric_update`）→ `status_update`（仅播放中时发 `playing`）→ 逐行 `lyric_update`
-- applemusic：`song_info_update` → `all_lyrics`（歌词还没进内存时 `lyrics: []`，到了补发一条）→ `status_update`（`playing`：确认在放之后才宣告）→ 逐行 `lyric_update`；换歌 15 秒后仍无歌词才发 `index: -1` 的 `lyric_update`；封面晚到时补一条 `song_info_update`
-- kugou / sodamusic / spotify：先 `status_update` 再 `all_lyrics`；`song_info_update` 由封面协程异步发出，先后不固定（spotify 换歌时不等取词，`all_lyrics` 先以空歌词发出；取词结束后，拿到即补发一条带歌词的 `all_lyrics`，没拿到则发一条 `index: -1` 的 `lyric_update`；没取到响应时之后每 5 秒补取一次（90 秒后降到每 30 秒一次、直到换歌），拿到即补发 `all_lyrics`）
+- applemusic：`song_info_update` → `all_lyrics`（歌词还没进内存时 `lyrics: []`，到了补发一条）→ `status_update`（`playing`：确认在放之后才宣告）→ 逐行 `lyric_update`；换歌 15 秒后仍无歌词才发 `index: -1` 的 `lyric_update`；封面在后台缩放，宣告的那条 `song_info_update` 多半不带图，缩放完或封面晚到时补一条带图的
+- kugou / sodamusic / spotify：先 `status_update` 再 `all_lyrics`；`song_info_update` 由封面协程异步发出，先后不固定（spotify 换歌时不等取词，`all_lyrics` 先以空歌词发出；取词结束后，拿到即补发一条带歌词的 `all_lyrics`，没拿到则发一条 `index: -1` 的 `lyric_update`；没取到响应时之后在播放中每 5 秒补取一次（18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止；平台答复 HTTP 404 时不补取），拿到即补发 `all_lyrics`）
 
 
 **Replay（重播同一首歌）** 时行为因播放器而异：

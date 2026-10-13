@@ -1,7 +1,8 @@
 package spotify
 
 // 本文件测 runSession 里抽出来的几处判定（runSession 本身没有离线夹具，见 AGENTS §4）：
-// 歌词补取的节奏（lyricsRetry）、时钟迁移到对外事件的翻译（clockEmits）、时长晚到（durationArrived）。
+// 歌词补取的节奏、上限与落地后的状态变化（lyricsRetry）、暂停时不补取（retryDue 的播放态）、
+// 时钟迁移到对外事件的翻译（clockEmits）、时长晚到（durationArrived）。
 // 异步取词的状态机与取词结果的落地判定在 lyricsjob_test.go。不碰 Spotify、不碰 CDP。
 
 import (
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/player"
+	"Metabox-Nexus-PlayerCap/player/spotify/lyric"
 )
 
 // tries 从 from 起每 step 调一次 due，直到 until（含），返回触发补取的时刻（相对 from 的秒数）。
@@ -35,8 +37,8 @@ func sameSeconds(t *testing.T, label string, got, want []float64) {
 	}
 }
 
-// 第一首：前 90 秒 5 秒一次，到 90 秒那一次降频，之后 30 秒一次。
-// 变异自证：due 里降频的判据改成 `>`（90 秒那一次不降频）→ 本例红（实测）。
+// 第一首：前 18 次（90 秒）5 秒一次，之后 30 秒一次。
+// 变异自证：due 里降频的判据改成 `>`（第 18 次之后多一次 5 秒）→ 本例与 TestLyricsRetryCap、TestRetryDuePaused 红（实测）。
 func TestLyricsRetryCadenceWithinOneSong(t *testing.T) {
 	var r lyricsRetry
 	r.start("a", t0)
@@ -46,13 +48,14 @@ func TestLyricsRetryCadenceWithinOneSong(t *testing.T) {
 }
 
 // F5：上一首等过 90 秒降到 30 秒之后换歌，下一首必须从 5 秒一次重新起步（真机曾是 +29.8s 才第一次补取）。
-// 变异自证：start 里去掉 `r.every = lyricsRetryInterval` → 本例红（第一首从零值节奏起步、第二首沿用 30s，实测）。
+// 对应 2026-10-13 真机日志 03:59:01 换到有歌词的曲目、随即加载完成：补取状态随换歌复位。
+// 变异自证：start 里去掉 `r.tries = 0` → 本例红（第二首沿用 30s，实测）。
 func TestLyricsRetryCadenceResetsOnSongChange(t *testing.T) {
 	var r lyricsRetry
 	r.start("a", t0)
 	tries(&r, t0, time.Second, 200*time.Second) // 第一首等到慢节奏
-	if r.every != lyricsRetrySlow {
-		t.Fatalf("前置条件：第一首应已降到慢节奏，得到 %v", r.every)
+	if r.tries < lyricsFastTries {
+		t.Fatalf("前置条件：第一首应已降到慢节奏，得到 %d 次", r.tries)
 	}
 
 	change := t0.Add(200 * time.Second)
@@ -97,15 +100,209 @@ func TestLyricsRetryNotDue(t *testing.T) {
 	}
 }
 
-// 同一首歌重新 start（例如换走又换回）：等待起点重算，不沿用上一次的 since。
-func TestLyricsRetryRestartResetsSince(t *testing.T) {
+// 同一首歌重新 start（例如换走又换回）：次数从零重算，不沿用上一次的。
+func TestLyricsRetryRestartResets(t *testing.T) {
 	var r lyricsRetry
 	r.start("a", t0)
 	tries(&r, t0, time.Second, 100*time.Second)
 	again := t0.Add(100 * time.Second)
 	r.start("a", again)
-	// 若 since 没重算，again+5s 这一次就会因「已等过 90 秒」降频，下一次落在 +35s。
+	// 若次数没重算（已补 18 次），again 之后第一次就是 30 秒一次。
 	sameSeconds(t, "重新 start", tries(&r, again, time.Second, 20*time.Second), []float64{5, 10, 15, 20})
+}
+
+// capSchedule 是一首歌从不间断播放、每次补取都没拿到时的全部补取时刻（秒）：5..90 每 5 秒一次，120..600 每 30 秒一次。
+func capSchedule() []float64 {
+	var want []float64
+	for s := 5; s <= 90; s += 5 {
+		want = append(want, float64(s))
+	}
+	for s := 120; s <= 600; s += 30 {
+		want = append(want, float64(s))
+	}
+	return want
+}
+
+// 补取有终点（issue #111）：一直取不到时共补 lyricsMaxTries 次、约 10 分钟，之后无论多久都不再补；换歌复位。
+// 变异自证（均实测）：due 不查上限 → 「一小时内」与 TestRetryDuePaused 的「播放暂停交替」红（补到换歌为止）；
+// 上限比较改成 `>` → 同两例红（多补一次）；start 不清次数 → 「换歌复位」红。
+func TestLyricsRetryCap(t *testing.T) {
+	want := capSchedule()
+	if len(want) != lyricsMaxTries || lyricsFastTries != 18 {
+		t.Fatalf("前置条件：时刻表 %d 项、上限 %d、快节奏 %d 次", len(want), lyricsMaxTries, lyricsFastTries)
+	}
+	var r lyricsRetry
+	r.start("a", t0)
+	sameSeconds(t, "一小时内", tries(&r, t0, 100*time.Millisecond, time.Hour), want)
+	if r.tries != lyricsMaxTries || r.trackID == "" {
+		t.Fatalf("到顶后 tries=%d trackID=%q，期望 %d 且仍在等（由 land 停下）", r.tries, r.trackID, lyricsMaxTries)
+	}
+
+	// 换歌复位：从 5 秒一次重新起步，上限重新算。
+	change := t0.Add(2 * time.Hour)
+	r.stop()
+	r.start("b", change)
+	if r.tries != 0 {
+		t.Fatalf("换歌后 tries=%d，期望 0", r.tries)
+	}
+	sameSeconds(t, "换歌复位", tries(&r, change, 100*time.Millisecond, time.Hour), want)
+}
+
+// land：结果落地后怎么动补取状态。401 / 403 在上限之内照常补取，最后一次也没拿到即停并报「到顶」一次；
+// 到顶之前拿到、或平台答复 404 / UNSYNCED，当场停而不报到顶。驱动方式照 runSession：每拍 retryDue 为真即起一次，
+// 结果立刻落地（settleLyrics → land）。
+// 对应 2026-10-13 真机日志 03:33:09–03:43:10：页面内取词约 10 分钟回 401（token 过期），之后又回 404。
+// 变异自证（均实测）：land 不查上限 → 「一直 401」「401 与 403 交替」红（due 到顶后不再补，但不报到顶、一直挂着）；
+// 到顶判定不看是否仍在等 → 「第 35 次拿到」红（报了到顶）；stopRetry 时不停 → 「转成 404」「第 35 次拿到」「UNSYNCED」三例红。
+func TestLyricsRetryLand(t *testing.T) {
+	synced := mustParse(t, syncedBody)
+	unsynced := mustParse(t, unsyncedBody)
+	fail401 := lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, diag: "page-side lyrics fetch returned HTTP 401"}
+	fail403 := lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, diag: "page-side lyrics fetch returned HTTP 403"}
+	got404 := lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, diag: "page-side lyrics fetch returned HTTP 404", notFound: true}
+	gotLines := lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, lines: lyric.Parse(synced), resp: synced}
+	gotUnsynced := lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, resp: unsynced, diag: "x"}
+
+	cases := []struct {
+		name      string
+		result    func(n int) lyricsResult // 第 n 次补取（从 1 起）的结果
+		wantTries int
+		wantGave  bool
+	}{
+		{"一直 401：补满上限后停、报到顶", func(int) lyricsResult { return fail401 }, lyricsMaxTries, true},
+		{"401 与 403 交替：同上", func(n int) lyricsResult {
+			if n%2 == 0 {
+				return fail403
+			}
+			return fail401
+		}, lyricsMaxTries, true},
+		{"401 一段之后转成 404（第 25 次起）：当场停、不报到顶", func(n int) lyricsResult {
+			if n >= 25 {
+				return got404
+			}
+			return fail401
+		}, 25, false},
+		{"第 35 次拿到：不报到顶", func(n int) lyricsResult {
+			if n == lyricsMaxTries {
+				return gotLines
+			}
+			return fail401
+		}, lyricsMaxTries, false},
+		{"第 3 次 UNSYNCED：当场停", func(n int) lyricsResult {
+			if n == 3 {
+				return gotUnsynced
+			}
+			return fail401
+		}, 3, false},
+	}
+	for _, tc := range cases {
+		var j lyricsJobs
+		var r lyricsRetry
+		// 换歌那次：页面 401、有 URI → 开始补取。
+		started, gave := r.land(settleLyrics(lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, diag: "HTTP 401"}), "a", t0)
+		if !started || gave {
+			t.Fatalf("%s：换歌那次 401 应开始补取，得到 started=%v gaveUp=%v", tc.name, started, gave)
+		}
+		gaveUps := 0
+		for d := time.Duration(0); d <= time.Hour; d += 100 * time.Millisecond {
+			now := t0.Add(d)
+			if !j.retryDue(&r, true, now) {
+				continue
+			}
+			res := tc.result(r.tries)
+			if _, g := r.land(settleLyrics(res), res.trackID, now); g {
+				gaveUps++
+			}
+		}
+		if r.tries != tc.wantTries || (gaveUps == 1) != tc.wantGave || gaveUps > 1 || r.trackID != "" {
+			t.Errorf("%s：补了 %d 次、报到顶 %d 次、trackID=%q，期望 %d 次、到顶=%v、已停", tc.name, r.tries, gaveUps, r.trackID, tc.wantTries, tc.wantGave)
+		}
+	}
+
+	// 换歌那次就拿到 / 404 / 没有 URI：不开始，也不报到顶。
+	for _, res := range []lyricsResult{
+		{lyricsJob: lyricsJob{trackID: "a"}, lines: lyric.Parse(synced), resp: synced},
+		{lyricsJob: lyricsJob{trackID: "a"}, notFound: true, diag: "HTTP 404"},
+		{lyricsJob: lyricsJob{}},
+	} {
+		var r lyricsRetry
+		if started, gave := r.land(settleLyrics(res), res.trackID, t0); started || gave || r.trackID != "" {
+			t.Errorf("换歌那次 %+v：started=%v gaveUp=%v trackID=%q，期望都不", res, started, gave, r.trackID)
+		}
+	}
+}
+
+// 暂停时不补取，也不问 due（不耗次数、不动节奏）；恢复后按暂停前的次数继续，降频与上限都只按补取次数算。
+// 对应 2026-10-13 真机日志 03:01:32–03:59:00：暂停近一小时，期间每 30 秒补取一次。
+// 变异自证（均实测）：retryDue 不看播放态 → 「暂停期间」红；先问 due 再看播放态（`r.due(now) && playing`）→
+// 「暂停期间 tries / lastTry 不应变」红；节奏改回按距 start 的时间降频 → 「恢复后」红（暂停一小时后第一次就是 30 秒节奏）。
+func TestRetryDuePaused(t *testing.T) {
+	var j lyricsJobs
+	var r lyricsRetry
+	r.start("a", t0)
+
+	// run 从 from 起每 100ms 一拍跑到 until（含），返回触发补取的时刻（相对 from 的秒数）。
+	run := func(from time.Time, until time.Duration, playing bool) []float64 {
+		var got []float64
+		for d := time.Duration(0); d <= until; d += 100 * time.Millisecond {
+			if j.retryDue(&r, playing, from.Add(d)) {
+				got = append(got, d.Seconds())
+			}
+		}
+		return got
+	}
+
+	// 播放 17 秒：5、10、15 三次。
+	sameSeconds(t, "暂停前", run(t0, 17*time.Second, true), []float64{5, 10, 15})
+	triesBefore, lastBefore := r.tries, r.lastTry
+
+	// 暂停一小时：一次都不补，次数与上次补取的时刻都不动。
+	pause := t0.Add(17 * time.Second)
+	if got := run(pause, time.Hour, false); len(got) != 0 {
+		t.Fatalf("暂停期间不应补取，得到 %v", got)
+	}
+	if r.tries != triesBefore || !r.lastTry.Equal(lastBefore) {
+		t.Fatalf("暂停期间 tries / lastTry 不应变：%d→%d，%v→%v", triesBefore, r.tries, lastBefore, r.lastTry)
+	}
+
+	// 恢复：距上次补取早已超过间隔，恢复那一拍即补；之后仍是 5 秒一次，直到累计 18 次才降到 30 秒。
+	resume := pause.Add(time.Hour)
+	got := run(resume, 120*time.Second, true)
+	want := []float64{0}
+	for s := 5; len(want) < lyricsFastTries-triesBefore; s += 5 {
+		want = append(want, float64(s))
+	}
+	last := want[len(want)-1]
+	for s := last + 30; s <= 120; s += 30 {
+		want = append(want, s)
+	}
+	sameSeconds(t, "恢复后", got, want)
+
+	// 在飞时同样不问 due（原有约束，暂停与在飞叠加时亦然）。
+	_, gen := j.start()
+	before := r.tries
+	if j.retryDue(&r, true, resume.Add(time.Hour)) || j.retryDue(&r, false, resume.Add(time.Hour)) || r.tries != before {
+		t.Fatal("在飞时不应补取、不应耗次数")
+	}
+	j.accept(gen)
+
+	// 暂停与播放交替（每 3 秒切换一次）：补取只发生在播放的拍上，总数仍止于上限。
+	var r2 lyricsRetry
+	r2.start("b", t0)
+	var j2 lyricsJobs
+	n := 0
+	for d := time.Duration(0); d <= 3*time.Hour; d += 100 * time.Millisecond {
+		playing := (d/(3*time.Second))%2 == 0
+		if j2.retryDue(&r2, playing, t0.Add(d)) {
+			if !playing {
+				t.Fatalf("+%v 暂停中补取了", d)
+			}
+			n++
+		}
+	}
+	if n != lyricsMaxTries || r2.tries != lyricsMaxTries {
+		t.Fatalf("播放暂停交替：补了 %d 次（tries=%d），期望 %d", n, r2.tries, lyricsMaxTries)
+	}
 }
 
 // clockEmits：一拍的时钟迁移 → 对外事件序列。

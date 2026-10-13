@@ -180,6 +180,8 @@ helper 捕获 PCM 后就地算帧、只把帧写 stdout；主服务零音频处�
 
 **不做端点 loopback 兜底**（ASIO/独占用户在这些播放器占比极小，YAGNI）。
 
+> 后续（issue #115，2026-10-13）：ASIO 已在真机实测（QQ 音乐 22.71：静音零帧，目标进程没有任何 WASAPI 会话），WASAPI 独占以测试程序实测（有 Active 会话，进程 loopback 全为零样本）。探测没有走上文「判持续静音」的思路，改为 helper 内枚举 WASAPI 会话、经帧头 flags 给出，且区分不了 WASAPI 独占，见 [audio-session-signal-design.md](audio-session-signal-design.md)。
+
 ---
 
 ## 6. 错误处理与稳定性（§0 对齐）

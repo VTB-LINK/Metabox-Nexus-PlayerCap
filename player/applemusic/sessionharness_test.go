@@ -115,6 +115,8 @@ type harness struct {
 	play    bool
 	baseAt  time.Time
 	basePos float64
+	// manualCover 为真时封面缩放由用例自己放行（见 useGatedCover），run 不等它。
+	manualCover bool
 }
 
 func newHarness(t *testing.T) *harness {
@@ -154,7 +156,22 @@ func (h *harness) run(d time.Duration) {
 		if h.f.scans != scans { // 一轮至多一次全扫
 			h.scanAt = append(h.scanAt, h.now)
 		}
+		h.settleCover()
 		h.drain()
+	}
+}
+
+// settleCover 等在飞的那次封面缩放做完、把结果放回通道：它在下一轮 tick 落地。真机上结果在做完后的第一轮
+// 落地；测试里固定为「起缩放的下一轮」，事件序列因此不随机器快慢变化。
+func (h *harness) settleCover() {
+	if h.manualCover || !h.s.coverFly {
+		return
+	}
+	select {
+	case r := <-h.s.coverCh:
+		h.s.coverCh <- r
+	case <-time.After(10 * time.Second):
+		h.t.Fatal("封面缩放 10s 内没有送回结果")
 	}
 }
 
@@ -209,6 +226,20 @@ func songInfos(evs []player.Event) []*player.SongInfo {
 	for _, e := range evs {
 		if d, ok := e.Data.(*player.SongInfo); ok {
 			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// infoSeq 把各条 song_info_update 依次写成「歌名」（不带图）或「歌名+图」，供整段比对。封面在独立 goroutine 里
+// 缩放（见 session.setCover），带图的存储宣告时先发不带图的一条、缩放落地后再补一条带图的。
+func infoSeq(evs []player.Event) []string {
+	var out []string
+	for _, si := range songInfos(evs) {
+		if si.CoverBase64 != "" {
+			out = append(out, si.Name+"+图")
+		} else {
+			out = append(out, si.Name)
 		}
 	}
 	return out

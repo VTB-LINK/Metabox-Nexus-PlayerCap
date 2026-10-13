@@ -19,6 +19,8 @@ import (
 
 	"Metabox-Nexus-PlayerCap/audiocap/dsp"
 	"Metabox-Nexus-PlayerCap/audiocap/frame"
+	"Metabox-Nexus-PlayerCap/audiocap/procscan"
+	"Metabox-Nexus-PlayerCap/audiocap/session"
 	"Metabox-Nexus-PlayerCap/audiocap/wasapi"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
@@ -52,9 +54,11 @@ var (
 	qpcFrequency = queryQPFreq() // 包初始化时采一次；此后只读
 )
 
-// capture 是一路捕获的控制柄。done 关闭即通知该路采集 goroutine 收尾。
+// capture 是一路捕获的控制柄。done 关闭即通知该路采集 goroutine 收尾；slot 是这次 capture 的会话信号槽位，
+// 随控制柄新建、随 stop 摘除。
 type capture struct {
 	done chan struct{}
+	slot *session.Slot
 }
 
 // Run 是 helper 子进程的主循环：读 stdin 控制命令、驱动每路捕获、把帧写 stdout。阻塞直到
@@ -62,9 +66,11 @@ type capture struct {
 // 在 shutdownGrace 内未全部退出时不返回，直接 os.Exit(0)。
 //
 // 并发拓扑：本 goroutine=控制/读 stdin；每个被 capture 的 player 一个采集 goroutine（各自
-// LockOSThread+MTA，COM 亲和）；单个写 goroutine 从有界 channel 取帧写 stdout；单个日志 goroutine
-// 从有界 channel 取采集侧投递的诊断写 stderr。四者经 done channel、有界帧与诊断 channel、WaitGroup
-// 编排关停；卡死不返回的采集 goroutine 由限时退出进程回收。
+// LockOSThread+MTA，COM 亲和）；单个会话 watcher goroutine（独立的 LockOSThread+MTA 线程，探测各路目标的
+// WASAPI 会话，写各路槽位，由采集侧编码进帧头 flags）；单个写 goroutine 从有界 channel 取帧写 stdout；
+// 单个日志 goroutine 从有界 channel 取采集侧与 watcher 投递的诊断写 stderr。五者经 done channel、watcher
+// 的 Stop、有界帧与诊断 channel、WaitGroup 编排关停；卡死不返回的采集 goroutine 或 watcher 由限时退出
+// 进程回收。
 //
 // 遥测无需传 DSN：DSN 是编译期 ldflags 注入的包级变量，helper 与主服务同一 exe → DSN 天然一致，
 // telemetry.Init(Options{}) 已用对（helper 短路早于主服务 init，故 helper 自己 Init，见 §2.1）。
@@ -100,8 +106,19 @@ func Run(stdin io.Reader, stdout io.Writer) {
 	}()
 
 	// 控制 goroutine = 本 goroutine：逐行读 stdin。active 只被本 goroutine 读写 → 无需锁。
+	// capWG 计采集 goroutine 与会话 watcher：二者都向 frames 或 diag 发送，关停时一并限时等待。
 	var capWG sync.WaitGroup
 	active := map[string]*capture{}
+
+	// 会话 watcher（单个）：独立线程，探测卡在 COM 只冻结会话信号，不冻结采集与出帧。槽位集合为空时阻塞，
+	// 不做任何 COM 调用。诊断经 diag 非阻塞投递。
+	watcher := session.NewWatcher(procscan.Snapshot, func(s string) { sendDiag(diag, s) })
+	capWG.Add(1)
+	go func() {
+		defer telemetry.Guard()
+		defer capWG.Done()
+		watchSessions(watcher, diag)
+	}()
 
 	scanner := bufio.NewScanner(stdin)
 	for scanner.Scan() {
@@ -115,17 +132,20 @@ func Run(stdin io.Reader, stdout io.Writer) {
 			if _, ok := active[ctl.player]; ok {
 				continue // 该 player 已在捕获，幂等忽略
 			}
-			c := &capture{done: make(chan struct{})}
+			// 每条 capture 新建槽位：manager 在 PID 变化时先 stop 再 capture 同名播放器，旧目标的在途探测
+			// 只会写回下面 stop 分支摘除的旧槽位。
+			c := &capture{done: make(chan struct{}), slot: watcher.Add(ctl.pid)}
 			active[ctl.player] = c
 			capWG.Add(1)
-			go func(ctl control, done <-chan struct{}) {
+			go func(ctl control, done <-chan struct{}, slot *session.Slot) {
 				defer telemetry.Guard()
 				defer capWG.Done()
-				captureLoop(ctl, done, frames, diag)
-			}(ctl, c.done)
+				captureLoop(ctl, done, slot, frames, diag)
+			}(ctl, c.done, c.slot)
 		case "stop":
 			if c, ok := active[ctl.player]; ok {
 				close(c.done)
+				watcher.Remove(c.slot)
 				delete(active, ctl.player)
 			}
 		}
@@ -134,23 +154,25 @@ func Run(stdin io.Reader, stdout io.Writer) {
 		log.Printf("[helper] stdin 读取结束/出错: %v", err)
 	}
 
-	// stdin EOF/错误 → 关停所有捕获、排空、干净收尾。
-	// 关停顺序（防 send-on-closed-channel）：先关所有 done → 等所有采集 goroutine 退出
-	//（此后再无人向/从 frames 收发）→ 才 close(frames) → 等写 goroutine 排空剩余帧退出 →
+	// stdin EOF/错误 → 关停所有捕获与会话 watcher、排空、干净收尾。
+	// 关停顺序（防 send-on-closed-channel）：先关所有 done、停 watcher → 等所有采集 goroutine 与 watcher
+	// 退出（此后再无人向/从 frames 收发、向 diag 发送）→ 才 close(frames) → 等写 goroutine 排空剩余帧退出 →
 	// close(diag) → 限时等日志 goroutine 排空。
-	// 等采集 goroutine 至多 shutdownGrace：超时即直接退出进程，且不 close(frames)、不 close(diag)——
+	// 等采集 goroutine 与 watcher 至多 shutdownGrace：超时即直接退出进程，且不 close(frames)、不 close(diag)——
 	// 卡住的 goroutine 若恢复会向二者发送，关闭后发送即 panic。
 	for _, c := range active {
 		close(c.done)
+		watcher.Remove(c.slot)
 	}
+	watcher.Stop()
 	if !waitTimeout(&capWG, shutdownGrace) {
-		log.Printf("[helper] 关停超时：%v 内仍有采集 goroutine 未退出（可能卡在 COM 调用），直接退出进程", shutdownGrace)
+		log.Printf("[helper] 关停超时：%v 内仍有采集 goroutine 或会话 watcher 未退出（可能卡在 COM 调用），直接退出进程", shutdownGrace)
 		os.Exit(0)
 	}
 	close(frames)
 	writeWG.Wait()
-	// 诊断的发送方只有采集 goroutine，此时已全部退出。至多等 shutdownGrace：写 stderr 卡住时不再等，
-	// 剩余诊断随进程退出丢弃。
+	// 诊断的发送方只有采集 goroutine 与 watcher，此时已全部退出。至多等 shutdownGrace：写 stderr 卡住时
+	// 不再等，剩余诊断随进程退出丢弃。
 	close(diag)
 	waitTimeout(&diagWG, shutdownGrace)
 }
@@ -184,7 +206,9 @@ func writeLoop(w io.Writer, frames <-chan []byte) {
 //
 // 读包循环运行期间的诊断（数据不连续）经 sendDiag 投递到 diag，由 Run 的日志 goroutine 写 stderr，
 // 本 goroutine 不同步写日志。
-func captureLoop(ctl control, done <-chan struct{}, frames chan []byte, diag chan<- string) {
+//
+// slot 是这次 capture 的会话信号槽位，由会话 watcher 写入，encodeFrame 只读。
+func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames chan []byte, diag chan<- string) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -220,7 +244,7 @@ func captureLoop(ctl control, done <-chan struct{}, frames chan []byte, diag cha
 		disc.report(disc.observe(c.Discontinuities(), time.Now()), send)
 		return n, silent, err
 	}
-	if err := pumpCapture(read, time.Now, ctl, atomic.AddUint32(&epochCounter, 1), done, frames); err != nil {
+	if err := pumpCapture(read, time.Now, ctl, atomic.AddUint32(&epochCounter, 1), slot, done, frames); err != nil {
 		log.Printf("[helper][%s] 读取失败: %v", ctl.player, err)
 	}
 	// 捕获已结束：补报投递失败时次数退回 disc 后不再重试，这些次数不会出现在日志里。
@@ -228,15 +252,15 @@ func captureLoop(ctl control, done <-chan struct{}, frames chan []byte, diag cha
 }
 
 // pumpCapture 把 read 读到的包按 ctl 的参数分帧、分析、归一化、编码后入队 frames，直到 done 关闭
-// （返回 nil）或读包出错（返回该错误）。captureLoop 在激活成功后以包了数据不连续计数的 Capturer.Read
-// 与 time.Now 调用；两者可注入，本函数不触碰 WASAPI。
-func pumpCapture(read readFunc, now func() time.Time, ctl control, epoch uint32, done <-chan struct{}, frames chan []byte) error {
+// （返回 nil）或读包出错（返回该错误）。每帧按 slot 的当前结果带上会话标志。captureLoop 在激活成功后以
+// 包了数据不连续计数的 Capturer.Read 与 time.Now 调用；两者可注入，本函数不触碰 WASAPI。
+func pumpCapture(read readFunc, now func() time.Time, ctl control, epoch uint32, slot *session.Slot, done <-chan struct{}, frames chan []byte) error {
 	analyzer := dsp.New(fftSize)
 	nz := newNormalizer(ctl.norm, ctl.target, ctl.maxGain, wasapi.SampleRate) // 每路一个，持独立 EMA
 	readBuf := make([]float32, wasapi.SampleRate*wasapi.Channels/10)          // 100ms 容量，避免 Read 截断
 	fr := newFramer(hopFor(wasapi.SampleRate, ctl.fps), fftSize)
 	emit := func(batch []float32, peaks [2]float32, fresh int) {
-		enqueue(frames, encodeFrame(analyzer, nz, ctl.player, epoch, batch, peaks, fresh))
+		enqueue(frames, encodeFrame(analyzer, nz, slot, ctl.player, epoch, batch, peaks, fresh))
 	}
 	return pumpFrames(read, now, done, fr, readBuf, wasapi.Channels, time.Second/time.Duration(ctl.fps), emit)
 }
@@ -244,16 +268,19 @@ func pumpCapture(read readFunc, now func() time.Time, ctl control, epoch uint32,
 // encodeFrame 用 batch 的**最近 fftSize 样本**算 RMS 与 bins，peaks 为本帧新增的全部非静音样本
 // 按声道的峰值，fresh 为新增的样本数（归一化的时长权重），编码为独立字节（可安全跨 goroutine 传递：
 // frame.Encode 已把 bins 拷入返回切片，返回后复用 analyzer 内部缓冲安全）。归一化增益同乘到 RMS、
-// bins 与 peak；nz 启用时每帧（含 keepalive）置 FlagNormalized。batch 空（本帧没有非静音样本）→ 发
-// keepalive 零帧：RMS、peak 为 0（不论传入的 peaks）、bins 全零。
-func encodeFrame(a *dsp.Analyzer, nz *Normalizer, player string, epoch uint32, batch []float32, peaks [2]float32, fresh int) []byte {
+// bins 与 peak；nz 启用时每帧（含 keepalive）置 FlagNormalized。每帧（含 keepalive：静音帧正是会话信号要
+// 判别的场景）并入 slot 此刻的会话标志（bit1、bit2，与 bit0 互不重叠），slot 为 nil、从未发布或已过期时
+// 两位为 0。batch 空（本帧没有非静音样本）→ 发 keepalive 零帧：RMS、peak 为 0（不论传入的 peaks）、bins
+// 全零。
+func encodeFrame(a *dsp.Analyzer, nz *Normalizer, slot *session.Slot, player string, epoch uint32, batch []float32, peaks [2]float32, fresh int) []byte {
 	f := frame.Frame{
 		Player:   player,
+		Flags:    slot.Flags(time.Now()),
 		Epoch:    epoch,
 		TSMillis: frame.QPCMillis(readQPC(), qpcFrequency),
 	}
 	if nz.enabled {
-		f.Flags = frame.FlagNormalized
+		f.Flags |= frame.FlagNormalized
 	}
 	if len(batch) > 0 {
 		w := batch
@@ -282,6 +309,23 @@ func coInitMTA() error {
 		}
 	}
 	return nil
+}
+
+// watchSessions 在本 goroutine 锁定的独立线程上初始化 MTA COM 并跑会话 watcher，直到 w.Stop。COM 初始化
+// 失败时只投递一条诊断即返回：槽位不再被写，各路帧的会话标志恒为 0（未知），捕获照常。
+func watchSessions(w *session.Watcher, diag chan<- string) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	if err := coInitMTA(); err != nil {
+		sendDiag(diag, fmt.Sprintf("[helper] 会话探测的 CoInitializeEx 失败，本 helper 不给出会话信号: %v", err))
+		return
+	}
+	defer windows.CoUninitialize()
+
+	e := session.NewCOMEnumerator()
+	defer e.Close()
+	w.Run(e)
 }
 
 // readQPC 读一次 QueryPerformanceCounter 原始计数。QPC 是系统级单调源（开机起，不随 helper

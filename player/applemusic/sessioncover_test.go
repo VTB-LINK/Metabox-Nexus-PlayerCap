@@ -1,6 +1,7 @@
 package applemusic
 
-// 本文件只测会话里的封面：随歌曲信息一起发、晚到或换了就补发一条、不把别的歌的图配上来。
+// 本文件只测会话里的封面：规范化在独立 goroutine 里做，宣告时先不带图、落地后补发一条；晚到或换了就补发一条；
+// 不把别的歌的图配上来。在飞与作废的细节见 sessioncoverjob_test.go。
 
 import (
 	"bytes"
@@ -8,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,31 +18,47 @@ import (
 	"Metabox-Nexus-PlayerCap/player/applemusic/mem"
 )
 
-// 封面与标题同在一条存储里，宣告时一起发：cover_base64 是 data URI，cover（URL）恒为空。
+// dataURI 是假封面字节经规范化原样退回后的 cover_base64（会话测试的封面多是假字节，读不出图片头）。
+func dataURI(cover string) string {
+	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte(cover))
+}
+
+// 封面与标题同在一条存储里，但规范化在独立 goroutine 里做（issue #110）：宣告时先发不带图的 song_info_update，
+// 缩放做完后下一轮就补一条带图的，之后不再发。cover_base64 是 data URI，cover（URL）恒为空。
 //
-// 变异自证：删掉 announce 里取封面的那一段（setCover），先发一条不带封面的、下一次全扫再补一条，
-// 共两条而红。
+// 变异自证：删掉 tick 里对 pollCover 的调用，结果一直不落地、不补发而红；putCover 里去掉 `if s.announced`
+// 下的 emitSongInfo，同样不补发而红；setCover 改回在轮询 goroutine 里同步算（`s.song.coverURI = coverDataURI(...)`，
+// 不起 goroutine），宣告时就带图而红。
 func TestSessionCoverWithAnnounce(t *testing.T) {
 	h := newHarness(t)
 	h.f.songs = []mem.NowPlaying{store("带封面", "图片字节")}
 	h.setTwin(200, 10, true)
-	h.run(5 * time.Second)
-	si := songInfos(h.evs)
-	if len(si) != 1 {
-		t.Fatalf("应只发一条 song_info_update，got %d", len(si))
+	if waitAnnounce(h, 5*time.Second) < 0 {
+		t.Fatal("前置：5s 内应宣告")
 	}
+	if si := songInfos(h.evs); len(si) != 1 || si[0].CoverBase64 != "" || si[0].Name != "带封面" {
+		t.Fatalf("宣告时缩放还没做完，应先发一条不带图的，got %d 条", len(si))
+	}
+	h.run(step)
 	const want = "data:image/jpeg;base64,5Zu+54mH5a2X6IqC" // base64("图片字节")
-	if si[0].CoverBase64 != want || si[0].Cover != "" {
-		t.Fatalf("cover_base64=%q cover=%q，want %q 与空 URL", si[0].CoverBase64, si[0].Cover, want)
+	si := songInfos(h.evs)
+	if len(si) != 2 || si[1].CoverBase64 != want || si[1].Cover != "" || si[1].Name != "带封面" {
+		t.Fatalf("缩放做完的下一轮应补一条带图的，got %d 条（末条 cover_base64=%q）", len(si), si[len(si)-1].CoverBase64)
+	}
+	h.run(5 * time.Second)
+	if n := len(songInfos(h.evs)); n != 2 {
+		t.Fatalf("封面没再变，不应再发 song_info_update，got 共 %d 条", n)
 	}
 }
 
-// 存储里是一张真实的 1200² JPEG：宣告的 cover_base64 是规范化之后的 800×800 JPEG（issue #101）。之后存储在
-// 新地址重建、图不变：盯梢发现、全扫重认，不重复补发——换图判定按原始字节的哈希，与规范化之后的字节无关。
-// （现有各用例的封面是假字节，规范化原样退回，断言不变。）
+// 存储里是一张真实的 1200² JPEG：缩放落地后补发的 cover_base64 是规范化之后的 800×800 JPEG（issue #101），
+// 缩放走真的 player.CoverDataURI、在独立 goroutine 里（issue #110）。之后存储在新地址重建、图不变：盯梢发现、
+// 全扫重认，不重复补发、也不重新缩放——换图判定按原始字节的哈希，与规范化之后的字节无关。（其余用例的封面是
+// 假字节，规范化原样退回。）
 //
-// 变异自证：setCover 改回把原字节直接拼成 data URI 的旧写法，宣告的封面解出 1200×1200 而红；setCover 记下的
-// 哈希改成按规范化之后的 data URI 算，存储重建后被当成换了图、补发一条而红。
+// 变异自证：runCoverJob 改成不经 norm、把原字节直接拼成 data URI，补发的封面解出 1200×1200 而红；applyCover 的
+// `h == s.song.coverHash` 判断与 putCover 的同 URI 不补发一起去掉，存储重建后又补发一条而红（只去掉其一仍绿：
+// 两道各自都拦得住）。
 func TestSessionCoverNormalizedTo800(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 1200, 1200))
 	for y := 0; y < 1200; y++ {
@@ -58,12 +76,12 @@ func TestSessionCoverNormalizedTo800(t *testing.T) {
 	h.setTwin(200, 10, true)
 	h.run(5 * time.Second)
 	si := songInfos(h.evs)
-	if len(si) != 1 {
-		t.Fatalf("应只发一条 song_info_update，got %d", len(si))
+	if len(si) != 2 || si[0].CoverBase64 != "" {
+		t.Fatalf("应先发一条不带图的宣告、缩放落地后补一条，got %d 条", len(si))
 	}
-	b64, ok := strings.CutPrefix(si[0].CoverBase64, "data:image/jpeg;base64,")
+	b64, ok := strings.CutPrefix(si[1].CoverBase64, "data:image/jpeg;base64,")
 	if !ok {
-		t.Fatalf("cover_base64 应是 image/jpeg 的 data URI，got 前缀 %q", si[0].CoverBase64[:min(len(si[0].CoverBase64), 30)])
+		t.Fatalf("cover_base64 应是 image/jpeg 的 data URI，got 前缀 %q", si[1].CoverBase64[:min(len(si[1].CoverBase64), 30)])
 	}
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
@@ -73,7 +91,7 @@ func TestSessionCoverNormalizedTo800(t *testing.T) {
 		t.Fatalf("宣告的封面应为 800×800 的 JPEG，got %s %dx%d %v", format, cfg.Width, cfg.Height, err)
 	}
 
-	from, scans := h.mark(), h.f.scans
+	from, scans, jobs := h.mark(), h.f.scans, h.s.coverSeq
 	again := first
 	again.Addr += 0x1000
 	again.Sig = append([]byte("rebuilt:"), first.Sig...)
@@ -82,13 +100,13 @@ func TestSessionCoverNormalizedTo800(t *testing.T) {
 	if h.f.scans == scans {
 		t.Fatal("前置：存储换了地址应触发全扫")
 	}
-	if n := len(songInfos(h.since(from))); n != 0 {
-		t.Fatalf("同一张图不应重复补发，got %d 条 song_info_update", n)
+	if n := len(songInfos(h.since(from))); n != 0 || h.s.coverSeq != jobs {
+		t.Fatalf("同一张图不应重复补发、重新缩放，got %d 条 song_info_update、缩放 %d 次", n, h.s.coverSeq-jobs)
 	}
 }
 
 // 宣告时存储里还没有封面（真机首次开播时封面比标题晚约 0.4s，旧会话见过晚 4s 以上）：先发不带封面的，
-// 封面写进来时存储重建、盯梢发现，补发一条带封面的——同一首歌，不重新发歌词。
+// 封面写进来时存储重建、盯梢发现，缩放落地后补发一条带封面的——同一首歌，不重新发歌词。
 //
 // 变异自证：删掉 applySnapshot 里对 applyCover 的调用，封面到了也不补发而红。
 func TestSessionLateCoverReemitted(t *testing.T) {
@@ -139,15 +157,19 @@ func TestSessionNoCoverGivesUp(t *testing.T) {
 	}
 }
 
-// 换歌：新歌带着自己的封面宣告，不沿用上一首的。
+// 换歌：新歌换上自己的封面，不沿用上一首的——宣告时不带图（不是带着上一首的图），落地的是自己的那张。
 //
-// 变异自证：同上一条的变异（删掉 announce 里取封面的那一段），第二首先不带封面宣告、再补发，共两条而红。
+// 变异自证：beginSong 里不清当前曲目的封面（`s.song = songState{dur: t.Dur}` 改成保留 coverHash 与
+// coverURI），第二首宣告时带着图一而红；pollCover 落地不比哈希（去掉 `r.hash == s.song.coverHash`），
+// 本例仍绿（在飞的就是图二）——那一条由 sessioncoverjob_test.go 的换歌连按守。
 func TestSessionCoverFollowsSong(t *testing.T) {
 	h := newHarness(t)
 	h.f.songs = []mem.NowPlaying{store("第一首", "图一")}
 	h.setTwin(200, 10, true)
 	h.run(5 * time.Second)
-	first := songInfos(h.evs)[0].CoverBase64
+	if got := infoSeq(h.evs); !slices.Equal(got, []string{"第一首", "第一首+图"}) {
+		t.Fatalf("前置：第一首应先不带图宣告、再补上图一，got %v", got)
+	}
 
 	from := h.mark()
 	h.setTwin(0, 0, false)
@@ -156,8 +178,8 @@ func TestSessionCoverFollowsSong(t *testing.T) {
 	h.setTwin(260, 0, true)
 	h.run(3 * time.Second)
 	si := songInfos(h.since(from))
-	if len(si) != 1 || si[0].Name != "第二首" || si[0].CoverBase64 == "" || si[0].CoverBase64 == first {
-		t.Fatalf("第二首应带自己的封面宣告一次，got %d 条", len(si))
+	if len(si) != 2 || si[0].Name != "第二首" || si[0].CoverBase64 != "" || si[1].Name != "第二首" || si[1].CoverBase64 != dataURI("图二") {
+		t.Fatalf("第二首应先不带图宣告、再补上自己的图二，got %v", infoSeq(h.since(from)))
 	}
 }
 
@@ -179,7 +201,9 @@ func TestSessionStaleCoverNotSent(t *testing.T) {
 	h.f.songs = []mem.NowPlaying{storeOf("上一首", "专辑甲", "图甲")}
 	h.setTwin(200, 10, true)
 	h.run(5 * time.Second)
-	old := songInfos(h.evs)[0].CoverBase64
+	if si := songInfos(h.evs); len(si) != 2 || si[1].CoverBase64 != dataURI("图甲") {
+		t.Fatalf("前置：上一首应已补上图甲，got %v", infoSeq(h.evs))
+	}
 
 	from := h.mark()
 	skipTo(h, storeOf("新歌", "专辑乙", "图甲"), 260) // 新标题、旧图
@@ -190,8 +214,8 @@ func TestSessionStaleCoverNotSent(t *testing.T) {
 	if len(si) != 2 || si[0].Name != "新歌" || si[0].CoverBase64 != "" {
 		t.Fatalf("应先不带图宣告新歌、图换了再补一条，got %d 条（首条带图=%v）", len(si), len(si) > 0 && si[0].CoverBase64 != "")
 	}
-	if si[1].CoverBase64 == "" || si[1].CoverBase64 == old {
-		t.Fatal("补发的那条应带新歌自己的图")
+	if si[1].CoverBase64 != dataURI("图乙") {
+		t.Fatal("补发的那条应带新歌自己的图乙")
 	}
 }
 
@@ -230,10 +254,7 @@ func TestSessionCoverIdentityKeptAcrossClear(t *testing.T) {
 		h.run(300 * time.Millisecond)
 		h.setTwin(dur, 0, true)
 	}
-	uri := func(cover string) string {
-		return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte(cover))
-	}
-	imgA, imgB := uri("图甲"), uri("图乙")
+	imgA, imgB := dataURI("图甲"), dataURI("图乙")
 
 	t.Run("新歌先带着上一首的图", func(t *testing.T) {
 		h := playThenClear(t, storeOf("上一首", "专辑甲", "图甲"))
@@ -273,9 +294,17 @@ func TestSessionCoverIdentityKeptAcrossClear(t *testing.T) {
 		h := playThenClear(t, storeOf("没有封面", "专辑甲", ""))
 		from := h.mark()
 		startNext(h, storeOf("新歌", "专辑乙", "图乙"), 260)
+		if waitAnnounce(h, 5*time.Second) < 0 {
+			t.Fatal("前置：5s 内应宣告新歌")
+		}
+		// 不扣图：宣告时就采用图乙，只是缩放还没落地、先不带图，下一轮就补上（扣图的话要等 coverHold）。
+		h.run(step)
+		if si := songInfos(h.since(from)); len(si) != 2 || si[0].CoverBase64 != "" || si[1].CoverBase64 != imgB {
+			t.Fatalf("没有可比对的上一张图时，新歌应采用自己的图、宣告的下一轮补上，got %v", infoSeq(h.since(from)))
+		}
 		h.run(5 * time.Second)
-		if si := songInfos(h.since(from)); len(si) != 1 || si[0].CoverBase64 != imgB {
-			t.Fatalf("没有可比对的上一张图时，新歌应带着自己的图宣告一次，got %d 条", len(si))
+		if n := len(songInfos(h.since(from))); n != 2 {
+			t.Fatalf("之后不应再发 song_info_update，got 共 %d 条", n)
 		}
 	})
 	t.Run("清掉的那首没发过封面", func(t *testing.T) { // 沿用更早那首发出的图
@@ -292,21 +321,25 @@ func TestSessionCoverIdentityKeptAcrossClear(t *testing.T) {
 	})
 }
 
-// 同一张专辑连着两首，图本来就是同一张：照常随宣告发，不扣。
+// 同一张专辑连着两首，图本来就是同一张：不扣；上一次缩放的就是这张图，随宣告当场带上，不先发不带图的、
+// 也不重新缩放。
 //
-// 变异自证：把 staleCover 里的 `np.Album != s.prevAlbum` 去掉，第二首先不带图宣告而红。
+// 变异自证：把 staleCover 里的 `np.Album != s.prevAlbum` 去掉，第二首先不带图宣告而红；删掉 setCover 里
+// 「上一次缩放的正是这张图就当场用」那一段，第二首宣告时不带图（且 startCover 认为已缩放过、一直不补）而红。
 func TestSessionSameAlbumCoverSentAtOnce(t *testing.T) {
 	h := newHarness(t)
 	h.f.songs = []mem.NowPlaying{storeOf("第一首", "同一张专辑", "专辑图")}
 	h.setTwin(200, 10, true)
 	h.run(5 * time.Second)
-	first := songInfos(h.evs)[0].CoverBase64
+	if got := infoSeq(h.evs); !slices.Equal(got, []string{"第一首", "第一首+图"}) {
+		t.Fatalf("前置：第一首应先不带图宣告、再补上专辑图，got %v", got)
+	}
 
-	from := h.mark()
+	from, jobs := h.mark(), h.s.coverSeq
 	skipTo(h, storeOf("第二首", "同一张专辑", "专辑图"), 260)
 	h.run(5 * time.Second)
-	if si := songInfos(h.since(from)); len(si) != 1 || si[0].CoverBase64 != first || first == "" {
-		t.Fatalf("同专辑的下一首应带着同一张图宣告一次，got %d 条", len(si))
+	if si := songInfos(h.since(from)); len(si) != 1 || si[0].CoverBase64 != dataURI("专辑图") || h.s.coverSeq != jobs {
+		t.Fatalf("同专辑的下一首应随宣告带着同一张图、只发一条、不重新缩放，got %v、缩放 %d 次", infoSeq(h.since(from)), h.s.coverSeq-jobs)
 	}
 }
 
@@ -319,13 +352,15 @@ func TestSessionSameImageDifferentAlbumSentAfterHold(t *testing.T) {
 	h.f.songs = []mem.NowPlaying{storeOf("单曲版", "某单曲", "同一张图")}
 	h.setTwin(200, 10, true)
 	h.run(5 * time.Second)
-	first := songInfos(h.evs)[0].CoverBase64
+	if got := infoSeq(h.evs); !slices.Equal(got, []string{"单曲版", "单曲版+图"}) {
+		t.Fatalf("前置：单曲版应先不带图宣告、再补上图，got %v", got)
+	}
 
 	from := h.mark()
 	skipTo(h, storeOf("专辑版", "某专辑", "同一张图"), 260)
 	h.run(5 * time.Second)
 	si := songInfos(h.since(from))
-	if len(si) != 2 || si[0].CoverBase64 != "" || si[1].CoverBase64 != first {
+	if len(si) != 2 || si[0].CoverBase64 != "" || si[1].CoverBase64 != dataURI("同一张图") {
 		t.Fatalf("应先不带图宣告、过了 coverHold 补上这张图，got %d 条", len(si))
 	}
 }

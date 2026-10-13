@@ -106,18 +106,22 @@ var fetchCoverBase64 = player.FetchCoverBase64
 // lyricsTimeout 是取一次歌词的 HTTP 预算。实测 100~300ms（含 TLS）。
 const lyricsTimeout = 5 * time.Second
 
-// lyricsRetryInterval / lyricsRetrySlow / lyricsGiveUp 是「换歌时没拿到歌词」的补取节奏。
+// lyricsRetryInterval / lyricsRetrySlow / lyricsFastTries / lyricsMaxTries 是「换歌时没拿到歌词」的补取节奏与上限，
+// 都按已补取的次数计（见 lyricsRetry）。
 const (
 	lyricsRetryInterval = 5 * time.Second
-	// lyricsRetrySlow 是等过 lyricsGiveUp 之后的补取节奏。
+	// lyricsRetrySlow 是补过 lyricsFastTries 次之后的补取节奏。
 	//
-	// **不在某个时刻彻底放弃**：真机上「手里还没有 Bearer」可以持续好几分钟 —— App 只在换歌、
-	// 或者用户碰界面时才发 API 请求，而我们只能旁观它的请求。一首歌换歌时没词、两分钟后 App
-	// 因为别的原因发了一次请求（于是我们抓到了 token），那时补取仍然值钱。降频到 30 秒一次，
-	// 代价可以忽略（一次 Runtime.evaluate），而覆盖了整个换歌周期。
+	// 头 90 秒之后不立刻停：真机上「手里还没有 Bearer」或 token 过期（401）可以持续好几分钟 —— App 只在换歌、
+	// 或者用户碰界面时才发 API 请求，而我们只能旁观它的请求。App 因为别的原因发了一次请求（于是我们抓到了新 token），
+	// 那时补取仍然值钱。降频到 30 秒一次，代价可以忽略（一次 Runtime.evaluate）。
 	lyricsRetrySlow = 30 * time.Second
-	// lyricsGiveUp 是切换到慢节奏的时刻（不是放弃）。
-	lyricsGiveUp = 90 * time.Second
+	// lyricsFastTries 是按 lyricsRetryInterval 补取的次数（18 次，约 90 秒），之后降到 lyricsRetrySlow。
+	lyricsFastTries = 18
+	// lyricsMaxTries 是一首歌补取的次数上限（issue #111）：18 次快的加 17 次慢的，约 10 分钟的播放时间（暂停不补取、
+	// 不计次），到顶即停并打一次日志，换歌复位。10 分钟长于绝大多数曲目，正常长度的歌在播完之前碰不到它；它给超长曲目
+	// 与单曲循环（歌名歌手不变，不算换歌）一个终点。平台明确答复没有歌词（404、UNSYNCED）的不靠它，当场就停（见 settleLyrics）。
+	lyricsMaxTries = 35
 	// lyricsFailRepeat 是「歌词取不到」这条日志的复读间隔。补取每 5 秒试一次，
 	// 逐次打日志会在一首没歌词的歌上刷出十几条（真机实测过），故只在超过这个间隔时复读。
 	lyricsFailRepeat = 30 * time.Second
@@ -355,9 +359,13 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 				if r.resp != nil && s.hint == "" {
 					// 平台答复了、只是没有行级时间轴：不起补取（见 settleLyrics），但要留痕，与「取词链路坏了」区分开。
 					log.Detail("Lyrics has no line-level timing (syncType %s); keeping this track without lyrics", lyric.SyncType(r.resp))
+				} else if r.notFound {
+					log.Detail("No lyrics for this track (HTTP 404); not retrying") // 平台答复 404：同上，不起补取、留痕
 				}
 			case s.hint != "":
 				p.Emit(player.EventLyricUpdate, noLine) // 补取时才给出提示语：同换歌那次，随 index:-1 发出
+			case r.notFound:
+				log.Detail("No lyrics for this track (HTTP 404); not retrying")
 			case s.stopRetry:
 				log.Detail("Lyrics has no line-level timing (syncType %s); keeping this track without lyrics", lyric.SyncType(r.resp))
 			case r.diag != "" && now.Sub(lyricsFailAt) >= lyricsFailRepeat:
@@ -365,16 +373,16 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 				lyricsFailAt = now
 				log.Detail("Lyrics still unavailable: %s", r.diag)
 			}
-			if s.stopRetry {
-				retry.stop()
-			}
-			if s.startRetry {
-				retry.start(r.trackID, now)
+			started, gaveUp := retry.land(s, r.trackID, now)
+			if started {
 				log.Detail("No lyrics for this track yet; will retry while it plays")
 				if r.diag != "" {
 					lyricsFailAt = now
 					log.Detail("Lyrics unavailable: %s", r.diag)
 				}
+			}
+			if gaveUp {
+				log.Detail("Giving up on lyrics for this track after %d attempts", lyricsMaxTries)
 			}
 		default:
 		}
@@ -480,8 +488,8 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 			})
 		}
 
-		// ── 歌词补取：换歌后首次没拿到、且还在等（Bearer 通常在这一两秒内被抓到）──
-		if jobs.retryDue(&retry, now) {
+		// ── 歌词补取：换歌后首次没拿到、且还在等（Bearer 通常在这一两秒内被抓到）；暂停时不补 ──
+		if jobs.retryDue(&retry, playing, now) {
 			jctx, gen := jobs.start()
 			go runLyricsJob(jctx, lyricsJob{gen: gen, retry: true, trackID: retry.trackID}, cliPath, client, results)
 		}
@@ -561,42 +569,58 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 	}
 }
 
-// lyricsRetry 是「换歌时没拿到歌词」的补取状态，节奏见 lyricsRetryInterval / lyricsRetrySlow / lyricsGiveUp。
+// lyricsRetry 是「换歌时没拿到歌词」的补取状态，节奏与上限见 lyricsRetryInterval / lyricsRetrySlow / lyricsFastTries / lyricsMaxTries。
 //
-// **两个时间戳各司其职，别合并**：since 是这首歌开始等歌词的时刻，只用它判降频；lastTry 是上次补取的
-// 时刻，用它守节奏。曾经用同一个变量兼任两者，重试前把它重置成 now，于是 90 秒的降频分支**永远到不了**
-// （真机实测：整首每 5 秒静默重试到歌结束）。
+// **节奏按已补取的次数定，不按距换歌过了多久**：暂停期间不补取、不计次（见 retryDue），按时间算的话，暂停很久之后
+// 恢复，第一次补取就落到慢节奏、甚至越过上限。lastTry 只用来守间隔。
 //
-// **every 由 start 复位**：它曾是会话里的局部变量、换歌不复位，上一首等过 90 秒降到 30 秒之后，下一首
-// 从第一次补取起就是 30 秒一次（真机实测：换歌后 +29.8s 才第一次补取）。
+// **tries 由 start 复位**：节奏曾是会话里的局部变量、换歌不复位，上一首降到 30 秒之后，下一首从第一次补取起就是
+// 30 秒一次（真机实测：换歌后 +29.8s 才第一次补取）。
 type lyricsRetry struct {
 	trackID string // 空串 = 不在等
-	since   time.Time
 	lastTry time.Time
-	every   time.Duration
+	tries   int // 本首已补取的次数（不含换歌那次）
 }
 
 // start 开始等 trackID 的歌词（换歌时没拿到才调）；now 计为第一次尝试。
 func (r *lyricsRetry) start(trackID string, now time.Time) {
 	r.trackID = trackID
-	r.since = now
 	r.lastTry = now
-	r.every = lyricsRetryInterval
+	r.tries = 0
 }
 
-// stop 不再补取（换歌、拿到了、或平台没有行级歌词）。
+// stop 不再补取（换歌、拿到了、平台答复没有歌词、或次数到顶）。
 func (r *lyricsRetry) stop() { r.trackID = "" }
 
-// due 报告此刻该不该补取一次；该则记下这次尝试，等过 lyricsGiveUp 之后降频（不是放弃，见 lyricsRetrySlow）。
+// due 报告此刻该不该补取一次；该则记下这次尝试。补过 lyricsFastTries 次之后降频，到 lyricsMaxTries 次即不再补。
 func (r *lyricsRetry) due(now time.Time) bool {
-	if r.trackID == "" || now.Sub(r.lastTry) < r.every {
+	every := lyricsRetryInterval
+	if r.tries >= lyricsFastTries {
+		every = lyricsRetrySlow
+	}
+	if r.trackID == "" || r.tries >= lyricsMaxTries || now.Sub(r.lastTry) < every {
 		return false
 	}
 	r.lastTry = now
-	if now.Sub(r.since) >= lyricsGiveUp {
-		r.every = lyricsRetrySlow
-	}
+	r.tries++
 	return true
+}
+
+// land 按一次取词结果的落地判定（settleLyrics）更新补取状态：拿到或平台已答复即停，换歌那次没取到响应即开始；
+// 之后次数已到上限而仍在等（最后一次补取也没拿到）即停。返回是否开始了补取、是否因到顶而停（调用方各打一次日志）。
+func (r *lyricsRetry) land(s lyricsSettle, trackID string, now time.Time) (started, gaveUp bool) {
+	if s.stopRetry {
+		r.stop()
+	}
+	if s.startRetry {
+		r.start(trackID, now)
+		started = true
+	}
+	if r.trackID != "" && r.tries >= lyricsMaxTries {
+		r.stop()
+		gaveUp = true
+	}
+	return started, gaveUp
 }
 
 // lyricsJobs 是异步取词（runLyricsJob）的代次与在飞状态，只在轮询 goroutine 里读写，不加锁。
@@ -636,10 +660,14 @@ func (j *lyricsJobs) accept(gen uint64) bool {
 	return true
 }
 
-// retryDue 报告此刻该不该起一次补取。**先看有没有在飞、再问 r.due**：due 一旦返回真就记下了这次尝试，
-// 在飞时先问它会把这一拍的补取白白记掉，下一次要再等一整个间隔。
-func (j *lyricsJobs) retryDue(r *lyricsRetry, now time.Time) bool {
-	return j.cancel == nil && r.due(now)
+// retryDue 报告此刻该不该起一次补取。未在播放（playing 为假）时不补取：暂停期间页面不发新请求、抓不到新 token，
+// 补取只会重复同样的失败，路由也已在暂停超时后撤下这一家（2026-10-13 真机：暂停近一小时，每 30 秒补取一次）；
+// 恢复播放后照常继续。
+//
+// **先看播放态与有没有在飞、再问 r.due**：due 一旦返回真就记下了这次尝试，暂停或在飞时先问它，会把这一拍的补取
+// 白白记掉（暂停时还会耗掉次数），下一次要再等一整个间隔。
+func (j *lyricsJobs) retryDue(r *lyricsRetry, playing bool, now time.Time) bool {
+	return playing && j.cancel == nil && r.due(now)
 }
 
 // lyricsJob 是一次异步取词的请求。换歌那次 trackID 为空、由 CLI 取；补取那次带着已知的 trackID、不读 CLI。
@@ -660,6 +688,8 @@ type lyricsResult struct {
 	lines       []lyric.Line
 	resp        *lyric.Response
 	diag        string
+	// notFound 报告平台答复了 HTTP 404（没有这首歌的歌词，见 fetchLyrics）。
+	notFound bool
 }
 
 // lyricsClient 是取词用到的 CDP 会话方法（*cdp.Client 实现它）；抽成接口只为离线测试注入桩。
@@ -704,7 +734,7 @@ func runLyricsJob(ctx context.Context, job lyricsJob, cliPath string, client lyr
 		}
 		log.Info("♪ Song: %s - %s (id: %s)", job.name, job.singer, r.trackID)
 	}
-	r.lines, r.resp, r.diag = fetchLyrics(ctx, client, r.trackID)
+	r.lines, r.resp, r.diag, r.notFound = fetchLyrics(ctx, client, r.trackID)
 	if ctx.Err() != nil {
 		return
 	}
@@ -725,10 +755,10 @@ type lyricsSettle struct {
 // settleLyrics 判定一次取词结果怎么落地：
 //   - 拿到行级歌词：换上，停止补取；
 //   - 平台只给了提示语（player.IsPureMusicOnly）：按无歌词处理；
-//   - 取到了响应却没有可用的行级歌词（UNSYNCED、零行、只有提示语）：平台已经答复，再试也不会有——
-//     换歌那次不起补取，补取那次停止补取；
-//   - 换歌那次没取到响应：有 URI 才开始补取（没有 URI 就没有补取的钥匙，不必空转）；
-//     补取仍没取到响应：照节奏继续。
+//   - 取到了响应却没有可用的行级歌词（UNSYNCED、零行、只有提示语），或平台答复 404（notFound）：平台已经答复，
+//     再试也不会有——换歌那次不起补取，补取那次停止补取；
+//   - 换歌那次没取到响应（401 / 403 / 网络错误等）：有 URI 才开始补取（没有 URI 就没有补取的钥匙，不必空转）；
+//     补取仍没取到响应：照节奏继续，到次数上限为止（lyricsMaxTries，见 lyricsRetry.land）。
 func settleLyrics(r lyricsResult) lyricsSettle {
 	var s lyricsSettle
 	if items := toLyricLines(r.lines, 0); player.IsPureMusicOnly(items) {
@@ -736,13 +766,14 @@ func settleLyrics(r lyricsResult) lyricsSettle {
 	} else {
 		s.lines = r.lines
 	}
+	answered := r.resp != nil || r.notFound
 	switch {
 	case len(s.lines) > 0:
 		s.stopRetry = true
 	case !r.retry:
-		s.startRetry = r.trackID != "" && r.resp == nil
+		s.startRetry = r.trackID != "" && !answered
 	default:
-		s.stopRetry = r.resp != nil
+		s.stopRetry = answered
 	}
 	return s
 }
@@ -819,7 +850,7 @@ func truePositionSec(rawSec float32, playing bool) float32 {
 	return 0
 }
 
-// fetchLyrics 按优先级取一份歌词，返回解析好的行与诊断串（诊断串为空表示拿到了行）。
+// fetchLyrics 按优先级取一份歌词，返回解析好的行、响应、诊断串（为空表示拿到了行）与 notFound。
 //
 // 三层都实机验证过（2026-10）：
 //   - Go 侧带 Bearer 直取（lyric.Fetch）最快，但真机上稳定 **403**（同一 token、同一 URL，
@@ -833,54 +864,60 @@ func truePositionSec(rawSec float32, playing bool) float32 {
 // 诊断串同时覆盖「请求失败」与「取到了但平台没有可用的行级歌词」（syncType 为 UNSYNCED 或
 // lines 为空）两种情形 —— 后者此前是完全静默的，运维看不出「平台没歌词」与「取词链路坏了」的区别。
 //
+// notFound 报告平台答复了「没有这首歌的歌词」：页面内取词或页面缓存得到 HTTP 404（lyric.IsNotFound），且没有一层取到响应。
+// Go 直取的状态码不参与：它在真机上稳定 403（请求来源不同），只说明这一层不行。
+//
 // 每一层之前查 ctx：被作废（换歌、会话结束）就不再发下一层的请求，返回空（调用方不会用它）。
-func fetchLyrics(ctx context.Context, client lyricsClient, trackID string) ([]lyric.Line, *lyric.Response, string) {
+func fetchLyrics(ctx context.Context, client lyricsClient, trackID string) ([]lyric.Line, *lyric.Response, string, bool) {
 	if trackID == "" || ctx.Err() != nil {
-		return nil, nil, ""
+		return nil, nil, "", false
 	}
-	tokenErr := ""
+	tokenErr, notFound := "", false
 	if token := client.Token(); token != "" {
 		if resp, err := fetchLyricsDirect(trackID, token, client.AppPlatform(), client.AppVersion(), lyricsTimeout); err == nil {
 			if lines := lyric.Parse(resp); len(lines) > 0 {
-				return lines, resp, ""
+				return lines, resp, "", false
 			} else {
-				return nil, resp, noLineLyricsDiag(resp)
+				return nil, resp, noLineLyricsDiag(resp), false
 			}
 		} else {
 			tokenErr = err.Error()
 		}
 		if ctx.Err() != nil {
-			return nil, nil, ""
+			return nil, nil, "", false
 		}
 		if raw, err := client.FetchLyrics(trackID, token); err == nil && raw != "" {
 			if resp, perr := lyric.ParseBody([]byte(raw)); perr == nil {
 				if lines := lyric.Parse(resp); len(lines) > 0 {
-					return lines, resp, ""
+					return lines, resp, "", false
 				} else {
-					return nil, resp, noLineLyricsDiag(resp)
+					return nil, resp, noLineLyricsDiag(resp), false
 				}
 			}
 		} else if err != nil {
 			tokenErr = err.Error()
+			notFound = lyric.IsNotFound(err)
 		}
 	}
 	if ctx.Err() != nil {
-		return nil, nil, ""
+		return nil, nil, "", false
 	}
 	raw, err := client.FetchViaPageCache(trackID)
 	if err == nil && raw != "" {
 		if resp, perr := lyric.ParseBody([]byte(raw)); perr == nil {
 			if lines := lyric.Parse(resp); len(lines) > 0 {
-				return lines, resp, ""
+				return lines, resp, "", false
 			} else {
-				return nil, resp, noLineLyricsDiag(resp)
+				return nil, resp, noLineLyricsDiag(resp), false
 			}
 		}
+	} else if lyric.IsNotFound(err) {
+		notFound = true
 	}
 	if tokenErr != "" {
-		return nil, nil, tokenErr
+		return nil, nil, tokenErr, notFound
 	}
-	return nil, nil, i18n.T("lyrics unavailable")
+	return nil, nil, i18n.T("lyrics unavailable"), notFound
 }
 
 // noLineLyricsDiag 是「取到了但平台没有行级歌词」的诊断串。它作为 %s 注入日志，不会被 logger 翻译，

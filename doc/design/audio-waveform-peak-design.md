@@ -35,7 +35,7 @@
 | 4 | u32 | `payloadLen` | 本字段之后的全部字节数。服务端内部分帧用；WebSocket 消费者可直接用消息长度 |
 | 8 | u32 | `version` | `1` |
 | 12 | u32 | `headerLen` | 定长头总长，即 bins 在帧内的起始偏移，恒为 4 的倍数。v1 为 `48` |
-| 16 | u32 | `flags` | bit0：本路已启用音量归一化。其余位保留，发送方置 0，接收方忽略 |
+| 16 | u32 | `flags` | bit0：本路已启用音量归一化。其余位保留，发送方置 0，接收方忽略（bit1、bit2 后由 issue #115 启用，见 [audio-session-signal-design.md](audio-session-signal-design.md) §4.1） |
 | 20 | u32 | `epoch` | 语义不变 |
 | 24 | f64 | `ts` | 开机起算的毫秒数，来源仍为系统 QPC；与墙钟无关，仅用于帧间相对时间 |
 | 32 | f32 | `rms` | 语义不变 |

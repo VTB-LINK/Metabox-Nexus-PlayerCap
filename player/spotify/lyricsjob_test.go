@@ -105,40 +105,41 @@ func TestLyricsJobs(t *testing.T) {
 }
 
 // 补取与在飞：在飞时不起补取，也不把这一拍的补取记掉——上一次落地后下一拍就补，不必再等一整个间隔。
-// 变异自证：retryDue 两个条件对调（先问 due）→ 「上一次落地后，已到期的补取应在这一拍就起」红（实测）。
+// 变异自证：retryDue 先问 due、再看在飞 → 「上一次落地后，已到期的补取应在这一拍就起」红（实测）。播放态的那一半见
+// session_test.go 的 TestRetryDuePaused。
 func TestRetryDueWaitsForInFlight(t *testing.T) {
 	var j lyricsJobs
 	var r lyricsRetry
 	r.start("a", t0)
 
 	_, gen := j.start() // 上一次（例如换歌那次的取词）还在飞
-	if j.retryDue(&r, t0.Add(5*time.Second)) {
+	if j.retryDue(&r, true, t0.Add(5*time.Second)) {
 		t.Fatal("在飞时不应起补取")
 	}
-	if j.retryDue(&r, t0.Add(6*time.Second)) {
+	if j.retryDue(&r, true, t0.Add(6*time.Second)) {
 		t.Fatal("在飞时不应起补取")
 	}
 	if !j.accept(gen) {
 		t.Fatal("前置条件：应认下在飞的那次")
 	}
-	if !j.retryDue(&r, t0.Add(6200*time.Millisecond)) {
+	if !j.retryDue(&r, true, t0.Add(6200*time.Millisecond)) {
 		t.Fatal("上一次落地后，已到期的补取应在这一拍就起")
 	}
 	_, gen = j.start()
-	if j.retryDue(&r, t0.Add(20*time.Second)) {
+	if j.retryDue(&r, true, t0.Add(20*time.Second)) {
 		t.Fatal("补取自己在飞时不应再起一次")
 	}
 	j.accept(gen)
-	if j.retryDue(&r, t0.Add(10*time.Second)) {
+	if j.retryDue(&r, true, t0.Add(10*time.Second)) {
 		t.Fatal("节奏照旧：上一次补取起于 +6.2s，+10s 不应再补")
 	}
-	if !j.retryDue(&r, t0.Add(11200*time.Millisecond)) {
+	if !j.retryDue(&r, true, t0.Add(11200*time.Millisecond)) {
 		t.Fatal("节奏照旧：上一次补取起于 +6.2s，+11.2s 应补")
 	}
 
 	// 不在等歌词（没 start 过或已 stop）：不在飞也不补。
 	var idle lyricsRetry
-	if j.retryDue(&idle, t0.Add(time.Hour)) {
+	if j.retryDue(&idle, true, t0.Add(time.Hour)) {
 		t.Fatal("不在等歌词时不应补取")
 	}
 }
@@ -165,6 +166,8 @@ const (
 // 变异自证：去掉 IsPureMusicOnly 的判断 → 两条「提示语」红；换歌那次不看 trackID 就开始补取 → 「没有 URI」红；
 // 补取没拿到时不看 resp 一律停止 → 「补取仍失败」红；拿到歌词时不停止补取 → 两条「拿到」与「两行中的一行」红；
 // 换歌那次不看 resp、有 URI 就补取（改回旧写法）→ 换歌那次「提示语」「UNSYNCED」「零行」三例红（均实测）。
+// 不看 notFound（issue #111 之前的写法）→ 「换歌那次 404」「补取时 404」红；没取到响应的失败也当作已答复（加上 `r.diag != ""`）
+// → 两条 401 与两条 403 红（均实测）。
 func TestSettleLyrics(t *testing.T) {
 	synced := mustParse(t, syncedBody)
 	unsynced := mustParse(t, unsyncedBody)
@@ -190,6 +193,13 @@ func TestSettleLyrics(t *testing.T) {
 		{"换歌那次请求失败（没取到响应）、有 URI：开始补取", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, diag: "HTTP 403"}, 0, "", true, false},
 		{"换歌那次没有 URI（CLI 缺失或失败）：不补取", lyricsResult{lyricsJob: lyricsJob{}}, 0, "", false, false},
 		{"补取仍失败（没取到响应）：照节奏继续", lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, diag: "HTTP 403"}, 0, "", false, false},
+		// 平台答复 404（notFound）与「取到响应却没有行级歌词」同等处理。
+		{"换歌那次 404：平台已答复、不补取", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, diag: "HTTP 404", notFound: true}, 0, "", false, false},
+		{"补取时 404：停止补取", lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, diag: "HTTP 404", notFound: true}, 0, "", false, true},
+		{"换歌那次 401：没取到响应、有 URI，开始补取", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, diag: "HTTP 401"}, 0, "", true, false},
+		{"补取时 401：照节奏继续", lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, diag: "HTTP 401"}, 0, "", false, false},
+		{"换歌那次 404 且没有 URI：不补取", lyricsResult{lyricsJob: lyricsJob{}, notFound: true}, 0, "", false, false},
+		{"补取时 404 而又带着歌词（不应出现）：按拿到处理", lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, lines: lyric.Parse(synced), resp: synced, notFound: true}, 2, "", false, true},
 	}
 	for _, c := range cases {
 		s := settleLyrics(c.r)
@@ -464,10 +474,94 @@ func TestFetchLyricsPriority(t *testing.T) {
 		s := &lyricsStubs{directRes: tc.directRes, directErr: tc.directErr}
 		useLyricsStubs(t, s)
 		c := tc.client
-		lines, resp, diag := fetchLyrics(context.Background(), c, "t")
+		lines, resp, diag, nf := fetchLyrics(context.Background(), c, "t")
 		sameStrings(t, tc.name, c.callList(), tc.wantCalls)
-		if len(lines) != tc.wantLines || (resp != nil) != tc.wantResp || diag != tc.wantDiag {
-			t.Errorf("%s：lines=%d resp=%v diag=%q，期望 lines=%d resp=%v diag=%q", tc.name, len(lines), resp != nil, diag, tc.wantLines, tc.wantResp, tc.wantDiag)
+		if len(lines) != tc.wantLines || (resp != nil) != tc.wantResp || diag != tc.wantDiag || nf {
+			t.Errorf("%s：lines=%d resp=%v diag=%q notFound=%v，期望 lines=%d resp=%v diag=%q notFound=false", tc.name, len(lines), resp != nil, diag, nf, tc.wantLines, tc.wantResp, tc.wantDiag)
+		}
+	}
+}
+
+// httpErr 是带状态码的取词错误（与 lyric.Fetch、cdp 页面内取词返回的同型），文案与状态码各自给出。
+func httpErr(status int, text string) error {
+	return &lyric.StatusError{Status: status, Err: errors.New(text)}
+}
+
+// 平台答复「没有这首歌的歌词」（notFound）：只认页面内取词与页面缓存的 HTTP 404；Go 直取的状态码（真机稳定 403）不参与，
+// 401 / 403 / 400 / 5xx、超时、只在文案里写着 404 的普通错误都不是。404 之后仍走缓存，缓存取到响应以响应为准。
+// 对应 2026-10-13 真机日志：无歌词曲目换歌那次页面内取词回 404（直取照常 403）。
+// 变异自证（均实测）：直取的错误也参与判定 → 「直取 404 不算、页面给解析不了的串」红（页面出错时会覆盖掉，只有这一例拦得住）；
+// 页面的 404 不置位 → 「页面 404」三例与「包了一层」红；缓存层不参与 → 「缓存 404」两例红；IsNotFound 不看状态码 →
+// 401 / 403 / 400 / 500 与「缓存 401」各例红；IsNotFound 改成类型断言 → 「包了一层」红。
+func TestFetchLyricsNotFound(t *testing.T) {
+	synced := mustParse(t, syncedBody)
+	unsynced := mustParse(t, unsyncedBody)
+	direct403 := httpErr(403, "direct 403")
+	unavailable := i18n.T("lyrics unavailable")
+	cases := []struct {
+		name      string
+		directRes *lyric.Response
+		directErr error
+		client    *fakeLyricsClient
+		wantLines int
+		wantResp  bool
+		wantDiag  string
+		wantNF    bool
+	}{
+		{"直取 403、页面 404、缓存不中", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(404, "page 404"), cacheErr: errors.New("miss")}, 0, false, "page 404", true},
+		{"直取 403、页面 404、缓存返回空串", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(404, "page 404")}, 0, false, "page 404", true},
+		{"直取网络错误、页面 404", nil, errors.New("dial tcp: timeout"), &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(404, "page 404")}, 0, false, "page 404", true},
+		{"页面 404 包了一层（errors.As 取得到）", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: fmt.Errorf("wrapped: %w", httpErr(404, "page 404"))}, 0, false, "wrapped: page 404", true},
+		{"直取 404 不算（直取的状态码不参与）、页面 401", nil, httpErr(404, "direct 404"), &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(401, "page 401")}, 0, false, "page 401", false},
+		{"直取 404 不算、页面超时", nil, httpErr(404, "direct 404"), &fakeLyricsClient{token: "Bearer x", pageErr: errors.New("timeout")}, 0, false, "timeout", false},
+		{"直取 404 不算、页面给解析不了的串、缓存不中", nil, httpErr(404, "direct 404"), &fakeLyricsClient{token: "Bearer x", pageBody: `{"lyrics":`}, 0, false, "direct 404", false},
+		{"页面 401（token 过期）", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(401, "page 401")}, 0, false, "page 401", false},
+		{"页面 403", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(403, "page 403")}, 0, false, "page 403", false},
+		{"页面 400（缺 app-platform 头）", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(400, "page 400")}, 0, false, "page 400", false},
+		{"页面 500", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(500, "page 500")}, 0, false, "page 500", false},
+		{"页面普通错误、文案里写着 404：不按文案判", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: errors.New("page-side lyrics fetch failed: http 404")}, 0, false, "page-side lyrics fetch failed: http 404", false},
+		{"页面 200 而 UNSYNCED：原行为（有响应，不是 notFound）", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageBody: unsyncedBody}, 0, true, noLineLyricsDiag(unsynced), false},
+		{"直取 UNSYNCED：当场返回，不是 notFound", unsynced, nil, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(404, "page 404")}, 0, true, noLineLyricsDiag(unsynced), false},
+		{"页面 404 而缓存取到歌词：以歌词为准", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(404, "page 404"), cacheBody: syncedBody}, 2, true, "", false},
+		{"页面 404 而缓存给 UNSYNCED：以响应为准", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(404, "page 404"), cacheBody: unsyncedBody}, 0, true, noLineLyricsDiag(unsynced), false},
+		{"没有 token、缓存 404", nil, nil, &fakeLyricsClient{cacheErr: httpErr(404, "cache 404")}, 0, false, unavailable, true},
+		{"页面 401、缓存 404", nil, direct403, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(401, "page 401"), cacheErr: httpErr(404, "cache 404")}, 0, false, "page 401", true},
+		{"没有 token、缓存 401", nil, nil, &fakeLyricsClient{cacheErr: httpErr(401, "cache 401")}, 0, false, unavailable, false},
+		{"直取拿到：不是 notFound", synced, nil, &fakeLyricsClient{token: "Bearer x", pageErr: httpErr(404, "page 404")}, 2, true, "", false},
+	}
+	for _, tc := range cases {
+		useLyricsStubs(t, &lyricsStubs{directRes: tc.directRes, directErr: tc.directErr})
+		lines, resp, diag, nf := fetchLyrics(context.Background(), tc.client, "t")
+		if len(lines) != tc.wantLines || (resp != nil) != tc.wantResp || diag != tc.wantDiag || nf != tc.wantNF {
+			t.Errorf("%s：lines=%d resp=%v diag=%q notFound=%v，期望 lines=%d resp=%v diag=%q notFound=%v",
+				tc.name, len(lines), resp != nil, diag, nf, tc.wantLines, tc.wantResp, tc.wantDiag, tc.wantNF)
+		}
+	}
+}
+
+// 换歌那次与补取那次都把 notFound 随结果交回，落地时不起补取 / 停止补取；401 照常补取。
+// 变异自证：runLyricsJob 不带回 notFound（第四个返回值丢弃）→ 两例 404 红（实测）。
+func TestRunLyricsJobCarriesNotFound(t *testing.T) {
+	cases := []struct {
+		name               string
+		job                lyricsJob
+		pageErr            error
+		wantNF             bool
+		wantStart, wantStp bool
+	}{
+		{"换歌那次 404：不起补取", lyricsJob{gen: 1}, httpErr(404, "page 404"), true, false, false},
+		{"补取那次 404：停止补取", lyricsJob{gen: 1, retry: true, trackID: "abc"}, httpErr(404, "page 404"), true, false, true},
+		{"换歌那次 401：开始补取", lyricsJob{gen: 1}, httpErr(401, "page 401"), false, true, false},
+		{"补取那次 401：照节奏继续", lyricsJob{gen: 1, retry: true, trackID: "abc"}, httpErr(401, "page 401"), false, false, false},
+	}
+	for _, tc := range cases {
+		useLyricsStubs(t, &lyricsStubs{np: watchdog.NowPlaying{URI: "spotify:track:abc", HasTrack: true}, directErr: httpErr(403, "direct 403")})
+		out := make(chan lyricsResult, 1)
+		waitDone(t, tc.name, runJob(context.Background(), tc.job, `C:\cli.exe`, &fakeLyricsClient{token: "Bearer x", pageErr: tc.pageErr}, out))
+		r := recvResult(t, out)
+		s := settleLyrics(r)
+		if r.notFound != tc.wantNF || s.startRetry != tc.wantStart || s.stopRetry != tc.wantStp {
+			t.Errorf("%s：notFound=%v start=%v stop=%v，期望 notFound=%v start=%v stop=%v", tc.name, r.notFound, s.startRetry, s.stopRetry, tc.wantNF, tc.wantStart, tc.wantStp)
 		}
 	}
 }
@@ -488,7 +582,10 @@ func TestCacheNoLineLyricsSettle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		useLyricsStubs(t, &lyricsStubs{})
-		lines, resp, diag := fetchLyrics(context.Background(), &fakeLyricsClient{cacheBody: tc.cacheBody}, "t")
+		lines, resp, diag, nf := fetchLyrics(context.Background(), &fakeLyricsClient{cacheBody: tc.cacheBody}, "t")
+		if nf {
+			t.Errorf("%s：没有 404，不应是 notFound", tc.name)
+		}
 		s := settleLyrics(lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "t"}, lines: lines, resp: resp, diag: diag})
 		if s.stopRetry != tc.wantRetryStop || s.startRetry || len(s.lines) != 0 {
 			t.Errorf("%s（补取那次）：settle = %+v，期望 stopRetry=%v、不开始补取、没有行", tc.name, s, tc.wantRetryStop)
@@ -588,8 +685,8 @@ func TestLyricsJobCanceledBeforeStart(t *testing.T) {
 	s := &lyricsStubs{directRes: mustParse(t, syncedBody)}
 	useLyricsStubs(t, s)
 	c := &fakeLyricsClient{token: "Bearer x", pageBody: syncedBody, cacheBody: syncedBody}
-	if lines, resp, diag := fetchLyrics(canceled, c, "t"); lines != nil || resp != nil || diag != "" {
-		t.Errorf("直接调 fetchLyrics：已作废应返回空，得到 lines=%d resp=%v diag=%q", len(lines), resp != nil, diag)
+	if lines, resp, diag, nf := fetchLyrics(canceled, c, "t"); lines != nil || resp != nil || diag != "" || nf {
+		t.Errorf("直接调 fetchLyrics：已作废应返回空，得到 lines=%d resp=%v diag=%q notFound=%v", len(lines), resp != nil, diag, nf)
 	}
 	if _, direct := s.counts(); len(direct) != 0 || len(c.callList()) != 0 {
 		t.Errorf("直接调 fetchLyrics：已作废仍起了操作：direct=%q calls=%q", direct, c.callList())

@@ -107,7 +107,8 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 
 	var lastName string
 	var currentLyrics []lyricLine
-	var midWait midWaitGate // v20.05 等 songMid 就绪的有界等待
+	var midWait midWaitGate      // v20.05 等 songMid 就绪的有界等待
+	var progressWait midWaitGate // 换歌后等进度从上一首换过来的有界等待（见 progressCarriedOver）
 	var lastLineIdx int = -1
 	var currentDurationSec float32 = 0
 	var isPaused bool = false
@@ -158,6 +159,16 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		// 用前缀挡掉 QQ 空闲/过渡态漏进 Name 字段的窗口标题串（"QQ音乐"、"QQ音乐 听我想听" 等）——
 		// 真歌名极不可能以 "QQ音乐" 开头，否则会把占位串当成一首歌、推出错误标题。
 		if meta.Name != lastName && meta.Name != "" && !strings.HasPrefix(meta.Name, "QQ音乐") {
+			// 换歌时显示结构里的歌名与时长先换成新歌的，进度要晚一些才从上一首换过来（issue #96 的录音里
+			// 换歌那一拍读到的仍是上一首的位置）。按它认领，all_lyrics 带的是上一首的进度，首条 lyric_update
+			// 落在新歌中间的某一行，进度归零时又被判成一次回跳。进度换过来之前不认领，本轮其余判定一并跳过，
+			// 上一首停在已发出的那一行；等待有界，等窗用尽按当时的读数认领。
+			if progressCarriedOver(lastName, lastMemProgress, meta.ProgressMs) {
+				if _, keepWaiting := progressWait.wait(meta.Name, sampleTime, progressSettleWindow); keepWaiting {
+					continue
+				}
+			}
+
 			// v20.05: songMid 从 URL 参数异步提取，换歌瞬间可能尚未就绪；struct+0x40 不是
 			// 标准 songId，用它请求会拿到错歌词。此时**不能认领 lastName**——否则下次轮询
 			// meta.Name==lastName 不再进本分支，songMid 就绪也永不重试，上一首的 currentLyrics
@@ -182,6 +193,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				log.Warn("songMid still not ready after waiting %v; continuing without lyrics (local file playback?)", midWaitWindow)
 			}
 			midWait.reset()
+			progressWait.reset()
 
 			lastName = meta.Name
 			lastLineIdx = -1
@@ -261,16 +273,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			} else if len(currentLyrics) == 0 {
 				// 纯音乐：API 成功但无歌词行
 				log.Info("Detected instrumental/no lyrics; clearing lyrics; per-word: %s", detailedFlag(currentLyrics))
-				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-					Title: title, Duration: currentDurationSec,
-					Position: playTimeSec,
-					Progress: progress,
-					Lyrics:   []player.LyricLine{}, Count: 0,
-				})
-				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index: -1, Text: "", SubText: "", Timestamp: 0,
-					Position: playTimeSec, Progress: progress,
-				})
+				p.emitNoLyrics(title, currentDurationSec, playTimeSec, progress)
 			} else {
 				log.Info("Lyrics loaded: %d lines; per-character: %s", len(currentLyrics), detailedFlag(currentLyrics))
 				lyricItems := toLyricLines(currentLyrics, offsetSec)
@@ -295,6 +298,10 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 					})
 				}
 			}(coverGen, coverURL, meta.Name, meta.Singer, title)
+		} else if meta.Name == lastName {
+			// 等进度的时候又切回了已认领的歌：这次等待作废。不清的话，之后再切到那首歌，闸门按歌名认出它、
+			// 沿用早已过期的等窗，当拍就按上一首的进度认领。
+			progressWait.reset()
 		}
 
 		// --- 换歌后歌词补取 ---
@@ -348,10 +355,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 						p.Emit(player.EventSongInfoUpdate, &player.SongInfo{Name: name, Singer: singer, Title: title})
 						if len(lines) == 0 {
 							log.Info("Detected instrumental/no lyrics; clearing lyrics; per-word: %s", detailedFlag(lines))
-							p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-								Title: title, Duration: currentDurationSec, Position: psec, Progress: prog,
-								Lyrics: []player.LyricLine{}, Count: 0,
-							})
+							p.emitNoLyrics(title, currentDurationSec, psec, prog)
 						} else {
 							log.Info("Lyrics loaded (backfill): %d lines; per-word: %s", len(lines), detailedFlag(lines))
 							items := toLyricLines(lines, offsetSec)
@@ -445,16 +449,10 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		progressSec := player.LivePosition(float32(anchorProgressMs)/1000.0, anchorTime, time.Now(), !isPaused, float32(meta.DurationMs)/1000.0)
 		matchTime := player.LyricMatchTime(progressSec, offsetSec)
 
-		// 歌词行匹配
-		trueIdx := -1
-		for i := len(currentLyrics) - 1; i >= 0; i-- {
-			if matchTime >= currentLyrics[i].Time {
-				trueIdx = i
-				break
-			}
-		}
-
-		if trueIdx >= 0 && trueIdx != lastLineIdx {
+		// 歌词行匹配。行号只往前走，除非刚换歌、跳转或换了歌词（lastLineIdx 置 -1）：暂停要等计时器停滞
+		// pauseTimeoutSec 才判得出，其间插值照走、可能推过下一行的开头，判出暂停时位置退回锚点，按它匹配会
+		// 补发上一行、恢复后再推回来（issue #96）。不足 2s 的回跳不判 seek，同样只重锚、不回退行号。
+		if trueIdx, ok := nextLine(currentLyrics, matchTime, lastLineIdx); ok {
 			lastLineIdx = trueIdx
 			line := currentLyrics[trueIdx]
 
@@ -525,6 +523,51 @@ func (g *midWaitGate) wait(songName string, now time.Time, window time.Duration)
 
 // reset 在 songMid 就绪（或放弃等待）后清空，使下一首歌重新开窗。
 func (g *midWaitGate) reset() { g.name = "" }
+
+// progressSettleWindow 是换歌后等进度从上一首换过来的时间上界。取值未经真机测量：录音只说明进度落后于
+// 歌名不超过一次取词加一拍。真机上若换歌常等满这个时长、或等满之后读到的仍是上一首的进度，按实测调整。
+const progressSettleWindow = 2 * time.Second
+
+// carriedOverFloorMs 以内的读数不必等：按它匹配，落到的至多是新歌开头约 2 秒内起唱的行；取值同 seek 检测的
+// 门槛。没有它，上一首几乎没走（读数在 0 附近）时新歌的读数总不低于它，这时换歌都要等满等窗。
+const carriedOverFloorMs = 2000
+
+// progressCarriedOver 判断换歌时读到的进度是否还是上一首的：本会话已认领过一首（prevName 非空），读数不低于
+// 上一首最后一次读数 prevMs（在播时计时器只往前走，暂停时停着），且超过 carriedOverFloorMs。新歌从头播起时
+// 读数归零、低于 prevMs。新歌从上次的位置续播、续播点又不早于上一首的位置时同样判为没换过来，要等满
+// progressSettleWindow 才认领。
+func progressCarriedOver(prevName string, prevMs, ms uint32) bool {
+	return prevName != "" && ms >= prevMs && ms > carriedOverFloorMs
+}
+
+// nextLine 返回匹配时刻 t 所在的行（最后一个起点不晚于 t 的行；还没到第一行为 -1），ok 表示要为它发
+// lyric_update：行号只往前走，last 为 -1 时不限。同 applemusic 的 nextLine。
+func nextLine(lines []lyricLine, t float32, last int) (idx int, ok bool) {
+	idx = -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t >= lines[i].Time {
+			idx = i
+			break
+		}
+	}
+	return idx, idx > last
+}
+
+// emitNoLyrics 发「这首歌没有歌词」：空的 all_lyrics 加 index:-1 的 lyric_update。取词成功但零行（纯音乐）
+// 的两处——换歌时、歌曲 ID 晚到的补取——共用它，两处发出的事件必须一致。lyrics 用显式空 slice（nil 会
+// 序列化成 null）；index:-1 的 lyric_update 必须带 Progress（lyricupdate_lint 全仓强制）。
+func (p *QQMusicPlayer) emitNoLyrics(title string, durationSec, positionSec, progress float32) {
+	p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+		Title: title, Duration: durationSec,
+		Position: positionSec,
+		Progress: progress,
+		Lyrics:   []player.LyricLine{}, Count: 0,
+	})
+	p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+		Index: -1, Text: "", SubText: "", Timestamp: 0,
+		Position: positionSec, Progress: progress,
+	})
+}
 
 // toLyricLines converts internal lyricLine to player.LyricLine
 // 逐字音译（RomaDetailed）进 roma_text_detailed：BuildLyricLine 不填它，这里赋值。

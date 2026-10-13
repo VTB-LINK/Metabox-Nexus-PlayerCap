@@ -6,6 +6,7 @@ package applemusic
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -184,8 +185,8 @@ func TestSessionSkippedSongLyricsStayWithIt(t *testing.T) {
 	h.setTwin(250, 0, true) // N 开播
 	h.run(6 * time.Second)
 	evs := h.since(from)
-	if si := songInfos(evs); len(si) != 1 || si[0].Name != "N" {
-		t.Fatalf("应只宣告 N，got %d 条", len(si))
+	if got := infoSeq(evs); !slices.Equal(got, []string{"N", "N+图"}) {
+		t.Fatalf("应只宣告 N（不带图的宣告与封面落地后补的一条），got %v", got)
 	}
 	for _, al := range allLyrics(evs) {
 		if al.Count != 0 {
@@ -623,8 +624,8 @@ func TestSessionLyricsSeenOnlyWhileLoading(t *testing.T) {
 		h.setTwin(256, 1, true) // 真正开播
 		h.run(lyricGrace + 2*time.Second)
 		evs := h.since(from)
-		if si := songInfos(evs); len(si) != 1 || si[0].Name != "信仰" {
-			t.Fatalf("清屏后应重新宣告《信仰》一次，got %d 条", len(si))
+		if got := infoSeq(evs); !slices.Equal(got, []string{"信仰", "信仰+图"}) {
+			t.Fatalf("清屏后应重新宣告《信仰》一次（不带图的宣告与封面落地后补的一条），got %v", got)
 		}
 		if al := allLyrics(evs); len(al) != 1 || al[0].Count != 3 {
 			t.Fatalf("重新宣告时应带着留下的歌词、只发一条 all_lyrics，got %+v", al)
@@ -749,8 +750,8 @@ func TestSessionKeptLyricsFollowOwner(t *testing.T) {
 		h.setTwin(200, 37, true) // A 还在放
 		h.run(lyricGrace + 5*time.Second)
 		evs := h.since(from)
-		if si := songInfos(evs); len(si) != 1 || si[0].Name != "A" {
-			t.Fatalf("前置：新会话应宣告 A 一次，got %d 条", len(si))
+		if got := infoSeq(evs); !slices.Equal(got, []string{"A", "A+图"}) {
+			t.Fatalf("前置：新会话应宣告 A 一次（不带图的宣告与封面落地后补的一条），got %v", got)
 		}
 		if got, v := lastLyrics(evs), verdicts(evs); got != "" || len(v) != 1 {
 			t.Fatalf("新会话没有上一个会话留下的文档，应按无歌词，got %q（index:-1 %d 条）", got, len(v))
@@ -886,8 +887,8 @@ func TestSessionCorrectedTitleMovesKeptDoc(t *testing.T) {
 	h.f.songs = np("B")
 	h.run(lyricGrace + 2*time.Second)
 	evs := h.since(from)
-	if si := songInfos(evs); len(si) != 1 || si[0].Name != "B" {
-		t.Fatalf("应纠正为 B 并宣告一次，got %d 条", len(si))
+	if got := infoSeq(evs); !slices.Equal(got, []string{"B", "B+图"}) {
+		t.Fatalf("应纠正为 B 并宣告一次（不带图的宣告与封面落地后补的一条），got %v", got)
 	}
 	if got := lastLyrics(evs); got != "B 的歌词" {
 		t.Fatalf("标题纠正为 B 后，留下的那份应随归属转给 B 并配上，got %q", got)
@@ -1012,8 +1013,8 @@ func TestSessionUnownedLyricsNotKept(t *testing.T) {
 		h.setTwin(245, 37, true) // 按了播放：本会话第一首，时长也严格对得上
 		h.run(lyricGrace + 5*time.Second)
 		evs := h.since(from)
-		if count(evs, player.EventSongInfoUpdate) != 1 {
-			t.Fatalf("前置：恢复播放后应宣告一次，got %d", count(evs, player.EventSongInfoUpdate))
+		if got := infoSeq(evs); !slices.Equal(got, []string{"第一首", "第一首+图"}) {
+			t.Fatalf("前置：恢复播放后应宣告一次（不带图的宣告与封面落地后补的一条），got %v", got)
 		}
 		if got := lastLyrics(evs); got != "" {
 			t.Fatalf("附加前就在的文档已不在内存里，不应配上，got %q", got)

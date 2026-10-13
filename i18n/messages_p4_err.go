@@ -126,6 +126,7 @@ var p4ErrMessages = map[string]string{
 	"page-side lyrics fetch returned HTTP %d":                                 "页面内取歌词返回 HTTP %d",
 	"page-side lyrics fetch timed out after %s":                               "页面内取歌词在 %s 后超时",
 	"page-side lyrics fetch returned an unexpected body":                      "页面内取歌词返回了意外的响应体",
+	"page-cache lyrics fetch returned HTTP %d":                                "页面缓存取歌词返回 HTTP %d",
 	"no access token available":                                               "没有可用的 access token",
 	"failed to build lyrics request: %w":                                      "构造歌词请求失败: %w",
 	"lyrics request failed: %w":                                               "歌词请求失败: %w",

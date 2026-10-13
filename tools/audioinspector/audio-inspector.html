@@ -65,6 +65,7 @@
         <span>峰值 L/R <b id="m-peak">0.000 / 0.000</b></span>
         <span>bins <b id="m-bins">0</b></span>
         <span>归一化 <b id="m-norm">—</b></span>
+        <span>WASAPI 会话 <b id="m-sess">—</b></span>
       </div>
       <div class="metrics">
         <span>帧率 <b id="m-fps">0</b>/s</span>
@@ -95,7 +96,7 @@
 //   epoch(20,u32) | ts(24,f64) | rms(32,f32) | peakL(36,f32) | peakR(40,f32) | playerLen(44,u32) |
 //   bins(headerLen,f32×N) | player(headerLen+4N)
 // 帧长 = 8 + payloadLen；N = (帧长 − headerLen − playerLen) / 4。N = 0 是空闲帧（无捕获）。
-const MAGIC = [0x57,0x41,0x54,0x56], HEADER_LEN = 48, MAX_PAYLOAD = 1 << 16, VERSION = 1, FLAG_NORMALIZED = 1;
+const MAGIC = [0x57,0x41,0x54,0x56], HEADER_LEN = 48, MAX_PAYLOAD = 1 << 16, VERSION = 1, FLAG_NORMALIZED = 1, FLAG_SESSION_KNOWN = 2, FLAG_SESSION_ACTIVE = 4;
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
 let ws = null, buf = new Uint8Array(0);
@@ -172,6 +173,8 @@ function onFrame(f){
   $('m-player').textContent = name; $('m-epoch').textContent = f.epoch;
   $('m-rms').textContent = f.rms.toFixed(3); $('m-peak').textContent = f.peakL.toFixed(3) + ' / ' + f.peakR.toFixed(3);
   $('m-bins').textContent = f.bins.length; $('m-norm').textContent = isIdle ? '—' : (f.flags & FLAG_NORMALIZED ? '开' : '关');
+  // 会话信号（flags bit1、bit2，doc/design/audio-session-signal-design.md §4.1）：(1,1) 有 Active 的 WASAPI 会话（共享或独占，不可区分），(1,0) 没有，其余为未知。
+  $('m-sess').textContent = isIdle ? '—' : (f.flags & FLAG_SESSION_KNOWN ? (f.flags & FLAG_SESSION_ACTIVE ? '有 Active 会话' : '无 Active 会话') : '未知');
   $('m-live').textContent = live; $('m-idle').textContent = idle; $('m-nonzero').textContent = nonzero;
   $('m-ts').textContent = f.ts.toFixed(0);
   const line = 'player=' + name + ' epoch=' + f.epoch + ' rms=' + f.rms.toFixed(3) +

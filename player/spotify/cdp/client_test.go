@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/i18n"
+	"Metabox-Nexus-PlayerCap/player/spotify/lyric"
 )
 
 // 页面里取词的预算必须明显小于 evalTimeout：表达式一旦撞上 evalTimeout，call 会关掉整条会话。
@@ -70,6 +72,9 @@ func englishErrors(t *testing.T) {
 	t.Cleanup(func() { i18n.SetLanguage(i18n.Chinese) })
 }
 
+// HTTP 状态的错误带出结构化的状态码（lyric.StatusError，errors.As 可取），文案不变；其余错误不带状态码。
+// 变异自证（均实测）：HTTP 状态改回普通错误 → 带状态码的各例红；状态码改从 err 文案里解析 → 「err and status disagree」
+// 与三条只带 status 的例红。
 func TestParseLyricsFetchResult(t *testing.T) {
 	englishErrors(t)
 	cases := []struct {
@@ -77,16 +82,22 @@ func TestParseLyricsFetchResult(t *testing.T) {
 		in      string
 		body    string
 		errPart string // 空 = 期望成功
+		status  int    // 0 = 不应是 lyric.StatusError
 	}{
-		{"ok", `{"ok":true,"status":200,"body":"{\"lyrics\":{}}","err":""}`, `{"lyrics":{}}`, ""},
-		{"timeout", `{"ok":false,"status":0,"body":"","err":"timeout"}`, "", "timed out after " + lyricsFetchBudget.String()},
-		{"http 403 with err", `{"ok":false,"status":403,"body":"","err":"http 403"}`, "", "HTTP 403"},
-		{"status only", `{"ok":false,"status":400,"body":""}`, "", "HTTP 400"},
-		{"ok false with body", `{"ok":false,"status":200,"body":"x","err":"unexpected body"}`, "", "unexpected body"},
-		{"browser exception text passes through", `{"ok":false,"status":0,"body":"","err":"Failed to fetch"}`, "", "failed: Failed to fetch"},
-		{"empty", ``, "", "returned empty"},
-		{"not json", `timeout`, "", "failed to parse"},
-		{"missing ok", `{"status":200,"body":"x"}`, "", "HTTP 200"},
+		{"ok", `{"ok":true,"status":200,"body":"{\"lyrics\":{}}","err":""}`, `{"lyrics":{}}`, "", 0},
+		{"timeout", `{"ok":false,"status":0,"body":"","err":"timeout"}`, "", "timed out after " + lyricsFetchBudget.String(), 0},
+		{"http 403 with err", `{"ok":false,"status":403,"body":"","err":"http 403"}`, "", "page-side lyrics fetch returned HTTP 403", 403},
+		{"http 404 with err (no lyrics for the track)", `{"ok":false,"status":404,"body":"","err":"http 404"}`, "", "page-side lyrics fetch returned HTTP 404", 404},
+		{"http 401 with err (token expired)", `{"ok":false,"status":401,"body":"","err":"http 401"}`, "", "page-side lyrics fetch returned HTTP 401", 401},
+		{"err and status disagree: status wins", `{"ok":false,"status":401,"body":"","err":"http 404"}`, "", "HTTP 401", 401},
+		{"status only", `{"ok":false,"status":400,"body":""}`, "", "HTTP 400", 400},
+		{"status only 404", `{"ok":false,"status":404,"body":""}`, "", "HTTP 404", 404},
+		{"ok false with body", `{"ok":false,"status":200,"body":"x","err":"unexpected body"}`, "", "unexpected body", 0},
+		{"browser exception text passes through", `{"ok":false,"status":0,"body":"","err":"Failed to fetch"}`, "", "failed: Failed to fetch", 0},
+		{"browser exception mentioning 404 is not a status", `{"ok":false,"status":0,"body":"","err":"404 Not Found"}`, "", "failed: 404 Not Found", 0},
+		{"empty", ``, "", "returned empty", 0},
+		{"not json", `timeout`, "", "failed to parse", 0},
+		{"missing ok", `{"status":200,"body":"x"}`, "", "HTTP 200", 200},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,7 +111,29 @@ func TestParseLyricsFetchResult(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.errPart) || body != "" {
 				t.Fatalf("got (%q, %v), want error containing %q", body, err, tc.errPart)
 			}
+			var se *lyric.StatusError
+			if got := errors.As(err, &se); got != (tc.status != 0) || (got && se.Status != tc.status) {
+				t.Fatalf("StatusError: as=%v %+v, want status %d", got, se, tc.status)
+			}
+			if lyric.IsNotFound(err) != (tc.status == 404) {
+				t.Fatalf("IsNotFound = %v, want %v", lyric.IsNotFound(err), tc.status == 404)
+			}
 		})
+	}
+}
+
+// 缓存层的返回串：cacheNotFound 译成状态码 404 的错误，其余原样返回。
+// 变异自证：cacheNotFound 不译（原样返回）→ 本例红（实测）。
+func TestParseCachedLyricsResult(t *testing.T) {
+	englishErrors(t)
+	body, err := parseCachedLyricsResult(cacheNotFound)
+	if body != "" || !lyric.IsNotFound(err) || err.Error() != "page-cache lyrics fetch returned HTTP 404" {
+		t.Fatalf("cacheNotFound: got (%q, %v), want a 404 StatusError", body, err)
+	}
+	for _, in := range []string{"", lyricsBody, "http 401", "HTTP 404", "http 404 "} {
+		if body, err := parseCachedLyricsResult(in); body != in || err != nil {
+			t.Errorf("%q: got (%q, %v), want it unchanged", in, body, err)
+		}
 	}
 }
 
@@ -166,6 +199,8 @@ func TestLyricsFetchJSBehaviour(t *testing.T) {
 		{"body never finishes", `function(u,o){return Promise.resolve({ok:true,status:200,text:function(){return hang(o.signal);}});}`, short, "", "timed out after"},
 		{"fast success", `function(u,o){return Promise.resolve(resp(200,` + jsQuote(lyricsBody) + `));}`, time.Minute, lyricsBody, ""},
 		{"http 403 is not timeout", `function(u,o){return Promise.resolve(resp(403,''));}`, time.Minute, "", "HTTP 403"},
+		{"http 404 (no lyrics for the track)", `function(u,o){return Promise.resolve(resp(404,''));}`, time.Minute, "", "HTTP 404"},
+		{"http 401 (token expired)", `function(u,o){return Promise.resolve(resp(401,''));}`, time.Minute, "", "HTTP 401"},
 		{"network error is not timeout", `function(u,o){return Promise.reject(new TypeError('Failed to fetch'));}`, time.Minute, "", "Failed to fetch"},
 		{"unexpected body", `function(u,o){return Promise.resolve(resp(200,'<html>'));}`, time.Minute, "", "unexpected body"},
 		{"request carries the signal", `function(u,o){if(!o||!o.signal)throw new Error('no signal');return hang(o.signal);}`, short, "", "timed out after"},
@@ -181,6 +216,9 @@ func TestLyricsFetchJSBehaviour(t *testing.T) {
 				}
 			} else if err == nil || !strings.Contains(err.Error(), tc.errPart) {
 				t.Fatalf("got (%q, %v), want error containing %q", body, err, tc.errPart)
+			}
+			if want := strings.HasSuffix(tc.errPart, "HTTP 404"); lyric.IsNotFound(err) != want {
+				t.Fatalf("IsNotFound = %v, want %v (err %v)", !want, want, err)
 			}
 			if tc.errPart != "" && strings.HasPrefix(tc.errPart, "timed out") && took > tc.budget+time.Second {
 				t.Fatalf("aborted after %v, budget %v", took, tc.budget)
@@ -212,6 +250,15 @@ func TestCachedLyricsJSBehaviour(t *testing.T) {
 		{"newest url hits", `function(u,o){calls++;return Promise.resolve(resp(200,u.indexOf('/c?')>=0?` + jsQuote(lyricsBody) + `:''));}`, time.Minute, lyricsBody, 1},
 		{"newest misses, older hits", `function(u,o){calls++;return Promise.resolve(u.indexOf('/a?')>=0?resp(200,` + jsQuote(lyricsBody) + `):resp(401,''));}`, time.Minute, lyricsBody, 2},
 		{"all miss", `function(u,o){calls++;return Promise.resolve(resp(401,''));}`, time.Minute, "", 2},
+		// 404：没有一个候选取到歌词、而其中有一个答复 404 时返回 cacheNotFound；取到歌词的优先。
+		// 变异自证：去掉 `nf=true` → 本组返回 cacheNotFound 的五例红；404 也照 ok 读 body → 「404 with a lyrics-like body」红（均实测）。
+		{"newest 404, older 401", `function(u,o){calls++;return Promise.resolve(resp(u.indexOf('/c?')>=0?404:401,''));}`, time.Minute, cacheNotFound, 2},
+		{"newest 401, older 404", `function(u,o){calls++;return Promise.resolve(resp(u.indexOf('/a?')>=0?404:401,''));}`, time.Minute, cacheNotFound, 2},
+		{"all 404", `function(u,o){calls++;return Promise.resolve(resp(404,''));}`, time.Minute, cacheNotFound, 2},
+		{"newest 404, older hits", `function(u,o){calls++;return Promise.resolve(u.indexOf('/a?')>=0?resp(200,` + jsQuote(lyricsBody) + `):resp(404,''));}`, time.Minute, lyricsBody, 2},
+		{"404 then the older one hangs past the budget", `function(u,o){calls++;return u.indexOf('/c?')>=0?Promise.resolve(resp(404,'')):hang(o&&o.signal);}`, short, cacheNotFound, 2},
+		{"404 with a lyrics-like body is still 404", `function(u,o){calls++;return Promise.resolve(resp(404,` + jsQuote(lyricsBody) + `));}`, time.Minute, cacheNotFound, 2},
+		{"403 and 410 are not 404", `function(u,o){calls++;return Promise.resolve(resp(u.indexOf('/c?')>=0?403:410,''));}`, time.Minute, "", 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

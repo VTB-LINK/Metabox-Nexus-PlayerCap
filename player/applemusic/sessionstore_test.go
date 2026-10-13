@@ -43,8 +43,13 @@ func TestSessionCoveredStoreAnnouncedOverCoverlessResidue(t *testing.T) {
 		h.setTwin(301, 50, true)
 		h.run(5 * time.Second)
 		si := songInfos(h.evs)
-		if len(si) != 1 || si[0].Name != "过火" || si[0].Singer != "张信哲" || si[0].CoverBase64 != uri("封面:过火") || h.s.song.album != "从开始到现在" {
-			t.Fatalf("应宣告带封面的《过火》一次，got %d 条：%+v（专辑 %q）", len(si), names(si), h.s.song.album)
+		if len(si) != 2 || si[0].CoverBase64 != "" || si[1].CoverBase64 != uri("封面:过火") || h.s.song.album != "从开始到现在" {
+			t.Fatalf("应宣告带封面的《过火》一次（先不带图、封面落地后补一条），got %d 条：%+v（专辑 %q）", len(si), names(si), h.s.song.album)
+		}
+		for _, s := range si {
+			if s.Name != "过火" || s.Singer != "张信哲" {
+				t.Fatalf("每一条都应是《过火》，got %+v", names(si))
+			}
 		}
 		return h
 	}
@@ -117,7 +122,8 @@ func TestSessionCoveredStoreAnnouncedOverCoverlessResidue(t *testing.T) {
 			}
 			h.setTwin(301, 0, true)
 			h.run(5 * time.Second)
-			if si := songInfos(h.since(from)); len(si) != 1 || si[0].Name != "过火" || si[0].Singer != "张信哲" {
+			// 同一张图上一次缩放过，随宣告当场带上，只一条。
+			if si := songInfos(h.since(from)); len(si) != 1 || si[0].Name != "过火" || si[0].Singer != "张信哲" || si[0].CoverBase64 != uri("封面:过火") {
 				t.Fatalf("两份存储都是此前就在的，仍应宣告带封面的《过火》一次，got %+v", names(si))
 			}
 		})

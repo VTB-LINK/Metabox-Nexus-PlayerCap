@@ -40,6 +40,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/applemusic/lyric"
 	"Metabox-Nexus-PlayerCap/player/applemusic/mem"
 	"Metabox-Nexus-PlayerCap/player/krc"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 const PlayerName = "applemusic"
@@ -245,6 +246,7 @@ func (p *AppleMusicPlayer) Start() {
 // runSession 轮询内存并 emit 事件，直到目标进程退出或收到 Stop。
 func (p *AppleMusicPlayer) runSession(r *mem.Reader) {
 	s := newSession(p, r, time.Now)
+	defer close(s.coverEnd)
 	poll := EffectivePollInterval(p.pollMs)
 	for {
 		select {
@@ -274,8 +276,8 @@ type songState struct {
 	lyrics    []krc.Line
 	pureHint  string // TTML 只有一行「纯音乐」提示时的那行文本（lyrics 此时为空），随 index:-1 发出
 	docHash   uint64 // 已采用的 TTML；0 = 未采用
-	coverHash uint64 // 已发出的封面；0 = 还没发过封面
-	coverURI  string
+	coverHash uint64 // 已采用的封面（原始字节的哈希，缩放可能还没落地）；0 = 还没有
+	coverURI  string // 已落地的 cover_base64（见 putCover）
 }
 
 // preAttachOwner 是附加时就在内存里的 TTML 在归属表里的主人：来历不明。曲目 key 以标题开头，不会是这个串。
@@ -380,8 +382,17 @@ type session struct {
 	lastScanEnd   time.Time
 	emptyTitle    string // 正在等它稳住的「歌手为空」标题
 	emptySince    time.Time
-	prevCover     uint64 // 最近一次随别的歌发出的封面与那首歌的专辑（见 staleCover）；0 = 没有
+	prevCover     uint64 // 最近一次别的歌采用的封面与那首歌的专辑（见 staleCover）；0 = 没有
 	prevAlbum     string
+
+	// 封面缩放（见 startCover、pollCover）
+	coverCh   chan coverResult // 容量 1
+	coverEnd  chan struct{}    // 会话结束时关闭
+	coverSeq  uint64           // 最近起的那次缩放的序号
+	coverFly  bool             // 最近起的那次还没收到结果
+	coverLast coverResult      // 最近收到的结果：同一张图不再缩放
+	coverSrc  []byte           // song.coverHash 那张图的原始字节与 MIME，起缩放用
+	coverMIME string
 
 	// 歌词归属
 	docOwner   map[uint64]string    // TTML 全文哈希 → 它属于哪首歌（metaKey）；"" = 分不清；preAttachOwner = 附加前就在
@@ -414,6 +425,8 @@ func newSession(p *AppleMusicPlayer, r memReader, clock func() time.Time) *sessi
 		dirtyGap:    minScanGap,
 		lastLineIdx: -1,
 		staleScan:   backoff{steps: staleScanSteps},
+		coverCh:     make(chan coverResult, 1),
+		coverEnd:    make(chan struct{}),
 	}
 	s.clk.lastRaw = -1
 	// 附加成功后先报「没有歌」：此前外层报的是「未启动」，附加后若一直没有歌也不能沿用它。
@@ -457,7 +470,7 @@ func (s *session) retableTwinScan(now time.Time) {
 	}
 }
 
-// tick 是一轮轮询：读位置 → 复读候选与存储 → 到期的全扫 → 无歌词判决 → 歌词行 → 位置采样。
+// tick 是一轮轮询：读位置 → 复读候选与存储 → 封面缩放结果 → 到期的全扫 → 无歌词判决 → 歌词行 → 位置采样。
 func (s *session) tick() {
 	now := s.now()
 	s.readPosition(now)
@@ -467,6 +480,7 @@ func (s *session) tick() {
 		s.watchStore()
 	}
 	s.checkStale(now)
+	s.pollCover()
 	s.maybeScan()
 	s.checkVerdict()
 	s.emitLyricLine()
@@ -1122,7 +1136,8 @@ func (s *session) applyLyrics(lines []krc.Line, h uint64) {
 	}
 }
 
-// applyCover 同一首歌的封面到了或换了（宣告时还没有、或当时存储里还是上一首的图）：补发一条 song_info_update。
+// applyCover 同一首歌的封面到了或换了（宣告时还没有、或当时存储里还是上一首的图）：采用它，规范好后补发一条
+// song_info_update（见 putCover）。
 func (s *session) applyCover(np mem.NowPlaying) {
 	if !s.announced || np.Cover == nil || np.Title != s.song.title || np.Artist != s.song.artist {
 		return
@@ -1132,7 +1147,6 @@ func (s *session) applyCover(np mem.NowPlaying) {
 		return
 	}
 	s.setCover(np, h)
-	s.emitSongInfo()
 }
 
 // staleCover 判断存储里这张图是不是上一首留下的：换歌后新存储先带着新标题建出来，图却常常还是上一首的，
@@ -1143,18 +1157,88 @@ func (s *session) staleCover(np mem.NowPlaying, h uint64) bool {
 	return h == s.prevCover && np.Album != s.prevAlbum && s.now().Sub(s.songChangedAt) < coverHold
 }
 
-// setCover 记下这张图并生成 cover_base64（规范为 800×800，见 player.CoverDataURI）。在轮询 goroutine 里同步
-// 做：换封面的那一轮多出缩放的耗时，期间不推歌词行，当轮末尾按当前时钟补推。h 是原始字节的哈希，换图判定
-// （applyCover、staleCover）都按原始字节，不受规范化影响。
+// setCover 采用这张图作当前曲目的封面。h 是原始字节的哈希，换图判定（applyCover、staleCover）都按它，不受
+// 规范化影响。cover_base64 要规范为 800×800（player.CoverDataURI），在独立 goroutine 里做、由 pollCover 落地：
+// 本机 1200² 的 JPEG 约 75ms、1600² 的约 170ms，在轮询 goroutine 里同步做时这期间不读位置、不推歌词行
+// （issue #110）。代价是宣告时还没缩放完的先发不带图的 song_info_update、落地后再补一条。上一次缩放的
+// 正是这张图（同一张专辑连着放、同一首重新宣告）就当场用，不再缩放；原始字节照样记下：之后在飞的另一张
+// 才落地、把「上一次」挤掉时，startCover 要按这张的字节重新缩放（结果相同，不补发）。
 func (s *session) setCover(np mem.NowPlaying, h uint64) {
 	s.song.coverHash = h
-	s.song.coverURI = player.CoverDataURI("AppleMusic", np.Cover, np.CoverMIME)
+	s.coverSrc, s.coverMIME = np.Cover, np.CoverMIME
 	s.needCover = false
+	if h == s.coverLast.hash {
+		s.putCover(s.coverLast.uri)
+	}
+	s.startCover()
+}
+
+// putCover 换上规范好的封面；已宣告的补发一条 song_info_update（宣告时还没缩放完、或同一首歌换了图）。
+func (s *session) putCover(uri string) {
+	if uri == s.song.coverURI {
+		return
+	}
+	s.song.coverURI = uri
+	if s.announced {
+		s.emitSongInfo()
+	}
+}
+
+// coverResult 是一次封面缩放的结果，经容量为 1 的 session.coverCh 交回轮询 goroutine。
+type coverResult struct {
+	seq  uint64 // 第几次缩放（session.coverSeq）
+	hash uint64 // 原始字节的哈希
+	uri  string
+}
+
+// coverDataURI 是 player.CoverDataURI 的可替换 seam：仅供封面缩放的离线测试注入桩。生产恒为该函数，不导出。
+var coverDataURI = player.CoverDataURI
+
+// startCover 当前曲目的封面还没缩放过、又没有在飞的就起一次。**至多一次在飞**：缩放吃 CPU、中途停不下，
+// 换歌连按时不叠着做——在飞的那次落地时对不上当前曲目、被丢掉，随即起最新的那张，中间几张不做。
+func (s *session) startCover() {
+	if s.coverFly || s.song.coverHash == 0 || s.song.coverHash == s.coverLast.hash {
+		return
+	}
+	s.coverSeq++
+	s.coverFly = true
+	go runCoverJob(coverDataURI, coverResult{seq: s.coverSeq, hash: s.song.coverHash}, s.coverSrc, s.coverMIME, s.coverCh, s.coverEnd)
+}
+
+// pollCover 每轮 tick 收一次缩放结果：是当前曲目要的那张就落地（putCover），不是的（换了歌或换了图）丢掉；
+// 然后按需起下一次（startCover）。会话状态只在轮询 goroutine 里读写，不加锁。
+func (s *session) pollCover() {
+	select {
+	case r := <-s.coverCh:
+		if !s.coverFly || r.seq != s.coverSeq {
+			break // 不是在飞的那次（按构造不会有）：丢掉，在飞的照旧等它
+		}
+		s.coverFly = false
+		s.coverLast = r
+		if r.hash == s.song.coverHash {
+			s.putCover(r.uri)
+		}
+	default:
+	}
+	s.startCover()
+}
+
+// runCoverJob 在独立 goroutine 里用 norm（coverDataURI，由起缩放的轮询 goroutine 取来传入）规范一张封面，结果
+// 送回轮询 goroutine。收走上一次的结果才起下一次，送的时候通道本是空的；万一有残留、又赶上会话结束没人再收，
+// end 关闭时退出，不挂住。
+func runCoverJob(norm func(string, []byte, string) string, r coverResult, b []byte, mime string, out chan<- coverResult, end <-chan struct{}) {
+	defer telemetry.Guard()
+	r.uri = norm("AppleMusic", b, mime)
+	select {
+	case out <- r:
+	case <-end:
+	}
 }
 
 // ── 事件 ──
 
-// announce 宣告当前曲目：song_info_update + all_lyrics + 状态。
+// announce 宣告当前曲目：song_info_update + all_lyrics + 状态。封面还没缩放完的，song_info_update 先不带图
+// （见 setCover）。
 func (s *session) announce() {
 	log.Info("♪ Song: %s", buildTitle(s.song.title, s.song.artist))
 	if np := s.store; np.Cover != nil && np.Title == s.song.title && np.Artist == s.song.artist {
@@ -1249,7 +1333,7 @@ func (s *session) showNoSong() {
 // clearSong 曲目没了：清屏并把当前曲目整个复位。复位是要害——旧实现只清屏不复位，同名歌再出现时
 // 被当成同一首，歌曲信息、歌词与状态都不再发（审查 P1-6）。
 //
-// 「最近一次发出的封面」不随之清掉：清屏后的新歌同样可能先带着上一首的图建出存储（见 staleCover），
+// 「最近一次采用的封面」不随之清掉：清屏后的新歌同样可能先带着上一首的图建出存储（见 staleCover），
 // 抹掉它，新歌就带着上一首的封面宣告。
 func (s *session) clearSong() {
 	if s.song.coverHash != 0 {

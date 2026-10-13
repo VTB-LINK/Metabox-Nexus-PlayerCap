@@ -8,6 +8,9 @@
 //	epoch(20,u32) | ts(24,f64) | rms(32,f32) | peakL(36,f32) | peakR(40,f32) | playerLen(44,u32) |
 //	bins(headerLen,f32×N) | player(headerLen+4N)
 //
+// flags 各位：bit0 FlagNormalized（音量归一化），bit1 FlagSessionKnown 与 bit2 FlagSessionActive（WASAPI
+// 会话信号，见 doc/design/audio-session-signal-design.md §4.1）；其余位保留，发送方置 0，接收方忽略。
+//
 // payloadLen 为其后的全部字节数，帧长 = 8 + payloadLen；N = (帧长 − headerLen − playerLen) / 4。
 // headerLen 是定长头总长（v1 为 48，恒为 4 的倍数）：兼容的新增字段追加在 playerLen 之后并增大
 // headerLen，version 不变；解码器跳过 48..headerLen 之间不认识的字段。不兼容的改动才升 version。
@@ -37,8 +40,18 @@ const Version uint32 = 1
 // HeaderLen 是 v1 定长头总长，即 bins 在帧内的起始偏移。
 const HeaderLen = 48
 
-// FlagNormalized 是 flags 的 bit0：本路已启用音量归一化。其余位保留，发送方置 0，接收方忽略。
+// FlagNormalized 是 flags 的 bit0：本路已启用音量归一化。
 const FlagNormalized uint32 = 1 << 0
+
+// FlagSessionKnown 是 flags 的 bit1：本帧所属的这路捕获已有一次新鲜的 WASAPI 会话探测结果。从未探测、
+// 结果过期或探测失败时为 0。
+const FlagSessionKnown uint32 = 1 << 1
+
+// FlagSessionActive 是 flags 的 bit2：该探测结果为「目标进程树在某个活跃渲染端点上有 Active 的 WASAPI
+// 会话」。共享与独占模式的流都使会话为 Active，本位不区分二者；为 0 说明没有任何 WASAPI 播放流（ASIO 等
+// 非 WASAPI 输出、暂停）。只在 FlagSessionKnown 置位时有意义：(known, active) = (0, 1) 不由编码侧产生，
+// 消费者遇到时按未知处理。
+const FlagSessionActive uint32 = 1 << 2
 
 // prefixLen 是 magic(u32)+payloadLen(u32)，Decoder 分帧用。
 const prefixLen = 8

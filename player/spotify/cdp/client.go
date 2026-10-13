@@ -12,8 +12,8 @@
 //     Network.requestWillBeSent 事件来抓 Bearer（同步读写的那套写法收不到事件）。
 //
 // 三条取数路径（歌词，按优先级）：
-//  1. token + track id → Go 侧直接 GET color-lyrics/v2（实测：带 Bearer 时任意曲目都 200，
-//     连 /image/ 段都不需要；不带 Bearer 一律 401，与 cookie 无关）。
+//  1. token + track id → Go 侧直接 GET color-lyrics/v2（实测：带 Bearer 时有歌词的曲目都 200，
+//     连 /image/ 段都不需要，没有歌词的曲目回 404；不带 Bearer 一律 401，与 cookie 无关）。
 //  2. 没有 token 时，走页面的**HTTP 缓存**：App 自己取过的歌词 URL 在缓存里（max-age=3600），
 //     用同一个 URL 在页面里 fetch 会命中缓存拿到 200 —— 见 FetchViaPageCache。
 //  3. 两条都不成 → 这一首没有歌词，轮询循环稍后重试（见 spotify.go 的补取）。
@@ -31,6 +31,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player/spotify/lyric"
 	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"github.com/gorilla/websocket"
@@ -402,7 +403,8 @@ func (c *Client) Snapshot() (*Snapshot, error) {
 	return &snap, nil
 }
 
-// FetchViaPageCache 用页面自己取过的歌词 URL 去命中 HTTP 缓存，返回原始歌词 JSON（拿不到返回空串）。
+// FetchViaPageCache 用页面自己取过的歌词 URL 去命中 HTTP 缓存，返回原始歌词 JSON（拿不到返回空串；
+// 缓存答复 404 时返回状态码为 404 的 lyric.StatusError，见 cachedLyricsJS）。
 //
 // 存在的理由：Bearer 只在 App 发请求时才被抓到（App 空闲时可能几分钟没有一条），而**服务刚起来
 // 那一刻**恰恰是最需要歌词的时候。App 每首歌都会自己取一次歌词（换歌时取当前 + 预取下一首），
@@ -413,7 +415,19 @@ func (c *Client) FetchViaPageCache(trackID string) (string, error) {
 	if trackID == "" {
 		return "", i18n.Errorf("empty track id")
 	}
-	return c.Evaluate(cachedLyricsJS(trackID, lyricsFetchBudget))
+	out, err := c.Evaluate(cachedLyricsJS(trackID, lyricsFetchBudget))
+	if err != nil {
+		return "", err
+	}
+	return parseCachedLyricsResult(out)
+}
+
+// parseCachedLyricsResult 解 cachedLyricsJS 的返回串：缓存答复 404 时返回带状态码的错误，其余原样返回（空串 = 没取到）。
+func parseCachedLyricsResult(out string) (string, error) {
+	if out == cacheNotFound {
+		return "", &lyric.StatusError{Status: http.StatusNotFound, Err: i18n.Errorf("page-cache lyrics fetch returned HTTP %d", http.StatusNotFound)}
+	}
+	return out, nil
 }
 
 // FetchLyrics 在**页面上下文里**发一次带 Bearer 的歌词请求，返回原始歌词 JSON（拿不到返回空串）。
@@ -462,11 +476,11 @@ func parseLyricsFetchResult(out string) (string, error) {
 		case res.Err == jsErrUnexpectedBody:
 			return "", i18n.Errorf("page-side lyrics fetch returned an unexpected body")
 		case strings.HasPrefix(res.Err, jsErrHTTPPrefix):
-			return "", i18n.Errorf("page-side lyrics fetch returned HTTP %d", res.Status)
+			// HTTP 状态：与只带 status 的情形一样在下面返回，状态码取结构化的 status 字段，不从文案里解析
 		case res.Err != "":
 			return "", i18n.Errorf("page-side lyrics fetch failed: %s", res.Err)
 		}
-		return "", i18n.Errorf("page-side lyrics fetch returned HTTP %d", res.Status)
+		return "", &lyric.StatusError{Status: res.Status, Err: i18n.Errorf("page-side lyrics fetch returned HTTP %d", res.Status)}
 	}
 	return res.Body, nil
 }
@@ -476,6 +490,8 @@ const (
 	jsErrTimeout        = "timeout"
 	jsErrUnexpectedBody = "unexpected body"
 	jsErrHTTPPrefix     = "http " // 后接状态码
+	// cacheNotFound 是 cachedLyricsJS 的「缓存答复 404」：不含 "lyrics"，不会与歌词原文混淆。
+	cacheNotFound = jsErrHTTPPrefix + "404"
 )
 
 // markClosed 关掉底层连接并置标志（幂等）。调用方不得持有 c.mu。
@@ -532,8 +548,10 @@ func snapshotJS() string {
 
 // cachedLyricsJS 构造「用 App 自己取过的 URL 命中 HTTP 缓存」的表达式（见 FetchViaPageCache）。
 // budget 管整个表达式：所有候选 URL 共用一个 AbortController，到点后余下的 fetch 立即失败、返回空串。
+// 没有一个候选取到歌词、而其中有一个答复 404 时返回 cacheNotFound：不带 token 的请求一旦真的发到服务端一律 401，
+// 404 只能是缓存里 App 自己那次请求的答复，即平台没有这首歌的歌词。
 func cachedLyricsJS(trackID string, budget time.Duration) string {
-	return "(async function(){var ac,tm;try{ac=new AbortController();" +
+	return "(async function(){var ac,tm,nf=false;try{ac=new AbortController();" +
 		"tm=setTimeout(function(){ac.abort();}," + strconv.FormatInt(budget.Milliseconds(), 10) + ");" +
 		"var id=" + strconv.Quote(trackID) + ";" +
 		"var urls=[];var es=performance.getEntriesByType('resource');" +
@@ -541,8 +559,8 @@ func cachedLyricsJS(trackID string, budget time.Duration) string {
 		"if(n.indexOf('/color-lyrics/v2/track/'+id+'/')>=0)urls.push(n);}" +
 		"for(var j=urls.length-1;j>=0;j--){" +
 		"try{var r=await fetch(urls[j],{signal:ac.signal});" +
-		"if(r.ok){var t=await r.text();if(t.indexOf('\"lyrics\"')>=0)return t;}}catch(e){}}" +
-		"return '';}catch(e){return '';}finally{clearTimeout(tm);}})()"
+		"if(r.ok){var t=await r.text();if(t.indexOf('\"lyrics\"')>=0)return t;}else if(r.status===404){nf=true;}}catch(e){}}" +
+		"return nf?" + strconv.Quote(cacheNotFound) + ":'';}catch(e){return '';}finally{clearTimeout(tm);}})()"
 }
 
 // lyricsFetchJS 构造「在页面里带 Bearer 取歌词」的表达式（见 FetchLyrics）。

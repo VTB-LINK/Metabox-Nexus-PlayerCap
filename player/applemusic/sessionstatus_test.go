@@ -57,8 +57,8 @@ func TestSessionPausedStartNotAnnounced(t *testing.T) {
 	h.setTwin(240, 37, true)
 	h.run(5 * time.Second)
 	evs := h.since(from)
-	if count(evs, player.EventSongInfoUpdate) != 1 {
-		t.Fatalf("恢复后应宣告一次，got %d", count(evs, player.EventSongInfoUpdate))
+	if got := infoSeq(evs); !slices.Equal(got, []string{"暂停中启动", "暂停中启动+图"}) {
+		t.Fatalf("恢复后应宣告一次（不带图的宣告与封面落地后补的一条），got %v", got)
 	}
 	if st := statuses(evs); len(st) == 0 || st[len(st)-1] != "playing" || slices.Contains(st, "paused") {
 		t.Fatalf("恢复播放后应直接报 playing，got %v", st)
@@ -125,12 +125,8 @@ func TestSessionQuickSwitchNoClear(t *testing.T) {
 	if count(evs, player.EventClearSongData) != 0 {
 		t.Fatal("快速换歌不应清屏")
 	}
-	var names []string
-	for _, si := range songInfos(evs) {
-		names = append(names, si.Name)
-	}
-	if len(names) != 1 || names[0] != "二" {
-		t.Fatalf("应宣告新歌「二」一次，got %v", names)
+	if got := infoSeq(evs); !slices.Equal(got, []string{"二", "二+图"}) {
+		t.Fatalf("应宣告新歌「二」一次（不带图的宣告与封面落地后补的一条），got %v", got)
 	}
 }
 
@@ -159,8 +155,8 @@ func TestSessionNewSongAfterPauseStartsPlaying(t *testing.T) {
 	h.setTwin(260, 0, true) // 按了播放
 	h.run(1 * time.Second)
 	evs := h.since(from)
-	if si := songInfos(evs); len(si) != 1 || si[0].Name != "下一首" {
-		t.Fatalf("按播放后 1s 内应宣告新歌，got %d 条", len(si))
+	if got := infoSeq(evs); !slices.Equal(got, []string{"下一首", "下一首+图"}) {
+		t.Fatalf("按播放后 1s 内应宣告新歌（不带图的宣告与封面落地后补的一条），got %v", got)
 	}
 	if st := statuses(evs); len(st) != 1 || st[0] != "playing" {
 		t.Fatalf("新歌应直接报 playing，got %v", st)
@@ -651,8 +647,8 @@ func TestSessionPendingSeekThenPauseOrSongChange(t *testing.T) {
 		if count(evs, player.EventPlaybackResume) != 0 || count(evs, player.EventPlaybackPause) != 0 {
 			t.Fatalf("换歌不应发 playback_resume / playback_pause，got resume=%d pause=%d", count(evs, player.EventPlaybackResume), count(evs, player.EventPlaybackPause))
 		}
-		if si := songInfos(evs); len(si) != 1 || si[0].Name != "B" {
-			t.Fatalf("应宣告 B 一次，got %d 条", len(si))
+		if got := infoSeq(evs); !slices.Equal(got, []string{"B", "B+图"}) {
+			t.Fatalf("应宣告 B 一次（不带图的宣告与封面落地后补的一条），got %v", got)
 		}
 		if st := statuses(evs); len(st) != 1 || st[0] != "playing" {
 			t.Fatalf("新歌应只报一次 playing，got %v", st)
@@ -691,13 +687,8 @@ func TestSessionNoEventsWhileLoading(t *testing.T) {
 	h.f.songs = np("C")
 	h.setTwin(300, 0, true)
 	h.run(3 * time.Second)
-	for _, si := range songInfos(h.since(from)) {
-		if si.Name != "C" {
-			t.Fatalf("加载结束后应宣告 C，got %q", si.Name)
-		}
-	}
-	if count(h.since(from), player.EventSongInfoUpdate) != 1 {
-		t.Fatal("加载结束后应宣告 C 一次")
+	if got := infoSeq(h.since(from)); !slices.Equal(got, []string{"C", "C+图"}) {
+		t.Fatalf("加载结束后应宣告 C 一次（不带图的宣告与封面落地后补的一条），got %v", got)
 	}
 }
 
@@ -750,8 +741,8 @@ func TestSessionSameDurationChangeDetectedByStore(t *testing.T) {
 	h.setTwin(200, 0, true)
 	h.run(3 * time.Second)
 	evs := h.since(from)
-	if si := songInfos(evs); len(si) != 1 || si[0].Name != "B" {
-		t.Fatalf("应宣告 B 一次，got %d 条", len(si))
+	if got := infoSeq(evs); !slices.Equal(got, []string{"B", "B+图"}) {
+		t.Fatalf("应宣告 B 一次（不带图的宣告与封面落地后补的一条），got %v", got)
 	}
 	for _, al := range allLyrics(evs) {
 		if al.Count != 0 {

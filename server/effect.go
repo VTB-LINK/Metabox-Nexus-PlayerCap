@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -273,7 +275,31 @@ func (s *Server) EffectIngestWSURL() string {
 	return "ws://127.0.0.1:" + port + "/cloudmusicv3/effect-ingest?t=" + token
 }
 
-// handleEffectIngest 接收网易云注入脚本推来的二进制 JPEG 帧，交给捕获器注册的 handler。
+// ingestDataURLPrefix 注入脚本当场编（toDataURL）的帧以文本消息回传，内容是 JPEG 的 data URL。
+const ingestDataURLPrefix = "data:image/jpeg;base64,"
+
+// ingestJPEG 从一条 ingest 消息里取出 JPEG：二进制消息即 JPEG 字节（toBlob 路径）；文本消息是被拖住时当场
+// 编的那一帧的 data URL，在这里解码，省掉页面主线程上转二进制的开销（issue #98）。取不出时 ok 为 false。
+func ingestJPEG(mt int, data []byte) (jpeg []byte, ok bool) {
+	switch mt {
+	case websocket.BinaryMessage:
+		return data, len(data) > 0
+	case websocket.TextMessage:
+		b64, found := bytes.CutPrefix(data, []byte(ingestDataURLPrefix))
+		if !found {
+			return nil, false
+		}
+		jpeg = make([]byte, base64.StdEncoding.DecodedLen(len(b64)))
+		n, err := base64.StdEncoding.Decode(jpeg, b64)
+		if err != nil || n == 0 {
+			return nil, false
+		}
+		return jpeg[:n], true
+	}
+	return nil, false
+}
+
+// handleEffectIngest 接收网易云注入脚本推来的 JPEG 帧（二进制，或当场编的 data URL 文本），交给捕获器注册的 handler。
 // 写端鉴权：Upgrade 之前先用常量时间比较校验 query 的 t 与进程内 ingestToken，不匹配即 403 且
 // 绝不 Upgrade，防本机其它软件向 OBS 特效源伪造帧（读端 effect-ws 不带 token、不受影响）。
 // 单一生产者（注入脚本只开一条），故升级后不做并发保护；handler 缺失则丢弃。
@@ -301,7 +327,8 @@ func (s *Server) handleEffectIngest(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
-		if mt != websocket.BinaryMessage || len(data) == 0 {
+		jpeg, ok := ingestJPEG(mt, data)
+		if !ok {
 			continue
 		}
 		h := s.effectHub
@@ -309,7 +336,7 @@ func (s *Server) handleEffectIngest(w http.ResponseWriter, r *http.Request) {
 		fn := h.ingestHandler
 		h.mu.Unlock()
 		if fn != nil {
-			fn(data)
+			fn(jpeg)
 		}
 	}
 	serverLog.Info("NetEase effect ingest disconnected: %s", conn.RemoteAddr())

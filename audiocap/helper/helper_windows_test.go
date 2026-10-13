@@ -27,7 +27,7 @@ func audioBatch(n int) []float32 {
 func TestEncodeFrameRealAudioUpdatesEMA(t *testing.T) {
 	a := dsp.New(fftSize)
 	nz := newNormalizer(true, -14, 12, testSR)
-	encodeFrame(a, nz, "kugou", 1, audioBatch(fftSize), [2]float32{}, fftSize)
+	encodeFrame(a, nz, nil, "kugou", 1, audioBatch(fftSize), [2]float32{}, fftSize)
 	if nz.seenN == 0 {
 		t.Fatalf("真音频帧后应已播种，got seenN=0")
 	}
@@ -42,18 +42,18 @@ func TestEncodeFrameKeepaliveLeavesEMA(t *testing.T) {
 
 	// (a) 从未播种：keepalive 后仍尚无估计（seenN==0、emaMS==0）
 	nz := newNormalizer(true, -14, 12, testSR)
-	encodeFrame(a, nz, "kugou", 1, nil, [2]float32{}, 0)
+	encodeFrame(a, nz, nil, "kugou", 1, nil, [2]float32{}, 0)
 	if nz.seenN != 0 || nz.warmN != 0 || nz.emaMS != 0 {
 		t.Fatalf("keepalive(未播种) 不应动估计: seenN=%v warmN=%v emaMS=%v", nz.seenN, nz.warmN, nz.emaMS)
 	}
 
 	// (b) 已播种：先喂真音频播种，记下估计与两个累计样本数，再 keepalive，三者都不变
-	encodeFrame(a, nz, "kugou", 1, audioBatch(fftSize), [2]float32{}, fftSize)
+	encodeFrame(a, nz, nil, "kugou", 1, audioBatch(fftSize), [2]float32{}, fftSize)
 	if nz.seenN == 0 {
 		t.Fatalf("前置真音频帧应已播种")
 	}
 	before := *nz
-	encodeFrame(a, nz, "kugou", 1, nil, [2]float32{}, 0) // keepalive：不经 Apply
+	encodeFrame(a, nz, nil, "kugou", 1, nil, [2]float32{}, 0) // keepalive：不经 Apply
 	if *nz != before {
 		t.Fatalf("keepalive(已播种) 不应改动归一化状态: before=%+v after=%+v", before, *nz)
 	}
@@ -63,7 +63,7 @@ func TestEncodeFrameKeepaliveLeavesEMA(t *testing.T) {
 func TestEncodeFrameDisabledPassthrough(t *testing.T) {
 	batch := audioBatch(fftSize)
 
-	raw := encodeFrame(dsp.New(fftSize), newNormalizer(false, -14, 12, testSR), "kugou", 7, batch, [2]float32{}, len(batch))
+	raw := encodeFrame(dsp.New(fftSize), newNormalizer(false, -14, 12, testSR), nil, "kugou", 7, batch, [2]float32{}, len(batch))
 
 	// 参照：同窗直接 Analyze（未施任何增益）
 	want := dsp.New(fftSize).Analyze(batch)
@@ -112,7 +112,7 @@ func TestEncodeFrameTimestampQPC(t *testing.T) {
 		batch []float32
 	}{{"音频帧", audioBatch(fftSize)}, {"保活帧", nil}} {
 		before := frame.QPCMillis(readQPC(), freq)
-		raw := encodeFrame(dsp.New(fftSize), newNormalizer(false, -14, 12, testSR), "kugou", 1, c.batch, [2]float32{}, len(c.batch))
+		raw := encodeFrame(dsp.New(fftSize), newNormalizer(false, -14, 12, testSR), nil, "kugou", 1, c.batch, [2]float32{}, len(c.batch))
 		after := frame.QPCMillis(readQPC(), freq)
 		if ts := decodeOne(t, raw).TSMillis; !(before <= ts && ts <= after) {
 			t.Fatalf("%s TSMillis=%v 不在 QPC 毫秒区间 [%v, %v]", c.name, ts, before, after)
@@ -127,7 +127,7 @@ func TestEncodeFramePeaksAndFlags(t *testing.T) {
 	peaks := [2]float32{0.5, 0.25}
 
 	// 归一化启用、有音频
-	f := decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(true, -14, 12, testSR), "kugou", 1, batch, peaks, len(batch)))
+	f := decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(true, -14, 12, testSR), nil, "kugou", 1, batch, peaks, len(batch)))
 	if f.Flags != frame.FlagNormalized {
 		t.Fatalf("启用归一化 flags: got %#x want %#x", f.Flags, frame.FlagNormalized)
 	}
@@ -142,7 +142,7 @@ func TestEncodeFramePeaksAndFlags(t *testing.T) {
 	}
 
 	// 归一化启用、保活帧：flags 仍置位，peak 不论传入值恒为 0
-	f = decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(true, -14, 12, testSR), "kugou", 1, nil, [2]float32{0.7, 0.3}, 0))
+	f = decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(true, -14, 12, testSR), nil, "kugou", 1, nil, [2]float32{0.7, 0.3}, 0))
 	if f.Flags != frame.FlagNormalized {
 		t.Fatalf("保活帧 flags: got %#x want %#x", f.Flags, frame.FlagNormalized)
 	}
@@ -151,7 +151,7 @@ func TestEncodeFramePeaksAndFlags(t *testing.T) {
 	}
 
 	// 归一化关闭、有音频：flags 为 0，peak、RMS、bins 逐位不变
-	f = decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(false, -14, 12, testSR), "kugou", 1, batch, peaks, len(batch)))
+	f = decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(false, -14, 12, testSR), nil, "kugou", 1, batch, peaks, len(batch)))
 	if f.Flags != 0 {
 		t.Fatalf("关闭归一化 flags: got %#x want 0", f.Flags)
 	}
@@ -181,7 +181,7 @@ func TestEncodeFrameNonFiniteSamples(t *testing.T) {
 
 	var w window
 	w.add(pkt, 2, false)
-	f := decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(true, -14, 12, testSR), "kugou", 1, w.batch, w.peaks, w.fresh))
+	f := decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(true, -14, 12, testSR), nil, "kugou", 1, w.batch, w.peaks, w.fresh))
 	assertFinite(t, "rms、peakL、peakR", []float32{f.RMS, f.PeakL, f.PeakR})
 	assertFinite(t, "bins", f.Bins)
 }
@@ -200,7 +200,7 @@ func TestFramesAtEachRateKeepFullAnalysisWindow(t *testing.T) {
 		nz := newNormalizer(false, -14, 30, wasapi.SampleRate)
 		var frames []frame.Frame
 		emit := func(batch []float32, peaks [2]float32, fresh int) {
-			frames = append(frames, decodeOne(t, encodeFrame(a, nz, "kugou", 1, batch, peaks, fresh)))
+			frames = append(frames, decodeOne(t, encodeFrame(a, nz, nil, "kugou", 1, batch, peaks, fresh)))
 		}
 		fr := newFramer(hopFor(wasapi.SampleRate, fps), fftSize)
 		for i := 0; i < 100; i++ {
@@ -237,7 +237,7 @@ func TestHighRateFrameWithSilentPacketKeepsFullWindow(t *testing.T) {
 	nz := newNormalizer(false, -14, 30, wasapi.SampleRate)
 	var frames []frame.Frame
 	emit := func(batch []float32, peaks [2]float32, fresh int) {
-		frames = append(frames, decodeOne(t, encodeFrame(a, nz, "kugou", 1, batch, peaks, fresh)))
+		frames = append(frames, decodeOne(t, encodeFrame(a, nz, nil, "kugou", 1, batch, peaks, fresh)))
 	}
 	fr := newFramer(hopFor(wasapi.SampleRate, 60), fftSize)
 	for _, silent := range []bool{false, false, true, false} {
@@ -265,7 +265,7 @@ func TestHighRateFrameWithSilentPacketKeepsFullWindow(t *testing.T) {
 // 变异自证（隔离副本，实测）：改取 batch 开头的 fftSize 个 → RMS 为 0，红。
 func TestEncodeFrameUsesLatestSamples(t *testing.T) {
 	batch := append(make([]float32, fftSize), audioBatch(fftSize)...)
-	f := decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(false, -14, 30, wasapi.SampleRate), "kugou", 1, batch, [2]float32{}, len(batch)))
+	f := decodeOne(t, encodeFrame(dsp.New(fftSize), newNormalizer(false, -14, 30, wasapi.SampleRate), nil, "kugou", 1, batch, [2]float32{}, len(batch)))
 	if math.Abs(float64(f.RMS)-0.5) > 1e-6 {
 		t.Fatalf("RMS = %v, 期望 0.5（只看最近 %d 个样本）", f.RMS, fftSize)
 	}
@@ -282,8 +282,8 @@ func TestEncodeFramePassesFreshToNormalizer(t *testing.T) {
 	}
 	a := dsp.New(fftSize)
 	nz := newNormalizer(true, -14, 30, wasapi.SampleRate)
-	encodeFrame(a, nz, "kugou", 1, loud, [2]float32{}, fftSize)
-	encodeFrame(a, nz, "kugou", 1, quiet, [2]float32{}, 480)
+	encodeFrame(a, nz, nil, "kugou", 1, loud, [2]float32{}, fftSize)
+	encodeFrame(a, nz, nil, "kugou", 1, quiet, [2]float32{}, 480)
 
 	ref := newNormalizer(true, -14, 30, wasapi.SampleRate)
 	for _, c := range []struct {
@@ -327,7 +327,7 @@ func TestPumpCaptureHonorsControl(t *testing.T) {
 		}
 		frames := make(chan []byte, 256)
 		ctl := control{op: "capture", pid: 1, player: "qqmusic", norm: norm, target: -20, maxGain: 12, fps: 30}
-		if err := pumpCapture(read, func() time.Time { return clk }, ctl, 7, make(chan struct{}), frames); err != errStopPump {
+		if err := pumpCapture(read, func() time.Time { return clk }, ctl, 7, nil, make(chan struct{}), frames); err != errStopPump {
 			t.Fatalf("pumpCapture 应返回读包的错误, 得 %v", err)
 		}
 		close(frames)
@@ -384,7 +384,7 @@ func TestPumpCaptureStartupNoOvershoot(t *testing.T) {
 	}
 	frames := make(chan []byte, 256)
 	ctl := control{op: "capture", pid: 1, player: "kugou", norm: true, target: -14, maxGain: 30, fps: 25}
-	if err := pumpCapture(read, func() time.Time { return clk }, ctl, 1, make(chan struct{}), frames); err != errStopPump {
+	if err := pumpCapture(read, func() time.Time { return clk }, ctl, 1, nil, make(chan struct{}), frames); err != errStopPump {
 		t.Fatalf("pumpCapture: %v", err)
 	}
 	close(frames)

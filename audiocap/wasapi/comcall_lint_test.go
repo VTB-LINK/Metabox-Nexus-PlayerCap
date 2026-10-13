@@ -2,8 +2,8 @@
 
 package wasapi
 
-// 本文件只测一件事：wasapi_windows.go 交给 COM / Win32 的 Go 变量地址不依赖栈位置（issue #103）。
-// 它是 AST 门禁，扫的是源码，不调用任何 COM。
+// 本文件只测一件事：wasapi_windows.go 与 audiocap/session 的 session_windows.go 交给 COM / Win32 的 Go
+// 变量地址不依赖栈位置（issue #103）。它是 AST 门禁，扫的是源码，不调用任何 COM。
 
 import (
 	"fmt"
@@ -27,16 +27,21 @@ import (
 // COM 写出参会写到旧栈上。先把转换结果存进变量或结构体字段再传，指令同样保护不到（编译器只认调用实参
 // 处的转换），pv.pBlobData 原先就是这种写法。
 //
+// audiocap/session 的手写 vtable 调用沿用同一约定（各自的 comCall 带同一指令），按相对路径一并在此扫描。
+//
 // 已知盲区：只认字面的 uintptr(unsafe.Pointer(…))，unsafe.Pointer 类型的变量直接转 uintptr（如 comCall
 // 内的 uintptr(obj)，指向 C 侧的 COM 对象）认不出；callee 按名字匹配，不做类型解析；*p = … 一律放行，
-// 所写对象是否在堆上不查（现有一处 completionHandlerQueryInterface，对象由 pin map 钉住）。
+// 所写对象是否在堆上不查（现有一处 completionHandlerQueryInterface，对象由 pin map 钉住）；只扫下面列出的
+// 文件，两包的其它文件不在范围内。
 func TestComCallUintptrEscapes(t *testing.T) {
-	v, err := lintComCall("wasapi_windows.go", nil)
-	if err != nil {
-		t.Fatalf("解析 wasapi_windows.go 失败: %v", err)
-	}
-	if len(v) > 0 {
-		t.Errorf("发现 %d 处 Go 变量地址依赖栈位置：\n  %s", len(v), strings.Join(v, "\n  "))
+	for _, file := range []string{"wasapi_windows.go", "../session/session_windows.go"} {
+		v, err := lintComCall(file, nil)
+		if err != nil {
+			t.Fatalf("解析 %s 失败: %v", file, err)
+		}
+		if len(v) > 0 {
+			t.Errorf("发现 %d 处 Go 变量地址依赖栈位置：\n  %s", len(v), strings.Join(v, "\n  "))
+		}
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -58,6 +59,54 @@ const captureFPS = 30
 // 正常窗口尺寸下不缩放（直接原生编码）。注意：这是对「我们自己快照画布」的降采样，绝不改网易云 canvas。
 const captureOutMaxW = 1920
 
+// captureStallMs 有 toBlob 在途（含 arrayBuffer 还没走完的）、而 toBlob 这条路径已超过这么久没有出东西（最近一次
+// arrayBuffer 走完，那一帧是否因过期被丢不论；当场编自己的送出不算），即判定被拖住（断流），这一帧改为当场编
+// （issue #98；判据由 #114 改订）。
+// 判据看「断流」而不是「回调慢」：网易云 3.1.38 实测，页面不忙时回调中位 21～28ms、p90 约 40ms，稍忙时每秒的
+// 最大值 129～368ms。回调慢到 100ms 上下但仍在持续回来的页面，三块画布的池照样出得满 30 帧，此时切到限频的
+// 当场编反而降帧率：初版按「最早在途等过 60ms」判，页面稍忙就被压到每秒 10～20 帧，人为加 CPU 负载下真机
+// 8.7～11.2fps、当场编 176～183 帧（多数白白作废），改按本判据为 13～28fps、当场编 4～38 帧。
+// 判定只在 rAF 拍上做。最后一次出东西在 c0，等过阈值 S 之后的第一拍才当场编，编完（耗时 e）发出；rAF 间隔不
+// 超过 R 时，距 c0 不超过 S + R + e。R 取忙时 rAF 间隔的实测最大 96ms，e 取 1062×753 当场编的实测中位 13ms：
+// 取 120，最坏约 229ms，低于 issue #98 里 250ms 的停顿判据；阈值要大于两个抓帧间隔（约 67ms），否则正常出帧
+// 的间隔就会触发它。不在此界内的：画面更大时 e 更长（输出宽 1920 约 28ms，多约 15ms）；判定那一拍恰被 25ms 的
+// 抓帧节流挡掉时推迟一拍（至多再加 R）。
+// 已知退化：回调延迟 D 持续在约 S+66ms 以上（三块画布的回调成簇到达，簇间空档约 D−66ms）时，每个空档都触发当场编，
+// 当场编的帧编号更大，使在途的 toBlob 帧回来即作废，流整个滑进当场编（离线模拟 D=250ms 时约 4fps，D=400ms
+// 约 7fps，旧代码此区间有 7～12fps 但会出现长停顿）；页面接近停摆才会持续这么慢，未做更复杂的自适应。
+const captureStallMs = 120
+
+// captureSyncGapMs 被拖住期间两次当场编的最小间隔，即每秒至多 10 帧。当场编每帧占主线程约 13ms 每百万像素
+// （1062×753 实测中位 12.6ms，输出宽封顶 1920 时约 28ms），页面本来就忙时按 30 帧编要再占去四到八成；
+// 每秒 10 帧约占一到三成；rAF 间隔不超过 96ms 时两次当场编至多隔两拍（192ms），仍低于 250ms。
+const captureSyncGapMs = 100
+
+// captureScript 生成本次会话注入的抓帧脚本（去掉注释与缩进后的，即实际发出的）。先格式化再精简：
+// 格式串保持为常量，go vet 照旧核对占位符；代入的值经 %q / %f / %d 输出，不会带入换行或行首的 //。
+func captureScript(ingestURL string, quality int) string {
+	return compactJS(fmt.Sprintf(captureInjectJS, ingestURL, float64(quality)/100.0, captureFPS, captureOutMaxW, captureStallMs, captureSyncGapMs))
+}
+
+// compactJS 去掉整行的 // 注释、行首缩进与空行，行内内容一字不动。
+// 网易云 3.1.38 的 CDP 连接收到单条超过约 4096 字节的消息即断开（agent-doc/07 §7.6），而抓帧脚本的
+// 中文注释每字 3 字节、缩进每行若干字节，原样发出时整条消息约 5KB，精简后约 3.5KB。
+// 前提：脚本里没有跨行的字符串或模板字符串，也没有位于行首的正则字面量，所以去掉行首空白后以 // 开头
+// 的行只可能是注释。模板里的注释照常写，只留在源码里、不随脚本发出。
+func compactJS(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimLeft(line, " \t")
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
 // glShimJS 单独的 getContext shim：强制特效 canvas 的 WebGL context 用 preserveDrawingBuffer:true。
 // 在网易云冷启动阶段（取词刚连上、还没开歌）就 eval 一次注入到当前文档 → 之后开的歌 context 自带
 // preserveDrawingBuffer，订阅者连上时无需 reload（避免播放中断）。幂等（__mbxGLHook 守卫），与
@@ -73,21 +122,25 @@ const glShimJS = `(function(){
 
 // captureInjectJS 纯层捕获注入脚本（严格只读，绝不修改网易云 canvas —— 改其尺寸会导致网易云崩溃）：
 //  1. WebGL getContext shim 强制 preserveDrawingBuffer:true —— 使合成后绘制缓冲不被清空，drawImage 随时
-//     能读到当前帧（否则只有 ~50% 命中）。SPA 同文档 eval 一次即对「之后创建的 context」生效；仅当连上时
-//     已有歌（context 已建）才 reload 一次。
+//     能读到当前帧（否则只有 ~50% 命中）。只对「之后创建的 context」生效，故由 shimInjectLoop 尽早注册。
 //  2. 抓帧循环：rAF 节流 → drawImage(#lyric-effect-canvas-id 到画布池快照) → toBlob(jpeg) → WS 推给 Go。
 //     按 canvas 当前实际尺寸抓（天然适配窗口最大化/手动调整，不假设固定尺寸）；仅当超大才降采样到 outw。
-//     画布池 + 并发 toBlob 提帧率（toBlob 异步不阻塞主线程）。抓的是 canvas backing store，永不含工具栏/
-//     顶栏/进度条（DOM 合成层）→ 主播可常开 chrome，OBS 仍得纯特效层。无订阅者时 __mbxCapPaused 暂停省 CPU。
+//     抓的是 canvas backing store，永不含工具栏/顶栏/进度条（DOM 合成层）→ 主播可常开 chrome，OBS 仍得
+//     纯特效层。无订阅者时 __mbxCapPaused 暂停省 CPU。
 //     分辨率 = 网易云窗口尺寸（用户放大窗口即更清晰，我们不强制改渲染分辨率以免崩溃/变形）。
+//     网易云（Chromium 91）的 JPEG toBlob 要等主线程空闲才编码，页面一忙回调就被拖住数百毫秒（issue #98）。
+//     有 toBlob 在途、而 toBlob 路径已超过 captureStallMs 没有出东西（断流），这一帧改用另一块画布当场 toDataURL（同步编码，不等空闲），
+//     间隔不小于 captureSyncGapMs；data URL 按文本帧回传，由服务端解码（省掉页面里转二进制的开销）。
+//     每次抓帧编号，只发比已发编号大的帧：被拖住的 toBlob 晚到时比当场编的帧旧，丢弃。
 //  3. 热接管（进程重启后 token 会变）：ingest WS URL 存进可重写的闭包变量，并把切换函数挂到
-//     window.__mbxCapSetIngest(url)（关旧 ws、改 url、ensureWS 重连）；用带版本的 window.__mbxCapV2
-//     标识本版脚本已就位。重复注入时：本版已在跑 → 只切地址、不新起 rAF 循环（防双 loop 双发帧）；
-//     只见旧标志 __mbxCapStarted 而无 __mbxCapV2（升级前注入的旧脚本、无切换函数）→ 无法热接管，
-//     安全返回（不硬调不存在的函数以免抛错），网易云 reload/切歌重建 canvas 即恢复——一次性升级过渡
-//     瑕疵，不为它引双 loop 或 reload 网易云。
+//     window.__mbxCapSetIngest(url)（关旧 ws、改 url、ensureWS 重连）；window.__mbxCapV4 标识本版已就位。
+//     本版已在跑 → 只切地址、不新起 rAF 循环（防双 loop 双发帧）。页面里是更早版本的循环（只认
+//     __mbxCapPaused，没有停止入口）→ 本版接管：把 __mbxCapPaused 换成读来恒为真的访问器，旧循环从此
+//     空转，服务端的暂停写入经 setter 交给本版；旧版有切换函数的，借它关掉旧 ws，在途的旧帧发不出去。
+//     本版自己的停止入口是 window.__mbxCapOwner：属主换掉即停循环、关 ws、丢弃在途的帧。
 //
-// %q=ingest WS 地址；%f=初始 q(0-1)；%d=初始 fps；%d=输出最大宽。
+// 依次为 ingest WS 地址、初始 q(0-1)、初始 fps、输出最大宽、被拖住判定（ms）、当场编最小间隔（ms）。
+// 脚本里不得出现百分号：它经 fmt.Sprintf 格式化。发出前经 compactJS 去掉整行注释与缩进（captureScript）。
 const captureInjectJS = `(function(){
   if(!window.__mbxGLHook){
     window.__mbxGLHook=true;
@@ -98,15 +151,24 @@ const captureInjectJS = `(function(){
     };
   }
   var WS_URL=%q;
-  // 热接管：本版脚本(__mbxCapV2)已在跑 → 只把 ingest 地址切到新 token、不新起循环（防双 loop 双发帧）。
-  if(window.__mbxCapV2&&window.__mbxCapSetIngest){window.__mbxCapSetIngest(WS_URL);return;}
-  // 升级过渡：页面里只有上一版脚本(有 __mbxCapStarted、无 __mbxCapV2、无切换函数) → 无法热接管，
-  // 直接返回（不硬调不存在的函数以免抛错）；网易云 reload/切歌重建 canvas 即恢复。
-  if(window.__mbxCapStarted)return;
-  window.__mbxCapStarted=true; window.__mbxCapV2=true;
-  var SEL='#lyric-effect-canvas-id';
-  if(!window.__mbxCapCfg)window.__mbxCapCfg={q:%f,fps:%d,outw:%d};
-  var ws=null, inflight=0, lastSend=0;
+  // 热接管：本版脚本(__mbxCapV4)已在跑 → 只把 ingest 地址切到新 token、不新起循环（防双 loop 双发帧）。
+  if(window.__mbxCapV4&&window.__mbxCapSetIngest){window.__mbxCapSetIngest(WS_URL);return;}
+  // 接管更早版本的循环：它们每拍只认 __mbxCapPaused、没有停止入口。读来恒为真 → 旧循环空转；
+  // 服务端照旧写入的暂停状态经 setter 落到本版。旧版的切换函数在的话，用建不起连接的地址关掉旧 ws。
+  var paused=!!window.__mbxCapPaused;
+  Object.defineProperty(window,'__mbxCapPaused',{configurable:true,get:function(){return true;},set:function(v){paused=!!v;}});
+  if(window.__mbxCapSetIngest){try{window.__mbxCapSetIngest('about:blank');}catch(e){}}
+  var me={}; window.__mbxCapOwner=me;
+  // 保留 __mbxCapV2、__mbxCapV3：降级回前两版时，它们的脚本据此热接管本版循环，而不是另起一个被本版暂停住的循环。
+  window.__mbxCapStarted=true; window.__mbxCapV2=true; window.__mbxCapV3=true; window.__mbxCapV4=true;
+  window.__mbxCapCfg={q:%f,fps:%d,outw:%d};
+  var SEL='#lyric-effect-canvas-id', STALL=%d, SYNC_GAP=%d;
+  // pend：已发起 toBlob、还没走完 arrayBuffer 的帧数；lastDone：toBlob 这条路径最近一次出东西（arrayBuffer 走完，
+  // 那一帧是否因过期被丢不论）的时刻，当场编自己的送出不算；wasIdle：循环刚开始、或暂停、画布缺席、连接未就绪
+  // 之后的第一拍，断流从这一拍起算，不拿停了很久的 lastDone 去比。
+  var ws=null, lastSend=0, lastSync=-Infinity, lastDone=0, pend=0, wasIdle=true, seq=0, sentSeq=0;
+  // 计数，供真机核对：经 toBlob 发出、当场编发出、晚于已发帧而丢弃的帧数
+  var stats=window.__mbxCapStats={blob:0,sync:0,stale:0};
   function ensureWS(){
     if(ws&&(ws.readyState===0||ws.readyState===1))return;
     try{ws=new WebSocket(WS_URL);ws.binaryType='arraybuffer';}catch(e){ws=null;}
@@ -118,30 +180,56 @@ const captureInjectJS = `(function(){
     if(ws){try{ws.close();}catch(e){}ws=null;}
     ensureWS();
   };
-  // 编码画布池：每个在飞帧用独立 2D 画布快照，允许并发 toBlob（toBlob 异步、编码不阻塞主线程）
-  var POOL=3, cans=[];
-  for(var i=0;i<POOL;i++){var o=document.createElement('canvas');var cx=o.getContext('2d',{alpha:false});cx.imageSmoothingEnabled=true;cx.imageSmoothingQuality='high';cans.push({o:o,x:cx,busy:false});}
+  function send(n,data,kind){
+    if(window.__mbxCapOwner!==me)return;
+    if(n<=sentSeq){stats.stale++;return;}
+    if(!ws||ws.readyState!==1)return;
+    try{ws.send(data);}catch(e){return;}
+    sentSeq=n; stats[kind]++;
+  }
+  function mk(){var o=document.createElement('canvas');var cx=o.getContext('2d',{alpha:false});cx.imageSmoothingEnabled=true;cx.imageSmoothingQuality='high';return {o:o,x:cx,busy:false};}
+  // 编码画布池：每个在途的 toBlob 各用一块快照；当场编另用一块，不碰在途的
+  var POOL=3, cans=[], syncCan=mk();
+  for(var i=0;i<POOL;i++)cans.push(mk());
+  // 按 canvas 实际尺寸快照；仅当超过 outw（超大窗口）才降采样，控制编码量。绝不改源 canvas。
+  function snap(s,c,mx){
+    var ow=c.width, oh=c.height;
+    if(mx>0&&ow>mx){var k=mx/ow; ow=Math.max(1,Math.round(ow*k)); oh=Math.max(1,Math.round(oh*k));}
+    if(s.o.width!==ow)s.o.width=ow; if(s.o.height!==oh)s.o.height=oh;
+    s.x.drawImage(c,0,0,ow,oh);
+  }
   function loop(){
+    if(window.__mbxCapOwner!==me){if(ws){try{ws.close();}catch(e){}ws=null;}return;}
     requestAnimationFrame(loop);
-    if(window.__mbxCapPaused)return;
-    var cfg=window.__mbxCapCfg||{}, now=performance.now();
+    if(paused){wasIdle=true;return;}
+    var cfg=window.__mbxCapCfg||{}, now=performance.now(), q=cfg.q||0.88;
     // 软上限：达到目标 fps 才跳过（容差 半个 60fps 帧，避免 rAF 量化导致每隔一拍被错过而腰斩帧率）
     if(cfg.fps && now-lastSend < 1000/cfg.fps - 8)return;
-    if(inflight>=POOL)return;
     var c=document.querySelector(SEL);
-    if(!c||!c.width||!c.height)return;
-    ensureWS(); if(!ws||ws.readyState!==1)return;
-    var slot=null; for(var i=0;i<POOL;i++){if(!cans[i].busy){slot=cans[i];break;}} if(!slot)return;
-    // 按 canvas 实际尺寸快照；仅当超过 outw（超大窗口）才降采样，控制编码量。绝不改源 canvas。
-    var ow=c.width, oh=c.height, mx=cfg.outw||0;
-    if(mx>0&&ow>mx){var k=mx/ow; ow=Math.max(1,Math.round(ow*k)); oh=Math.max(1,Math.round(oh*k));}
-    if(slot.o.width!==ow)slot.o.width=ow; if(slot.o.height!==oh)slot.o.height=oh;
-    try{slot.x.drawImage(c,0,0,ow,oh);}catch(e){return;}
-    slot.busy=true; inflight++; lastSend=now;
-    (function(s){s.o.toBlob(function(b){
-      s.busy=false; inflight--;
-      if(b&&ws&&ws.readyState===1){b.arrayBuffer().then(function(ab){try{ws.send(ab);}catch(_){}}).catch(function(){});}
-    },'image/jpeg',cfg.q||0.88);})(slot);
+    if(!c||!c.width||!c.height){wasIdle=true;return;}
+    ensureWS(); if(!ws||ws.readyState!==1){wasIdle=true;return;}
+    if(wasIdle){wasIdle=false;lastDone=now;}
+    var slot=null;
+    for(var i=0;i<POOL;i++){if(!cans[i].busy){slot=cans[i];break;}}
+    if(pend>0&&now-lastDone>STALL){
+      if(now-lastSync<SYNC_GAP)return;
+      // 先记时刻再编：编码抛错也照样限频，不会每拍重试
+      lastSync=now; lastSend=now;
+      var n=++seq, u;
+      try{snap(syncCan,c,cfg.outw||0); u=syncCan.o.toDataURL('image/jpeg',q);}catch(e){return;}
+      send(n,u,'sync');
+      return;
+    }
+    if(!slot)return;
+    try{snap(slot,c,cfg.outw||0);}catch(e){return;}
+    slot.busy=true; pend++; lastSend=now;
+    (function(s,n){
+      try{s.o.toBlob(function(b){
+        s.busy=false;
+        if(!b){pend--;return;}
+        b.arrayBuffer().then(function(ab){pend--;lastDone=performance.now();send(n,ab,'blob');},function(){pend--;}).catch(function(){});
+      },'image/jpeg',q);}catch(e){s.busy=false;pend--;}
+    })(slot,++seq);
   }
   requestAnimationFrame(loop);
 })()`
@@ -634,7 +722,7 @@ func (c *Capturer) purelayerSession() error {
 	call("Runtime.evaluate", map[string]any{"expression": chromeSrc, "returnByValue": true})
 
 	// 注入纯层抓帧脚本：注册到新文档（reload/导航后自动补注）+ 立即对当前文档运行一次
-	capSrc := fmt.Sprintf(captureInjectJS, c.sink.EffectIngestWSURL(), float64(quality)/100.0, captureFPS, captureOutMaxW)
+	capSrc := captureScript(c.sink.EffectIngestWSURL(), quality)
 	call("Page.addScriptToEvaluateOnNewDocument", map[string]any{"source": capSrc})
 	eval(capSrc)
 	eval("window.__mbxCapPaused=false;")

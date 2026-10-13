@@ -1,6 +1,6 @@
 package player
 
-// 本文件只测封面规范化的结果（issue #101，设计 §9 第 1～16、20 条）：哪些原样放行、哪些拉伸到 800×800、
+// 本文件只测封面规范化的结果（issue #101，设计 §9 第 1～16、20 条）：哪些原样放行、哪些居中裁切缩放到 800×800、
 // 哪些原样退回，以及 CoverDataURI 拼出的 data URI。JPEG 扫描次数的预检另见 coverscans_test.go。
 //
 // 变异自证（均实测，逐条记在各用例注释里）。
@@ -12,6 +12,7 @@ import (
 	"image"
 	"image/color"
 	"image/gif"
+	"math"
 	"strings"
 	"testing"
 )
@@ -80,7 +81,7 @@ func TestCoverPassesThrough800(t *testing.T) {
 	}
 }
 
-// 非 800×800 的都拉伸到 800×800 编成 JPEG：缩小、放大、只差一边、PNG 源（第 4～6、8 条）。
+// 非 800×800 的都缩放到 800×800（非正方形先居中裁切）编成 JPEG：缩小、放大、只差一边、PNG 源（第 4～6、8 条）。
 //
 // 变异自证：放行条件改成「宽或高是 800」，800×600、600×800、801×800、800×799 四例红；改成「宽是 800 且高不小于 800」，800×801、800×1200 两例红（主会话补的反例）；尺寸上限改成
 // `>= coverMaxSide`，三个边长 1600 的例子红。
@@ -121,12 +122,56 @@ func TestCoverSizeLimits(t *testing.T) {
 	}
 }
 
-// 非正方形拉伸、不裁切不留边（第 7 条，需求原文）：1078×875 左 1/4 红、其余蓝，输出的红蓝分界在 x≈200
-// （拉伸；居中裁切会在 x≈154），首行与末行是图像内容；875×1078 上 1/4 红，分界在 y≈200。
+// centerSquare 取居中的正方形（issue #113）：边长取较短边，长边两端各裁一半；宽高之差为奇数时偏移向下取整，
+// 多出的 1 像素在右（下）。矩形的 Min 非零时偏移要加上 Min（解码器出的图 Min 恒为 0，这一支只能在这里测）。
 //
-// 变异自证：Scale 的源矩形改成居中的正方形（只裁横向），横例分界落在 154 而红；目标矩形改成上下留边，
-// 横例首行变黑、竖例分界移到 64，两例红。
-func TestCoverStretchesNonSquare(t *testing.T) {
+// 变异自证（均实测）：边长取较长边，非正方形各例红；横向或纵向的偏移取 Min 而不居中，各自的横、竖例红；横向偏移
+// 向上取整，1078×875、1001×1000、1003×1000、1600×1 四例红；忘了加 Min，两个 Min 非零的例子红。
+func TestCenterSquare(t *testing.T) {
+	cases := []struct {
+		name string
+		in   image.Rectangle
+		want image.Rectangle
+	}{
+		{"正方形", image.Rect(0, 0, 640, 640), image.Rect(0, 0, 640, 640)},
+		{"横 1078×875", image.Rect(0, 0, 1078, 875), image.Rect(101, 0, 976, 875)},
+		{"竖 875×1078", image.Rect(0, 0, 875, 1078), image.Rect(0, 101, 875, 976)},
+		{"差 1 像素 1001×1000", image.Rect(0, 0, 1001, 1000), image.Rect(0, 0, 1000, 1000)},
+		{"差 3 像素 1003×1000", image.Rect(0, 0, 1003, 1000), image.Rect(1, 0, 1001, 1000)},
+		{"差 3 像素 1000×1003", image.Rect(0, 0, 1000, 1003), image.Rect(0, 1, 1000, 1001)},
+		{"极端横 1600×100", image.Rect(0, 0, 1600, 100), image.Rect(750, 0, 850, 100)},
+		{"极端竖 100×1600", image.Rect(0, 0, 100, 1600), image.Rect(0, 750, 100, 850)},
+		{"1 像素高 1600×1", image.Rect(0, 0, 1600, 1), image.Rect(799, 0, 800, 1)},
+		{"Min 非零 横", image.Rect(10, 20, 10+600, 20+400), image.Rect(110, 20, 510, 420)},
+		{"Min 非零 竖", image.Rect(-5, 7, -5+400, 7+601), image.Rect(-5, 107, 395, 507)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := centerSquare(c.in); got != c.want {
+				t.Fatalf("centerSquare(%v) = %v，期望 %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// rampImage 生成 w×h 的渐变图：R 随 x 从 0 线性升到 255，G 随 y 从 0 线性升到 255，B 恒为 128。
+func rampImage(w, h int) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{uint8(x * 255 / max(w-1, 1)), uint8(y * 255 / max(h-1, 1)), 128, 255})
+		}
+	}
+	return img
+}
+
+// 非正方形居中裁切、不变形不留边（issue #113，第 7 条改订）：1078×875 左 1/4 红、其余蓝，居中裁出 875×875 后
+// 红蓝分界在 (1078/4−101)×800/875≈154（拉伸会在 x≈200）；875×1078 上 1/4 红，分界在 y≈154。短边方向的首行与
+// 末行是图像内容而不是留边。
+//
+// 变异自证（均实测）：Scale 的源矩形改回整幅图（拉伸），横、竖两例红（分界落在 200）；横向或纵向的偏移取 0
+// （裁左或裁上），对应的例红；源矩形放宽 1 像素，两例红。
+func TestCoverCropsNonSquare(t *testing.T) {
 	quarter := func(w, h int, vertical bool) []byte {
 		img := image.NewRGBA(image.Rect(0, 0, w, h))
 		for y := 0; y < h; y++ {
@@ -165,8 +210,8 @@ func TestCoverStretchesNonSquare(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			out := assertResized(t, quarter(c.w, c.h, c.vertical), "image/png")
 			edge, img := boundary(out, c.vertical)
-			if edge < 196 || edge > 204 {
-				t.Fatalf("红蓝分界应在 200 附近（拉伸），got %d", edge)
+			if edge < 150 || edge > 158 {
+				t.Fatalf("红蓝分界应在 154 附近（居中裁切），got %d", edge)
 			}
 			for _, y := range []int{0, coverSide - 1} {
 				x := 600
@@ -175,6 +220,97 @@ func TestCoverStretchesNonSquare(t *testing.T) {
 				}
 				if r, g, b, _ := img.At(x, y).RGBA(); b>>8 < 200 || r>>8 > 60 || g>>8 > 60 {
 					t.Fatalf("(%d,%d) 应是蓝色的图像内容而不是留边，got rgb(%d,%d,%d)", x, y, r>>8, g>>8, b>>8)
+				}
+			}
+		})
+	}
+}
+
+// 输出像素与源图的对应关系：渐变图里 R 只随 x、G 只随 y 变化，输出第 i 列取自源图的 x0+(i+0.5)×side/800−0.5，
+// 逐点比对 R 与 G（容差 10 含 JPEG 与重采样误差）。覆盖横、竖、极端长宽比、宽高差为奇数、放大、缩小、只差一边
+// （801×800 裁掉最右一列，不能被当成 800² 放行）。crop 是手算的裁切矩形，不经 centerSquare。
+//
+// 变异自证（均实测）：Scale 的源矩形改回整幅图（拉伸）、边长取较长边、偏移取 0（裁左或裁上）、源矩形放宽 1 像素，
+// 本用例都有子用例红。
+func TestCoverCropMapsPixels(t *testing.T) {
+	cases := []struct {
+		w, h int
+		crop image.Rectangle
+	}{
+		{1078, 875, image.Rect(101, 0, 976, 875)},
+		{875, 1078, image.Rect(0, 101, 875, 976)},
+		{1600, 100, image.Rect(750, 0, 850, 100)},
+		{100, 1600, image.Rect(0, 750, 100, 850)},
+		{1001, 1000, image.Rect(0, 0, 1000, 1000)},
+		{1003, 1000, image.Rect(1, 0, 1001, 1000)},
+		{1000, 1003, image.Rect(0, 1, 1000, 1001)},
+		{600, 400, image.Rect(100, 0, 500, 400)},
+		{400, 600, image.Rect(0, 100, 400, 500)},
+		{1500, 1200, image.Rect(150, 0, 1350, 1200)},
+		{801, 800, image.Rect(0, 0, 800, 800)},
+		{800, 801, image.Rect(0, 0, 800, 800)},
+	}
+	pts := []int{0, 1, 200, 399, 400, 599, 798, 799}
+	near := func(a uint32, want float64) bool { return math.Abs(float64(a>>8)-want) <= 10 }
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%dx%d", c.w, c.h), func(t *testing.T) {
+			out := assertResized(t, encodePNG(t, rampImage(c.w, c.h)), "image/png")
+			dec, _, err := image.Decode(bytes.NewReader(out))
+			if err != nil {
+				t.Fatal(err)
+			}
+			side := float64(c.crop.Dx())
+			for _, p := range pts {
+				sx := float64(c.crop.Min.X) + (float64(p)+0.5)*side/coverSide - 0.5
+				sy := float64(c.crop.Min.Y) + (float64(p)+0.5)*side/coverSide - 0.5
+				wantR := sx * 255 / float64(c.w-1)
+				wantG := sy * 255 / float64(c.h-1)
+				if r, _, _, _ := dec.At(p, 400).RGBA(); !near(r, wantR) {
+					t.Errorf("输出第 %d 列 R=%d，期望约 %.0f（取自源图 x≈%.1f）", p, r>>8, wantR, sx)
+				}
+				if _, g, _, _ := dec.At(400, p).RGBA(); !near(g, wantG) {
+					t.Errorf("输出第 %d 行 G=%d，期望约 %.0f（取自源图 y≈%.1f）", p, g>>8, wantG, sy)
+				}
+			}
+		})
+	}
+}
+
+// 被裁掉的区域不能渗进输出的边缘：1078×875 的左右各 101 与 102 列是红色、居中 875 列是蓝色，输出的首列与末列
+// 必须是纯蓝（缩放核不能越过裁切矩形去取邻近的红色像素）；875×1078 的上下边同理。
+//
+// 变异自证（均实测）：Scale 的源矩形放宽 2 个像素（两端各 1），两例红；改回整幅图（拉伸）、边长取较长边，同样红。
+func TestCoverCropDoesNotBleed(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		w, h     int
+		vertical bool
+	}{{"横 1078x875", 1078, 875, false}, {"竖 875x1078", 875, 1078, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			r := centerSquare(image.Rect(0, 0, c.w, c.h))
+			img := image.NewNRGBA(image.Rect(0, 0, c.w, c.h))
+			for y := 0; y < c.h; y++ {
+				for x := 0; x < c.w; x++ {
+					col := color.NRGBA{255, 0, 0, 255}
+					if image.Pt(x, y).In(r) {
+						col = color.NRGBA{0, 0, 255, 255}
+					}
+					img.SetNRGBA(x, y, col)
+				}
+			}
+			dec, _, err := image.Decode(bytes.NewReader(assertResized(t, encodePNG(t, img), "image/png")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range []int{0, coverSide - 1} {
+				for _, k := range []int{0, 100, 400, 700, coverSide - 1} {
+					x, y := e, k
+					if c.vertical {
+						x, y = k, e
+					}
+					if rr, g, b, _ := dec.At(x, y).RGBA(); rr>>8 > 40 || g>>8 > 40 || b>>8 < 200 {
+						t.Fatalf("(%d,%d) 应是纯蓝（裁掉的红色不能渗进来），got rgb(%d,%d,%d)", x, y, rr>>8, g>>8, b>>8)
+					}
 				}
 			}
 		})

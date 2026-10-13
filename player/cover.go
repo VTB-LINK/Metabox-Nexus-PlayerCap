@@ -103,8 +103,8 @@ var newCoverClient = func(timeout time.Duration) *http.Client {
 }
 
 // CoverDataURI 把封面图片规范为 800×800 后编成 data URI（issue #101），b 为空时返回空串。cover_base64 一律经它
-// 生成。已是 800×800 的 JPEG / PNG 原字节发出、MIME 按格式改正；其余 JPEG / PNG 拉伸到 800×800、编码为 JPEG。
-// 处理不了的（读不出头、格式不在白名单、尺寸超限、CMYK、JPEG 扫描次数超限、解码或编码失败）原字节、原 mime
+// 生成。已是 800×800 的 JPEG / PNG 原字节发出、MIME 按格式改正；其余 JPEG / PNG 居中裁成正方形（非正方形裁去
+// 长边两端）再缩放到 800×800、编码为 JPEG。处理不了的（读不出头、格式不在白名单、尺寸超限、CMYK、JPEG 扫描次数超限、解码或编码失败）原字节、原 mime
 // 发出，并打一条警告。在调用方的 goroutine 里同步执行：本机缩放一张 1200² 的 JPEG 约 75ms（BenchmarkNormalizeCover）。
 func CoverDataURI(playerName string, b []byte, mime string) string {
 	if len(b) == 0 {

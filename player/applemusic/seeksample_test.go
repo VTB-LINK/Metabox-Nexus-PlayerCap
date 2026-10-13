@@ -93,6 +93,7 @@ func (h *harness) replay(origin time.Time, dur float64, fromMs, toMs, gapMs int,
 		h.now = origin.Add(time.Duration(ms) * time.Millisecond)
 		h.f.twins[realTwin] = mem.Twin{Dur: dur, Pos: pos(ms)}
 		h.s.tick()
+		h.settleCover()
 		h.drain()
 	}
 	return ms

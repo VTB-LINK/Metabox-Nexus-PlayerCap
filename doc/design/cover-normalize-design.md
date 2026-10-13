@@ -2,7 +2,7 @@
 
 本文覆盖里程碑 4.0 的 issue #101：各播放器发出的 `cover_base64` 统一为 800×800。
 
-状态：设计已过 Codex 前置审查第 1、2 轮并按其意见修订（2026-10-12）；§13 记录各点的决定，其中第 1 条（非正方形）按需求原文「拉伸」做，裁切是向用户提的建议、未获采纳前不做。
+状态：设计已过 Codex 前置审查第 1、2 轮并按其意见修订（2026-10-12）；§13 记录各点的决定，其中第 1 条（非正方形）起初按需求原文「拉伸」做，2026-10-13 项目负责人改订为居中裁切（issue #113）。
 
 ## 1. 需求与范围
 
@@ -14,7 +14,7 @@
 顺序约束（用户补充）：先合入 Spotify PR #100，#101 与它不冲突就同步做、先后合并。本设计不改 `player/spotify/*`；Spotify 的 `cover_base64` 经共享的 `player.FetchCoverBase64` 生成，共享层改完即覆盖。
 
 **目标**：
-- 所有生成 `cover_base64` 的路径经同一个函数：已是 800×800 的图原字节发出；其余 JPEG / PNG 拉伸到 800×800、编码为 JPEG 后发出。
+- 所有生成 `cover_base64` 的路径经同一个函数：已是 800×800 的图原字节发出；其余 JPEG / PNG 居中裁成正方形再缩放到 800×800、编码为 JPEG 后发出（issue #113 起；原为拉伸）。
 - 处理失败一律退回今天的行为（原字节原样发出），不吞 `song_info_update`，不阻塞对外事件。
 - 由门禁保证日后新增的播放器不绕开这个函数。
 
@@ -73,7 +73,7 @@
 | x/image/draw | `ApproxBiLinear` 缩小时只混 4 个最近像素、耗时与源像素数无关；`BiLinear` 慢但质量高；`CatmullRom` 很慢、质量很高；核插值器临时缓冲为 目标宽×源高 个 `[4]float64` | 本机模块缓存 `golang.org/x/image@v0.44.0/draw/scale.go:155-188`、`:204-206` |
 | imgproxy / sharp / Cloudflare Images | 解码前按像素数设上限（默认 50MP / 约 268MP / 100MP）；处理失败退回原图或回退图 | 调研所得（[imgproxy 配置](https://docs.imgproxy.net/configuration/options)、[sharp](https://sharp.pixelplumbing.com/api-constructor)、[Cloudflare 限制](https://developers.cloudflare.com/images/get-started/limits/)），未复核 |
 
-两点结论：同类系统普遍不放大、保持宽高比，本设计按需求放大并拉伸，属有意偏离，后果见 §11；「先读头限尺寸、失败退回原图」是通行做法，本设计照用。
+两点结论：同类系统普遍不放大、保持宽高比，本设计按需求放大；非正方形先居中裁成正方形、保持宽高比（issue #113 起；原为拉伸），后果见 §11；「先读头限尺寸、失败退回原图」是通行做法，本设计照用。
 
 ## 4. 备选方案
 
@@ -103,7 +103,7 @@ C 的逐家评估：
 
 ```go
 // CoverDataURI 把封面图片规范为 800×800 后编成 data URI。b 为空时返回空串。
-// 已是 800×800 的 JPEG / PNG 原字节发出；其余 JPEG / PNG 拉伸到 800×800、编码为 JPEG。
+// 已是 800×800 的 JPEG / PNG 原字节发出；其余 JPEG / PNG 居中裁成正方形再缩放到 800×800、编码为 JPEG。
 // 读不出头、格式不在白名单、尺寸超限、解码或编码失败时原字节、原 mime 发出，并打一条警告。
 func CoverDataURI(playerName string, b []byte, mime string) string
 
@@ -113,7 +113,7 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 
 - 导出 `CoverDataURI`：applemusic 在另一个包里调用。`normalizeCover` 不导出。
 - 放在 `player/cover.go`：与 `FetchCoverBase64` 同文件、共用 `coverLog`（`agent-doc/06-日志与文案.md:106` 的模块名表不变）。
-- 接入点只有两处：`FetchCoverBase64` 末尾（`cover.go:91-93`）改为 `return CoverDataURI(playerName, body, mimeType)`；applemusic `setCover`（`applemusic.go:1149`）改为 `s.song.coverURI = player.CoverDataURI("AppleMusic", np.Cover, np.CoverMIME)`。其余六家（含 spotify）不改。
+- 接入点只有两处：`FetchCoverBase64` 末尾（`cover.go:91-93`）改为 `return CoverDataURI(playerName, body, mimeType)`；applemusic `setCover`（`applemusic.go:1149`）改为 `s.song.coverURI = player.CoverDataURI("AppleMusic", np.Cover, np.CoverMIME)`（issue #110 起这次调用移到独立 goroutine 的 `runCoverJob` 里，经 seam `coverDataURI`，§6.3）。其余六家（含 spotify）不改。
 - `coverHash`、`staleCover` 仍按原始字节算（`applemusic.go:1131-1132`、`:1144`、`:1159`），换图判定不受影响。
 - 为了能测到 `FetchCoverBase64` 的成功路径（现有的拨号检查会拒绝 httptest 的回环地址），把 HTTP 客户端的构造抽成包级变量 `newCoverClient func(timeout time.Duration) *http.Client`，生产值就是现在 `cover.go:38-56` 的那段（SSRF 校验原样保留），测试里换成直连 httptest 服务器的客户端。该校验今天没有任何测试覆盖（全仓 `*_test.go` 里没有 `isBlockedCoverIP` 的用例；酷狗的封面用例连的是无服务的 `127.0.0.1:1`，删掉拨号校验它照样通过），所以这次抽取要把它补上（§9 第 22 条），免得抽取时丢了校验而无人知道。
 
@@ -130,7 +130,7 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 5b. **JPEG 预检扫描次数**：按字节扫描 SOS 标记（`FF DA`），个数超过 `maxJPEGScans`（16，最终取值按 §5.3 的实测校正）→ 原样，打警告。理由见 §5.3「渐进式 JPEG 炸弹」。只对 `jpeg` 做；PNG 的解码工作量由 IHDR 的尺寸界定。
 6. `image.Decode`。失败 → 原样（截断、损坏、4 分量但没有 Adobe APP14 的 JPEG）。
 7. 解出的图像类型再兜底一次：`*image.CMYK` → 原样（正常情况下已在 5a 拦下）。
-8. `dst := image.NewRGBA(800×800)`，`xdraw.BiLinear.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Src, nil)`。源矩形取整幅图，非正方形被拉伸（需求原文；§13 第 1 条）。
+8. `dst := image.NewRGBA(800×800)`，`xdraw.BiLinear.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Src, nil)`。源矩形取 `centerSquare(src.Bounds())`：居中的正方形，边长取较短边，非正方形裁去长边两端；宽高之差为奇数时偏移向下取整，多出的 1 像素在右（下）；Bounds().Min 非零时偏移加上 Min（issue #113；原为整幅图拉伸，§13 第 1 条）。
 9. `jpeg.Encode(dst, Quality: 90)`，MIME 为 `image/jpeg`。失败 → 原样。
 
 **插值器选 `BiLinear`**（本机实测见 §6.1）：
@@ -150,7 +150,7 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 | 情形 | 处理 |
 |---|---|
 | 解码炸弹：把 1×1 PNG 的 IHDR 改为 30000×30000 并重算 CRC，共 71 字节 | 第 5 步拦下，不解码。本机实测 `DecodeConfig` 立即返回该尺寸、无错误 |
-| 渐进式 JPEG 炸弹：尺寸与字节数都在上限内，但文件里重复放上万次只带几字节熵数据的 AC 扫描（Codex 设计审查的构造：约 4.1MB 的 2048×2048 灰度 SOF2，重复 20 万次扫描，约 131 亿次块处理）。Go 的 `image/jpeg` 对每个 SOS 都调用 `processSOS`，没有扫描次数上限（`GOROOT/src/image/jpeg/reader.go:620-624` 附近；2026-10-12 在 go1.26.1 上核对，未发现任何相关限制），尺寸与字节上限都拦不住 | 第 5b 步：解码前数 SOS 标记，超过 `maxJPEGScans`（16）直接原样；正常渐进式 JPEG 通常 10 个扫描上下（libjpeg、mozjpeg 的默认脚本都约 10 个），个数是保守的上界（EXIF 缩略图里的 SOS 也会被数进去，只会多数、不会漏数）。**放行后的最坏工作量不能只按熵位数算**：AC refinement 扫描对零系数的遍历不消耗熵位（`scan.go` 的 `refineNonZeroes`），Codex 推演 2048² 灰度、1 个 DC 扫描加 63 个 `Ss=1,Se=63,Ah=1,Al=0` 的 refinement 扫描（共 64 个 SOS，文件不足 10KB）会做约 65536×63×63≈2.6 亿次零系数检查；16 个扫描的上限把它压到约 1/4，仍是推演、没有实测。故 `maxJPEGScans` 的最终取值以 §9 第 18 条(b)(c)(d)的实测为准（只测灰度 refinement 一种形态不够：重复的基线扫描每次都要重做反量化与 IDCT，成本在另一处）：最坏耗时须在本机 ≤100ms，不满足就继续调低。applemusic 在轮询 goroutine 里同步处理，所以这条是必须的 |
+| 渐进式 JPEG 炸弹：尺寸与字节数都在上限内，但文件里重复放上万次只带几字节熵数据的 AC 扫描（Codex 设计审查的构造：约 4.1MB 的 2048×2048 灰度 SOF2，重复 20 万次扫描，约 131 亿次块处理）。Go 的 `image/jpeg` 对每个 SOS 都调用 `processSOS`，没有扫描次数上限（`GOROOT/src/image/jpeg/reader.go:620-624` 附近；2026-10-12 在 go1.26.1 上核对，未发现任何相关限制），尺寸与字节上限都拦不住 | 第 5b 步：解码前数 SOS 标记，超过 `maxJPEGScans`（16）直接原样；正常渐进式 JPEG 通常 10 个扫描上下（libjpeg、mozjpeg 的默认脚本都约 10 个），个数是保守的上界（EXIF 缩略图里的 SOS 也会被数进去，只会多数、不会漏数）。**放行后的最坏工作量不能只按熵位数算**：AC refinement 扫描对零系数的遍历不消耗熵位（`scan.go` 的 `refineNonZeroes`），Codex 推演 2048² 灰度、1 个 DC 扫描加 63 个 `Ss=1,Se=63,Ah=1,Al=0` 的 refinement 扫描（共 64 个 SOS，文件不足 10KB）会做约 65536×63×63≈2.6 亿次零系数检查；16 个扫描的上限把它压到约 1/4，仍是推演、没有实测。故 `maxJPEGScans` 的最终取值以 §9 第 18 条(b)(c)(d)的实测为准（只测灰度 refinement 一种形态不够：重复的基线扫描每次都要重做反量化与 IDCT，成本在另一处）：最坏耗时须在本机 ≤100ms，不满足就继续调低。applemusic 当时在轮询 goroutine 里同步处理，所以这条是必须的（issue #110 起改为异步，这条仍限住单次缩放的 CPU 耗时） |
 | CMYK / YCCK JPEG（含渐进式） | 第 5a 步原样、不解码（`DecodeConfig` 的颜色模型为 CMYK）；4 分量无 APP14 的同样报 CMYK 模型，同样在 5a 拦下 |
 | 800×800 但数据截断 | 第 4 步放行、不解码，与今天相同（`FetchCoverBase64` 已按 `Content-Length` 拒收不完整下载，`cover.go:76-81`） |
 | GIF、WebP 等 | 第 2 或第 3 步原样。现有来源没有这两种格式（§2.2；applemusic 只收 JPEG / PNG） |
@@ -192,7 +192,7 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 ### 6.3 在哪个 goroutine 里做
 
 - 五家与 spotify：在已有的封面 goroutine 里，紧接下载之后，不新开 goroutine，`telemetry.Guard` 门禁不受影响。kugou 的 `coverTotalBudget = 800ms`（`kugou.go:50-57`）只约束下载超时；常见路径是 800 档、放行耗时微秒级；晚到的 120 档若不做 §4 的源头修正，放大约 19ms。
-- applemusic：在轮询 goroutine 里同步做，**每次换封面阻塞一轮约 50～80ms（本机按 1080～1200 源估计）**。这一拍正跟在 0.12～0.24s 的全扫之后（`applemusic.go:18`、`doc/core.md:147`），全扫期间 `scanTick` 推行，缩放期间不推行，处理完后当轮 `tick` 末尾的 `emitLyricLine` 按当前时钟补推：落在缩放期间的歌词行晚到最多同样长；时钟按墙钟走（`clk.live`），位置不受影响。每首歌通常一到两次（宣告一次，图晚到或换图再一次）。不做异步的理由见 §11；真机耗时超过 100ms 时再按 §11 的异步方案改。
+- applemusic：#101 时在轮询 goroutine 里同步做，**每次换封面阻塞一轮约 50～80ms（本机按 1080～1200 源估计）**：这一拍正跟在 0.12～0.24s 的全扫之后（`applemusic.go:18`、`doc/core.md:147`），全扫期间 `scanTick` 推行，缩放期间不读位置、不推行，落在缩放期间的歌词行晚到最多同样长。**issue #110 起改为异步**（项目负责人 2026-10-13 决定不等真机耗时数据）：本机 1200² 约 75ms、1600² 高熵约 170ms，主播机可能更慢，而轮询下限是 50ms，同步做时歌词行与暂停、跳转的发现都要晚这么久。`setCover` 只记下采用的图（`coverHash` 仍按原始字节），`startCover` 起 `runCoverJob`（挂 `telemetry.Guard`）在独立 goroutine 里调 `CoverDataURI`，结果经容量为 1 的通道交回，由 `tick` 里的 `pollCover` 落地、补发 `song_info_update`。同一时刻至多一次在飞（缩放中途停不下，换歌连按不叠着做）；结果按序号认领、按原始字节哈希比对当前曲目，换歌、换图之后迟到的丢弃，随即缩放当前要的那张；上一次缩放的正是这张图（同专辑连放、同一首重新宣告）时当场使用；会话结束关闭 `coverEnd`，送结果不挂住。会话状态仍只在轮询 goroutine 里读写，不加锁。代价见 §11 该行。
 - `player/` 下不 panic（`agent-doc/03-硬规则.md:111`）：本设计的代码不调用 `panic`，所有错误走返回值退回原样。标准库解码器若在恶意输入上 panic，按现行规矩由 Guard 上报后进程退出；是否给这一个纯函数加局部 recover 属规矩取舍，默认不加（§13 第 6 条）。
 
 ### 6.4 确定性
@@ -203,9 +203,9 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 
 | 对象 | 影响 |
 |---|---|
-| 事件 | 条数、顺序、时机不变；`cover_base64` 的内容变为 800×800；MIME 可能由 `image/jpg` 变为 `image/jpeg` 或 `image/png`，由 PNG 变为 `image/jpeg`（缩放过的） |
+| 事件 | 条数、顺序、时机不变（applemusic 除外：issue #110 起宣告时还没缩放完的先发不带图的一条、落地后补发，§6.3）；`cover_base64` 的内容变为 800×800；MIME 可能由 `image/jpg` 变为 `image/jpeg` 或 `image/png`，由 PNG 变为 `image/jpeg`（缩放过的） |
 | `server/dedup.go` | 确定性输出，去重不变；`dedup_test.go:55-73` 用字面量，不受影响 |
-| 前端 `lyric_page.html` | 同首歌判定用 `cover` URL，不受影响；`data:image/` 前缀不变。非正方形源图在 80px 圆框里由 `object-fit: cover` 显示：今天是居中裁切的效果，拉伸后显示变形的图 |
+| 前端 `lyric_page.html` | 同首歌判定用 `cover` URL，不受影响；`data:image/` 前缀不变。非正方形源图在 80px 圆框里由 `object-fit: cover` 显示：居中裁切的效果；cover_base64 同样居中裁切，两者取景一致 |
 | 体积 | 缩放过的封面 71～204KB；小图放大后比原图大（120² 8KB → 71KB） |
 | `doc/openapi.yaml`、`API_RESPONSE_EXAMPLES.md` 示例 | 示例均为 `data:image/jpeg;base64,…`，不必改；字段描述补尺寸约定（§10） |
 | `tools/docsample` | 不校验 `cover_base64`（`tools/docsample/main.go:74-76`），不受影响 |
@@ -214,12 +214,12 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 
 | 播放器 | 常见路径 | 变化 |
 |---|---|---|
-| wesing | 800 档放行 | 字节不变；`FindCoverURL` 返回非 500 档时被拉伸到 800 |
+| wesing | 800 档放行 | 字节不变；`FindCoverURL` 返回非 500 档时被缩放到 800（非正方形居中裁切） |
 | cloudmusicv3 | 800 档放行 | 字节不变；PNG 的 MIME 改为 `image/png`、JPEG 的改为 `image/jpeg`；Redux / DOM 兜底路径被缩放（或做了源头修正后放行） |
 | qqmusic | 800 档放行 | 字节不变；MIME 为 `image/jpeg`（今天取 `Content-Type`，录音里同为 `image/jpeg`） |
 | kugou | 800 档放行 | 晚到的 120 档：不做源头修正则放大到 800（发糊），做了则放行 |
 | sodamusic | 800 档放行 | 字节不变；`cover_url` 为字符串的分支若非 800 则缩放 |
-| applemusic | 预计缩放（尺寸待确认） | 换封面那一轮多 50～80ms；`cover_base64` 为 800×800 JPEG |
+| applemusic | 预计缩放（尺寸待确认） | 缩放在独立 goroutine 里做（issue #110），不挡轮询；宣告先不带图、落地后补发一条；`cover_base64` 为 800×800 JPEG |
 | spotify（#100 合入后） | 预计缩放（档位待确认） | `cover_base64` 为 800×800；若取到 64 / 300 档，放大后发糊，需 §4 的后续 issue |
 
 `player/spotify/*` 不改。与 PR #100 的重叠只在文档与译表（§10）。
@@ -236,7 +236,7 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 4. 1200²、1080² JPEG：输出解码为 800×800，MIME `image/jpeg`。
 5. 640²、300²、120²、1×1：放大到 800×800。
 6. 800×600、600×800、801×800、800×799：都缩放（只有两边都是 800 才放行）。
-7. 非正方形 1078×875，左 1/4 红、其余蓝：输出的红蓝分界在 x≈200（拉伸；居中裁切会在 x≈154），首行与末行是图像内容而不是留边；875×1078 竖向同理。
+7. 非正方形 1078×875，左 1/4 红、其余蓝：输出的红蓝分界在 x≈154（居中裁切；拉伸会在 x≈200），首行与末行是图像内容而不是留边；875×1078 竖向同理。另见 `TestCenterSquare`（裁切矩形的取整与 Min）、`TestCoverCropMapsPixels`（输出像素与源图的对应）、`TestCoverCropDoesNotBleed`（被裁去的区域不渗进边缘）。
 8. 1600×1600 缩放；1601×10、10×1601 原样。
 9. IHDR 改为 30000²、CRC 重算的 PNG；SOF 改为 65000² 的 JPEG：原样，`testing.AllocsPerRun` 或分配量断言证明没有解码。删掉第 5 步即红。
 10. 截断的非 800 JPEG（头完整）：原样，返回错误。
@@ -255,7 +255,7 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 
 **`player/coverdatauri_lint_test.go`**：§5.4 的门禁与自测。
 
-**applemusic**：现有会话测试的封面是假字节（`sessionharness_test.go:269-281`、`sessioncover_test.go:28`、`sessionstore_test.go:37`），走第 2 步原样退回，断言不变、不改夹具。新增一条：存储里放一张真实的 1200² JPEG，宣告的 `cover_base64` 解码为 800×800；同一张图再次出现时不重复补发（`coverHash` 按原始字节）。
+**applemusic**：现有会话测试的封面是假字节（`sessionharness_test.go:269-281`、`sessioncover_test.go:28`、`sessionstore_test.go:37`），走第 2 步原样退回，断言不变、不改夹具。新增一条：存储里放一张真实的 1200² JPEG，宣告的 `cover_base64` 解码为 800×800；同一张图再次出现时不重复补发（`coverHash` 按原始字节）。issue #110 改为异步后，各会话用例的 `song_info_update` 条数按「先无图、后补图」逐条改写，在飞与作废另由 `sessioncoverjob_test.go` 覆盖（§6.3）。
 
 **kugou**：`cover_test.go:110-120` 的 seam 桩绕过 `FetchCoverBase64`，不受影响。做 §4 源头修正时补一条：晚到的 `/stdmusic/120/` URL 进入 `coverCh` 前被换成 800 档；换歌后第二拍 `info.Cover` 为 120 档时不再触发「Cover URL updated」。
 
@@ -267,7 +267,7 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 
 | 文件 | 改动 |
 |---|---|
-| `doc/openapi.yaml:2549-2552` | `cover_base64` 描述补：800×800；已是 800×800 的原样（JPEG 或 PNG）；其余缩放为 JPEG，非正方形被拉伸；无法处理的原样发出、尺寸不保证 |
+| `doc/openapi.yaml:2549-2552` | `cover_base64` 描述补：800×800；已是 800×800 的原样（JPEG 或 PNG）；其余缩放为 JPEG，非正方形居中裁切；无法处理的原样发出、尺寸不保证 |
 | `doc/API_RESPONSE_EXAMPLES.md:730` | applemusic 的 MIME 说明随之改写 |
 | `doc/core.md:152`、`:218` | applemusic 封面经 `player.CoverDataURI` 规范后发出 |
 | `README.md:79` | 「封面 Base64」补 800×800（§3.5 逐句回代码核） |
@@ -287,12 +287,12 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 
 | 不做 | 理由 |
 |---|---|
-| 保持宽高比（留边或裁切） | 需求原文是「拉伸」。后果：非正方形源图变形，1078×875 的图横向压缩约 19%；而今天随包前端以 `object-fit: cover` 显示的是居中裁切的效果。已知来源的专辑封面都是正方形（录音与调研样本），非正方形只可能来自兜底路径（酷狗歌手头像、QQ 歌手图、网易云 DOM 图、汽水字符串分支、applemusic 缩略图），频率未知。改为裁切只需把第 8 步的源矩形换成居中的正方形，本设计按需求原文拉伸，裁切作为建议向用户提出（§13 第 1 条） |
+| 保持宽高比（留边或裁切） | 采用居中裁切（issue #113，2026-10-13 由需求原文的「拉伸」改订）：非正方形源图居中裁成正方形，长边两端被裁去（1078×875 的图左右各丢约 10%），不变形，取景与随包前端 `object-fit: cover` 一致；留边未采用（输出要铺满 800×800 的方图）。拉伸会使 1078×875 的图横向压缩约 19%，已废止。已知来源的专辑封面都是正方形（录音与调研样本），非正方形只可能来自兜底路径（酷狗歌手头像、QQ 歌手图、网易云 DOM 图、汽水字符串分支、applemusic 缩略图），频率未知 |
 | 不放大小图 | 需求原文要求统一为 800。后果：120 档放大 6.7 倍、64 档放大 12.5 倍后明显发糊；以 §4 的源头修正减少这种情形 |
 | 800×800 的 PNG 转 JPEG | 需求原文要求放行。网易云 800×800 的 PNG 为 1.3～1.4MB，base64 后约 1.8MB，照旧 |
 | EXIF 方向校正 | 要解析 APP1；专辑封面几乎不带方向标签（未证实）。重编码后带方向标签的图会以未转正的样子显示 |
 | ICC 色彩管理 | Go 不做色彩管理，要引入 cgo 或自写转换。若 applemusic 的缩略图带 Display P3 配置文件，重编码后偏灰；需真机确认（§12）后再定 |
-| applemusic 改为异步缩放 | 要在会话里加结果通道、按 `coverHash` 回填，宣告变为「先无图、后补图」两条 `song_info_update`，现有封面会话测试的条数断言都要改，前端会先清空封面再显示。同步阻塞 50～80ms 可接受时不做；真机超过 100ms 再做 |
+| applemusic 改为异步缩放（已做，issue #110） | 原定真机超过 100ms 再做；项目负责人 2026-10-13 决定不等真机数据，已按 §6.3 改为异步。代价照原先的估计：宣告变为「先无图、后补图」两条 `song_info_update`（上一次缩放的正是这张图时仍是一条），随包前端会先清空封面再显示，换歌时旧封面淡出、新封面接替的过渡随之没有（`lyric_page.html` 收到不带图的一条即隐藏封面，补来的一条按首次显示处理）；现有封面会话测试的条数断言已逐条改写 |
 | 引入 imaging、bimg 等第三方库 | 标准库加已有的 `golang.org/x/image`（`go.mod:11`）够用；bimg 需要 cgo |
 | 在 `cover` URL 上保证 800 | URL 是平台给的，前端以它判断同首歌 |
 
@@ -300,7 +300,7 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 
 - `maxJPEGScans`（初值 16）与放行后最坏耗时：用 §9 第 18 条(b)(c)(d)的三类夹具在本机实测，最坏须 ≤100ms，取值以实测为准；主播机的 CPU 可能更慢，上限宁低勿高（低了只是更多渐进式 JPEG 原样放行）。
 - applemusic 缩略图的实际尺寸、格式，以及是否带 ICC（APP2 `ICC_PROFILE`）：播放时取 `/applemusic/song_info` 的 `cover_base64` 解码读头；实现后也可直接看 `cover resized` 日志。
-- applemusic 在主播机上的缩放耗时：看 `cover resized` 日志的耗时，超过 100ms 按 §11 改异步。
+- applemusic 在主播机上的缩放耗时：已改为异步（issue #110，§6.3），不再挡轮询；`cover resized` 日志的耗时仍可用来估计补图的那条比宣告晚多久，未经真机测量。
 - spotify `currentSrc` 取到的档位：已测，300×300（§13 第 3 条）；是否改取 640 档或原图档另议。
 - 酷狗晚到分支取到 120 档、换歌后第二拍改回 120 档：只有读代码推断，未真机复现。
 - 网易云 Redux 与 DOM 兜底路径的出现频率；`param=800y800` 对非正方形原图是裁切、对小于 800 的原图不放大，为调研的实测与肉眼判断，无官方文档。
@@ -310,12 +310,12 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 
 ## 13. 决定
 
-用户（项目负责人）的原话与决定：需求原文「拉伸」；顺序「先 Spotify（#100），#101 不冲突就同步做、先后合并」。其余点由主会话按推荐定，记在这里，用户可推翻：
+用户（项目负责人）的原话与决定：需求原文「拉伸」，2026-10-13 改订「非正方形封面：拉伸改成居中裁切填充吧。」；顺序「先 Spotify（#100），#101 不冲突就同步做、先后合并」。其余点由主会话按推荐定，记在这里，用户可推翻：
 
-1. 非正方形源图：**拉伸**（需求原文）。设计者推荐居中裁成正方形再缩放（与随包前端 `object-fit: cover` 的显示效果一致、不变形），实现上只差第 8 步的源矩形；作为建议向用户提出，用户未改口前不做。
+1. 非正方形源图：**居中裁切**（issue #113；2026-10-13 项目负责人由需求原文的「拉伸」改订）。居中裁成正方形再缩放，与随包前端 `object-fit: cover` 的显示效果一致、不变形，实现上只差第 8 步的源矩形。
 2. 网易云兜底路径与酷狗晚到封面的源头修正：**不并入 #101**，另建 issue（两处都只有读代码的推断、没有真机复现，不在 #101 里做没验证的改动）。
 3. spotify 源头改档：#100 合入后另建 issue。真机实测（2026-10-12，Spotify 1.3.4.258，连续 5 首）`currentSrc` 取到的是 `i.scdn.co/image/ab67616d00001e02…`，解码为 **300×300 JPEG，17～35KB**，不是 issue 标题说的 640；放大到 800 会发糊，建议改取 `ab67616d0000b273`（640）或原图档，见 §12。
 4. 缩放后一律 JPEG、质量 90，透明处按黑底。
-5. applemusic 同步缩放，换封面那一轮歌词行最多晚 50～80ms（本机）；实现后看真机日志，超过 100ms 再改异步。
+5. applemusic 同步缩放，换封面那一轮歌词行最多晚 50～80ms（本机）；实现后看真机日志，超过 100ms 再改异步。2026-10-13 项目负责人改为不等真机数据、直接改异步（issue #110，§6.3）。
 6. 标准库解码器 panic 不加局部 recover，遵守现行 Guard 规矩。
 7. EXIF 方向、ICC 配置文件不处理，写进 `agent-doc/14` 的「已知并接受」。

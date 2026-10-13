@@ -59,11 +59,11 @@ var p4LogMessages = map[string]string{
 	"SHA256 verification succeeded":                                                                  "SHA256 验证成功",
 	"SSE subscribe: path=%s player=%q eventTypes=%v":                                                 "SSE 订阅: path=%s player=%q eventTypes=%v",
 	"WS write failed, closing connection: %s player=%q: %v":                                          "WS 写入失败，关闭连接: %s player=%q: %v",
-	"WS disconnected: %s player=%q (total: %d)":                                                      "WS 断开: %s player=%q (total: %d)",
-	"WS connected: %s player=%q (total: %d)":                                                         "WS 连接: %s player=%q (total: %d)",
+	"WS disconnected: %s player=%q (total: %d)":                                                      "WS 断开: %s player=%q (共 %d)",
+	"WS connected: %s player=%q (total: %d)":                                                         "WS 连接: %s player=%q (共 %d)",
 	"watchdog error: %v":                                                                             "Watchdog 错误: %v",
 	"WeSing.exe not running, waiting...":                                                             "WeSing.exe 未运行，等待中...",
-	"[%s] cover fetched (%d bytes → base64)":                                                         "[%s] 封面已获取 (%d bytes → base64)",
+	"[%s] cover fetched (%d bytes → base64)":                                                         "[%s] cover fetched (%d bytes → base64)",
 	"crypt=%d but content is not QRC ciphertext; treating as plaintext: %v":                          "crypt=%d 但内容不是 QRC 密文，按明文处理: %v",
 	"No config.yml in the executable directory; using %s from the current working directory instead": "exe 目录无 config.yml，改用当前工作目录的 %s",
 	"libcef.dll patch complete. Restarting KuGou...":                                                 "libcef.dll patch 完成！正在重新启动酷狗...",
@@ -90,7 +90,7 @@ var p4LogMessages = map[string]string{
 	"Session ended, waiting for a new WeSing process...":                                    "会话结束，等待新的 WeSing 进程...",
 	"session ended, waiting for NetEase Cloud Music to restart...":                          "会话结束，等待网易云音乐重新启动...",
 	"Session ended; waiting for KuGou to restart...":                                        "会话结束，等待酷狗重新启动...",
-	"Using KUSER_SHARED_DATA to obtain tick count":                                          "使用 KUSER_SHARED_DATA 获取 tick count",
+	"Using KUSER_SHARED_DATA to obtain tick count":                                          "Using KUSER_SHARED_DATA to obtain tick count",
 	"using Redux ID: %s":        "使用 Redux ID: %s",
 	"Using first page: %s (%s)": "使用首页: %s (%s)",
 	"All updates complete! The program will restart automatically...": "全部更新完成！程序将自动重启...",
@@ -225,8 +225,8 @@ var p4LogMessages = map[string]string{
 	"NetEase effect ingest connected: %s":                                                                 "网易云特效Ingest 连接: %s",
 	"NetEase effect WS upgrade failed: %v":                                                                "网易云特效WS Upgrade 失败: %v",
 	"NetEase effect WS write failed, closing connection: %s: %v":                                          "网易云特效WS 写入失败，关闭连接: %s: %v",
-	"NetEase effect WS disconnected: %s (total: %d)":                                                      "网易云特效WS 断开: %s (total: %d)",
-	"NetEase effect WS connected: %s (total: %d)":                                                         "网易云特效WS 连接: %s (total: %d)",
+	"NetEase effect WS disconnected: %s (total: %d)":                                                      "网易云特效WS 断开: %s (共 %d)",
+	"NetEase effect WS connected: %s (total: %d)":                                                         "网易云特效WS 连接: %s (共 %d)",
 	"NetEase effect params updated: quality=%d scale=%.2f headerClickable=%v footerClickable=%v (gen=%d)": "网易云特效参数更新: quality=%d scale=%.2f headerClickable=%v footerClickable=%v (gen=%d)",
 	"NetEase effect control: %s":                                                                          "网易云特效控制: %s",
 	"NetEase Cloud Music window restored":                                                                 "网易云窗口已还原",
@@ -294,7 +294,7 @@ var p4LogMessages = map[string]string{
 	"Audio WS disconnected: %s player=%q":                         "音频WS 断开: %s player=%q",
 
 	// 封面与音译（player/cover.go、player/qqmusic/api.go、player/sodamusic）
-	"[%s] cover URL is not http/https, skipping: %q":                                                                                                          "[%s] 封面 URL 非 http/https，跳过: %q",
+	"[%s] cover URL is not http/https, skipping: %q":                                                                                                          "[%s] cover URL is not http/https, skipping: %q",
 	"Romanization lyric decryption failed; no roma_text for this song (main lyrics and translation unaffected): %v":                                           "音译歌词解密失败，本首无 roma_text（不影响主歌词/翻译）: %v",
 	"roma plaintext (first 120 chars): %s":                                                                                                                    "roma 明文(前120字符): %s",
 	"attachRoma: %d/%d lines have roma_text":                                                                                                                  "attachRoma: %d/%d 行有 roma_text",
@@ -310,7 +310,7 @@ var p4LogMessages = map[string]string{
 
 	// 封面规范化为 800×800（player/cover.go 的 CoverDataURI，issue #101）
 	"[%s] cover not normalized, sent as is: %v":              "[%s] 封面未规范化，原样发出: %v",
-	"[%s] cover resized %dx%d → 800x800 (%d → %d bytes, %v)": "[%s] 封面已缩放 %dx%d → 800x800（%d → %d 字节，%v）",
+	"[%s] cover resized %dx%d → 800x800 (%d → %d bytes, %v)": "[%s] cover resized %dx%d → 800x800 (%d → %d bytes, %v)",
 
 	// —— spotify：watchdog（带调试端口重启 / 自启项）、CDP、会话日志 ——
 	"%s is running without %s; restarting it with the debug and anti-throttling flags (playback resumes automatically)":                                                                  "%s 未带 %s 在运行，正带调试与防节流参数重启它（播放会自动恢复）",
@@ -334,5 +334,7 @@ var p4LogMessages = map[string]string{
 	"Lyrics unavailable: %s":                                                                              "歌词取不到: %s",
 	"Lyrics still unavailable: %s":                                                                        "歌词仍然取不到: %s",
 	"Lyrics has no line-level timing (syncType %s); keeping this track without lyrics":                    "歌词没有行级时间轴（syncType %s），本首按无歌词处理",
+	"No lyrics for this track (HTTP 404); not retrying":                                                   "平台没有这首歌的歌词（HTTP 404），不再重试",
+	"Giving up on lyrics for this track after %d attempts":                                                "已补取 %d 次仍取不到歌词，本首不再重试",
 	"Large cover unavailable; falling back to the page's cover URL":                                       "大尺寸封面取不到，改用页面上的封面地址",
 }
