@@ -85,6 +85,11 @@ type Options struct {
 	// PlayerNames 是播放器注册表（main.go 里那个）。要它是因为 cfg.Players 只含**被显式配过**
 	// 的播放器，而我们要报的是每个播放器实际在用的 offset/poll（未配的会回落到全局值）。
 	PlayerNames []string
+
+	// Process 标明事件来自哪个子进程，现只有音频采集 helper（"audio-helper"）；主服务不设。
+	// 非空时 scope 带 process 标签（applyProcess），playercap 上下文不写 config 与 overwritten：
+	// 子进程不加载配置，零值会被读成「配置全是默认」。
+	Process string
 }
 
 // Enabled 报告遥测是否启用，即 DSN 有没有被注入。
@@ -156,9 +161,13 @@ func Init(opts Options) {
 	// 没有版本/build/edition。这一坨全得自己采，见 sysinfo.go。
 	sys := collectOSInfo()
 	app := collectAppInfo(opts.Version, opts.Config, opts.PlayerNames)
+	if opts.Process != "" {
+		app.Config, app.Overwritten = nil, nil // 子进程不加载配置，见 Options.Process
+	}
 	sentry.ConfigureScope(func(scope *sentry.Scope) {
 		applyOSInfo(scope, sys)
 		applyAppInfo(scope, app)
+		applyProcess(scope, opts.Process)
 		applyUserIP(scope) // 见 userip.go：SendDefaultPII 在 Go SDK 里给不出 IP，实测过
 	})
 

@@ -72,8 +72,7 @@ type capture struct {
 // 的 Stop、有界帧与诊断 channel、WaitGroup 编排关停；卡死不返回的采集 goroutine 或 watcher 由限时退出
 // 进程回收。
 //
-// 遥测无需传 DSN：DSN 是编译期 ldflags 注入的包级变量，helper 与主服务同一 exe → DSN 天然一致，
-// telemetry.Init(Options{}) 已用对（helper 短路早于主服务 init，故 helper 自己 Init，见 §2.1）。
+// 遥测由 main.go 的 helper 分支在调用 Run 之前初始化（带版本号、环境与 process 标签），Run 只挂 Guard。
 func Run(stdin io.Reader, stdout io.Writer) {
 	// stdout 只写帧：把标准 log 钉死到 stderr，杜绝任何库（含 telemetry/logger，皆走 std log）
 	// 经默认 log 污染帧流——stdout 污染会冲垮主服务分帧，是致命故障。
@@ -81,7 +80,6 @@ func Run(stdin io.Reader, stdout io.Writer) {
 
 	// helper 进程自己的遥测：允许 defer Guard 在 helper 内 re-panic 杀 helper（隔离在此进程，
 	// 主服务由 Job Object/重启兜底）。Guard 无论 Init 与否都能安全 re-panic（未启用即零开销直抛）。
-	telemetry.Init(telemetry.Options{})
 	defer telemetry.Guard()
 
 	frames := make(chan []byte, outChanCap)

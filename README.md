@@ -250,6 +250,11 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 
 > 各接口事件类型、字段结构及完整消息示例请参阅 [在线 API 文档](https://playercap.nexus.metabox.apifox.vtb.link/)，README 不再同步维护此部分内容。
 
+### OBS 页面
+
+- 随包的 `lyric_display.html`、`lyric_page.html`（歌词）与 `effect_display.html`、`effect_page.html`（网易云特效歌词镜像）自 4.0 起是跳转页：打开后带着全部查询参数跳到线上 v3 的同名页面（`https://playercap.cfg.vtb.tools/v3/`，3.x 页面的冻结副本）；`lyric_page.html` 的查询串除 `lang` 外没有任何参数时，改为打开线上的新编辑器（`https://playercap.cfg.vtb.tools/`，`lang` 原样带上）
+- 使用时需要联网；OBS 浏览器源既可以继续指向这些本地文件，也可以直接填线上地址
+
 ### 接口清单参考
 
 **根端点**（返回当前活跃播放器数据）：

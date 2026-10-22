@@ -113,6 +113,7 @@ var p4LogMessages = map[string]string{
 	"Cover (album pmid): %s":                                                        "封面(专辑pmid): %s",
 	"Cover (singer): %s → %s":                                                       "封面(歌手): %s → %s",
 	"Cover download failed: %s":                                                     "封面下载失败: %s",
+	"Cannot open the WeSing process for cover retries: %v":                          "无法打开全民K歌进程，跳过封面重试: %v",
 	"Patched NetEase Cloud Music autostart flags: %s":                               "已修补网易云自启动参数: %s",
 	"Loaded %s":                        "已加载 %s",
 	"Copied to canonical filename: %s": "已复制为标准文件名: %s",
@@ -270,6 +271,8 @@ var p4LogMessages = map[string]string{
 	// 音频波形：主服务侧管理器（audiocap/manager）
 	"[idle-keepalive] panic recovered locally: %v":        "[idle-keepalive] panic 已本地恢复: %v",
 	"[demux] panic recovered locally: %v":                 "[demux] panic 已本地恢复: %v",
+	"[stderr-pump] panic recovered locally: %v":           "[stderr-pump] panic 已本地恢复: %v",
+	"[telemetry-report] panic recovered locally: %v":      "[telemetry-report] panic 已本地恢复: %v",
 	"Process snapshot failed: %v":                         "进程快照失败: %v",
 	"Failed to start helper: %v":                          "helper 启动失败: %v",
 	"Audio capture helper started (pid=%d)":               "音频捕获 helper 已启动 (pid=%d)",

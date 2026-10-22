@@ -96,7 +96,7 @@ func (p *SodaMusicPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Soda Music not running or not connected"), Reason: player.ReasonProcessNotRunning})
+		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Soda Music not running or not connected"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		pid, err := watchdog.FindMainPID()
@@ -547,7 +547,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 // **不变量：即使 b64 拿不到（超时/过大/失败）也照发带 URL 的信息**——绝不为封面吞掉歌曲信息，
 // 否则 OBS 整首停在上一首（轮询只在换歌时发、不自愈）。FetchCoverBase64 图片超限时本就返回空 URL 照发。
 //
-// **第一条必须带上 coverURL，别再退回「不含封面」。** 前端（lyric_page.html 的
+// **第一条必须带上 coverURL，别再退回「不含封面」。** 前端（旧版歌词页 lyric_page.html，4.0 起是线上 v3 的冻结副本，源码在前端仓库的 public/v3/；其
 // updateSongInfoRow）用 `info.cover_base64 || info.cover` 取封面源，为空就走
 // `coverArt.classList.remove('visible')` —— 那是**无过渡的硬隐藏**。于是换歌时前端先被这条
 // 空封面把旧封面瞬间抹掉，等第二条 base64 到了又因为此刻 `visible` 已被摘掉而落进「首次显示」

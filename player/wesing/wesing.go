@@ -13,7 +13,6 @@ import (
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/wesing/lyric"
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
-	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 const (
@@ -53,13 +52,14 @@ func (p *WesingPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("WeSing client not running"), Reason: player.ReasonProcessNotRunning})
+		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("WeSing client not running"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		handle, pid := p.waitForProcess()
 		p.runSession(handle, pid, offsetSec, pollInterval)
 		proc.CloseProc(handle)
 
+		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo（issue #118）
 		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("WeSing client has exited"), Reason: player.ReasonProcessExited})
 		p.Emit(player.EventClearSongData, nil)
 		log.Info("Session ended, waiting for a new WeSing process...")
@@ -255,34 +255,9 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		// 异步获取封面 base64（带重试），完成后补发 song_info_update。
 		// 带代次守卫：这里的窗口最长约 10s（5×1s 内存重试 + 5s 下载），是 cloudmusic / qqmusic / wesing 三家里最宽的；
 		// 无守卫时迟到的回写会把这首歌的标题+封面盖在下一首上，且整首歌不自愈。
+		// 内存重试用的句柄由封面 goroutine 自己另开、自己关，见 startCoverFetch（issue #117）。
 		coverGen := p.NewSongGen()
-		go func(gen uint64, handle syscall.Handle, mid, name, singer, title, url string) {
-			defer telemetry.Guard()
-			coverURL := url
-			// 如果初始未获取到封面 URL，重试从内存中搜索（K歌客户端可能延迟加载封面数据）
-			if coverURL == "" && mid != "" {
-				for i := 0; i < 5; i++ {
-					time.Sleep(1 * time.Second)
-					if found := lyric.FindCoverURL(handle, mid); found != "" {
-						coverURL = strings.Replace(found, "/mid_album_500/", "/mid_album_800/", 1)
-						log.Info("Cover URL fetched on retry %d", i+1)
-						break
-					}
-				}
-			}
-			if coverURL == "" {
-				log.Warn("Cover URL fetch failed, skipping base64 encoding")
-				return
-			}
-			if b64 := player.FetchCoverBase64("WeSing", coverURL, 5*time.Second); b64 != "" {
-				p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
-					Name: name, Singer: singer, Title: title,
-					Cover: coverURL, CoverBase64: b64,
-				})
-			} else {
-				log.Warn("Cover download failed: %s", coverURL)
-			}
-		}(coverGen, handle, songMID, songName, singer, songTitle, coverURL)
+		p.startCoverFetch(realCoverFetchOps, coverGen, pid, songMID, songName, singer, songTitle, coverURL)
 
 		lastPhase = proc.PhasePlaying
 

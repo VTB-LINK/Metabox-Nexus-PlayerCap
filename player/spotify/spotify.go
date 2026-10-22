@@ -190,7 +190,7 @@ func (p *SpotifyPlayer) Start() {
 		}
 
 		// 每轮先声明「未连上」，避免上一场的状态留在缓存里（与 sodamusic 同形）。
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Spotify not running or not connected"), Reason: player.ReasonProcessNotRunning})
+		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Spotify not running or not connected"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		err := watchdog.EnsureDebugMode()

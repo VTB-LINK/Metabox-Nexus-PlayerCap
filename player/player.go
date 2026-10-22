@@ -238,6 +238,11 @@ type BaseEmitter struct {
 
 	// lastSampleAt 是上一条位置采样发出的时刻（EmitPositionSample）。只由播放器的轮询循环读写。
 	lastSampleAt time.Time
+
+	// lastStatus 是最近一次成功入队的 status_update 的内容（StatusInfo 值），供 EmitStatusIfChanged 比较。
+	// 用 atomic.Value 而非 sync.Mutex：BaseEmitter 按值嵌入，含 noCopy 的类型会被 vet 的 copylocks 报，
+	// 而 atomic.Value 的零值可复制。只存 StatusInfo 一种具体类型。
+	lastStatus atomic.Value
 }
 
 // NewBaseEmitter 创建 BaseEmitter
@@ -255,10 +260,35 @@ func (b *BaseEmitter) Stop()                { close(b.StopCh) }
 
 // Emit 向事件通道发送事件，通道满时丢弃（非阻塞）。
 func (b *BaseEmitter) Emit(evtType string, data interface{}) {
+	b.emit(evtType, data)
+}
+
+// emit 是 Emit 的实体，返回事件是否入队。入队的 status_update 记为「最近一次发出的状态」，
+// 不论经 Emit 还是 EmitStatusIfChanged，这样中间插进来的别的状态会自然让下一次比较判为有变化。
+func (b *BaseEmitter) emit(evtType string, data interface{}) bool {
 	select {
 	case b.EventCh <- Event{PlayerName: b.PlayerName, Type: evtType, Data: data}:
+		if evtType == EventStatusUpdate {
+			if si, ok := data.(*StatusInfo); ok && si != nil {
+				b.lastStatus.Store(*si)
+			}
+		}
+		return true
 	default:
+		return false
 	}
+}
+
+// EmitStatusIfChanged 发 status_update，但内容（Status、Detail、Reason）与本播放器最近一次成功发出的
+// 状态完全相同时不发，返回是否真的发出。用于「未运行」这类持续状态：播放器的外层循环每轮都要声明一次，
+// 不该每轮都推给订阅者（issue #119）。别的状态（经 Emit 发出的 playing、paused、standby 等）会让下一次
+// 比较判为有变化；通道满而丢弃的不记，下一次仍会发。**waiting_process 一律经它发**
+// （✅ player/waitingstatus_lint_test.go）。只应由播放器的轮询循环调用（与 Emit 的约定相同）。
+func (b *BaseEmitter) EmitStatusIfChanged(info *StatusInfo) bool {
+	if last, ok := b.lastStatus.Load().(StatusInfo); ok && last == *info {
+		return false
+	}
+	return b.emit(EventStatusUpdate, info)
 }
 
 // PositionSampleInterval 是播放中相邻两条位置采样（EventPositionSample）的间隔。

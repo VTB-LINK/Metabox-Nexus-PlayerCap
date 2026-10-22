@@ -961,6 +961,8 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		Endpoints         *OrderedMap `json:"endpoints"`
 		ClientCount       int         `json:"client_count"`
 		WSConnected       interface{} `json:"ws_connected"`
+		AudioWSConnected  interface{} `json:"audio_ws_connected"`
+		EffectWSConnected interface{} `json:"effect_ws_connected"`
 	}{
 		Version:           info.Version,
 		Capabilities:      capabilities,
@@ -975,13 +977,20 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		PlayerStatus:      playerStatus,
 		Endpoints:         info.Endpoints,
 		ClientCount:       len(clients),
-		WSConnected: map[string]interface{}{
-			"connected": len(clients) > 0,
-			"clients":   clients,
-		},
+		WSConnected:       wsStatus(clients),
+		AudioWSConnected:  wsStatus(s.AudioClientAddrs()),
+		EffectWSConnected: wsStatus(s.EffectClientAddrs()),
 	}
 
 	writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: "internal", Data: data})
+}
+
+// wsStatus 是 /service-status 里 ws_connected / audio_ws_connected / effect_ws_connected 共用的形状。
+func wsStatus(clients []string) map[string]interface{} {
+	return map[string]interface{}{
+		"connected": len(clients) > 0,
+		"clients":   clients,
+	}
 }
 
 // resolvePlayer 根据路径或 active player 确定用哪个播放器。

@@ -107,9 +107,15 @@ paths:
         - 注意 `"error"` 不在 `player_running` 的排除集内，故障中的 kugou 仍会出现在 `player_running` 里
 
         **ws_connected 说明：**
-        - 仅统计 `/ws` 与 `/{player}/ws` 的连接；SSE、`effect-ws`、`audio-ws` 连接不计入
+        - 仅统计 `/ws` 与 `/{player}/ws` 的连接；SSE、`effect-ws`、`audio-ws` 连接不计入（后两者见下）
         - `connected` - 布尔值，表示是否存在上述连接
         - `clients` - 字符串数组，上述连接的客户端地址列表（RemoteAddr 格式）
+
+        **audio_ws_connected / effect_ws_connected 说明：**
+        - 与 `ws_connected` 同形（`connected`、`clients`），三组互不计入
+        - `audio_ws_connected` 统计 `/audio-ws` 与 `/{player}/audio-ws` 的连接，`effect_ws_connected` 统计 `/cloudmusicv3/effect-ws` 的连接
+        - 无连接时 `clients` 为空数组
+        - 旧后端没有这两个字段，按字段是否存在判断
 
         **endpoints 说明：**
         - 返回所有可用接口的完整地址（含 Per-player 端点）
@@ -312,6 +318,13 @@ paths:
                         clients:
                           - "192.168.1.100:54321"
                           - "192.168.1.200:54322"
+                      audio_ws_connected:
+                        connected: true
+                        clients:
+                          - "192.168.1.100:54330"
+                      effect_ws_connected:
+                        connected: false
+                        clients: []
 
   # ============================================================
   # 根端点（跟随活跃播放器）
@@ -2246,7 +2259,7 @@ components:
 
     ServiceStatusData:
       type: object
-      required: [version, capabilities, addr, now_time, config_sources, config, config_effective, config_overwritten, player_support, player_running, player_status, endpoints, client_count, ws_connected]
+      required: [version, capabilities, addr, now_time, config_sources, config, config_effective, config_overwritten, player_support, player_running, player_status, endpoints, client_count, ws_connected, audio_ws_connected, effect_ws_connected]
       properties:
         version:
           type: string
@@ -2523,6 +2536,36 @@ components:
               items:
                 type: string
               example: ["192.168.1.100:54321", "192.168.1.200:54322"]
+        audio_ws_connected:
+          type: object
+          description: 音频波形通道（`/audio-ws` 与 `/{player}/audio-ws`）的连接状态，与 `ws_connected` 同形，互不计入
+          required: [connected, clients]
+          properties:
+            connected:
+              type: boolean
+              description: 是否存在 `/audio-ws` 或 `/{player}/audio-ws` 连接
+              example: true
+            clients:
+              type: array
+              description: "`/audio-ws` 与 `/{player}/audio-ws` 连接的客户端地址列表（RemoteAddr 格式）；无连接时为空数组"
+              items:
+                type: string
+              example: ["192.168.1.100:54330"]
+        effect_ws_connected:
+          type: object
+          description: 网易云特效通道（`/cloudmusicv3/effect-ws`）的连接状态，与 `ws_connected` 同形，互不计入
+          required: [connected, clients]
+          properties:
+            connected:
+              type: boolean
+              description: 是否存在 `/cloudmusicv3/effect-ws` 连接
+              example: false
+            clients:
+              type: array
+              description: "`/cloudmusicv3/effect-ws` 连接的客户端地址列表（RemoteAddr 格式）；无连接时为空数组"
+              items:
+                type: string
+              example: []
 
     StatusInfo:
       type: object

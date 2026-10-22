@@ -77,15 +77,22 @@ func collectAppInfo(version string, cfg config.Config, playerNames []string) app
 	return a
 }
 
-// applyAppInfo 把自身信息写进 scope。
+// applyAppInfo 把自身信息写进 scope。a.Config 为 nil（子进程，见 Options.Process）时不写
+// config、overwritten 与取自配置的两个 tag：子进程不加载配置，零值会被读成「配置全是默认、主播没动过」。
 func applyAppInfo(scope *sentry.Scope, a appInfo) {
-	scope.SetContext("playercap", map[string]any{
-		"version":     a.Version,
-		"exe_path":    a.ExePath,
-		"config":      a.Config,
-		"overwritten": a.Overwritten,
-		"sources":     a.Sources,
-	})
+	ctx := map[string]any{
+		"version":  a.Version,
+		"exe_path": a.ExePath,
+		"sources":  a.Sources,
+	}
+	if a.Config != nil {
+		ctx["config"] = a.Config
+		ctx["overwritten"] = a.Overwritten
+	}
+	scope.SetContext("playercap", ctx)
+	if a.Config == nil {
+		return
+	}
 
 	// effect-strategy 是个已知的故障维度（park 的屏外保活在 Win11 上失效，会黑屏），
 	// 值得一个能分面的 tag。
@@ -97,6 +104,11 @@ func applyAppInfo(scope *sentry.Scope, a appInfo) {
 
 	// 「主播动过配置没有」是个好的第一刀：绝大多数机器是默认配置，出问题的往往不是。
 	scope.SetTag("config.customized", boolTag(len(a.Overwritten) > 0))
+}
+
+// applyProcess 给子进程的事件打 process 标签（见 Options.Process），空串不设。
+func applyProcess(scope *sentry.Scope, process string) {
+	setTagIfNotEmpty(scope, "process", process)
 }
 
 // boolTag 把 bool 转成 tag 用的字符串。

@@ -18,9 +18,11 @@ import (
 // 所有发送一律非阻塞 drop-oldest：慢客户端只丢帧、永不回压主服务或 helper 排空循环。
 
 // audioSub 是一个音频帧订阅者。player=="" 为 root（跟随 activePlayer 缓存）；非空为固定那一家。
+// addr 是客户端的 RemoteAddr，仅供 /service-status 的 audio_ws_connected 回显。
 type audioSub struct {
 	ch     chan []byte
 	player string
+	addr   string
 }
 
 // audioHub 按 player 键 fan-out 音频帧。
@@ -136,6 +138,18 @@ func (h *audioHub) removeSub(s *audioSub) {
 	h.mu.Unlock()
 }
 
+// AudioClientAddrs 返回 /audio-ws 与 /<player>/audio-ws 全部连接的客户端地址（无连接时为空切片，非 nil）。
+func (s *Server) AudioClientAddrs() []string {
+	h := s.audioHub
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	addrs := []string{}
+	for sub := range h.subs {
+		addrs = append(addrs, sub.addr)
+	}
+	return addrs
+}
+
 // AudioHub 供捕获管理器（Task 10/11）拿到 hub 以扇出帧、读订阅门控。
 // 导出方法返回未导出类型合法（vet 干净）；manager 侧用接口接收它，不依赖具体类型。
 func (s *Server) AudioHub() *audioHub {
@@ -170,7 +184,7 @@ func (s *Server) handleAudioWS(playerName string) http.HandlerFunc {
 			return
 		}
 
-		sub := &audioSub{ch: make(chan []byte, 8), player: playerName}
+		sub := &audioSub{ch: make(chan []byte, 8), player: playerName, addr: conn.RemoteAddr().String()}
 		s.audioHub.addSub(sub)
 		serverLog.Info("Audio WS connected: %s player=%q", conn.RemoteAddr(), playerName)
 

@@ -59,7 +59,7 @@ func (p *QQMusicPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("QQ Music not running"), Reason: player.ReasonProcessNotRunning})
+		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("QQ Music not running"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		mem, err := ConnectQQMusic()

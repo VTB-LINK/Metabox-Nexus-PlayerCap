@@ -218,9 +218,9 @@ func (p *AppleMusicPlayer) Start() {
 		r, err := mem.Attach()
 		if err != nil {
 			if errors.Is(err, mem.ErrAccessDenied) {
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Apple Music process (Apple Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
+				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Apple Music process (Apple Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
 			} else {
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Apple Music not running"), Reason: player.ReasonProcessNotRunning})
+				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Apple Music not running"), Reason: player.ReasonProcessNotRunning})
 			}
 			p.Emit(player.EventClearSongData, nil)
 			if p.sleepOrStop(3 * time.Second) {

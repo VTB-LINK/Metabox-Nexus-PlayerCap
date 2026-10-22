@@ -11,10 +11,15 @@ package telemetry
 //	appinfo.go    → 遥测段的程序那行（playercap context：version/exe_path/config/overwritten/sources）
 //	userip.go     → 遥测段的网络那行（user.ip_address = {{auto}}，由 Sentry 服务端填）
 //	report.go     → 遥测段的播放器那行（ReportOnce 的 key 与 extra）
+//	audiocap/manager/telemetry.go
+//	              → 遥测段的音频采集那行（三个事件的 tags 与 extra：退出码、运行时长、失败次数、stderr 末几行）
+//	appinfo.go 的 applyProcess
+//	              → 同上那行（音频采集 helper 的事件带 process 标签）
 //	panic.go      → 遥测段的崩溃那行（Guard 上报的 Exception 与栈）
 //	clientid/     → 更新段（版本检查请求头，见 clientid.HeaderNames）
 //
-// ✅ 有门禁：privacynotice_test.go 逐项核对遥测段；gatewaynotice_test.go 核对更新段。
+// ✅ 有门禁：privacynotice_test.go 逐项核对遥测段；audionotice_test.go 核对音频采集的事件（取
+// manager.SampleTelemetryEvents，与真实上报共用构造函数）；gatewaynotice_test.go 核对更新段。
 //
 // # 为什么分成两段、各自开关
 //
@@ -54,6 +59,7 @@ const (
      · 系统：Windows 版本与 edition、语言、时区、CPU 架构与核数、设备名
      · 程序：版本号、安装路径（含 Windows 用户名）、config.yml 的全部配置项
      · 播放器：版本号与异常类型（版本不受支持、歌词解密失败等）
+     · 音频采集：采集进程异常退出或放弃时的退出码、运行时长、失败次数与诊断日志末几行（含播放器名、PID、系统错误码）
      · 网络：本机公网 IP（由遥测服务端记录）
      · 崩溃时的调用栈
 
@@ -102,6 +108,7 @@ const (
      · System: Windows version and edition, language, time zone, CPU architecture and core count, device name
      · Program: version, install path (includes the Windows user name), all config.yml settings
      · Player: version and anomaly type (unsupported version, lyric decryption failure, etc.)
+     · Audio capture: on an abnormal exit or give-up of the capture process, its exit code, run time, failure count and the last lines of its diagnostic log (including player names, PIDs and system error codes)
      · Network: this machine's public IP (recorded by the telemetry server)
      · Call stack at the moment of a crash
 

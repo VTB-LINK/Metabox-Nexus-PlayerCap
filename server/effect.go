@@ -36,7 +36,8 @@ type effectMsg struct {
 }
 
 type effectSub struct {
-	ch chan effectMsg
+	ch   chan effectMsg
+	addr string // 客户端 RemoteAddr，仅供 /service-status 的 effect_ws_connected 回显
 }
 
 type effectHub struct {
@@ -181,6 +182,18 @@ func (s *Server) HasEffectSubscribers() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs) > 0
+}
+
+// EffectClientAddrs 返回 /cloudmusicv3/effect-ws 全部连接的客户端地址（无连接时为空切片，非 nil）。
+func (s *Server) EffectClientAddrs() []string {
+	h := s.effectHub
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	addrs := []string{}
+	for sub := range h.subs {
+		addrs = append(addrs, sub.addr)
+	}
+	return addrs
 }
 
 // BroadcastEffectFrame 向所有特效订阅者广播一帧 JPEG（满则丢最新优先）
@@ -398,16 +411,13 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setEffectParams(quality, scale, headerClickable, footerClickable)
 
-	sub := &effectSub{ch: make(chan effectMsg, 8)}
+	sub := &effectSub{ch: make(chan effectMsg, 8), addr: conn.RemoteAddr().String()}
 	h := s.effectHub
 	h.mu.Lock()
 	h.subs[sub] = struct{}{}
 	count := len(h.subs)
 	h.mu.Unlock()
 	serverLog.Info("NetEase effect WS connected: %s (total: %d)", conn.RemoteAddr(), count)
-
-	// 连接即发一次当前状态（网易云是否活跃输出）
-	sub.ch <- effectMsg{mt: websocket.TextMessage, data: s.effectStatusJSON()}
 
 	// 写失败必须显式关连接，理由同 server.go 的 handleWS：写失败不蕴含连接已断，
 	// 只 return 会让读循环永远阻塞、sub 永远留在 h.subs 里（截帧管线因此继续为
@@ -425,6 +435,16 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+
+	// 连接即发一次当前状态（网易云是否活跃输出）。
+	//
+	// **必须在写 goroutine 启动之后**，且要同时监听 done：订阅者已登记在 h.subs，广播随时可能
+	// 把容量为 8 的 sub.ch 填满；写 goroutine 启动前（或已因写失败退出后）做阻塞发送会永久卡住
+	// handler，使它进不了读循环与注销路径，订阅者成为僵尸（issue #123）。
+	select {
+	case sub.ch <- effectMsg{mt: websocket.TextMessage, data: s.effectStatusJSON()}:
+	case <-done:
+	}
 
 	// Read loop：保活 + 断开检测（也消费客户端可能发来的控制消息）
 	for {

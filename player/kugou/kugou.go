@@ -195,7 +195,7 @@ func (p *KuGouPlayer) Start() {
 		default:
 		}
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("KuGou not running or CDP not ready"), Reason: player.ReasonProcessNotRunning})
+		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("KuGou not running or CDP not ready"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
 		// 自动检测并修复：若 libcef.dll 未 patch 则 kill → patch → 重启酷狗

@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -20,6 +22,7 @@ import (
 	"Metabox-Nexus-PlayerCap/audiocap/frame"
 	"Metabox-Nexus-PlayerCap/audiocap/procscan"
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
 var managerLog = logger.New("AudioCap] [Manager") // 渲染为 [AudioCap] [Manager]
@@ -69,6 +72,46 @@ type helperProc struct {
 	// watchdogKill 为真表示本进程由看门狗判假死而杀：超时各路已逐播放器记账，reapHelper 不再计 helper
 	// 快速失败、不退避。仅 Run 访问。
 	watchdogKill bool
+	// stderrTail 是本 helper stderr 的有界尾部，由读泵写入、上报时取快照；nil 表示未接管 stderr（测试构造）。
+	stderrTail *tailBuffer
+
+	// mu 保护 exit 与 killMarkedAt。exit 由 demux 在 cmd.Wait 返回后、close(exited) 之前写入；killMarkedAt 是
+	// manager 首次主动终止本进程（killHelperForRestart、teardownHelper）的调用时刻（墙钟），从未终止为零。
+	// 二者交给 classifyExit 判定是否为自行退出。
+	mu           sync.Mutex
+	exit         exitInfo
+	killMarkedAt time.Time
+}
+
+// markKilled 记下 manager 首次主动终止本 helper 的时刻。已记过的不覆盖：先被看门狗杀、后被拆除时，判定用最早的
+// 那次下手，否则死在两次下手之间的进程会被当成自行退出。
+func (hp *helperProc) markKilled() {
+	hp.mu.Lock()
+	defer hp.mu.Unlock()
+	if hp.killMarkedAt.IsZero() {
+		hp.killMarkedAt = time.Now().Round(0) // 只留墙钟，与 exit.at 同一时钟域
+	}
+}
+
+// recordExit 在 cmd.Wait 返回后记下退出信息（demux 调用）。
+func (hp *helperProc) recordExit() {
+	e := exitInfoOf(hp.cmd.ProcessState, time.Now().Round(0))
+	hp.mu.Lock()
+	hp.exit = e
+	hp.mu.Unlock()
+}
+
+// exitInfoOf 从 ProcessState 取退出信息：at 取进程真实的退出时刻（GetProcessTimes 的 ExitTime，经 SysUsage
+// 取得），取不到时退回 observed。ps 为 nil（Wait 没拿到进程状态）时 known 为假。
+func exitInfoOf(ps *os.ProcessState, observed time.Time) exitInfo {
+	if ps == nil {
+		return exitInfo{}
+	}
+	e := exitInfo{known: true, code: uint32(ps.ExitCode()), at: observed}
+	if ru, ok := ps.SysUsage().(*syscall.Rusage); ok && ru.ExitTime != (syscall.Filetime{}) {
+		e.at = time.Unix(0, ru.ExitTime.Nanoseconds())
+	}
+	return e
 }
 
 // Manager 监管唯一的音频 helper 子进程：门控计算、下发差异控制、退避重启、假死看门狗、stdout 解复用。
@@ -77,7 +120,8 @@ type helperProc struct {
 // respawnAfter 全部只由 Run goroutine 单线程访问（reconcile 与看门狗都在 Run 上跑），无需锁。跨
 // goroutine 共享的只有 lastFrame（解复用 goroutine 写、Run 的看门狗读写）与 lastForward（解复用
 // goroutine 写、idleKeepalive 读），均由 mu 保护；demux 与 idleKeepalive 也在 mu 内向 sink 广播，使同一
-// 播放器的真帧与空闲帧严格串行。
+// 播放器的真帧与空闲帧严格串行。遥测相关的 lastExit / lastTail 同样只由 Run 访问；report / reportDelay /
+// stderrOut 构造后只读；shutdown 是原子标志，任意 goroutine 可置位。
 type Manager struct {
 	sink         AudioSink
 	status       func(name string) string       // 主服务 GetPlayerStatus：返回 "playing"/"paused"/"idle"/...
@@ -103,6 +147,17 @@ type Manager struct {
 	// lastForward 是每 player 最近一次转发真帧的时刻（idleKeepalive 判无捕获）。只由 demux 写，不含下发
 	// 基线，reap / teardown 时不清空。
 	lastForward map[string]time.Time
+
+	// 遥测（issue #120）。report 接收延后触发的事件，nil 时不上报（测试里直接构造的 Manager），New 设为
+	// reportToSentry；reportDelay 是延后时长；stderrOut 是 helper stderr 的转发目标，nil 为 os.Stderr。
+	report      func(TelemetryEvent)
+	reportDelay time.Duration
+	stderrOut   io.Writer
+	// shutdown 由 BeginShutdown 或 Stop 置位，延后的上报触发时见到即丢弃。
+	shutdown atomic.Bool
+	// lastExit、lastTail 是最近一个结算过的 helper 的退出信息与 stderr 尾部，helper_gave_up 用。
+	lastExit exitInfo
+	lastTail *tailBuffer
 }
 
 // New 构造管理器。sink 为帧接收/门控能力（server 的 *audioHub），status 为主服务播放状态查询
@@ -123,7 +178,14 @@ func New(sink AudioSink, status func(name string) string, normResolver func(play
 		captureFails: map[string]captureFailure{},
 		lastFrame:    map[string]time.Time{},
 		lastForward:  map[string]time.Time{},
+		report:       reportToSentry,
+		reportDelay:  telemetryReportDelay,
 	}
+}
+
+// reportToSentry 是 Manager.report 的默认实现。
+func reportToSentry(ev TelemetryEvent) {
+	telemetry.ReportOnce(ev.Key, ev.Message, ev.Tags, ev.Extra)
 }
 
 // Wake 非阻塞唤醒：向缓冲=1 的 wakeCh 投一个信号（已满则丢弃，多次唤醒合并成一次重算）。
@@ -135,9 +197,17 @@ func (m *Manager) Wake() {
 	}
 }
 
-// Stop 请求 Run 退出（幂等）。Run 收到即拆除 helper 并返回。
+// Stop 请求 Run 退出（幂等）。Run 收到即拆除 helper 并返回。同 BeginShutdown，此后触发的延后上报一律丢弃。
 func (m *Manager) Stop() {
+	m.shutdown.Store(true)
 	m.stopOnce.Do(func() { close(m.stopCh) })
+}
+
+// BeginShutdown 标记主服务开始关停（幂等，只置原子标志，任意 goroutine 可调）：此后触发的延后上报一律丢弃。
+// main.go 的信号处理在最开头调用——Ctrl+C、关闭控制台窗口等会把 helper 与主服务一并结束，那不是 helper 自身的
+// 故障。信号处理不调 Stop（见 main.go），故另设此入口。
+func (m *Manager) BeginShutdown() {
+	m.shutdown.Store(true)
 }
 
 // Run 阻塞跑管理循环：秒级 ticker 或 Wake 或 helper 退出通知，先到即 reconcile；stopCh 关则拆
@@ -286,7 +356,7 @@ func (m *Manager) reconcile() {
 		}
 		if err := m.spawnHelper(); err != nil {
 			managerLog.Warn("Failed to start helper: %v", err)
-			m.noteSpawnFailure()
+			m.noteSpawnFailure(err)
 			return
 		}
 	}
@@ -395,32 +465,53 @@ func (m *Manager) checkWatchdog(want map[string]uint32) {
 	}
 }
 
-// noteCaptureFailure 按本次下发时刻给 player 记一次捕获失败（pid 为其当前 PID）并打日志。仅 Run 调用。
+// noteCaptureFailure 按本次下发时刻给 player 记一次捕获失败（pid 为其当前 PID）并打日志；放弃时延后上报
+// capture_gave_up，附当前 helper 的 stderr 尾部（激活失败的 HRESULT 在其中）。仅 Run 调用。
 func (m *Manager) noteCaptureFailure(player string, pid uint32, now time.Time) {
 	f := recordCaptureFailure(m.captureFails[player], now, m.dispatchedAt[player], pid)
 	m.captureFails[player] = f
 	if f.givenUp {
 		managerLog.Warn("Capture for player %q failed %d times in a row; giving up its waveform until its process restarts. Other players are unaffected", player, f.count)
+		var tail *tailBuffer
+		if m.helper != nil {
+			tail = m.helper.stderrTail
+		}
+		failures := f.count
+		m.reportLater(func() TelemetryEvent { return CaptureGaveUpEvent(player, failures, tail.Snapshot()) })
 		return
 	}
 	managerLog.Warn("Player %q produced no frames for %v; recording capture failure #%d, retrying in %v", player, hangThreshold, f.count, f.retryAt.Sub(now))
 }
 
-// spawnHelper 拉起 helper 子进程、建 Job Object 并赋入、起 stdout 解复用 goroutine。
+// spawnHelper 拉起 helper 子进程、建 Job Object 并赋入、起 stdout 解复用与 stderr 读泵两个 goroutine。
 func (m *Manager) spawnHelper() error {
 	cmd := exec.Command(m.exe, helperFlag)
-	cmd.Stderr = os.Stderr // helper 诊断经 stderr 继承可见（§0.5）
+	// helper 的诊断走 stderr（§0.5）：经自建管道由读泵转发到控制台，同时留尾部供上报。cmd.Stderr 是
+	// *os.File，os/exec 把句柄直接交给子进程、不起拷贝 goroutine，cmd.Wait 既不等读泵、也不关读端。
+	// 先于 StdinPipe / StdoutPipe 建：它失败时没有别的管道要回收；其后两步失败时由这里关掉它。
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = stderrW
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		stderrR.Close()
+		stderrW.Close()
 		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		stderrR.Close()
+		stderrW.Close()
 		return err
 	}
 	if err := cmd.Start(); err != nil {
+		stderrR.Close()
+		stderrW.Close()
 		return err
 	}
+	stderrW.Close() // 写端只留在子进程里：子进程退出后读泵读完剩余字节即见 EOF
 
 	// Job Object：KILL_ON_JOB_CLOSE，父死 → 子随内核回收。best-effort——建/赋失败不致命，只记日志、
 	// helper 照跑。赋入失败时 helper 不在 Job 内、关句柄杀不掉它，故关闭 job 并保持 0，令
@@ -447,11 +538,12 @@ func (m *Manager) spawnHelper() error {
 		}
 	}
 
-	hp := &helperProc{cmd: cmd, stdin: stdin, job: job, exited: make(chan struct{}), start: time.Now()}
+	hp := &helperProc{cmd: cmd, stdin: stdin, job: job, exited: make(chan struct{}), start: time.Now(), stderrTail: &tailBuffer{}}
 	m.helper = hp
 	m.dispatched = map[string]uint32{}
 	m.dispatchedAt = map[string]time.Time{}
 
+	go m.pumpHelperStderr(stderrR, hp.stderrTail)
 	go m.demux(hp, stdout)
 
 	managerLog.Info("Audio capture helper started (pid=%d)", cmd.Process.Pid)
@@ -508,11 +600,32 @@ func (m *Manager) demux(hp *helperProc, stdout io.Reader) {
 			break
 		}
 	}
-	hp.cmd.Wait() // EOF 后再 Wait（os/exec 契约），回收僵尸；退出码这里不需要
+	// EOF 后再 Wait（os/exec 契约），回收僵尸，并记下退出信息供结算。Wait 不等 stderr 读泵（见 spawnHelper），
+	// close(exited) 的时机与改动前相同；这里也不得加任何等读泵的步骤：等待会计进 reapHelper / teardownHelper 的
+	// 存活时长，并让等待期间的看门狗对已退出的进程追加失败。
+	hp.cmd.Wait()
+	hp.recordExit()
+}
+
+// pumpHelperStderr 是 helper stderr 的读泵 goroutine（每个 helper 一个）：经 pumpStderr 读到 EOF，每块先写入
+// tail、再同步写 m.stderrOut（nil 为 os.Stderr），然后关闭读端。监管路径（demux、reapHelper、teardownHelper、
+// 看门狗）都不等它；控制台卡住时它卡在写出这一步，直到控制台恢复或主进程退出。本地 recover，绝不挂 Guard（§1）。
+func (m *Manager) pumpHelperStderr(r *os.File, tail *tailBuffer) {
+	defer r.Close()
+	defer func() {
+		if rec := recover(); rec != nil {
+			managerLog.Warn("[stderr-pump] panic recovered locally: %v", rec)
+		}
+	}()
+	out := m.stderrOut
+	if out == nil {
+		out = os.Stderr
+	}
+	pumpStderr(r, tail, out)
 }
 
 // reapHelper 回收 exited 已 close 的 helper，记账退避 / 快速失败放弃；看门狗所杀的不计快速失败、
-// 不退避。仅 Run 调用。
+// 不退避。记账之后经 settleExit 结算，放弃时另延后上报 helper_gave_up。仅 Run 调用。
 //
 // exited 关闭不等于进程已退出：demux panic 被本地恢复时同样 close(exited)，进程可能仍在跑。故回收
 // 前先确保终止：关 stdin；job 非 0 时关 job 句柄（KILL_ON_JOB_CLOSE 强杀），否则 Process.Kill，
@@ -540,6 +653,7 @@ func (m *Manager) reapHelper() {
 	} else if !hp.watchdogKill {
 		m.quickFails++
 	}
+	m.settleExit(hp)
 	if hp.watchdogKill {
 		// 看门狗所杀：只有超时各路已逐播放器记账，其重试由各自 retryAt 经 filterWant 控制；同被杀但未超时
 		// 的路不记账，在本轮 reconcile 随新 helper 立即恢复。不计 helper 快速失败、不抬退避、不推迟 respawnAfter。
@@ -549,6 +663,7 @@ func (m *Manager) reapHelper() {
 	if m.quickFails >= maxQuickFails {
 		m.givenUp = true
 		managerLog.Warn("Helper has failed fast %d times (spawn failure or exit within %v of starting; watchdog restarts and on-demand teardowns not counted); giving up audio capture for this session (waveform degraded) until the main service restarts", m.quickFails, quickFailWindow)
+		m.reportGaveUp(causeQuickExit, nil)
 		return
 	}
 	m.bumpBackoff()
@@ -556,16 +671,64 @@ func (m *Manager) reapHelper() {
 	managerLog.Warn("Helper exited (alive for %v); restarting in %v", time.Since(hp.start).Round(time.Millisecond), m.backoff)
 }
 
-// noteSpawnFailure 处理 spawn 本身失败（exec 起不来）：同样计快速失败并退避。
-func (m *Manager) noteSpawnFailure() {
+// noteSpawnFailure 处理 spawn 本身失败（exec 起不来，err 为其错误）：同样计快速失败并退避，放弃时延后上报。
+func (m *Manager) noteSpawnFailure(err error) {
 	m.quickFails++
 	if m.quickFails >= maxQuickFails {
 		m.givenUp = true
 		managerLog.Warn("Helper has failed fast %d times (spawn failure or exit within %v of starting; watchdog restarts and on-demand teardowns not counted); giving up audio capture for this session (waveform degraded) until the main service restarts", m.quickFails, quickFailWindow)
+		m.reportGaveUp(causeSpawnFailure, err)
 		return
 	}
 	m.bumpBackoff()
 	m.respawnAfter = time.Now().Add(m.backoff)
+}
+
+// settleExit 结算一个已退出、已从 m.helper 摘下的 helper：记下它的退出信息与 stderr 尾部（helper_gave_up 用）；
+// classifyExit 判为自行退出时延后上报 helper_exited_abnormally。reapHelper 与 teardownHelper 共用，各在自己的
+// 快速失败记账之后调用；只安排上报，不阻塞、不改监管状态。仅 Run 调用。
+func (m *Manager) settleExit(hp *helperProc) {
+	hp.mu.Lock()
+	e, killedAt := hp.exit, hp.killMarkedAt
+	hp.mu.Unlock()
+	m.lastExit, m.lastTail = e, hp.stderrTail
+	if !classifyExit(e, killedAt) {
+		return
+	}
+	alive, quickFails, tail := e.at.Sub(hp.start), m.quickFails, hp.stderrTail
+	if alive < 0 {
+		alive = 0 // 退出时刻与 hp.start 都按时钟步进取值，刚启动即崩溃时前者可能略早于后者
+	}
+	m.reportLater(func() TelemetryEvent { return HelperExitedEvent(e.code, alive, quickFails, tail.Snapshot()) })
+}
+
+// reportGaveUp 在 givenUp 由假转真处延后上报 helper_gave_up：cause 为触发放弃的那次快速失败的来源，spawnErr 为
+// spawn 失败的错误（quick_exit 时为 nil），附最近一个结算过的 helper 的退出码与 stderr 尾部。仅 Run 调用。
+func (m *Manager) reportGaveUp(cause string, spawnErr error) {
+	quickFails, last, tail := m.quickFails, m.lastExit, m.lastTail
+	m.reportLater(func() TelemetryEvent {
+		return HelperGaveUpEvent(cause, quickFails, last.code, last.known, spawnErr, tail.Snapshot())
+	})
+}
+
+// reportLater 在 reportDelay 之后把 build 构造的事件交给 report，不占 Run goroutine。触发时若主服务已开始关停
+// （BeginShutdown / Stop）则丢弃：随主服务一起被结束的 helper 不报（设计 §3.2.2）。build 在触发时才调用，
+// stderr 尾部取那时的快照。report 为 nil 时不上报。回调本地 recover，绝不挂 Guard（§1）。
+func (m *Manager) reportLater(build func() TelemetryEvent) {
+	if m.report == nil {
+		return
+	}
+	time.AfterFunc(m.reportDelay, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				managerLog.Warn("[telemetry-report] panic recovered locally: %v", r)
+			}
+		}()
+		if m.shutdown.Load() {
+			return
+		}
+		m.report(build())
+	})
 }
 
 // bumpBackoff 指数退避、封顶 backoffCap。
@@ -580,12 +743,13 @@ func (m *Manager) bumpBackoff() {
 	}
 }
 
-// killHelperForRestart 杀掉假死 helper，不阻塞 Run：关 stdin + 关 Job（KILL_ON_JOB_CLOSE 强杀）
-// → 进程死 → stdout EOF → demux close(exited) → 下一轮 reconcile 的 reapHelper 回收，同轮即可重启（不退避）。
+// killHelperForRestart 杀掉假死 helper，不阻塞 Run：记下下手时刻（markKilled），关 stdin + 关 Job（KILL_ON_JOB_CLOSE
+// 强杀）→ 进程死 → stdout EOF → demux close(exited) → 下一轮 reconcile 的 reapHelper 回收，同轮即可重启（不退避）。
 func (m *Manager) killHelperForRestart() {
 	if m.helper == nil {
 		return
 	}
+	m.helper.markKilled()
 	m.helper.stdin.Close()
 	if m.helper.job != 0 {
 		windows.CloseHandle(m.helper.job)
@@ -597,7 +761,8 @@ func (m *Manager) killHelperForRestart() {
 
 // teardownHelper 优雅拆除 helper（无订阅 / stopCh / Run panic 展开）：关 stdin 触发其 stdin-EOF 自杀
 // （Task 6 已验），关 Job 兜底强杀，等解复用 goroutine 收尾；存活满 quickFailWindow 的 helper 同样
-// 清零快速失败计数与退避。无 helper 时为空操作。仅 Run 调用，可阻塞（非高频）。
+// 清零快速失败计数与退避，随后经 settleExit 结算（拆除之前已自行退出的照常上报）。无 helper 时为空操作。
+// 仅 Run 调用，可阻塞（非高频），但不等 stderr 读泵。
 func (m *Manager) teardownHelper() {
 	if m.helper == nil {
 		return
@@ -607,6 +772,7 @@ func (m *Manager) teardownHelper() {
 	m.dispatched = nil
 	m.dispatchedAt = nil
 
+	hp.markKilled()
 	hp.stdin.Close()
 	if hp.job != 0 {
 		windows.CloseHandle(hp.job)
@@ -618,6 +784,7 @@ func (m *Manager) teardownHelper() {
 		m.quickFails = 0 // 与 reapHelper 的稳定分支一致，计数不跨订阅会话累积
 		m.backoff = 0
 	}
+	m.settleExit(hp)
 
 	m.mu.Lock()
 	m.lastFrame = map[string]time.Time{}

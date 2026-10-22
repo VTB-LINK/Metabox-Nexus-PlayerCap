@@ -255,6 +255,14 @@
         "[::1]:62354"
       ],
       "connected": true
+    },
+    "audio_ws_connected": {
+      "clients": [],
+      "connected": false
+    },
+    "effect_ws_connected": {
+      "clients": [],
+      "connected": false
     }
   }
 }
@@ -320,9 +328,15 @@
 - 可能的状态值：`"offline"`（服务端兜底：从未上报过状态）/ `"waiting_process"` / `"waiting_song"` / `"playing"` / `"paused"` / `"standby"` / `"error"`（仅 kugou 故障终态）。`"loading"` 为保留值，当前版本不会出现。spotify 不产生 `waiting_song`：连上 CDP 后若没有曲目，它保持静默、不发状态
 
 **ws_connected 说明：**
-- 仅统计 `/ws` 与 `/<player>/ws` 的连接；SSE、`effect-ws`、`audio-ws` 连接不计入
+- 仅统计 `/ws` 与 `/<player>/ws` 的连接；SSE、`effect-ws`、`audio-ws` 连接不计入（后两者见下）
 - `connected` - 布尔值，表示是否存在上述连接
 - `clients` - 字符串数组，上述连接的客户端地址列表（RemoteAddr 格式）
+
+**audio_ws_connected / effect_ws_connected 说明：**
+- 与 `ws_connected` 同形（`connected`、`clients`），三组互不计入
+- `audio_ws_connected` 统计 `/audio-ws` 与 `/<player>/audio-ws` 的连接，`effect_ws_connected` 统计 `/cloudmusicv3/effect-ws` 的连接
+- 无连接时 `clients` 为空数组
+- 旧后端没有这两个字段，按字段是否存在判断
 
 **endpoints 说明：**
 - WebSocket 使用 `ws://`，HTTP/SSE 使用 `http://`
@@ -638,7 +652,7 @@ lyrics[1]  {"index": 1, "text": "Written by：Annie Clark、Taylor Swift…"} �
 | **spotify** | color-lyrics 返回零行或 HTTP 404（该曲无歌词）、拿不到曲目 URI、没有 Bearer，或请求失败 | `index: -1`，`text: ""`，在换歌那次取词结束之后发出（换歌时先发的是空歌词的 `all_lyrics`，取词不阻塞）；提示语归一逻辑同样生效，尚未观测到它发出「纯音乐，请欣赏」这一行。有曲目 URI 而没取到响应（没有 Bearer 或请求失败）时，播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间仍取不到即停（暂停时不补取），拿到即补发 `all_lyrics`；平台答复 HTTP 404、或取到了响应但没有行级时间轴（`UNSYNCED` 或零行）则不补取 |
 | **wesing** | —— | **不会出现**：K 歌平台曲库内所有歌都带词 |
 
-服务端已把七家**归一成 `index: -1`**，下游只需认这一个判据。但**平台的提示语原样保留在 `text` 里**——它是平台的数据，不是我们编的。如何处理该文本由下游决定（本项目自带的 `lyric_page.html` 忽略它）。
+服务端已把七家**归一成 `index: -1`**，下游只需认这一个判据。但**平台的提示语原样保留在 `text` 里**——它是平台的数据，不是我们编的。如何处理该文本由下游决定（旧版歌词页 `lyric_page.html`，4.0 起是线上 v3 的冻结副本，忽略它）。
 
 > **所以 `index === -1` 时 `text` 可能非空。** 别写成 `if (data.text) 显示歌词`——那会把「纯音乐，请欣赏」当歌词渲染。判据永远是 `index`。
 
@@ -1756,7 +1770,7 @@ OBS/前端连接此端点，收到两类消息：
 
 前端据此决定显示/淡出：`cmActive && showing` 才显示实时帧，否则按 `offmode` 处理。
 
-> 连接 query 可携带截帧/注入参数（透传后端）：`quality`、`header_clickable`、`footer_clickable`。`effect_page.html` 会自动按需附加。
+> 连接 query 可携带截帧/注入参数（透传后端）：`quality`、`header_clickable`、`footer_clickable`。旧版特效页 `effect_page.html`（4.0 起是线上 v3 的冻结副本）会自动按需附加。
 
 ### `/cloudmusicv3/effect-ingest` — 帧回传（WebSocket，内部）
 
@@ -1764,7 +1778,7 @@ OBS/前端连接此端点，收到两类消息：
 
 ### 前端页面 URL 参数（`effect_display.html` / `effect_page.html`）
 
-`effect_display.html` 是防 OBS 缓存的引导页（透传全部参数 + 时间戳）。参数：
+`effect_display.html` 与 `effect_page.html` 自 4.0 起是跳转页，把全部查询参数原样带到线上 v3 的同名页面（`https://playercap.cfg.vtb.tools/v3/`，3.x 页面的冻结副本，使用时需要联网）；线上的 `effect_display.html` 是防 OBS 缓存的引导页（透传全部参数 + 时间戳）。参数：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|

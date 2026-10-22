@@ -63,8 +63,11 @@ func main() {
 	}
 
 	// 音频波形捕获 helper 模式：由主服务通过 exec.Command 拉起，命令行形如 --audio-capture-helper。
-	// 直接调用 helper.Run(stdin, stdout) 并退出，绕过一切初始化（隐私提示/更新检查等）。
+	// 只初始化遥测，随即调用 helper.Run(stdin, stdout) 并退出，绕过其余一切初始化（隐私提示/更新检查等）。
+	// 遥测在这里而不在 helper 包里初始化：版本号与 isReleaseVersion 在 main 包，helper 包不反向依赖。
+	// helper 不加载配置，故不传 Config（见 telemetry.Options.Process）。
 	if len(os.Args) >= 2 && os.Args[1] == "--audio-capture-helper" {
+		telemetry.Init(telemetry.Options{Version: Version, IsRelease: isReleaseVersion(Version), Process: "audio-helper"})
 		helper.Run(os.Stdin, os.Stdout)
 		return
 	}
@@ -261,7 +264,7 @@ func main() {
 	// 不 spawn helper，双保险。manager 内部只查 GetPlayerStatus、扇出帧、Wake 唤醒，不回调 router。
 	//
 	// 关停：主服务退出走 os.Exit(0)，helper 由 Job Object（KILL_ON_JOB_CLOSE）+ stdin-EOF 自杀回收，
-	// 无需在信号处理里显式 Stop（Phase 1 不加）。
+	// 无需在信号处理里显式 Stop（Phase 1 不加）；信号处理只调 BeginShutdown，使关停期间的遥测上报被丢弃。
 	selfExe, _ := os.Executable()
 	audioNormResolver := func(p string) manager.NormParams {
 		return manager.NormParams{
@@ -282,6 +285,8 @@ func main() {
 	go func() {
 		defer telemetry.Guard()
 		<-sigCh
+		// 最先置位：helper 与本进程同在一个控制台，随后会被一并结束，那不是 helper 自身的故障，不报遥测。
+		audioMgr.BeginShutdown()
 		mainLog.Info("Received shutdown signal, restoring NetEase Cloud Music window and menu...")
 		park.Unpark() // 若处于屏外泊车，先飞回原位
 		effectCapturer.RestoreChrome()

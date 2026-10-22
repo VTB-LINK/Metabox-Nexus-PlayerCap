@@ -35,6 +35,7 @@ var noticeCoverageEN = map[string]string{
 	"config.customized":      "config.yml",
 	"config.effect_strategy": "config.yml",
 	"unexpected":             "anomaly type",
+	"process":                "Audio capture",
 }
 
 // gatewayNoticeCoverageEN 是 gatewayNoticeCoverage 的英文对照：请求头 → 更新段英文关键词。
@@ -59,6 +60,7 @@ func TestPrivacyNoticeENCoversEveryContextAndTag(t *testing.T) {
 		Arch: "x64", CPUCores: 8,
 	})
 	applyAppInfo(scope, collectAppInfo("1.0.0", config.DefaultConfig(), []string{"wesing"}))
+	applyProcess(scope, "audio-helper")
 	applyUserIP(scope)
 
 	ev := scope.ApplyToEvent(&sentry.Event{}, nil, nil)

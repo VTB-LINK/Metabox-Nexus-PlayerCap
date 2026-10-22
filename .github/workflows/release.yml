@@ -198,9 +198,9 @@ jobs:
           LATEST_DOWNLOAD_PROXY_BASE="${DOWNLOAD_PROXY_PREFIX}/${DOTCOM_REPO_BASE_URL}/releases/latest/download"
           DOTCOM_DISCUSSIONS_URL="${DOTCOM_REPO_BASE_URL}/discussions"
 
-          # 生成 github.com 发布用压缩包（仅 exe + html）
+          # 生成 github.com 发布用压缩包（仅 exe + html；4.0 起不含 effect_page.html，见 issue #63）
           rm -f "${DOTCOM_ARCHIVE_NAME}"
-          zip -j "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" lyric_page.html effect_display.html effect_page.html
+          zip -j "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" lyric_page.html effect_display.html
 
           # 生成自动 release notes
           gh api "repos/${DOTCOM_REPO}/releases/generate-notes" \
@@ -225,7 +225,6 @@ jobs:
           | ${HTML_FILE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${HTML_FILE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${HTML_FILE_NAME}) |
           | lyric_page.html | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/lyric_page.html) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/lyric_page.html) |
           | effect_display.html | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/effect_display.html) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/effect_display.html) |
-          | effect_page.html | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/effect_page.html) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/effect_page.html) |
 
           ### 关于
           - 感谢您使用VTB-TOOLS Metabox Nexus PlayerCap！这是一个多播放器歌词实时推送工具，旨在提升您的K歌与直播体验。
@@ -244,8 +243,8 @@ jobs:
             cat auto-release-notes.md
           } > combined-release-notes.md
 
-          # 创建 Release Draft 并上传 zip + 独立文件（含特效页 effect_display.html / effect_page.html）
-          gh release create "${TAG_NAME}" "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" lyric_page.html effect_display.html effect_page.html \
+          # 创建 Release Draft 并上传 zip + 独立文件（含特效页 effect_display.html）
+          gh release create "${TAG_NAME}" "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" lyric_page.html effect_display.html \
             --repo "${DOTCOM_REPO}" \
             --title "${TAG_NAME}" \
             --draft \

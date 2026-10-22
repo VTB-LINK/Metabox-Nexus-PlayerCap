@@ -38,6 +38,7 @@ var noticeCoverage = map[string]string{
 	"config.customized":      "config.yml",
 	"config.effect_strategy": "config.yml", // 是 config.yml 里的一项
 	"unexpected":             "异常类型",
+	"process":                "音频采集", // 只有音频采集 helper 的事件带它（Options.Process）
 }
 
 // noticeExempt 是**不必**写进隐私提示的 context —— 它们由 sentry 自动附加，且不含任何
@@ -67,6 +68,7 @@ func TestPrivacyNoticeCoversEveryContextAndTag(t *testing.T) {
 		Arch: "x64", CPUCores: 8,
 	})
 	applyAppInfo(scope, collectAppInfo("1.0.0", config.DefaultConfig(), []string{"wesing"}))
+	applyProcess(scope, "audio-helper") // 只在子进程出现，出现时同样会发出去
 	applyUserIP(scope)
 
 	ev := scope.ApplyToEvent(&sentry.Event{}, nil, nil)

@@ -146,7 +146,7 @@ func (p *CloudMusicPlayer) Start() {
 	// 0. Patch Windows registry auto-start
 	watchdog.PatchRegistryAutoStart()
 
-	p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_process", Detail: i18n.T("NetEase Cloud Music not running"), Reason: player.ReasonProcessNotRunning})
+	p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("NetEase Cloud Music not running"), Reason: player.ReasonProcessNotRunning})
 
 	warnedUnsupported := false // v2 警告只打一次（它是永久状态，每轮打就是新的刷屏）
 
