@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player/launch"
 	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"Metabox-Nexus-PlayerCap/i18n"
@@ -291,14 +292,18 @@ func IsKuGouRunning() bool {
 	return strings.Contains(string(out), TargetProcessName)
 }
 
-// launchKuGou starts KuGou.exe in detached mode from its own directory.
+// launchKuGou 以 KuGou.exe 所在目录为工作目录、经 launch.Detached 拉起酷狗，不直接 Start：直接启动的酷狗
+// 是 PlayerCap 的子进程，按进程树结束 PlayerCap 的工具（OBS 的 Autostarter 插件）会把它一并结束（issue #127）。
+// 经 cmd.exe 中转时拿不到酷狗的 PID，日志里不再打。
 func launchKuGou(exePath string) error {
-	cmd := exec.Command(exePath)
-	cmd.Dir = filepath.Dir(exePath)
-	if err := cmd.Start(); err != nil {
+	detached, err := launch.Detached(exePath, nil, filepath.Dir(exePath))
+	if err != nil {
 		return i18n.Errorf("start KuGou.exe: %w", err)
 	}
-	log.Info("KuGou started (PID %d); waiting for initialization...", cmd.Process.Pid)
+	if !detached {
+		log.Warn("%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well", TargetProcessName)
+	}
+	log.Info("KuGou started; waiting for initialization...")
 	return nil
 }
 

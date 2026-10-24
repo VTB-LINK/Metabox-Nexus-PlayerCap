@@ -46,6 +46,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player/launch"
 
 	"github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/sys/windows/registry"
@@ -198,8 +199,19 @@ var (
 	portUpFn       = DebugPortUp
 	supportsFlagFn = SupportsDebugFlag
 	killFn         = func() error { return exec.Command("taskkill", "/F", "/IM", TargetProcessName).Run() }
-	startFn        = func(exePath string, args []string) error { return exec.Command(exePath, args...).Start() }
+	startFn        = startDetached
+	detachFn       = launch.Detached
 )
+
+// startDetached 是 startFn 的生产实现：经 launch.Detached 拉起，不直接 Start。直接启动的 Spotify 是
+// PlayerCap 的子进程，按进程树结束 PlayerCap 的工具（OBS 的 Autostarter 插件）会把它一并结束（issue #127）。
+func startDetached(exePath string, args []string) error {
+	detached, err := detachFn(exePath, args, "")
+	if err == nil && !detached {
+		log.Warn("%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well", TargetProcessName)
+	}
+	return err
+}
 
 // restartedThisRun 记录本次服务运行内是否已为补参数杀过 Spotify；
 // keptMissingWarned 保证「重启后仍缺参数、不再重启」只 Warn 一次。

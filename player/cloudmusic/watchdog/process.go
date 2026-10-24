@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player/launch"
 
 	"github.com/shirou/gopsutil/v3/process"
 )
@@ -108,12 +109,16 @@ func EnsureDebugMode() (bool, error) {
 	exec.Command("taskkill", "/F", "/IM", TargetProcessName).Run()
 	time.Sleep(2 * time.Second)
 
-	// Restart with debug + keepalive flags
+	// Restart with debug + keepalive flags.
+	// 经 launch.Detached 拉起，不直接 Start：直接启动的网易云是 PlayerCap 的子进程，按进程树结束 PlayerCap
+	// 的工具（OBS 的 Autostarter 插件）会把它一并结束（issue #127）。
 	log.Info("Restarting %s (%s)", exePath, strings.Join(LaunchFlags, " "))
-	cmd := exec.Command(exePath, LaunchFlags...)
-	err = cmd.Start()
+	detached, err := launch.Detached(exePath, LaunchFlags, "")
 	if err != nil {
 		return false, fmt.Errorf("failed to restart process: %v", err)
+	}
+	if !detached {
+		log.Warn("%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well", TargetProcessName)
 	}
 
 	// Wait a few seconds for CEF to initialize

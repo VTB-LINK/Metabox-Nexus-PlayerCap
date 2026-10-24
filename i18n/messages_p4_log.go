@@ -252,7 +252,7 @@ var p4LogMessages = map[string]string{
 	"Telemetry enabled (environment=%s release=%s)":                                                   "遥测已启用（environment=%s release=%s）",
 	"Config: %d item(s) changed %v (source %v)":                                                       "配置: 已改动 %d 项 %v（来源 %v）",
 	"KuGou install directory: %s":                                                                     "酷狗安装目录: %s",
-	"KuGou started (PID %d); waiting for initialization...":                                           "酷狗已启动（PID %d），等待初始化...",
+	"KuGou started; waiting for initialization...":                                                    "酷狗已启动，等待初始化...",
 	"KuGou version: %s (recommended version is %s; the libcef.dll byte fingerprint is authoritative)": "酷狗版本: %s（推荐版本为 %s，实际以 libcef.dll 字节指纹为准）",
 	"KuGou version: %s (recommended)":                                                                 "酷狗版本: %s（推荐版本）",
 	"KuGou process did not fully exit within 5s; continuing...":                                       "酷狗进程未在 5s 内完全退出，继续...",
@@ -314,6 +314,9 @@ var p4LogMessages = map[string]string{
 	// 封面规范化为 800×800（player/cover.go 的 CoverDataURI，issue #101）
 	"[%s] cover not normalized, sent as is: %v":              "[%s] 封面未规范化，原样发出: %v",
 	"[%s] cover resized %dx%d → 800x800 (%d → %d bytes, %v)": "[%s] cover resized %dx%d → 800x800 (%d → %d bytes, %v)",
+
+	// —— cloudmusicv3、spotify、kugou 的 watchdog 经 player/launch 拉起播放器时退回直接启动（issue #127）——
+	"%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well": "%s 已改为直接启动（其路径、参数或工作目录无法经 cmd.exe 原样转交）；它留在 PlayerCap 的进程树里，连同子进程一起结束 PlayerCap 的工具（如 OBS 的自启插件）会把它一并关闭",
 
 	// —— spotify：watchdog（带调试端口重启 / 自启项）、CDP、会话日志 ——
 	"%s is running without %s; restarting it with the debug and anti-throttling flags (playback resumes automatically)":                                                                  "%s 未带 %s 在运行，正带调试与防节流参数重启它（播放会自动恢复）",

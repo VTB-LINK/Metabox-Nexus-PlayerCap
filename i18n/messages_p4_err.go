@@ -146,4 +146,10 @@ var p4ErrMessages = map[string]string{
 	"cannot parse spotify_cli output: %w":                                     "无法解析 spotify_cli 输出: %w",
 	"response has no line-level lyrics (syncType %s)":                         "响应里没有行级歌词（syncType %s）",
 	"lyrics unavailable":                                                      "歌词不可用",
+
+	// —— player/launch：经 cmd.exe 中转拉起播放器（issue #127）——
+	"%s is not a regular file":                                     "%s 不是普通文件",
+	"cmd.exe did not exit within %s while starting %s; stopped it": "cmd.exe 启动 %[2]s 时未在 %[1]s 内退出，已将其结束",
+	"cmd.exe exited with code %d while starting %s":                "cmd.exe 启动 %[2]s 时以退出码 %[1]d 退出",
+	"start cmd.exe: %w":                                            "启动 cmd.exe: %w",
 }
