@@ -12,15 +12,18 @@
 
 ## 支持的播放器
 
-| 播放器 | 标识名 | 提取方式 |
-|--------|--------|----------|
-| 全民K歌 | `wesing` | 进程内存读取 |
-| 网易云音乐 | `cloudmusicv3` | CDP 远程调试 |
-| QQ 音乐 | `qqmusic` | 进程内存读取 + AOB Hook 注入 |
-| 酷狗音乐 | `kugou` | CDP 远程调试 |
-| 汽水音乐 | `sodamusic` | CDP 远程调试 |
-| Apple Music | `applemusic` | 进程内存读取 |
-| Spotify | `spotify` | CDP 远程调试（页面 DOM + 官方 CLI） |
+| 播放器 | 标识名 | 提取方式 | 版本 |
+|--------|--------|----------|------|
+| 全民K歌 | `wesing` | 进程内存读取 | 未限定 |
+| 网易云音乐 | `cloudmusicv3` | CDP 远程调试 | 3.x 及以上 |
+| QQ 音乐 | `qqmusic` | 进程内存读取 + AOB Hook 注入 | `22.16` ～ `22.76`（收录 8 个版本，另有 `20.05`、`21.81`） |
+| 酷狗音乐 | `kugou` | CDP 远程调试 | `20.1.22.27795` |
+| 汽水音乐 | `sodamusic` | CDP 远程调试 | 未限定 |
+| Apple Music | `applemusic` | 进程内存读取 | 未限定 |
+| Spotify | `spotify` | CDP 远程调试（页面 DOM + 官方 CLI） | 未限定（实测 `1.3.4.258`） |
+| 酷我音乐 | `kuwo` | CDP 远程调试 + 进程内存读取 | `9.6.0.0`（渠道后缀不限，实测 `W1`、`UG1`） |
+
+「版本」写代码实际接受或实测过的版本。「未限定」指代码里没有版本判断，不代表所有版本都测过。QQ 音乐遇到未收录的版本时，按最近的已收录版本推测，可能读错；酷狗以 `libcef.dll` 的字节指纹为准，10.x 不支持；Spotify 以安装目录的 `Spotify.dll` 是否认调试端口开关判断，不看版本号。
 
 ### 能力对照
 
@@ -35,14 +38,15 @@
 | 汽水音乐 `sodamusic` | ✔ | ✔ | ✔ | ⚠ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | 🚫 |
 | Apple Music `applemusic` | ⚠ | ⚠ | ⚠ | 🚫 | ✔ | ✔ | ⚠ | ✔ | ✔ | ✔ | 🚫 |
 | Spotify `spotify` | 🚫 | ✔ | 🚫 | 🚫 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | 🚫 |
+| 酷我音乐 `kuwo` | ⚠ | ✔ | ⚠ | 🚫 | ✔ | ✔ | ✔ | ✔ | ⚠ | ✔ | 🚫 |
 
 <details>
 <summary>⚠ 与 🚫 各项的原因</summary>
 
 - `✔` 表示能取到；某首歌有没有逐字、翻译、音译，取决于平台是否提供。
 - 「音译歌词」指行级音译（`roma_text`）。
-- 逐字音译（`roma_text_detailed`）由全民K歌、QQ 音乐、酷狗音乐、汽水音乐提供；网易云音乐只在一字一音的歌（如粤语歌）上提供；Apple Music、Spotify 没有。有行级音译的行不一定有逐字音译，没有时为 `{}`。
-- 「本地文件」指播放本地音频文件时能否取到歌词，标 `🚫` 的六家暂不支持，下面不逐个列出。
+- 逐字音译（`roma_text_detailed`）由全民K歌、QQ 音乐、酷狗音乐、汽水音乐提供；网易云音乐只在一字一音的歌（如粤语歌）上提供；Apple Music、Spotify、酷我没有。有行级音译的行不一定有逐字音译，没有时为 `{}`。
+- 「本地文件」指播放本地音频文件时能否取到歌词，标 `🚫` 的播放器暂不支持，下面不逐个列出。
 
 **全民K歌 `wesing`**
 
@@ -74,11 +78,19 @@
 - 翻译 / 音译歌词 `🚫`：平台没有译文与音译。
 - 需要带调试端口和防后台节流的启动参数才有歌词与进度：程序会自动补进自启项，发现正在运行的 Spotify 缺参数时会重启它一次（播放自动恢复）。
 
+**酷我音乐 `kuwo`**
+
+- 逐字歌词 `⚠`：来自带有效时间头的 lrcx；无头、坏头或没有有效字级时间时降级为逐行。
+- 翻译歌词 `⚠`：只支持已实测的 `[ml:1.0]` 双语 lrcx，是否有译文取决于歌曲；未知格式不猜测配对，也不生成机器翻译。
+- 音译歌词 `🚫`：当前不提供，逐字音译同样为 `{}`。
+- 进度/跳转 `⚠`：位置读自酷我播放内核的内存，只有内核结构匹配的构建才读得出；读不出，或这首歌连续播放满 20 秒而位置始终没动时，酷我整体退回等待状态，不用低频快照顶替。
+- 需要带调试端口 `9224` 启动：发现运行中的酷我没开端口时，对已验证的构建（当前 `W1`、`UG1`）会重启它一次，正在播放的歌会中断；其余构建不自动重启，须手动带 `--remote-debugging-port=9224` 启动酷我。
+
 </details>
 
 ## 功能特性
 
-- ✅ **多播放器支持** — 同时监控七个播放器，按优先级自动切换输出
+- ✅ **多播放器支持** — 同时监控八个播放器，按优先级自动切换输出
 - ✅ **自动等待进程** — 播放器未启动时持续等待，启动后自动接入
 - ✅ **进程断线重连** — 播放器退出后回到等待状态，重新启动后自动恢复
 - ✅ **跨重启稳定** — 不依赖固定的内存地址，播放器重启后重新定位
@@ -196,11 +208,11 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 | `-<player>-idle-hide` | *(沿用 `-per-player-idle-hide`)* | 指定播放器的无活跃自动隐藏（秒，`0`=关） |
 | `-<player>-audio-normalize` | *(沿用 `-audio-normalize`)* | 指定播放器的归一化开关 |
 
-> `<player>` ∈ `wesing` / `cloudmusicv3` / `qqmusic` / `kugou` / `sodamusic` / `applemusic` / `spotify`，未设置时沿用全局值。
+> `<player>` ∈ `wesing` / `cloudmusicv3` / `qqmusic` / `kugou` / `sodamusic` / `applemusic` / `spotify` / `kuwo`，未设置时沿用全局值。
 > 例：`-cloudmusicv3-offset -300`、`-wesing-idle-hide 15`、`-qqmusic-audio-normalize false`。
 >
 > 越界的取值自动钳到边界。各播放器另有自己的轮询下限，低于它的取值会被抬高：cloudmusicv3 低于 50 抬到 100、
-> qqmusic 低于 30 抬到 50、sodamusic 低于 200 抬到 200、applemusic 低于 50 抬到 50、spotify 低于 200 抬到 200。
+> qqmusic 低于 30 抬到 50、sodamusic 低于 200 抬到 200、applemusic 低于 50 抬到 50、spotify 低于 200 抬到 200、kuwo 低于 50 抬到 50。
 > 实际生效的值见启动横幅与 `/service-status` 的 `config_effective`。
 
 ### 配置文件
@@ -231,6 +243,7 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
    播放器: sodamusic (*offset=-340ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    播放器: applemusic (*offset=-400ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    播放器: spotify (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
+   播放器: kuwo (offset=-200ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b
 ===========================================================
 ```
@@ -299,11 +312,12 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
 | `github.com/getsentry/sentry-go` | 崩溃与错误上报（未注入 DSN 的构建自动禁用） |
 | `github.com/go-ole/go-ole` | 任务栏进度显示（ITaskbarList3 COM） |
 | `github.com/gorilla/websocket` | WebSocket 服务 |
-| `github.com/josephspurrier/goversioninfo` | 构建期生成 exe 图标与版本信息资源（`tools/winicon`） |
 | `github.com/shirou/gopsutil/v3` | 进程枚举与命令行读取（网易云 / 汽水 watchdog、网易云 park、音频捕获子进程孤儿清理） |
+| `github.com/josephspurrier/goversioninfo` | 构建期生成 exe 图标与版本信息资源（`tools/winicon`） |
 | `golang.org/x/image` | 构建期图标缩放（`tools/winicon`） |
 | `golang.org/x/mod` | 自动更新的版本号比较（semver） |
 | `golang.org/x/sys` | Windows 系统调用 |
+| `golang.org/x/text` | 酷我歌词请求的 GBK 编码与响应的 GB18030 解码（`player/kuwo/lyric`） |
 | `gopkg.in/yaml.v3` | YAML 配置文件解析 |
 
 ## License

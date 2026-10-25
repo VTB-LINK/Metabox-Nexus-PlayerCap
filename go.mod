@@ -11,6 +11,7 @@ require (
 	golang.org/x/image v0.44.0
 	golang.org/x/mod v0.37.0
 	golang.org/x/sys v0.45.0
+	golang.org/x/text v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -23,5 +24,4 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/text v0.40.0 // indirect
 )

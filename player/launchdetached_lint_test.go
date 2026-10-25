@@ -13,9 +13,9 @@ package player
 //  (a) 扫 player/ 下的非测试 .go（player/launch 自身除外），exec.Command / exec.CommandContext 的结果被 .Start() 的写法即红：
 //      链式调用，以及同一个顶层声明里先赋给变量或字段（:=、=、var）、再对它 .Start()。.Run() / .Output() 不管
 //      （taskkill、tasklist、spotify_cli 是等它结束的一次性命令，不留在进程树里）。
-//  (b) 三个已知拉起点（cloudmusic 的 EnsureDebugMode、spotify 的 startDetached、kugou 的 launchKuGou）必须调用
+//  (b) 四个已知拉起点（cloudmusic 的 EnsureDebugMode、spotify 的 startDetached、kugou 的 launchKuGou、kuwo 的 startExact）必须调用
 //      launch.Detached（直接调用，或经同一文件里初始化为 launch.Detached 的包级变量调用，即 spotify 供测试替换的
-//      detachFn），且三处各有一条逐字相同的 Warn（退回直接启动时打的那条）。
+//      detachFn），且四处各有一条逐字相同的 Warn（退回直接启动时打的那条）。
 //
 // 盲区：只认 os/exec 的这两个构造函数与 .Start() 这个名字；os.StartProcess、syscall / windows 的 CreateProcess、
 // ShellExecute、exec.Cmd 字面量、跨顶层声明传递的 *exec.Cmd 都查不出；不做类型解析。player/ 之外不扫（audiocap 的
@@ -34,11 +34,12 @@ import (
 	"testing"
 )
 
-// launchPoints 是三个已知的播放器拉起点：相对 player/ 的文件 → 必须调用 launch.Detached 的函数名。
+// launchPoints 是四个已知的播放器拉起点：相对 player/ 的文件 → 必须调用 launch.Detached 的函数名。
 var launchPoints = map[string]string{
-	"cloudmusic/watchdog/process.go": "EnsureDebugMode",
-	"spotify/watchdog/watchdog.go":   "startDetached",
-	"kugou/watchdog/watchdog.go":     "launchKuGou",
+	"cloudmusic/watchdog/process.go":   "EnsureDebugMode",
+	"spotify/watchdog/watchdog.go":     "startDetached",
+	"kugou/watchdog/watchdog.go":       "launchKuGou",
+	"kuwo/watchdog/process_windows.go": "startExact",
 }
 
 // TestPlayersNeverStartDirectly 是门禁 (a)。

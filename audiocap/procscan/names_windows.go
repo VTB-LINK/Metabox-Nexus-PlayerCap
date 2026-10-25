@@ -8,6 +8,8 @@ import (
 	cmwd "Metabox-Nexus-PlayerCap/player/cloudmusic/watchdog"
 	"Metabox-Nexus-PlayerCap/player/kugou"
 	kugouwd "Metabox-Nexus-PlayerCap/player/kugou/watchdog"
+	"Metabox-Nexus-PlayerCap/player/kuwo"
+	kuwowd "Metabox-Nexus-PlayerCap/player/kuwo/watchdog"
 	"Metabox-Nexus-PlayerCap/player/qqmusic"
 	"Metabox-Nexus-PlayerCap/player/sodamusic"
 	sodawd "Metabox-Nexus-PlayerCap/player/sodamusic/watchdog"
@@ -28,7 +30,8 @@ var PlayerProcess = map[string]string{
 	sodamusic.PlayerName:  sodawd.TargetProcessName,    // "sodamusic" → "SodaMusic.exe"
 	applemusic.PlayerName: applemusic.AudioProcessName, // "applemusic" → "AMPLibraryAgent.exe"：出声的不是 AppleMusic.exe，见该常量
 	spotify.PlayerName:    spotifywd.TargetProcessName, // "spotify" → "Spotify.exe"：播放由主进程（CEF 浏览器进程）自己走 WASAPI，子进程都在它的进程树里
+	kuwo.PlayerName:       kuwowd.TargetProcessName,    // "kuwo" → "kwmusic.exe"：捕获包含 KwService 子进程的进程树；已在 9.6.0.0_UG1 真机核对 RMS 非零
 }
 
 // Players 是稳定顺序的播放器名列表（供 manager 遍历门控）。
-var Players = []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName, applemusic.PlayerName, spotify.PlayerName}
+var Players = []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName, applemusic.PlayerName, spotify.PlayerName, kuwo.PlayerName}

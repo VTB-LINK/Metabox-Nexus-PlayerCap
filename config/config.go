@@ -864,6 +864,7 @@ prior-player:
 # - sodamusic
 # - applemusic
 # - spotify
+# - kuwo
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
@@ -932,6 +933,16 @@ applemusic-offset: -400
 # spotify-poll: 200       # 低于 200 会被静默抬到 200（页面上的位置与播放态本来就是 ~1Hz 更新，调快买不到精度）
 # spotify-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # spotify-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
+
+# 酷我音乐配置（CDP 9224 取元数据/状态，KwService 内存只读取高频位置）
+# 读取对 9.6.0.0 的任意渠道后缀放行，PlayerCore 按结构匹配、要原生音频后端，缺证据即降级。
+# 未开端口时仅对白名单内构建（当前 W1、UG1）受控重启一次；白名单外需手动带 --remote-debugging-port=9224。
+# 受控重启不改注册表或 DLL。
+# offset 尚未按声卡/OBS 播出延迟校准，以下为继承全局值的注释示例。
+# kuwo-offset: -200
+# kuwo-poll: 50           # 低于 50 会被静默抬到 50
+# kuwo-idle-hide: 15      # 不写=跟随全局 per-player-idle-hide，0=关
+# kuwo-audio-normalize: false   # 不写=跟随全局 audio-normalize
 `
 
 // versionPlaceholder 是模板里版本键取值的占位符，由 templateContent 换成盖章值。
