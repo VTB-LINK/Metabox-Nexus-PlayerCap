@@ -54,6 +54,13 @@ jobs:
           echo "Exporting snapshot for tag ${TAG_NAME}..."
           git archive --format=tar "${TAG_NAME}" | tar -xf - -C "${SNAPSHOT_DIR}"
 
+          echo "Removing documents from the snapshot (keeping README.md, CONFIG.README.md and doc/title.png)..."
+          find "${SNAPSHOT_DIR}" -type f -name '*.md' ! -path "${SNAPSHOT_DIR}/README.md" ! -path "${SNAPSHOT_DIR}/CONFIG.README.md" -delete
+          rm -rf "${SNAPSHOT_DIR}/agent-doc"
+          if [ -d "${SNAPSHOT_DIR}/doc" ]; then
+            find "${SNAPSHOT_DIR}/doc" -mindepth 1 ! -path "${SNAPSHOT_DIR}/doc/title.png" -delete
+          fi
+
           echo "Cloning target repository main branch..."
           git clone --branch "${TARGET_BRANCH}" --single-branch "${TARGET_URL}" "${TARGET_DIR}"
 
