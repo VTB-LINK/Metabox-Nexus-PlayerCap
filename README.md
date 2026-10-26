@@ -17,10 +17,10 @@
 | 全民K歌 | `wesing` | 进程内存读取 | 未限定 |
 | 网易云音乐 | `cloudmusicv3` | CDP 远程调试 | 3.x 及以上 |
 | QQ 音乐 | `qqmusic` | 进程内存读取 + AOB Hook 注入 | `22.16` ～ `22.76`（收录 8 个版本，另有 `20.05`、`21.81`） |
-| 酷狗音乐 | `kugou` | CDP 远程调试 | `20.1.22.27795` |
+| 酷狗音乐 | `kugou` | CDP 远程调试 | `20.1.22.27795` 及以上（x64架构） |
 | 汽水音乐 | `sodamusic` | CDP 远程调试 | 未限定 |
 | Apple Music | `applemusic` | 进程内存读取 | 未限定 |
-| Spotify | `spotify` | CDP 远程调试（页面 DOM + 官方 CLI） | 未限定（实测 `1.3.4.258`） |
+| Spotify | `spotify` | CDP 远程调试（页面 DOM + 官方 CLI） | 未限定（实测 `1.3.6.1921`） |
 | 酷我音乐 | `kuwo` | CDP 远程调试 + 进程内存读取 | `9.6.0.0`（渠道后缀不限，实测 `W1`、`UG1`） |
 
 <details>
@@ -251,7 +251,7 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
    播放器: sodamusic (*offset=-340ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    播放器: applemusic (*offset=-400ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    播放器: spotify (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
-   播放器: kuwo (offset=-200ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
+   播放器: kuwo (*offset=-300ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b
 ===========================================================
 ```

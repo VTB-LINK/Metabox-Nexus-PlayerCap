@@ -915,31 +915,24 @@ kugou-offset: -430
 
 # 汽水音乐 配置
 sodamusic-offset: -340
-# sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
+# sodamusic-poll: 200     # 低于 200 会被静默抬到 200
 # sodamusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # sodamusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
-# Apple Music 配置（纯内存扫描接入，与自身同用户的 AppleMusic.exe 普通权限即可读，无需管理员）
+# Apple Music 配置
 applemusic-offset: -400
-# applemusic-poll: 50     # 低于 50 会被静默抬到 50（每轮只读 24 字节；位置的跳变与歌词行都在这一轮里发现、推出，调慢歌词跟着晚）
+# applemusic-poll: 50     # 低于 50 会被静默抬到 50
 # applemusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # applemusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
-# Spotify 配置（CDP 接入：watchdog 让它带 --remote-debugging-port=9223 重启，状态从页面 DOM 读）
-#
-# offset 暂不写实测值：它是「平台报的位置与实际出声之间的差」，要靠真机听感/录制对齐才敢填。
-# 不写即跟随全局 offset（-200）；对齐之后再把下面这行改成具体值（并评估 DefaultConfig 的回退值）。
+# Spotify 配置
 # spotify-offset: -200
-# spotify-poll: 200       # 低于 200 会被静默抬到 200（页面上的位置与播放态本来就是 ~1Hz 更新，调快买不到精度）
+# spotify-poll: 200       # 低于 200 会被静默抬到 200
 # spotify-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # spotify-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
-# 酷我音乐配置（CDP 9224 取元数据/状态，KwService 内存只读取高频位置）
-# 读取对 9.6.0.0 的任意渠道后缀放行，PlayerCore 按结构匹配、要原生音频后端，缺证据即降级。
-# 未开端口时仅对白名单内构建（当前 W1、UG1）受控重启一次；白名单外需手动带 --remote-debugging-port=9224。
-# 受控重启不改注册表或 DLL。
-# offset 尚未按声卡/OBS 播出延迟校准，以下为继承全局值的注释示例。
-# kuwo-offset: -200
+# 酷我音乐配置
+kuwo-offset: -300
 # kuwo-poll: 50           # 低于 50 会被静默抬到 50
 # kuwo-idle-hide: 15      # 不写=跟随全局 per-player-idle-hide，0=关
 # kuwo-audio-normalize: false   # 不写=跟随全局 audio-normalize

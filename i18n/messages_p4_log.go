@@ -322,6 +322,7 @@ var p4LogMessages = map[string]string{
 	"%s is running without %s; restarting it with the debug and anti-throttling flags (playback resumes automatically)":                                                                  "%s 未带 %s 在运行，正带调试与防节流参数重启它（播放会自动恢复）",
 	"%s is running without the anti-throttling flags; restarting it once with them so progress keeps updating while the window is minimized or covered (playback resumes automatically)": "%s 未带防节流参数在运行，正带上它们重启一次，使窗口最小化或被遮挡时进度仍持续更新（播放会自动恢复）",
 	"%s still lacks the debug or anti-throttling flags after our restart; not restarting it again during this run (progress may slow down while the window is minimized or covered)":     "%s 重启后仍缺调试或防节流参数，本次运行不再重启它（窗口最小化或被遮挡时进度可能变慢）",
+	"the progress bar shows a track but its title has been unreadable for %v; Spotify's page structure may have changed, so nothing is reported for this track":                          "进度条上有曲目，但已有 %v 读不到歌名：Spotify 的页面结构可能变了，这首歌不会发出任何消息",
 	"Starting %s %s": "启动 %s %s",
 	"Spotify restarted with the debug port on %d":                                                         "Spotify 已带调试端口重启（端口 %d）",
 	"taskkill returned: %v":                                                                               "taskkill 返回: %v",

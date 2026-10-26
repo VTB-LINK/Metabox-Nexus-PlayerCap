@@ -14,14 +14,17 @@ import (
 
 const coverHash = "e8b066f70c206551210d902b"
 
-// 变异自证：去掉 SMALL 档 → 「SMALL 档」红；档位码改为在路径任意位置查找并替换 → 带查询串、hash 里含档位码字样两例、
-// 档位码不在路径开头共四例红；前缀比较改成不分大小写 → 「主机大写」红（均实测）。
+// 变异自证：去掉 SMALL 档 → 「SMALL 档」红；去掉 DEFAULT 的 WebP 版 → 「DEFAULT 档的 WebP 版」红；
+// 档位码改为在路径任意位置查找并替换 → 带查询串、hash 里含档位码字样两例、档位码不在路径开头共四例红；
+// 前缀比较改成不分大小写 → 「主机大写」红（均实测）。
 func TestLargeCoverURL(t *testing.T) {
 	large := coverURLPrefix + coverSizeLarge + coverHash
 	cases := []struct {
 		name, in, want string
 	}{
-		{"DEFAULT 档（页面给的就是这档）", coverURLPrefix + coverSizeDefault + coverHash, large},
+		{"DEFAULT 档", coverURLPrefix + coverSizeDefault + coverHash, large},
+		{"DEFAULT 档的 WebP 版（页面给的就是这档）", coverURLPrefix + coverSizeDefaultWebP + coverHash, large},
+		{"LARGE 档的 WebP 版（不在表里）", coverURLPrefix + "ab67616d0000aa54" + coverHash, coverURLPrefix + "ab67616d0000aa54" + coverHash},
 		{"SMALL 档", coverURLPrefix + coverSizeSmall + coverHash, large},
 		{"带查询串：只换档位码，查询串原样", coverURLPrefix + coverSizeDefault + coverHash + "?x=1&y=ab67616d00004851", large + "?x=1&y=ab67616d00004851"},
 		{"hash 里含 SMALL 档位码字样：只换开头那段", coverURLPrefix + coverSizeDefault + coverSizeSmall + "00000000", coverURLPrefix + coverSizeLarge + coverSizeSmall + "00000000"},

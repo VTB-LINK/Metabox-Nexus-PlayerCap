@@ -188,7 +188,7 @@ paths:
                         spotify-poll: 30
                         spotify-idle-hide: 0
                         spotify-audio-normalize: true
-                        kuwo-offset: -200
+                        kuwo-offset: -300
                         kuwo-poll: 30
                         kuwo-idle-hide: 0
                         kuwo-audio-normalize: true
@@ -232,11 +232,11 @@ paths:
                         spotify-poll: 200
                         spotify-idle-hide: 0
                         spotify-audio-normalize: true
-                        kuwo-offset: -200
+                        kuwo-offset: -300
                         kuwo-poll: 50
                         kuwo-idle-hide: 0
                         kuwo-audio-normalize: true
-                      config_overwritten: ["addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "cloudmusicv3-effect-strategy", "cloudmusicv3-offset", "qqmusic-offset", "kugou-offset", "sodamusic-offset", "applemusic-offset"]
+                      config_overwritten: ["addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "cloudmusicv3-effect-strategy", "cloudmusicv3-offset", "qqmusic-offset", "kugou-offset", "sodamusic-offset", "applemusic-offset", "kuwo-offset"]
                       player_support: ["wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic", "applemusic", "spotify", "kuwo"]
                       player_running: ["wesing"]
                       player_status:
@@ -2475,7 +2475,7 @@ components:
             kuwo-offset:
               type: integer
               description: kuwo 歌词延迟（毫秒），方向同 offset
-              example: -200
+              example: -300
             kuwo-poll:
               type: integer
               description: kuwo 轮询间隔（毫秒）

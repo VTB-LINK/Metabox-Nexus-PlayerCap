@@ -2,11 +2,12 @@ package spotify
 
 // 本文件测 runSession 里抽出来的几处判定（runSession 本身没有离线夹具，见 AGENTS §4）：
 // 歌词补取的节奏、上限与落地后的状态变化（lyricsRetry）、暂停时不补取（retryDue 的播放态）、
-// 时钟迁移到对外事件的翻译（clockEmits）、时长晚到（durationArrived）。
+// 时钟迁移到对外事件的翻译（clockEmits）、时长晚到（durationArrived）、歌名选择器失效的告警（untitledWatch）。
 // 异步取词的状态机与取词结果的落地判定在 lyricsjob_test.go。不碰 Spotify、不碰 CDP。
 
 import (
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -403,6 +404,68 @@ func TestDurationArrived(t *testing.T) {
 	for _, c := range cases {
 		if got := durationArrived(c.current, c.read); got != c.want {
 			t.Errorf("durationArrived(%v, %v) = %v，期望 %v", c.current, c.read, got, c.want)
+		}
+	}
+}
+
+// untitledWatch：时长大于 0 而歌名持续为空满 untitledWarnAfter 才告警，每个会话一次。
+// 变异自证（均实测）：去掉歌名非空时的复位 → 「读得到歌名」「换歌空档」「第 50 拍起为空」红；
+// 去掉时长判断 → 「没有曲目」两例与「时长每 9 拍掉成 0」红；去掉 warned → 「一直为空」「恢复又失效」「第 50 拍起为空」红
+// （每拍都报）；`<` 改成 `<=` → 同这三例红（晚一拍）。
+func TestUntitledWatch(t *testing.T) {
+	if untitledWarnAfter != 10*time.Second {
+		t.Fatalf("前置条件：用例按 10 秒写，untitledWarnAfter = %v", untitledWarnAfter)
+	}
+	const dur = 200000.0
+	// 每秒一拍，跑 120 拍，第 i 拍的歌名与时长由 at(i) 给出；返回告警的拍号。
+	run := func(at func(i int) (string, float64)) []int {
+		var w untitledWatch
+		var got []int
+		for i := 0; i < 120; i++ {
+			title, d := at(i)
+			if w.observe(title, d, t0.Add(time.Duration(i)*time.Second)) {
+				got = append(got, i)
+			}
+		}
+		return got
+	}
+	cases := []struct {
+		name string
+		at   func(i int) (string, float64)
+		want []int
+	}{
+		{"一直为空：第 10 拍报一次", func(int) (string, float64) { return "", dur }, []int{10}},
+		{"读得到歌名：不报", func(int) (string, float64) { return "歌名", dur }, nil},
+		{"没有曲目（时长 0）：不报", func(int) (string, float64) { return "", 0 }, nil},
+		{"没有曲目（时长非法）：不报", func(int) (string, float64) { return "", math.NaN() }, nil},
+		{"换歌空档（每 9 拍有一拍读到歌名）：不报", func(i int) (string, float64) {
+			if i%9 == 8 {
+				return "歌名", dur
+			}
+			return "", dur
+		}, nil},
+		{"时长每 9 拍掉成 0 一拍：重新计时、不报", func(i int) (string, float64) {
+			if i%9 == 8 {
+				return "", 0
+			}
+			return "", dur
+		}, nil},
+		{"报过之后恢复又失效：本会话不再报", func(i int) (string, float64) {
+			if i >= 30 && i < 40 {
+				return "歌名", dur
+			}
+			return "", dur
+		}, []int{10}},
+		{"第 50 拍起为空：第 60 拍报", func(i int) (string, float64) {
+			if i < 50 {
+				return "歌名", dur
+			}
+			return "", dur
+		}, []int{60}},
+	}
+	for _, c := range cases {
+		if got := run(c.at); !slices.Equal(got, c.want) {
+			t.Errorf("%s：告警于第 %v 拍，期望 %v", c.name, got, c.want)
 		}
 	}
 }

@@ -3,9 +3,9 @@
 //
 // 与 cloudmusic/cdp、kugou/cdp、sodamusic/cdp 的关键差异：
 //   - 端口 9223、端点 /json/list；目标是**页面**（xpui.app.spotify.com），有完整 DOM。
-//   - 播放状态直接从 DOM 读，**不注入任何东西**：标题/歌手/封面是现成的 data-testid 元素；
-//     位置取 [data-testid="progress-bar"] 的 `--progress-bar-transform`（每秒刷新的浮点百分比，
-//     乘 duration 即毫秒位置），而不是 <input type=range> 的 value —— 后者实测只有 5 秒粒度。
+//   - 播放状态直接从 DOM 读，**不注入任何东西**：标题/歌手/封面取自底栏的 now-playing-widget-v2
+//     （1.3.6.1921 起；歌名没有 data-testid，见 snapshotJS）；位置取 [data-testid="progress-bar"]
+//     的 `--progress-bar-transform`（每秒刷新的浮点百分比，乘 duration 即毫秒位置），而不是 <input type=range> 的 value —— 后者实测只有 5 秒粒度。
 //   - 播放/暂停用**图标的 path 常量**判：按钮的 aria-label 随系统语言变（中文「播放/暂停」），
 //     path 的 d 不变。两个常量见 iconPlayingPrefix / iconPausedPrefix。
 //   - 收发改成「一个读 goroutine + 按 id 派发」：因为除了 RPC 回复，还要持续接
@@ -521,14 +521,23 @@ func (c *Client) IsClosed() bool {
 }
 
 // snapshotJS 构造取状态表达式。**内嵌的图标前缀必须保持纯 ASCII**（见包注释与常量注释）。
+//
+// 标题/歌手/封面只在底栏组件 now-playing-widget-v2 里找（实测 1.3.6.1921）。歌名与每位歌手名各在一个
+// dir="auto" 的元素上：可链接时它包在 <a> 里，不可链接时包在 <span> 里或直接是 <span>，故不按 <a> 取。
+// 组件里第一个 dir="auto" 是歌名；歌名缺席时第一个会落到歌手行或音质标签（context-item-info-quality）上，
+// 两者都排除。封面也限定在组件内：「当前播放」侧栏另有一个 cover-art-image，给的是另一档。
+// 歌名为空即上层判「无歌」，故组件结构一变就不出消息，只有上层的 untitledWatch 告警一次。
 func snapshotJS() string {
 	return "(function(){try{" +
 		"var q=function(s){return document.querySelector(s)};" +
-		"var titleEl=q('[data-testid=\"context-item-info-title\"]');" +
-		"var title=titleEl?(titleEl.textContent||'').trim():'';" +
-		"var artists=[];var an=document.querySelectorAll('[data-testid=\"context-item-info-artist\"]');" +
-		"for(var i=0;i<an.length;i++){var t=(an[i].textContent||'').trim();if(t)artists.push(t);}" +
-		"var img=q('[data-testid=\"cover-art-image\"]');" +
+		"var w=q('[data-testid=\"now-playing-widget-v2\"]');" +
+		"var bl=w?w.querySelector('[data-testid=\"now-playing-widget-v2-byline\"]'):null;" +
+		"var ql=w?w.querySelector('[data-testid=\"context-item-info-quality\"]'):null;" +
+		"var te=w?w.querySelector('[dir=\"auto\"]'):null;" +
+		"var title=(te&&!(bl&&bl.contains(te))&&!(ql&&ql.contains(te)))?(te.textContent||'').trim():'';" +
+		"var artists=[];if(bl){var an=bl.querySelectorAll('[dir=\"auto\"]');" +
+		"for(var i=0;i<an.length;i++){var t=(an[i].textContent||'').trim();if(t)artists.push(t);}}" +
+		"var img=w?w.querySelector('[data-testid=\"cover-art-image\"]'):null;" +
 		"var cover=img?(img.currentSrc||img.src||''):'';" +
 		"var inp=q('[data-testid=\"playback-progressbar\"] input');" +
 		"var durationMs=inp?Number(inp.max):0;" +

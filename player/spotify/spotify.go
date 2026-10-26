@@ -91,12 +91,14 @@ const coverBudget = 5 * time.Second
 // 出处：项目负责人给的 album 元数据口径——/metadata/4/album/<gid> 的 cover_group.image 恰好三条，
 // size 为 SMALL / DEFAULT / LARGE，没有第四档；尺寸经真机实测（2026-10，10 张不同专辑三档全部 200，
 // 尺寸依次为 64 / 300 / 640，同一 hash 换档位码 10/10 成立）。档位码不能由尺寸反推，故没有更大的档可猜。
-// 页面上 [data-testid="cover-art-image"] 给的是 DEFAULT 档。
+// 页面底栏 [data-testid="cover-art-image"] 给的是 DEFAULT 档的 WebP 版（实测 1.3.6.1921，同一 hash 下为
+// 300×300 WebP）。WebP 不在 player 封面规范化的解码白名单里，不换档就原样发出 300×300、不缩放。
 const (
-	coverURLPrefix   = "https://i.scdn.co/image/"
-	coverSizeSmall   = "ab67616d00004851" // SMALL，64×64
-	coverSizeDefault = "ab67616d00001e02" // DEFAULT，300×300
-	coverSizeLarge   = "ab67616d0000b273" // LARGE，640×640
+	coverURLPrefix       = "https://i.scdn.co/image/"
+	coverSizeSmall       = "ab67616d00004851" // SMALL，64×64
+	coverSizeDefault     = "ab67616d00001e02" // DEFAULT，300×300
+	coverSizeDefaultWebP = "ab67616d0000e1a3" // DEFAULT 的 WebP 版，300×300
+	coverSizeLarge       = "ab67616d0000b273" // LARGE，640×640
 )
 
 // fetchCoverBase64 是 player.FetchCoverBase64 的可替换 seam：仅供 runCoverFetch 的离线测试注入桩
@@ -163,6 +165,33 @@ const stallWindow = 2500 * time.Millisecond
 // extractErrRepeat 是取数错误的复读间隔（同一错误首次必打，之后每这么久复读一次）。
 // 照 cloudmusic 的 extractErrLog：轮询路径上的瞬时错误（换歌间隙、页面重渲染）不设闸会刷屏。
 const extractErrRepeat = 60 * time.Second
+
+// untitledWarnAfter 是「进度条上有曲目、却读不到歌名」持续多久才告警。换歌瞬间页面可能有一两拍的空档，
+// 窗口要远大于轮询周期。
+const untitledWarnAfter = 10 * time.Second
+
+// untitledWatch 判定歌名选择器是否失效：时长大于 0（进度条上有曲目）而歌名为空，持续 untitledWarnAfter
+// 即告警，每个会话一次。歌名为空时上层把每一拍都当作没有曲目，不出任何消息（issue #128 即此症状）。
+type untitledWatch struct {
+	since  time.Time
+	warned bool
+}
+
+// observe 返回 true 表示此刻该告警。
+func (w *untitledWatch) observe(title string, durationMs float64, now time.Time) bool {
+	if title != "" || !(durationMs > 0) {
+		w.since = time.Time{}
+		return false
+	}
+	if w.since.IsZero() {
+		w.since = now
+	}
+	if w.warned || now.Sub(w.since) < untitledWarnAfter {
+		return false
+	}
+	w.warned = true
+	return true
+}
 
 // sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
 func (p *SpotifyPlayer) sleepOrStop(d time.Duration) bool {
@@ -289,6 +318,7 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 	var lastMoveAt time.Time
 	var unknownIconWarned bool
 	var cliMismatchWarned bool
+	var untitled untitledWatch
 
 	// 取数错误的降噪状态。
 	var lastExtractErr string
@@ -405,6 +435,10 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 			continue
 		}
 		lastExtractErr = ""
+
+		if untitled.observe(snap.Title, snap.DurationMs, now) {
+			log.Warn("the progress bar shows a track but its title has been unreadable for %v; Spotify's page structure may have changed, so nothing is reported for this track", untitledWarnAfter)
+		}
 
 		// 没有曲目（首页/未播放/刚启动）：静默等待，交给路由超时判 idle。
 		if snap.Title == "" {
@@ -967,14 +1001,14 @@ func (p *SpotifyPlayer) runCoverFetch(ctx context.Context, coverURL, name, singe
 	})
 }
 
-// largeCoverURL 把页面给的 SMALL / DEFAULT 档封面 URL 换成 LARGE 档：只换档位码，其后的 hash 与查询串原样保留。
+// largeCoverURL 把页面给的 SMALL / DEFAULT（含 WebP 版）档封面 URL 换成 LARGE 档：只换档位码，其后的 hash 与查询串原样保留。
 // 不是 i.scdn.co 的 https 图片地址、已是 LARGE、档位码不认识（例如艺人头像的前缀）时原样返回。
 func largeCoverURL(u string) string {
 	rest, ok := strings.CutPrefix(u, coverURLPrefix)
 	if !ok {
 		return u
 	}
-	for _, code := range []string{coverSizeSmall, coverSizeDefault} {
+	for _, code := range []string{coverSizeSmall, coverSizeDefault, coverSizeDefaultWebP} {
 		if hash, ok := strings.CutPrefix(rest, code); ok {
 			return coverURLPrefix + coverSizeLarge + hash
 		}
