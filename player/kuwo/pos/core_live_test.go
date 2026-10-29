@@ -18,7 +18,7 @@ func TestLiveCoreClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	first, err := r.Read("")
+	first, err := r.Read("", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestLiveCoreClock(t *testing.T) {
 	sawSeek := false
 	for n := 0; n < 100; n++ {
 		time.Sleep(50 * time.Millisecond)
-		s, err := r.Read(first.RID)
+		s, err := r.Read(first.RID, false)
 		if err != nil {
 			t.Fatal(err)
 		}

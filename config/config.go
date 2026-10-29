@@ -932,7 +932,7 @@ applemusic-offset: -400
 # spotify-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # 酷我音乐配置
-kuwo-offset: -300
+kuwo-offset: -380
 # kuwo-poll: 50           # 低于 50 会被静默抬到 50
 # kuwo-idle-hide: 15      # 不写=跟随全局 per-player-idle-hide，0=关
 # kuwo-audio-normalize: false   # 不写=跟随全局 audio-normalize

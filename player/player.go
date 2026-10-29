@@ -33,16 +33,6 @@ func (d LyricTextDetailed) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(d))
 }
 
-// LyricDetailedLine 是 all_lyrics 的完整逐字歌词集合项，仅从逐字源数据派生。
-type LyricDetailedLine struct {
-	LyricIndex int                     `json:"lyric_index"`
-	Timestamp  float32                 `json:"timestamp"`
-	PlayTime   float32                 `json:"play_time"`
-	Duration   float32                 `json:"duration"`
-	Text       string                  `json:"text"`
-	Words      []LyricTextDetailedWord `json:"words"`
-}
-
 // LyricLine 歌词行
 type LyricLine struct {
 	Index        int               `json:"index"`
@@ -132,6 +122,10 @@ type PlaybackTimeInfo struct {
 // Position 是**整曲实时播放位置**（秒，= Progress×Duration）；顶层无「行」概念，故不设
 // 歌词行的 play_time——逐行 play_time 在 lyrics[i] 内。连接补发与 HTTP 快照中，播放中的
 // position/progress 由服务端外推到发送时刻（server 包的 PlayerState.livePosition）。
+//
+// 没有自定义的 MarshalJSON：字段的声明顺序即 JSON 的键序，键集合与键序是对外契约
+// （eventjson_test.go 的 TestAllLyricsDataTopLevelKeys）。逐字只在每行的 text_detailed /
+// roma_text_detailed 里，顶层不另设派生的逐字集合（issue #132）。
 type AllLyricsData struct {
 	Title    string      `json:"title,omitempty"`
 	Duration float32     `json:"duration"`
@@ -139,44 +133,6 @@ type AllLyricsData struct {
 	Progress float32     `json:"progress"`
 	Count    int         `json:"count"`
 	Lyrics   []LyricLine `json:"lyrics"`
-}
-
-func (d AllLyricsData) MarshalJSON() ([]byte, error) {
-	type alias AllLyricsData
-	out := struct {
-		alias
-		LyricsDetailed []LyricDetailedLine `json:"lyrics_detailed"`
-	}{
-		alias:          alias(d),
-		LyricsDetailed: BuildLyricsDetailed(d.Lyrics),
-	}
-	return json.Marshal(out)
-}
-
-func BuildLyricsDetailed(lyrics []LyricLine) []LyricDetailedLine {
-	detailed := make([]LyricDetailedLine, 0)
-	for _, line := range lyrics {
-		if len(line.TextDetailed.Words) == 0 {
-			continue
-		}
-		detailed = append(detailed, LyricDetailedLine{
-			LyricIndex: line.Index,
-			Timestamp:  line.TextDetailed.Timestamp,
-			PlayTime:   line.TextDetailed.PlayTime,
-			Duration:   line.TextDetailed.Duration,
-			Text:       BuildDetailedText(line.TextDetailed.Words),
-			Words:      line.TextDetailed.Words,
-		})
-	}
-	return detailed
-}
-
-func BuildDetailedText(words []LyricTextDetailedWord) string {
-	var text string
-	for _, word := range words {
-		text += word.Text
-	}
-	return text
 }
 
 // Event 播放器事件
@@ -261,6 +217,12 @@ func (b *BaseEmitter) Stop()                { close(b.StopCh) }
 // Emit 向事件通道发送事件，通道满时丢弃（非阻塞）。
 func (b *BaseEmitter) Emit(evtType string, data interface{}) {
 	b.emit(evtType, data)
+}
+
+// TryEmit 与 Emit 相同，但返回事件是否入队（通道满时丢弃并返回 false，不阻塞）。供要据入队结果更新自身
+// 状态的调用方使用（kuwo 的 emitPos：入队成功才更新前端模型）。
+func (b *BaseEmitter) TryEmit(evtType string, data interface{}) bool {
+	return b.emit(evtType, data)
 }
 
 // emit 是 Emit 的实体，返回事件是否入队。入队的 status_update 记为「最近一次发出的状态」，

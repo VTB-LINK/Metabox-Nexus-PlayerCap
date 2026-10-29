@@ -57,7 +57,7 @@ func run(pid int, duration time.Duration, art bool) error {
 		return err
 	}
 	defer r.Close()
-	first, err := r.Read("")
+	first, err := r.Read("", false)
 	if err != nil {
 		return err
 	}
@@ -67,7 +67,7 @@ func run(pid int, duration time.Duration, art bool) error {
 		if err != nil {
 			return err
 		}
-		current, err := r.Read(first.RID)
+		current, err := r.Read(first.RID, false)
 		if err != nil {
 			return err
 		}
@@ -80,7 +80,7 @@ func run(pid int, duration time.Duration, art bool) error {
 	previous := first.PositionMs
 	errors := 0
 	for time.Since(start) < duration {
-		s, err := r.Read("")
+		s, err := r.Read("", false)
 		if err != nil {
 			errors++
 			if errors <= 3 {

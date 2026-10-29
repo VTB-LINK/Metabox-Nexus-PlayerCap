@@ -152,7 +152,7 @@ func flattenText(inner string) string {
 // 行文本里连续的 XML 空白折成一个空格（foldSpace）：文档带换行缩进排版时，span 之间的换行不得进入行文本。
 //
 // span 之间的 chardata 同时并入前一个词（空白折成一个空格），与 KRC/YRC 词尾带空格的形态一致。
-// 只拼进行文本不够：overlay 的逐字效果与 lyrics_detailed[].text 都直接拼接 words，英文、韩文等
+// 只拼进行文本不够：overlay 的逐字效果与下游读逐字文本都直接拼接 words[].text，英文、韩文等
 // 以空格分词的歌会显示成「HelloWorld」（审查 P2）。行尾那个词的尾部空白去掉，与行文本去首尾空白一致。
 //
 // 解不出 begin 的 <span> 是容器，不整段读掉，其子节点照常处理：背景人声写作

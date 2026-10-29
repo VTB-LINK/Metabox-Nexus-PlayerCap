@@ -36,7 +36,7 @@ func Open(pid int, rid string, durationMs int32) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := core.Read(rid)
+	s, err := core.Read(rid, false)
 	if err != nil {
 		core.Close()
 		return nil, err
@@ -73,7 +73,7 @@ func (r *Reader) Song() Song { return r.song }
 // Position 读一次位置（毫秒）。
 func (r *Reader) Position() (int32, error) {
 	if r.core != nil {
-		s, err := r.core.Read(r.song.RID)
+		s, err := r.core.Read(r.song.RID, false)
 		if err != nil {
 			return 0, err
 		}

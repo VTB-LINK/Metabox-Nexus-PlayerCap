@@ -80,18 +80,31 @@ type untold struct {
 // add 记一次校准的改动量。
 func (u *untold) add(delta float32) { u.sec += delta }
 
-// anchored 在带位置的对外事件发出后调用：前端据它落锚到当时的时钟读数，此前的改动都已包含在内。
+// anchored 在带位置的对外事件**成功入队**后调用：前端据它落锚到当时的时钟读数，此前的改动都已包含在内。
+// 事件被丢弃时不调，未告知量保留（#133）。
 func (u *untold) anchored() { u.sec = 0 }
 
-// due 报告 now 时刻该不该发通知，为真时清零并记下时刻。两次通知之间至少隔
+// due 是纯判断（#133）：报告 now 时刻累计量是否达门槛、且距上一次通知已满限频间隔。**不副作用清零**
+// ——现状若在此清零，即便 emitPos 丢弃了那条校准 resume，累计量也已丢失、永不补发。清零与限频时刻的
+// 更新移到 noticed，只在由校准触发的那条 resume 成功入队后调。两次通知之间至少隔
 // player.PositionSampleInterval；间隔未到时顺延而不丢弃：量保留，间隔一到、仍达门槛就发。
 func (u *untold) due(now time.Time) bool {
-	if !(u.sec >= syncNotifySec || u.sec <= -syncNotifySec) {
-		return false
+	return (u.sec >= syncNotifySec || u.sec <= -syncNotifySec) &&
+		now.Sub(u.lastNotice) >= player.PositionSampleInterval
+}
+
+// noticed 在由校准触发的 playback_resume 成功入队后调用：清零未告知量并记下通知时刻（限频）。
+func (u *untold) noticed(now time.Time) { u.sec, u.lastNotice = 0, now }
+
+// notifyCalibration 发由对表校准触发的 playback_resume：累计量达门槛且限频已过（due）时，经 emit 发一条，
+// **只在成功入队时** noticed（清零 + 更新限频时刻）——emit 内部成功时也 anchored 清零未告知量，被丢弃时
+// 两者都不动，due 下一拍仍为真、排空后补发（#133）。提取成函数是为了让「成功才清零」这条判定离线可测
+// （runSession 需真 CDP 连接、没有离线夹具）。参数 emitPos 即 runSession 的 emitPos（返回入队结果、内部
+// 成功时 anchored）；参数名保持 emitPos，使发出点仍是 `emitPos(EventXxx, …)`、经 AST 门禁。
+func notifyCalibration(now time.Time, pending *untold, isPlaying bool, pos, dur float32, emitPos func(string, interface{}) bool) {
+	if isPlaying && pending.due(now) {
+		if emitPos(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: pos, Progress: player.ClampProgress(pos, dur)}) {
+			pending.noticed(now)
+		}
 	}
-	if now.Sub(u.lastNotice) < player.PositionSampleInterval {
-		return false
-	}
-	u.sec, u.lastNotice = 0, now
-	return true
 }

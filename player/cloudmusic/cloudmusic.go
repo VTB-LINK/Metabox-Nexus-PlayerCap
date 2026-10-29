@@ -240,12 +240,16 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 	var pending untold // 校准改动了时钟而前端尚不知道的量
 
 	// emitPos 发出带位置的对外事件（all_lyrics、lyric_update、playback_pause、playback_resume）。前端据它
-	// 落锚到此刻的时钟读数，此前的校准都已包含在内，未告知量随之清零。**本包这四种事件只许经它发出**
+	// 落锚到此刻的时钟读数，此前的校准都已包含在内。**本包这四种事件只许经它发出**
 	// （✅ player/cloudmusicanchor_lint_test.go）：绕过它发一条，未告知量不清零，随后会多发一条由校准
-	// 触发的 playback_resume。
-	emitPos := func(evtType string, data interface{}) {
-		p.Emit(evtType, data)
-		pending.anchored()
+	// 触发的 playback_resume。只在**成功入队**时 anchored 清零未告知量并回传入队结果（#133）：事件被丢弃时
+	// 未告知量保留，后续 due 照常触发补发。
+	emitPos := func(evtType string, data interface{}) bool {
+		if p.TryEmit(evtType, data) {
+			pending.anchored()
+			return true
+		}
+		return false
 	}
 
 	// posNow 返回此刻的时钟读数，供带位置的对外事件与位置采样取 position。下游按事件到达的时刻落锚
@@ -717,10 +721,7 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		// 只要发过带位置的对外事件（补发的歌词、状态变化、行号变化），未告知量已被清零，这里不会再发；排在
 		// 对表之前的只有换歌分支与 seek 检测，那两种拍不对表。所以它不与任何带位置的事件同拍
 		// （AGENTS.md §3.2 的同拍去重）。
-		if isPlaying && pending.due(now) {
-			pos := posNow()
-			emitPos(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: pos, Progress: player.ClampProgress(pos, songDuration)})
-		}
+		notifyCalibration(now, &pending, isPlaying, posNow(), songDuration, emitPos)
 
 		// 位置采样（见 BaseEmitter.EmitPositionSample）：播放中、本曲的 all_lyrics 已发出（有歌词，或已判
 		// 纯音乐）之后按固定间隔报一次。本播放器的时钟会被对表改动而不发事件（未达通知门槛的校准），

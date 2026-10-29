@@ -18,9 +18,10 @@ package player
 //
 // # 它不守什么
 //
-// 只查形状：四种事件的常量与字面量只许作 emitPos 调用的第一个实参；Emit / EmitForGen 的事件类型在
-// emitPos 之外必须是 EventXxx 常量；emitPos 的函数体里要有对 anchored 的调用。emitPos 之内先发后清
+// 只查形状：四种事件的常量与字面量只许作 emitPos 调用的第一个实参；Emit / TryEmit / EmitForGen 的事件
+// 类型在 emitPos 之外必须是 EventXxx 常量；emitPos 的函数体里要有对 anchored 的调用。emitPos 之内先发后清
 // 还是先清后发、调用点传的位置取的是哪个读数，不查。不做类型解析，事件类型经别的包转手的查不出。
+// 判据 scanAnchorEmits 与 kuwo 的门禁（kuwoanchor_lint_test.go）共用，两种 emitPos 写法都认。
 
 import (
 	"go/ast"
@@ -54,25 +55,7 @@ func TestCloudmusicPositionedEventsGoThroughEmitPos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("定位仓库根目录失败: %v", err)
 	}
-	dir := filepath.Join(root, "player", "cloudmusic")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("读目录失败: %v", err)
-	}
-	fset := token.NewFileSet()
-	var files []*ast.File
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
-		if err != nil {
-			t.Fatalf("解析 %s 失败: %v", name, err)
-		}
-		files = append(files, f)
-	}
-
+	fset, files := parseNonTestFiles(t, filepath.Join(root, "player", "cloudmusic"))
 	violations, sent := scanAnchorEmits(fset, files)
 	if len(violations) > 0 {
 		t.Errorf("player/cloudmusic 里有带位置的对外事件没有经 emitPos 发出：\n  %s\n\n"+
@@ -147,6 +130,29 @@ import "Metabox-Nexus-PlayerCap/player"
 	}
 }
 
+// parseNonTestFiles 解析 dir 下（不含子目录）的非测试 .go 文件。
+func parseNonTestFiles(t *testing.T, dir string) (*token.FileSet, []*ast.File) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("读目录失败: %v", err)
+	}
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("解析 %s 失败: %v", name, err)
+		}
+		files = append(files, f)
+	}
+	return fset, files
+}
+
 func scanAnchorSrc(t *testing.T, src string) ([]string, map[string]int) {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -164,54 +170,59 @@ func scanAnchorEmits(fset *token.FileSet, files []*ast.File) (violations []strin
 		violations = append(violations, fset.Position(pos).String()+" "+why)
 	}
 
-	// 第一遍：找 emitPos 的函数字面量，以及各处 emitPos 调用的第一个实参。
-	var lits []*ast.FuncLit
+	// 第一遍：找 emitPos 的定义——函数字面量（cloudmusic 的 emitPos := func…）或名为 emitPos 的函数、方法
+	// （kuwo 的 session.emitPos）——以及各处 emitPos 调用（emitPos(…) 或 x.emitPos(…)）的第一个实参。
+	var defs []ast.Node
 	allowed := map[ast.Expr]bool{}
 	for _, f := range files {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
+			case *ast.FuncDecl:
+				if n.Name.Name == "emitPos" {
+					defs = append(defs, n)
+				}
 			case *ast.AssignStmt:
 				for i, lhs := range n.Lhs {
 					if id, ok := lhs.(*ast.Ident); ok && id.Name == "emitPos" && i < len(n.Rhs) {
 						if lit, ok := n.Rhs[i].(*ast.FuncLit); ok {
-							lits = append(lits, lit)
+							defs = append(defs, lit)
 						}
 					}
 				}
 			case *ast.CallExpr:
-				if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "emitPos" && len(n.Args) > 0 {
+				if calleeName(n.Fun) == "emitPos" && len(n.Args) > 0 {
 					allowed[n.Args[0]] = true
 				}
 			}
 			return true
 		})
 	}
-	for _, lit := range lits {
+	for _, def := range defs {
 		anchored := false
-		ast.Inspect(lit.Body, func(n ast.Node) bool {
+		ast.Inspect(def, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok && calleeName(call.Fun) == "anchored" {
 				anchored = true
 			}
 			return true
 		})
 		if !anchored {
-			report(lit.Pos(), "emitPos 的函数体里没有调用 anchored")
+			report(def.Pos(), "emitPos 的函数体里没有调用 anchored")
 		}
 	}
-	if len(lits) > 1 {
-		report(lits[1].Pos(), "emitPos 定义了不止一处")
+	if len(defs) > 1 {
+		report(defs[1].Pos(), "emitPos 定义了不止一处")
 	}
 	inEmitPos := func(pos token.Pos) bool {
-		for _, lit := range lits {
-			if pos >= lit.Pos() && pos < lit.End() {
+		for _, def := range defs {
+			if pos >= def.Pos() && pos < def.End() {
 				return true
 			}
 		}
 		return false
 	}
 
-	// 第二遍：四种事件的常量、字面量只许作 emitPos 的第一个实参；emitPos 之外的 Emit / EmitForGen
-	// 事件类型必须是 EventXxx 常量。
+	// 第二遍：四种事件的常量、字面量只许作 emitPos 的第一个实参；emitPos 之外的 Emit / TryEmit /
+	// EmitForGen 事件类型必须是 EventXxx 常量。
 	eventConst := func(e ast.Expr) string {
 		switch e := e.(type) {
 		case *ast.Ident:
@@ -254,7 +265,7 @@ func scanAnchorEmits(fset *token.FileSet, files []*ast.File) (violations []strin
 			case *ast.CallExpr:
 				argIdx := -1
 				switch calleeName(n.Fun) {
-				case "Emit":
+				case "Emit", "TryEmit":
 					argIdx = 0
 				case "EmitForGen":
 					argIdx = 1

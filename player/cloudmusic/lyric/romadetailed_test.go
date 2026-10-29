@@ -64,7 +64,8 @@ func fillRoma(t *testing.T, lines []LyricLine) {
 }
 
 // wantRoma 断言这一行产出了逐字音译并满足对外的约定：各单元的文本是 texts；第 j 个单元的时间取自第 j 个
-// 非空白的逐字单元；整行的时间取自逐字歌词；各单元的文本拼起来、去掉首尾空白，等于行级音译。
+// 非空白的逐字单元；整行的时间取自逐字歌词；各单元的文本直接拼起来（不去各单元的空白）、再去掉首尾空白，
+// 等于行级音译。变异自证（隔离副本，实测）：拼接时先去掉各单元的首尾空白 → 多于一个音节的各例红。
 func wantRoma(t *testing.T, l LyricLine, texts ...string) {
 	t.Helper()
 	d := l.RomaTextDetailed
@@ -80,7 +81,9 @@ func wantRoma(t *testing.T, l LyricLine, texts ...string) {
 	if len(han) != len(texts) {
 		t.Fatalf("用例有误：%d 个非空白的逐字单元，期望 %d 个音节", len(han), len(texts))
 	}
+	var joined string
 	for j, w := range d.Words {
+		joined += w.Text
 		if w.Text != texts[j] {
 			t.Errorf("第 %d 个单元的文本 = %q，应为 %q", j, w.Text, texts[j])
 		}
@@ -92,7 +95,7 @@ func wantRoma(t *testing.T, l LyricLine, texts ...string) {
 	if td := l.TextDetailed; d.Timestamp != td.Timestamp || d.PlayTime != td.PlayTime || d.Duration != td.Duration {
 		t.Errorf("整行的时间 = %v/%v/%v，应取逐字歌词的 %v/%v/%v", d.Timestamp, d.PlayTime, d.Duration, td.Timestamp, td.PlayTime, td.Duration)
 	}
-	if got := strings.TrimSpace(player.BuildDetailedText(d.Words)); got != l.RomaText {
+	if got := strings.TrimSpace(joined); got != l.RomaText {
 		t.Errorf("各单元拼起来去掉首尾空白 = %q，应等于行级音译 %q", got, l.RomaText)
 	}
 }

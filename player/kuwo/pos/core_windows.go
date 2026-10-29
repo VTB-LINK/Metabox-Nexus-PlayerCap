@@ -67,7 +67,9 @@ func (r *CoreReader) read(addr uintptr, n int) ([]byte, error) {
 // On unknown versions or torn/song-changing samples it returns an error. There
 // is no implicit fallback to the former four-second clock. A vtable value that
 // differs from open time rejects; a zero value is a not-yet-constructed object.
-func (r *CoreReader) Read(expectedRID string) (Sample, error) {
+// The playing flag is part of the positionSource contract for the corrected
+// source's #135 transient filter; the core reader has none and ignores it.
+func (r *CoreReader) Read(expectedRID string, _ bool) (Sample, error) {
 	v, err := r.read(r.base, 4)
 	if err != nil {
 		return Sample{}, err
@@ -113,19 +115,26 @@ func servicePID(parent uint32) (uint32, error) {
 // coreModule returns the module base and its in-memory size (ModBaseSize). The
 // size is no longer pinned; validateCoreImage checks it against SizeOfImage.
 func coreModule(pid uint32) (uintptr, uint32, error) {
+	base, size, _, err := findModule(pid, "PlayerCore.dll")
+	return base, size, err
+}
+
+// findModule returns the base, in-memory size (ModBaseSize) and file path of
+// the named module in pid, or ErrNotFound.
+func findModule(pid uint32, name string) (base uintptr, size uint32, path string, err error) {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPMODULE|windows.TH32CS_SNAPMODULE32, pid)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, "", err
 	}
 	defer windows.CloseHandle(snap)
 	entry := windows.ModuleEntry32{Size: uint32(windows.SizeofModuleEntry32)}
 	for err = windows.Module32First(snap, &entry); err == nil; err = windows.Module32Next(snap, &entry) {
-		if strings.EqualFold(windows.UTF16ToString(entry.Module[:]), "PlayerCore.dll") {
-			return entry.ModBaseAddr, entry.ModBaseSize, nil
+		if strings.EqualFold(windows.UTF16ToString(entry.Module[:]), name) {
+			return entry.ModBaseAddr, entry.ModBaseSize, windows.UTF16ToString(entry.ExePath[:]), nil
 		}
 	}
 	if err != windows.ERROR_NO_MORE_FILES {
-		return 0, 0, err
+		return 0, 0, "", err
 	}
-	return 0, 0, ErrNotFound
+	return 0, 0, "", ErrNotFound
 }

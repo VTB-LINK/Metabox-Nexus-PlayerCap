@@ -28,11 +28,50 @@ const (
 
 // Sample is a read-only snapshot of PlayerCore's playback position, in milliseconds.
 // This is a client clock, not a measurement of sound-card or OBS output latency.
+// The core reader returns the position PlayerCore reports, which after a seek
+// leads the sound by the seek lag; LagCorrector.Apply deducts that lag
+// (doc/design/kuwo-seek-lag-design.md). The corrected position is the public
+// one: positioned events, EmitPositionSample and lyric matching all use it,
+// without offset.
 type Sample struct {
 	RID        string
 	PositionMs int32
 	DurationMs int32
 	ObservedAt time.Time
+	// LagShiftMs is how far, in milliseconds, this sample's position moved
+	// beyond the core position's own movement because the seek-lag correction
+	// changed on this tick: the deduction applied to the previous sample
+	// (core position minus output position, clamp included) minus the one
+	// applied to this sample. Positive when the correction shrinks, negative
+	// when it grows; 0 on a song change and on a session's first sample. The
+	// core reader leaves it 0; the corrector fills it.
+	LagShiftMs int32
+	// LagAppliedMs is the deduction applied to this sample, in milliseconds:
+	// the core position minus PositionMs, clamp included, so PositionMs +
+	// LagAppliedMs is the core position. The core reader leaves it 0; the
+	// corrector fills it.
+	LagAppliedMs int32
+	// LagAdopted is whether a segment's confirmed value became the e_cur in
+	// effect for the first time on this tick: at most once per segment, the
+	// opening segment and a session's first one included, never on a raise, and
+	// not on a tick on which the mismatch rule zeroes it. The core reader leaves
+	// it false; the corrector fills it.
+	LagAdopted bool
+	// CoreMs is the raw core position before the #135 transient filter and the
+	// #131 correction, so that the three consumers that must see it (design
+	// §3.2: the mismatch rule, the stall guard, and LagAppliedMs's reference)
+	// read the kernel's own value rather than the filtered PositionMs. The core
+	// reader sets it to PositionMs; the filter and corrector leave it.
+	CoreMs int32
+	// TransientResync is set by the #135 transient filter on the tick DirectSound
+	// starts playing, so the session can notify the front-end model (design
+	// §3.6). The core reader leaves it false.
+	TransientResync bool
+	// TransientEngaged is set by the #135 transient filter on the one tick a
+	// segment first enters filtering, so the corrected source logs the engage once
+	// (design §3.8). It is distinct from TransientResync, which marks only the
+	// DirectSound Play-issued tick. The core reader leaves it false.
+	TransientEngaged bool
 }
 
 type memoryRead func(uintptr, int) ([]byte, error)
@@ -95,6 +134,7 @@ func readCoreSample(read memoryRead, base uintptr, expectedRID string) (Sample, 
 		return result, ErrSongChanged
 	}
 	result = Sample{RID: rid, PositionMs: int32(position), DurationMs: int32(duration), ObservedAt: observedAt}
+	result.CoreMs = result.PositionMs
 	return result, nil
 }
 

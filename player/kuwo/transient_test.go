@@ -71,7 +71,7 @@ type switchReader struct {
 	pos      int32
 }
 
-func (r *switchReader) Read(expected string) (pos.Sample, error) {
+func (r *switchReader) Read(expected string, _ bool) (pos.Sample, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if pos.RIDWithPrefix(expected) == r.badRID && r.badReads > 0 {
@@ -79,7 +79,7 @@ func (r *switchReader) Read(expected string) (pos.Sample, error) {
 		return pos.Sample{}, pos.ErrSongChanged
 	}
 	r.pos += 50
-	return pos.Sample{RID: pos.RIDWithPrefix(expected), PositionMs: r.pos, DurationMs: 200000, ObservedAt: time.Now()}, nil
+	return pos.Sample{RID: pos.RIDWithPrefix(expected), PositionMs: r.pos, CoreMs: r.pos, DurationMs: 200000, ObservedAt: time.Now()}, nil
 }
 
 func (r *switchReader) Close() {}

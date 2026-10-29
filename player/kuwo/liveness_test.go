@@ -115,8 +115,8 @@ type frozenReader struct {
 	sample pos.Sample
 }
 
-func (r *frozenReader) Read(string) (pos.Sample, error) { return r.sample, nil }
-func (r *frozenReader) Close()                          { r.closes++ }
+func (r *frozenReader) Read(string, bool) (pos.Sample, error) { return r.sample, nil }
+func (r *frozenReader) Close()                                { r.closes++ }
 
 // 变异自证（隔离副本，实测）：删掉 runSession 里 s.stall.stalled 的那段 → 会话不再
 // 结束，runSession 一直循环直到 ctx 超时，本用例红。
@@ -126,7 +126,7 @@ func TestRunSessionFailsClosedOnStalledClock(t *testing.T) {
 	p := New(0, 50)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	reader := &frozenReader{sample: pos.Sample{RID: "MUSIC_1", PositionMs: 1000, DurationMs: 60000, ObservedAt: time.Now()}}
+	reader := &frozenReader{sample: pos.Sample{RID: "MUSIC_1", PositionMs: 1000, CoreMs: 1000, DurationMs: 60000, ObservedAt: time.Now()}}
 	err := p.runSession(ctx, snapshotFunc(func(context.Context) (cdp.Snapshot, error) {
 		return cdp.Snapshot{RID: "MUSIC_1", Status: 1, Title: "t"}, nil
 	}), func() (positionSource, error) { return reader, nil })

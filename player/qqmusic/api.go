@@ -714,7 +714,7 @@ func parseLRC(lrc string, durationMs uint32) ([]lyricLine, string, string) {
 			if plainText != "" {
 				lineTimestamp := float32(startMs) / 1000.0
 				// 逐字：QRC 的字级时间戳原本在这里被 qqCharTimingRe 整段丢弃，只留行文本。
-				// 现在同时留下来喂 text_detailed / lyrics_detailed（契约见 player.LyricTextDetailed）。
+				// 现在同时留下来喂 text_detailed（契约见 player.LyricTextDetailed）。
 				// 非 QRC 源（普通 LRC）走不到本分支，Detailed 保持零值 → 序列化成 {}。
 				var detailed player.LyricTextDetailed
 				if words := parseQRCWords(rawText); len(words) > 0 {

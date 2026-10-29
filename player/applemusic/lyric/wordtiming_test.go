@@ -17,8 +17,8 @@ const wordDocHead = `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://
 const wordDocTail = `
 </div></body></tt>`
 
-// 逐字时间 + 译文对齐（合成）。词间空格必须落在 words 里：overlay 的逐字效果与 lyrics_detailed[].text
-// 都直接拼接 words，空格只在行文本里时英文会显示成「HelloWorld」（审查 P2）。
+// 逐字时间 + 译文对齐（合成）。词间空格必须落在 words 里：overlay 的逐字效果与下游读逐字文本都直接拼接
+// words[].text，空格只在行文本里时英文会显示成「HelloWorld」（审查 P2）。
 //
 // 变异自证：把 span 的 begin 解析去掉，Words 为空即红；去掉 parseLineContent 里把 span 间 chardata
 // 并入前一个词的分支，w[0] 变回 "Hello" 而红。

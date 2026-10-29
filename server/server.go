@@ -1041,8 +1041,10 @@ func (s *Server) perPlayerHidden(requestPlayer string) bool {
 // 这四个 handler 的既有写法是「RLock → 取 *PlayerState → RUnlock → 读它的字段」，
 // 锁只保护了 map 查找，字段读全在锁外，而 UpdatePlayerState 是在 s.mu.Lock()
 // 内写这些字段的 —— 写侧持锁、读侧不持锁，是真实数据竞争，已复现两种后果：
-//  1. slice header 撕裂：ps.AllLyrics 拿到「新 ptr + 旧 len」→ BuildLyricsDetailed
-//     把分配区外的垃圾当 LyricLine 迭代 → BuildDetailedText 解引用垃圾指针 panic。
+//  1. slice header 撕裂：ps.AllLyrics 拿到「新 ptr + 旧 len」→ 序列化时把分配区外的垃圾
+//     当 LyricLine 遍历 → 解引用垃圾指针 panic。实测的 panic 落在当时 MarshalJSON 里从 Lyrics
+//     派生顶层逐字集合的那一步（该派生已于 issue #132 删除）；序列化 Lyrics 本身同样逐行遍历、
+//     读每行的字符串与逐字切片，撕裂的后果不因删除而消失（推断，删除后未回退复测）。
 //     net/http 的 conn.serve 会 recover handler panic，故**进程不死**；但它只
 //     recover + 打日志 + 关连接，**不写任何响应**，且 json 是先整体 marshal 再写、
 //     panic 发生在 marshal 阶段，一个字节都没发出去 —— 所以客户端拿到的是**裸 EOF /

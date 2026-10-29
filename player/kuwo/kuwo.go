@@ -114,7 +114,9 @@ type snapshotSource interface {
 	Snapshot(context.Context) (cdp.Snapshot, error)
 }
 type positionSource interface {
-	Read(string) (pos.Sample, error)
+	// Read takes one sample. playing (meta.Status == 1) feeds the corrected
+	// source's #135 transient filter; the bare core reader ignores it.
+	Read(rid string, playing bool) (pos.Sample, error)
 	Close()
 }
 
@@ -128,6 +130,8 @@ func (p *KuwoPlayer) connectSession(ctx context.Context) error {
 		return err
 	}
 	defer client.Close()
+	// Per connection: the first seek-lag drift is logged as a warning.
+	warned := false
 	return p.runSession(ctx, client, func() (positionSource, error) {
 		reader, err := pos.OpenCore(pid)
 		if err != nil {
@@ -136,7 +140,14 @@ func (p *KuwoPlayer) connectSession(ctx context.Context) error {
 		}
 		timestamp, slot := reader.Build()
 		log.Detail("Kuwo core bound: build %s, PlayerCore timestamp 0x%08X, read slot %d", client.Build(), timestamp, slot)
-		return reader, nil
+		return withLag(reader, func() (lagReader, string, error) {
+			lag, err := pos.OpenLag(pid)
+			if err != nil {
+				// Likewise for a nil *LagReader.
+				return nil, "", err
+			}
+			return lag, lag.Build(), nil
+		}, &warned, p.pollMs), nil
 	})
 }
 
@@ -207,7 +218,7 @@ func (p *KuwoPlayer) runSession(ctx context.Context, client snapshotSource, open
 			}
 			var sample pos.Sample
 			if err == nil {
-				sample, err = reader.Read(snap.RID)
+				sample, err = reader.Read(snap.RID, snap.Status == 1)
 			}
 			if err != nil {
 				// Reject a torn/song-transition sample immediately. A persistent
@@ -227,7 +238,11 @@ func (p *KuwoPlayer) runSession(ctx context.Context, client snapshotSource, open
 				}
 				// Liveness: playing long enough that a live core would have moved,
 				// yet the position never did. Fail closed via the disconnect path.
-				if s.stall.stalled(snap.Status == 1, sample.PositionMs, now) {
+				// It watches the raw core position (CoreMs), before the #135 transient
+				// filter and the #131 correction: the filter may pin the position at the
+				// base and a change of the correction moves the public position, neither
+				// of which is core movement (design §3.2).
+				if s.stall.stalled(snap.Status == 1, sample.CoreMs, now) {
 					log.Warn("Kuwo is playing but the core position has not advanced for %s; failing closed", livenessThreshold)
 					return pos.ErrClockStalled
 				}
@@ -245,6 +260,9 @@ func (p *KuwoPlayer) runSession(ctx context.Context, client snapshotSource, open
 					s.retryAt = time.Time{}
 				}
 				s.emitLine(now)
+				// Retry a dropped playback_pause (#134), independent of observe's
+				// event branch, which does not fire on a tick with no change.
+				s.resendPauseIfPending()
 			}
 		}
 		if !wait(ctx, EffectivePollInterval(p.pollMs)) {

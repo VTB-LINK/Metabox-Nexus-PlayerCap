@@ -7,7 +7,7 @@ info:
 
     **多播放器架构：** HTTP 响应与 `/ws`、`/{player}/ws`、SSE 的 JSON 事件均包含 `player` 字段，标识数据来源的播放器；音频波形帧内携带 `player`。当前八家：`"wesing"`（全民K歌）、`"cloudmusicv3"`（网易云音乐 v3）、`"qqmusic"`（QQ 音乐）、`"kugou"`（酷狗音乐）、`"sodamusic"`（汽水音乐）、`"applemusic"`（Apple Music for Windows）、`"spotify"`（Spotify）、`"kuwo"`（酷我音乐）。**八家的能力不一致**，逐字与翻译的差异见各字段说明。
 
-    **酷我接入边界：** `kuwo` 经 CDP 9224 读取元数据与状态；读取对 9.6.0.0 的任意渠道后缀放行（桥版本与页面目录后缀须一致）。高频毫秒位置来自 KwService 的 PlayerCore，按结构匹配（解析导出表定位单例、读位置函数须是该单例虚表的虚方法）加原生音频后端，不再钉死时间戳；未知结构、权限不足或身份不一致时降级，不回退四秒快照，播放满 20 秒而这首歌的核心位置从未变化时也降级（暂停清零，位置动过一次后不再检查）。受控重启只对白名单内构建（当前 W1、UG1 的 EXE 哈希）放行一次以开启端口，白名单外需手动带 --remote-debugging-port=9224 启动；不改注册表或 DLL。逐字仅采用有效 lrcx 时间头，无头/坏头降级逐行；翻译支持已实测的 `[ml:1.0]` 双语 lrcx，按相邻原文与下一时间戳配对为 sub_text；未知格式不猜测。音译为空。封面按 RID 异步获取并统一为 800×800。音频按 kwmusic.exe 及其 KwService.exe 子进程树捕获，已在 9.6.0.0_UG1 真机核对 RMS 非零。
+    **酷我接入边界：** `kuwo` 经 CDP 9224 读取元数据与状态；读取对 9.6.0.0 的任意渠道后缀放行（桥版本与页面目录后缀须一致）。高频毫秒位置来自 KwService 的 PlayerCore，按结构匹配（解析导出表定位单例、读位置函数须是该单例虚表的虚方法）加原生音频后端，不再钉死时间戳；未知结构、权限不足或身份不一致时降级，不回退四秒快照，播放满 20 秒而这首歌的核心位置从未变化时也降级（暂停清零，位置动过一次后不再检查）。拖动后核心位置领先实际出声的部分（实测最多约 300 ms）已按解码时间戳从 `position` 中扣除，只对代码指纹已知的播放插件（当前 9.6.0.0_UG1）生效，其他构建不扣除。受控重启只对白名单内构建（当前 W1、UG1 的 EXE 哈希）放行一次以开启端口，白名单外需手动带 --remote-debugging-port=9224 启动；不改注册表或 DLL。逐字仅采用有效 lrcx 时间头，无头/坏头降级逐行；翻译支持已实测的 `[ml:1.0]` 双语 lrcx，按相邻原文与下一时间戳配对为 sub_text；未知格式不猜测。音译为空。封面按 RID 异步获取并统一为 800×800。音频按 kwmusic.exe 及其 KwService.exe 子进程树捕获，已在 9.6.0.0_UG1 真机核对 RMS 非零。
 
     **空数据约定：** 所有事件在无数据时统一返回 `"data": {}`（空对象），而非 `null`。
 
@@ -368,8 +368,7 @@ paths:
         - `lyrics[].sub_text` - 翻译歌词文本；cloudmusicv3、qqmusic、kugou、sodamusic、applemusic、kuwo 提供（kuwo 限实测 ml:1.0 双语 lrcx），wesing、spotify 恒为空字符串。kugou 的翻译取自 KRC 内嵌的中文译轨、按行号对齐，回落行级 LRC、或该行无译文时为空；sodamusic 的翻译是平台单独下发的 tlyric LRC（`translations.cn`）、按绝对时间戳对齐，该曲无译轨或该行未被译轨覆盖（间奏等）时为空；applemusic 的翻译内嵌在 iTunes TTML 的 `<translations>` 里，按 `itunes:key`（L1/L2…）与正文行配对（非行号、非时间戳），该曲无译轨或该行无对应译文时为空
         - `lyrics[].roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；sodamusic 平台自身无音译源，改由酷狗歌词接口按歌名 + 时长匹配「借」音译补全（非平台原生、不保证稳定：跨平台歌名搜索可能搜不到对应曲、或匹配到不同版本 / 母带 / 翻唱，匹配失败、无对应曲或该行主歌词文本对不上时留空）；wesing 取自进程内存里的音译轨（与主歌词同一个歌词对象，逐行对应、按行号 + 行起始时间配上；只有曲库带音译的歌才有，与全民K歌界面上的音译开关无关；2026-10-09 用韩文、日文歌实测，罗马音）；applemusic 恒为空字符串（不解析 TTML 里的音译轨）；kuwo 当前不提供音译；spotify 无音译源（自家 color-lyrics/v2 只有行级时间轴，provider 为 MusixMatch），恒为空字符串
         - `lyrics[].roma_text_detailed` - 逐字音译：`roma_text` 的逐音节时间轴，形状与 `text_detailed` 相同（timestamp、play_time、duration、words[]），没有时为空对象 `{}`。wesing、qqmusic、kugou、sodamusic 提供，cloudmusicv3 只在一字一音的歌（粤语）上提供：wesing 与 qqmusic 取音译轨自带的字级时间，kugou、sodamusic 与 cloudmusicv3 的时间取自主歌词的字（sodamusic 的音译借自酷狗，只有按字对齐上的行才有）。cloudmusicv3 的音译只有逐行的 romalrc / yromalrc、没有字级时间（2026-10-10 实测）；带逐字歌词的行里，每个逐字单元（纯空白的不计）恰为一个汉字、行级音译的音节数与汉字数相等且都是罗马字时，把音节按顺序配上各个字的时间；带逐字歌词的行里出现假名或谚文的歌（日文、韩文歌）整首为 `{}`，中英混排等对不上的行为 `{}`。applemusic、spotify 与 kuwo 无音译，恒为 `{}`。有 `roma_text` 的行不一定有它：音译的字级单元与行级音译对不上、或时间轴不合法的行为 `{}`。它是一条独立的数组，单元与 `text_detailed` 不一一对应（一个汉字可以拆成多个音节，空格可以单独占一个单元）；各单元的 `text` 拼起来、去掉首尾空白即 `roma_text`
-        - `lyrics[].text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
-        - `lyrics_detailed` - 完整逐字歌词集合（仅包含有逐字数据的行）。cloudmusicv3（YRC）/ qqmusic（QRC）/ kugou（KRC）/ sodamusic（明文 KRC）/ wesing（进程内存卡拉OK字级时间）/ applemusic（TTML `<span>`）/ kuwo（有效 lrcx 时间头）提供逐字时有内容；kugou 回落到行级 LRC 时恒为 `[]`，wesing 字级时间轴不合法的行不计入。sodamusic 无行级回落，故它的 `lyrics_detailed` 要么与 `lyrics` 等长，要么两者同时为空；applemusic 仅 `itunes:timing="Word"` 型歌曲有内容，Line 型恒为 `[]`；spotify 无逐字源（自家 color-lyrics/v2 只有行级时间轴），恒为 `[]`
+        - `lyrics[].text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`。cloudmusicv3（YRC）/ qqmusic（QRC）/ kugou（KRC）/ sodamusic（明文 KRC）/ wesing（进程内存卡拉OK字级时间）/ applemusic（TTML `<span>`）/ kuwo（有效 lrcx 时间头）提供逐字；kugou 回落到行级 LRC 时各行均为 `{}`，wesing 字级时间轴不合法的行为 `{}`。sodamusic 无行级回落，各行要么都带逐字，要么 `lyrics` 为空；applemusic 仅 `itunes:timing="Word"` 型歌曲有逐字，Line 型各行均为 `{}`；kuwo 无有效 lrcx 时间头或字级时间时为 `{}`；spotify 无逐字源（自家 color-lyrics/v2 只有行级时间轴），恒为 `{}`。逐字文本为 `words[].text` 直接拼接，与该行 `text` 可能有标点差异，不可用于相等比较
       responses:
         "200":
           description: 200 成功
@@ -386,7 +385,7 @@ paths:
                           - $ref: "#/components/schemas/EmptyObject"
               examples:
                 有歌词时:
-                  summary: 有歌词时（cloudmusicv3，YRC 逐字 + 翻译）。示例已裁剪，只删元素不改值：lyrics 实际 88 行（此处留 2）、lyrics_detailed 实际 88 项（留 1）、每行 words 实际 6-8 个（留 2）。故 count 与数组长度对不上，真实响应中两者一致。
+                  summary: 有歌词时（cloudmusicv3，YRC 逐字 + 翻译）。示例已裁剪，只删元素不改值：lyrics 实际 88 行（此处留 2）、每行 words 实际 6-8 个（留 2）。故 count 与数组长度对不上，真实响应中两者一致。
                   value:
                     code: 0
                     msg: success
@@ -426,17 +425,8 @@ paths:
                               - { timestamp: 7.92, play_time: 7.42, duration: 0.06, text: "It " }
                               - { timestamp: 7.98, play_time: 7.48, duration: 0.3, text: "feels " }
                           roma_text_detailed: {}
-                      lyrics_detailed:
-                        - lyric_index: 0
-                          timestamp: 4.44
-                          play_time: 3.94
-                          duration: 3.48
-                          text: "Cold enough to chill my bones"
-                          words:
-                            - { timestamp: 4.44, play_time: 3.94, duration: 1.08, text: "Cold " }
-                            - { timestamp: 5.52, play_time: 5.02, duration: 0.36, text: "enough " }
                 有歌词时（sodamusic，明文 KRC 逐字）:
-                  summary: 中途接入 sodamusic（真实录音）。示例已裁剪，只删元素不改值：lyrics 实际 35 行（此处留 1）、lyrics_detailed 实际 35 项（留 1）、每行 words 实际 6 个（留 3），故 count 与数组长度对不上，真实响应中两者一致。注意 sodamusic 的 title 是「歌手 - 歌名」（同 kugou，与 wesing / cloudmusicv3 / qqmusic 相反）；lyrics_detailed 与 lyrics 等长（它无行级回落）。
+                  summary: 中途接入 sodamusic（真实录音）。示例已裁剪，只删元素不改值：lyrics 实际 35 行（此处留 1）、每行 words 实际 6 个（留 3），故 count 与数组长度对不上，真实响应中两者一致。注意 sodamusic 的 title 是「歌手 - 歌名」（同 kugou，与 wesing / cloudmusicv3 / qqmusic 相反）；它无行级回落，每行的 text_detailed 都带逐字。
                   value:
                     code: 0
                     msg: success
@@ -463,16 +453,6 @@ paths:
                               - { timestamp: 0.32, play_time: 0.11999999, duration: 0.18, text: "能" }
                               - { timestamp: 0.5, play_time: 0.3, duration: 0.18, text: "够" }
                           roma_text_detailed: {}
-                      lyrics_detailed:
-                        - lyric_index: 0
-                          timestamp: 0.09
-                          play_time: 0
-                          duration: 1.29
-                          text: "谁能够代替我"
-                          words:
-                            - { timestamp: 0.09, play_time: 0, duration: 0.23, text: "谁" }
-                            - { timestamp: 0.32, play_time: 0.11999999, duration: 0.18, text: "能" }
-                            - { timestamp: 0.5, play_time: 0.3, duration: 0.18, text: "够" }
                 无歌词时:
                   summary: 平台未返回歌词（cloudmusicv3 纯音乐）。data 不是空对象——lyrics 为空数组、count 为 0，而 title/duration 照常有值。
                   value:
@@ -486,7 +466,6 @@ paths:
                       progress: 0
                       count: 0
                       lyrics: []
-                      lyrics_detailed: []
 
   /lyric_update:
     get:
@@ -927,7 +906,7 @@ paths:
 
         有歌词时：
         ```json
-        {"type":"all_lyrics","player":"wesing","data":{"title":"都是夜归人 - 许美静","duration":296,"position":1.75,"progress":0.0059121624,"count":38,"lyrics":[{"index":0,"timestamp":25.44,"play_time":25.24,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","roma_text":"","text_detailed":{},"roma_text_detailed":{}},{"index":1,"timestamp":31.483,"play_time":31.282999,"text":"往事就像流星刹那划过心房","sub_text":"","roma_text":"","text_detailed":{},"roma_text_detailed":{}},{"index":2,"timestamp":37.716,"play_time":37.516,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","roma_text":"","text_detailed":{},"roma_text_detailed":{}}],"lyrics_detailed":[]}}（lyrics 已裁剪至 3 行，实际 38 行；录于 wesing 接通逐字之前，故 text_detailed 为 {}、lyrics_detailed 为 []）
+        {"type":"all_lyrics","player":"wesing","data":{"title":"都是夜归人 - 许美静","duration":296,"position":1.75,"progress":0.0059121624,"count":38,"lyrics":[{"index":0,"timestamp":25.44,"play_time":25.24,"text":"是冰冻的时分 已过夜深的夜晚","sub_text":"","roma_text":"","text_detailed":{},"roma_text_detailed":{}},{"index":1,"timestamp":31.483,"play_time":31.282999,"text":"往事就像流星刹那划过心房","sub_text":"","roma_text":"","text_detailed":{},"roma_text_detailed":{}},{"index":2,"timestamp":37.716,"play_time":37.516,"text":"灰暗的深夜 是寂寞的世界","sub_text":"","roma_text":"","text_detailed":{},"roma_text_detailed":{}}]}}（lyrics 已裁剪至 3 行，实际 38 行；录于 wesing 接通逐字之前，故 text_detailed 为 {}）
         ```
         无歌词时：
         ```json
@@ -960,7 +939,10 @@ paths:
         **7. `playback_resume` - 恢复播放 / 跳转**
 
         `position` 发生非连续跳变时发送，三种情形都会触发：从暂停中恢复播放；seek / 拖动进度条；以及
-        cloudmusicv3 按界面进度对表、校准量达到门槛（现为 0.2 秒）。
+        位置校准：cloudmusicv3 按界面进度对表、校准量达到门槛（现为 0.2 秒），kuwo 的拖动偏差修正改变或拖动后首次生效、使前端按插值推算的位置
+        与实际位置相差 0.2 秒以上（修正晚于或早于拖动本身生效时，一次拖动收到两条）。kuwo 在 DirectSound、WaveOut 下的开播/拖动输出瞬态经
+        过滤消除后，开播与拖动各至多一条（延迟确认的第二条仍在）；暂停中拖动 DirectSound 恢复后约 1 秒才出声，在声音真正开始的那一拍另发一条以
+        校正前端，故为两条。
         后两种的 `position` 是**新位置，可能小于上一次的值**。第三种同样是位置的非连续变化，前端照常以 `position` 重新落锚。
 
         因此本事件**不保证与 `playback_pause` 成对出现**，实际收到的 `playback_resume` 通常多于 `playback_pause`。
@@ -998,7 +980,7 @@ paths:
 
         ---
 
-        **WS 完整生命周期示例**（取自真实录音，`lyrics` / `lyrics_detailed` 内容以 `...` 略去；录于 wesing 接通逐字之前，故 `lyrics_detailed` 为 `[]`）：
+        **WS 完整生命周期示例**（取自真实录音，`lyrics` 内容以 `...` 略去）：
         ```
         （客户端连入根端点 /ws，当前没有活跃播放器）
         ← {"type":"player_clear","player":"","data":{}}
@@ -1007,7 +989,7 @@ paths:
         ← {"type":"player_switch","player":"wesing","data":{"from":"","to":"wesing"}}
         ← {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"晚风 - 陈婧霏"}}
         ← {"type":"song_info_update","player":"wesing","data":{"name":"晚风","singer":"陈婧霏","title":"晚风 - 陈婧霏","cover":"http://imgcache.qq.com/music/photo/mid_album_800/r/k/003JA09X2m9xrk.jpg","cover_base64":""}}
-        ← {"type":"all_lyrics","player":"wesing","data":{"title":"晚风 - 陈婧霏","duration":176,"position":0,"progress":0,"count":34,"lyrics":[...],"lyrics_detailed":[]}}
+        ← {"type":"all_lyrics","player":"wesing","data":{"title":"晚风 - 陈婧霏","duration":176,"position":0,"progress":0,"count":34,"lyrics":[...]}}
 
         （封面异步下载完成，补发第二条 song_info_update，此时 cover_base64 有值）
         ← {"type":"song_info_update","player":"wesing","data":{"name":"晚风","singer":"陈婧霏","title":"晚风 - 陈婧霏","cover":"http://imgcache.qq.com/music/photo/mid_album_800/r/k/003JA09X2m9xrk.jpg","cover_base64":"data:image/jpeg;base64,..."}}
@@ -1228,7 +1210,7 @@ paths:
                           - $ref: "#/components/schemas/EmptyObject"
               examples:
                 有歌词时:
-                  summary: 有歌词时（cloudmusicv3，YRC 逐字 + 翻译）。示例已裁剪，只删元素不改值：lyrics 实际 88 行（此处留 2）、lyrics_detailed 实际 88 项（留 1）、每行 words 实际 6-8 个（留 2）。故 count 与数组长度对不上，真实响应中两者一致。
+                  summary: 有歌词时（cloudmusicv3，YRC 逐字 + 翻译）。示例已裁剪，只删元素不改值：lyrics 实际 88 行（此处留 2）、每行 words 实际 6-8 个（留 2）。故 count 与数组长度对不上，真实响应中两者一致。
                   value:
                     code: 0
                     msg: success
@@ -1268,15 +1250,6 @@ paths:
                               - { timestamp: 7.92, play_time: 7.42, duration: 0.06, text: "It " }
                               - { timestamp: 7.98, play_time: 7.48, duration: 0.3, text: "feels " }
                           roma_text_detailed: {}
-                      lyrics_detailed:
-                        - lyric_index: 0
-                          timestamp: 4.44
-                          play_time: 3.94
-                          duration: 3.48
-                          text: "Cold enough to chill my bones"
-                          words:
-                            - { timestamp: 4.44, play_time: 3.94, duration: 1.08, text: "Cold " }
-                            - { timestamp: 5.52, play_time: 5.02, duration: 0.36, text: "enough " }
                 无歌词时:
                   summary: 平台未返回歌词（cloudmusicv3 纯音乐）。data 不是空对象——lyrics 为空数组、count 为 0，而 title/duration 照常有值。
                   value:
@@ -1290,7 +1263,6 @@ paths:
                       progress: 0
                       count: 0
                       lyrics: []
-                      lyrics_detailed: []
 
   /{player}/lyric_update:
     get:
@@ -1896,14 +1868,13 @@ webhooks:
                       - { index: 0, timestamp: 25.44, play_time: 25.24, text: "是冰冻的时分 已过夜深的夜晚", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
                       - { index: 1, timestamp: 31.483, play_time: 31.282999, text: "往事就像流星刹那划过心房", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
                       - { index: 2, timestamp: 37.716, play_time: 37.516, text: "灰暗的深夜 是寂寞的世界", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
-                    lyrics_detailed: []
               无歌词时:
                 value:
                   type: all_lyrics
                   player: wesing
                   data: {}
               有歌词时（kugou，KRC 逐字 + 翻译 + 音译）:
-                summary: kugou（真实录音，2026-10-09）。示例已裁剪，只删元素不改值——lyrics 实际 73 行（此处留 index 16、17 两行）、lyrics_detailed 实际 73 项（留 lyric_index 17 一项），words 未裁剪，故 count 与数组长度对不上。歌词正文从略——text、翻译 sub_text、音译 roma_text 与 words[].text 凡非空的写作「…」，空串是原值，所以第 16 行（英文）有翻译而没有音译、第 17 行（韩文）两者都有，这一差别是真实的。position 是宣告那一刻的实时位置，宣告时这首歌已在 39 秒处。
+                summary: kugou（真实录音，2026-10-09）。示例已裁剪，只删元素不改值——lyrics 实际 73 行（此处留 index 16、17 两行），words 未裁剪，故 count 与数组长度对不上。歌词正文从略——text、翻译 sub_text、音译 roma_text 与 words[].text 凡非空的写作「…」，空串是原值，所以第 16 行（英文）有翻译而没有音译、第 17 行（韩文）两者都有，这一差别是真实的。position 是宣告那一刻的实时位置，宣告时这首歌已在 39 秒处。
                 value:
                   type: all_lyrics
                   player: kugou
@@ -1945,18 +1916,8 @@ webhooks:
                             - { timestamp: 42.514, play_time: 42.084, duration: 1.031, text: "…" }
                             - { timestamp: 43.545, play_time: 43.114998, duration: 0.593, text: "…" }
                         roma_text_detailed: {}
-                    lyrics_detailed:
-                      - lyric_index: 17
-                        timestamp: 42.391
-                        play_time: 41.961
-                        duration: 2.058
-                        text: "…"
-                        words:
-                          - { timestamp: 42.391, play_time: 41.961, duration: 0.123, text: "…" }
-                          - { timestamp: 42.514, play_time: 42.084, duration: 1.031, text: "…" }
-                          - { timestamp: 43.545, play_time: 43.114998, duration: 0.593, text: "…" }
               有歌词时（applemusic，逐行）:
-                summary: applemusic（真实录音，2026-10-09）。lyrics 实际 20 行（此处留 2），歌词正文从略——text 写作「…」。这首歌只有逐行歌词、没有翻译，每行 text_detailed 为 {}、sub_text 为空串，lyrics_detailed 为 []，都是原值。position 是宣告那一刻的实时位置（2.72 秒），不是 0。
+                summary: applemusic（真实录音，2026-10-09）。lyrics 实际 20 行（此处留 2），歌词正文从略——text 写作「…」。这首歌只有逐行歌词、没有翻译，每行 text_detailed 为 {}、sub_text 为空串，都是原值。position 是宣告那一刻的实时位置（2.72 秒），不是 0。
                 value:
                   type: all_lyrics
                   player: applemusic
@@ -1969,9 +1930,8 @@ webhooks:
                     lyrics:
                       - { index: 0, timestamp: 7.723, play_time: 7.323, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
                       - { index: 1, timestamp: 14.427, play_time: 14.027, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
-                    lyrics_detailed: []
               有歌词时（applemusic，逐行 + 翻译）:
-                summary: applemusic（真实录音，2026-10-09）。lyrics 实际 28 行（此处留 2），歌词正文从略——text 与翻译 sub_text 写作「…」，录音里 28 行两者均非空。这首歌的正文是繁体中文，TTML 的译文轨是它的简体对照；没有逐字，每行 text_detailed 为 {}、lyrics_detailed 为 []。
+                summary: applemusic（真实录音，2026-10-09）。lyrics 实际 28 行（此处留 2），歌词正文从略——text 与翻译 sub_text 写作「…」，录音里 28 行两者均非空。这首歌的正文是繁体中文，TTML 的译文轨是它的简体对照；没有逐字，每行 text_detailed 为 {}。
                 value:
                   type: all_lyrics
                   player: applemusic
@@ -1984,7 +1944,6 @@ webhooks:
                     lyrics:
                       - { index: 0, timestamp: 26.929, play_time: 26.529001, text: "…", sub_text: "…", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
                       - { index: 1, timestamp: 34.575, play_time: 34.175, text: "…", sub_text: "…", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
-                    lyrics_detailed: []
               平台没有歌词（kugou 纯音乐）:
                 summary: kugou（真实录音，2026-10-09）。data 不是空对象——count 为 0、lyrics 为空数组，title / duration 照常有值。同一毫秒紧跟一条 index 为 -1、text 为「纯音乐，请欣赏」的 lyric_update。
                 value:
@@ -1997,7 +1956,6 @@ webhooks:
                     progress: 0
                     count: 0
                     lyrics: []
-                    lyrics_detailed: []
               平台没有歌词（applemusic）:
                 summary: applemusic（真实录音，2026-10-09）。宣告新歌时还没找到歌词，先发这条空的；14.8 秒后仍没有，才发 index 为 -1 的 lyric_update。
                 value:
@@ -2010,7 +1968,6 @@ webhooks:
                     progress: 0.0010718214
                     count: 0
                     lyrics: []
-                    lyrics_detailed: []
       responses:
         "200":
           description: 事件已接收
@@ -2086,8 +2043,10 @@ webhooks:
       summary: 恢复播放事件
       operationId: onPlaybackResume
       description: |
-        `position` 发生非连续跳变时发送：从暂停恢复播放，seek / 拖动进度条，或 cloudmusicv3 按界面进度对表、
-        校准量达到门槛（现为 0.2 秒）；后两种的 `position` 可能小于上一次的值。
+        `position` 发生非连续跳变时发送：从暂停恢复播放，seek / 拖动进度条，或位置校准（cloudmusicv3 按界面进度对表、
+        校准量达到门槛，现为 0.2 秒；kuwo 的拖动偏差修正改变或拖动后首次生效、使前端按插值推算的位置与实际位置相差 0.2 秒以上，
+        一次拖动可能收到两条）；
+        后两种的 `position` 可能小于上一次的值。
         因此本事件不保证与 `playback_pause` 成对出现。前端收到后应以 `position` 为锚点重新开始插值。
       requestBody:
         required: true
@@ -2802,6 +2761,7 @@ components:
               example: 3.46
             words:
               type: array
+              description: 按时间顺序的逐字片段。逐字文本为各片段的 text 直接拼接（词尾空格已含在 text 里），不来自 LyricLine.text，与之可能有标点差异，不可用于相等比较
               items:
                 $ref: "#/components/schemas/LyricTextDetailedWord"
 
@@ -2829,41 +2789,9 @@ components:
           description: 字/词文本
           example: "还"
 
-    LyricDetailedLine:
-      type: object
-      required: [lyric_index, timestamp, play_time, duration, text, words]
-      properties:
-        lyric_index:
-          type: integer
-          description: 对应 lyrics[] 中的行索引
-          example: 0
-        timestamp:
-          type: number
-          format: float
-          description: 逐字行原始起始时间（秒）
-          example: 4.44
-        play_time:
-          type: number
-          format: float
-          description: 逐字行应用 offset 后的展示时间（秒）
-          example: 3.94
-        duration:
-          type: number
-          format: float
-          description: 逐字行持续时间（秒）
-          example: 3.46
-        text:
-          type: string
-          description: 由 words[].text 拼接得到的逐字源文本，不来自 lyrics[].text
-          example: "还没"
-        words:
-          type: array
-          items:
-            $ref: "#/components/schemas/LyricTextDetailedWord"
-
     AllLyricsData:
       type: object
-      required: [title, duration, position, progress, count, lyrics, lyrics_detailed]
+      required: [title, duration, position, progress, count, lyrics]
       properties:
         title:
           type: string
@@ -2893,11 +2821,6 @@ components:
           description: 按 index 排序的歌词数组
           items:
             $ref: "#/components/schemas/LyricLine"
-        lyrics_detailed:
-          type: array
-          description: 完整逐字歌词集合，内容仅从逐字源数据派生。cloudmusicv3 / qqmusic / kugou / sodamusic / wesing / applemusic / kuwo 有逐字源时有内容；kugou 回落行级 LRC 时为空数组，wesing 字级时间轴不合法的行不计入。sodamusic 无行级回落，它的本数组要么与 lyrics 等长，要么两者同时为空。applemusic 仅 `itunes:timing="Word"` 型 TTML（带 `<span>` 字级时间）有内容，Line 型为空数组。kuwo 无有效 lrcx 时间头或字级时间时降级逐行，本数组为空。spotify 无逐字源（自家 color-lyrics/v2 只有行级时间轴），恒为空数组
-          items:
-            $ref: "#/components/schemas/LyricDetailedLine"
 
     PlaybackTimeInfo:
       type: object

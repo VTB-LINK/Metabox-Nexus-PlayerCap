@@ -43,7 +43,7 @@ func TestCoreOpenFailureReturnsErrorWithoutPanic(t *testing.T) {
 
 type openRecoveryReader struct{ reads, closes int }
 
-func (r *openRecoveryReader) Read(string) (pos.Sample, error) {
+func (r *openRecoveryReader) Read(string, bool) (pos.Sample, error) {
 	r.reads++
 	return pos.Sample{}, errors.New("sample unavailable")
 }

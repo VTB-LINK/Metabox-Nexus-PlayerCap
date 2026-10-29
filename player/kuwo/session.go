@@ -16,6 +16,13 @@ import (
 // before the session fails closed. It is a package var so tests can shrink it.
 var livenessThreshold = 20 * time.Second
 
+// lagNotifyMs is how far, in milliseconds, the public position may be from the
+// front-end model on a tick whose seek-lag correction changed or whose segment
+// was first adopted, before the session publishes a seek
+// (doc/design/kuwo-seek-lag-design.md §3.3 "通知"). It is a package var so
+// tests can change it.
+var lagNotifyMs int64 = 200
+
 // session has one owner: the polling loop. Workers return values, never emit
 // events. Generation AND RID checks prevent late assets crossing songs/idle.
 type session struct {
@@ -32,6 +39,43 @@ type session struct {
 	tries                    int
 	retryAt                  time.Time
 	stall                    livenessWatch
+	// outMs and outAt are this tick's public position and observation time,
+	// set in observe before any event of the tick: the position every
+	// positioned event of the tick, and of accept until the next tick, carries.
+	outMs int32
+	outAt time.Time
+	front frontModel
+	// notice: the front end is to be told the position as a seek, until a
+	// positioned event is enqueued.
+	notice bool
+	// pausePending: a playback_pause was judged to be sent but its enqueue was
+	// dropped (full channel), so the front end still interpolates past the pause
+	// (#134). resendPauseIfPending retries it each tick until it enqueues; while
+	// it is set, observe does not send a notice-triggered resume (a real seek
+	// still does), which would restart the front end the pause should have stopped.
+	pausePending bool
+}
+
+// frontModel follows a front end that interpolates as doc/API_RESPONSE_EXAMPLES.md
+// "时间插值" asks, from the positioned events of the song that were enqueued:
+// each anchors it at the position it carries; all_lyrics and playback_resume
+// start the interpolation, playback_pause stops it, lyric_update leaves it as
+// it is. It never reads the player's own state, which the front end does not
+// see: a paused session that sends all_lyrics, or whose playback_pause was
+// dropped after a playback_resume (#134), leaves the front end interpolating.
+type frontModel struct {
+	ok      bool // anchored in this song
+	ms      int32
+	at      time.Time
+	running bool
+}
+
+// positionMs is where the front end is at now.
+func (f *frontModel) positionMs(now time.Time) int64 {
+	if !f.running {
+		return int64(f.ms)
+	}
+	return int64(f.ms) + now.Sub(f.at).Milliseconds()
 }
 
 // livenessWatch is a second line of evidence behind the structure match: it
@@ -104,6 +148,29 @@ func (s *session) observe(meta cdp.Snapshot, sample pos.Sample) bool {
 	}
 	s.idle = false
 	seek := s.clock.Observe(sample)
+	s.outMs, s.outAt = sample.PositionMs, sample.ObservedAt
+	// Seek-lag notice, before any event of this tick. Judged only on a tick
+	// whose correction changed, whose segment was first adopted, or on which the
+	// #135 transient filter signals DirectSound started playing (TransientResync,
+	// design §3.6): after a DirectSound or WaveOut seek the kernel overshoots and
+	// stalls, moving the public position off the wall clock on other ticks, and
+	// judging those would anchor the front end on the transient. The model
+	// includes any silent advance (a small seek within CoreClock's tolerance)
+	// since the front end's anchor. Without an anchor in this song the front end
+	// has nothing to correct. A song change starts over: the session was just
+	// reset.
+	if !changed {
+		if s.front.ok && (sample.LagShiftMs != 0 || sample.LagAdopted || sample.TransientResync) {
+			if d := int64(s.outMs) - s.front.positionMs(s.outAt); d >= lagNotifyMs || d <= -lagNotifyMs {
+				s.notice = true
+			}
+		}
+		// A dropped playback_pause (pausePending) left the front end running; a
+		// notice-triggered resume would restart it (#134). Hold the notice until the
+		// pause is resent. A real seek judged by CoreClock.Observe (the seek variable)
+		// is not held: the user dragged, resume+pause go out at the new position.
+		seek = seek || (s.notice && !s.pausePending)
+	}
 	oldDuration := s.duration
 	s.duration = float32(sample.DurationMs) / 1000
 	info := player.SongInfo{Name: meta.Title, Singer: meta.Artist, Title: meta.Title}
@@ -130,23 +197,72 @@ func (s *session) observe(meta cdp.Snapshot, sample pos.Sample) bool {
 		s.emitAll()
 	}
 	if !changed && (stateChanged || seek) {
-		event := player.EventPlaybackPause
 		if playing || seek {
-			event = player.EventPlaybackResume
+			s.emitPos(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: s.clock.Position(), Progress: player.ClampProgress(s.clock.Position(), s.duration)})
 		}
-		s.p.Emit(event, &player.PlaybackTimeInfo{Position: s.clock.Position(), Progress: player.ClampProgress(s.clock.Position(), s.duration)})
-		// Seek uses resume as a position correction, but must not leave paused
+		if playing {
+			// Resumed playback: no pending pause to resend (#134).
+			s.pausePending = false
+		}
+		// Paused: playback_pause, after the resume when this tick is a seek. Seek
+		// uses resume as a position correction, but must not leave paused
 		// consumers extrapolating. Preserve ordering and the same sampled position.
-		if seek && !playing {
-			s.p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: s.clock.Position(), Progress: player.ClampProgress(s.clock.Position(), s.duration)})
+		// A dropped pause sets pausePending so resendPauseIfPending retries it (#134).
+		if !playing {
+			s.pausePending = !s.emitPos(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: s.clock.Position(), Progress: player.ClampProgress(s.clock.Position(), s.duration)})
 		}
 		s.lineIndex = -2
 	}
 	return changed
 }
 
+// emitPos sends a positioned public event (all_lyrics, lyric_update,
+// playback_pause, playback_resume). The front end anchors on it, so an
+// enqueued event updates the front-end model and delivers the notice; a
+// dropped one (full channel) never reached the front end and changes neither,
+// so a dropped notice is sent again on the next tick. It returns whether the
+// event was enqueued, so the pause path can mark pausePending on a drop (#134).
+// These four events go out only through here (✅ player/kuwoanchor_lint_test.go).
+func (s *session) emitPos(evtType string, data interface{}) bool {
+	if s.p.TryEmit(evtType, data) {
+		s.anchored(evtType)
+		return true
+	}
+	return false
+}
+
+// resendPauseIfPending retries a dropped playback_pause (#134), at the current
+// clock position, until it enqueues. Driven by runSession each tick after
+// observe, independent of observe's own event branch (observe sends no event on
+// a tick with no change, so a tied retry would never fire). It goes through
+// emitPos: the AST gate (kuwoanchor_lint_test.go) requires it, emitPos builds
+// the *PlaybackTimeInfo the server needs, and anchored lands the front-end model
+// on this tick's public position, the same one the resent pause carries. Only
+// while still paused: a resume already cleared pausePending, and resendPauseIfPending
+// must not send a stale pause over a running front end.
+func (s *session) resendPauseIfPending() {
+	if s.pausePending && !s.playing {
+		if s.emitPos(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: s.clock.Position(), Progress: player.ClampProgress(s.clock.Position(), s.duration)}) {
+			s.pausePending = false
+		}
+	}
+}
+
+// anchored records an enqueued positioned event at this tick's public position.
+func (s *session) anchored(evtType string) {
+	f := &s.front
+	f.ok, f.ms, f.at = true, s.outMs, s.outAt
+	switch evtType {
+	case player.EventAllLyrics, player.EventPlaybackResume:
+		f.running = true
+	case player.EventPlaybackPause:
+		f.running = false
+	}
+	s.notice = false
+}
+
 func (s *session) emitAll() {
-	s.p.Emit(player.EventAllLyrics, &player.AllLyricsData{Title: s.song.Title, Duration: s.duration, Position: s.clock.Position(), Progress: player.ClampProgress(s.clock.Position(), s.duration), Count: len(s.lines), Lyrics: s.lines})
+	s.emitPos(player.EventAllLyrics, &player.AllLyricsData{Title: s.song.Title, Duration: s.duration, Position: s.clock.Position(), Progress: player.ClampProgress(s.clock.Position(), s.duration), Count: len(s.lines), Lyrics: s.lines})
 	s.allSent = true
 	s.lineIndex = -2
 }
@@ -197,10 +313,10 @@ func (s *session) emitLine(now time.Time) {
 	if i != s.lineIndex {
 		s.lineIndex = i
 		if i < 0 {
-			s.p.Emit(player.EventLyricUpdate, &player.LyricUpdate{Index: -1, Position: position, Progress: player.ClampProgress(position, s.duration)})
+			s.emitPos(player.EventLyricUpdate, &player.LyricUpdate{Index: -1, Position: position, Progress: player.ClampProgress(position, s.duration)})
 		} else {
 			line := s.lines[i]
-			s.p.Emit(player.EventLyricUpdate, player.BuildLyricUpdate(i, line.Timestamp, line.Text, line.SubText, line.RomaText, line.TextDetailed, float32(s.p.offsetMs)/1000, position, s.duration))
+			s.emitPos(player.EventLyricUpdate, player.BuildLyricUpdate(i, line.Timestamp, line.Text, line.SubText, line.RomaText, line.TextDetailed, float32(s.p.offsetMs)/1000, position, s.duration))
 		}
 	}
 	if s.playing {

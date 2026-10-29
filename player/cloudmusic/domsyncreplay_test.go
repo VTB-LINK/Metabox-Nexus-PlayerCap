@@ -213,9 +213,12 @@ func (r *replay) lineChange(gotMs int, playing bool, lineIdx int) {
 
 // notice 通知检查：由校准触发的 playback_resume。限频按 got 计，位置取发出那一刻的读数。去掉 `playing`
 // 是等价变异（实测不红）：暂停那一拍的 playback_pause 已把未告知量清零，暂停中又不对表。
+// due 现为纯判断（#133）；回放的 emit 不模拟通道满，恒成功入队，故 emit（内含 anchored）后调 noticed
+// 更新限频时刻，与 runSession 成功入队后调 pending.noticed(now) 一致。
 func (r *replay) notice(gotMs int, playing bool) {
 	if playing && r.pending.due(msAt(gotMs)) {
 		r.emit(gotMs, player.EventPlaybackResume, "sync", r.posNow(gotMs), -1)
+		r.pending.noticed(msAt(gotMs))
 	}
 }
 
