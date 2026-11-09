@@ -4,8 +4,8 @@ package qqmusic
 // 当前歌的 songMid。这是「一错就把别的歌的 mid 安到当前歌、整首放错歌词」的路径。
 //
 // 抽成纯函数是为了可测：与 FindSongMid 的全内存扫描解耦，无需活的 QQ 音乐进程。
-// 但**这不代表 CI 能跑**——qqmusic 整包是 Windows-only（mem.go 的 syscall.NewLazyDLL），
-// GOOS=linux 整包编译不过，本测试只能靠本机 `go test ./...` 兜住（见 AGENTS.md §8 的表）。
+// qqmusic 整包是 Windows-only（mem.go 的 syscall.NewLazyDLL），GOOS=linux 整包编译不过，
+// 本测试只在 Windows 上的 `go test ./...` 里跑（见 AGENTS.md §8 的表）。
 
 import "testing"
 

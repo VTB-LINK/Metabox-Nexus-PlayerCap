@@ -6,12 +6,12 @@ import (
 	"debug/pe"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"io"
 	"math"
 	"math/bits"
 	"time"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 // This file is build-constraint free so the build admission, the per-sample
@@ -78,7 +78,7 @@ var lagBuilds = []lagBuild{{"9.6.0.0_UG1",
 
 // ErrLagUnsupported means the correction stays off for a reason other than a
 // system call failure: a module is missing, unknown, or differs from its file.
-var ErrLagUnsupported = errors.New("kuwo: seek-lag correction not available for this build")
+var ErrLagUnsupported = i18n.Sentinel("kuwo: seek-lag correction not available for this build")
 
 const (
 	lagFileLimit  = 4 << 20 // module file size upper bound, bytes
@@ -261,7 +261,7 @@ func execSectionHash(file []byte) (string, error) {
 	}
 	// debug/pe also accepts a COFF object, which has no optional header.
 	if _, ok := f.OptionalHeader.(*pe.OptionalHeader32); !ok {
-		return "", errors.New("not a PE32 image")
+		return "", i18n.Errorf("not a PE32 image")
 	}
 	h := sha256.New()
 	exec := false
@@ -277,7 +277,7 @@ func execSectionHash(file []byte) (string, error) {
 		exec = true
 	}
 	if !exec {
-		return "", errors.New("no executable section")
+		return "", i18n.Errorf("no executable section")
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -299,14 +299,14 @@ func matchLagBuild(inHash, outHash string) (string, bool) {
 func checkImageHeader(mem, file []byte, modBaseSize uint32) error {
 	ms, msz, err := peStampSize(mem)
 	if err != nil {
-		return fmt.Errorf("image in memory: %w", err)
+		return i18n.Errorf("image in memory: %w", err)
 	}
 	fs, fsz, err := peStampSize(file)
 	if err != nil {
-		return fmt.Errorf("file: %w", err)
+		return i18n.Errorf("file: %w", err)
 	}
 	if ms != fs || msz != fsz || msz != modBaseSize {
-		return fmt.Errorf("image in memory (TimeDateStamp %#x, SizeOfImage %#x, ModBaseSize %#x) does not match the file (TimeDateStamp %#x, SizeOfImage %#x)", ms, msz, modBaseSize, fs, fsz)
+		return i18n.Errorf("image in memory (TimeDateStamp %#x, SizeOfImage %#x, ModBaseSize %#x) does not match the file (TimeDateStamp %#x, SizeOfImage %#x)", ms, msz, modBaseSize, fs, fsz)
 	}
 	return nil
 }
@@ -315,12 +315,12 @@ func checkImageHeader(mem, file []byte, modBaseSize uint32) error {
 // start of a PE32 file or mapped image.
 func peStampSize(b []byte) (stamp, size uint32, err error) {
 	if len(b) < 0x40 || string(b[:2]) != "MZ" {
-		return 0, 0, errors.New("not a PE32 image")
+		return 0, 0, i18n.Errorf("not a PE32 image")
 	}
 	p := uint64(getU32(b[0x3c:]))
 	// SizeOfImage ends at the signature + 0x54.
 	if p+0x54 > uint64(len(b)) || string(b[p:p+4]) != "PE\x00\x00" || getU16(b[p+0x18:]) != 0x10b {
-		return 0, 0, errors.New("not a PE32 image")
+		return 0, 0, i18n.Errorf("not a PE32 image")
 	}
 	return getU32(b[p+0x8:]), getU32(b[p+0x50:]), nil
 }
@@ -332,7 +332,7 @@ func readLimited(r io.Reader, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("file larger than %d bytes", limit)
+		return nil, i18n.Errorf("file larger than %d bytes", limit)
 	}
 	return b, nil
 }

@@ -110,15 +110,15 @@ const portWait = 25 * time.Second
 const exitWait = 8 * time.Second
 
 // ErrNotRunning 表示 Spotify 没在跑。上层据此报「未启动」并静默等待（用户可能稍后启动）。
-var ErrNotRunning = errors.New("Spotify 未在运行")
+var ErrNotRunning = i18n.Sentinel("Spotify is not running")
 
 // ErrVersionUnsupported 表示这一版 Spotify 的 flag 表里没有 remote-debugging-port，
 // 或安装文件读不到、无法确认。属于近乎永久的状态，上层应长退避重探而不是空转。
-var ErrVersionUnsupported = errors.New("这一版 Spotify 不支持 remote-debugging-port（或安装文件不可读）")
+var ErrVersionUnsupported = i18n.Sentinel("this Spotify version does not support remote-debugging-port (or the installation file is unreadable)")
 
 // ErrPortNotReady 表示命令行里已经带着调试 flag，但端口还没起来（正在启动，或被别的程序占用）。
 // 与 ErrVersionUnsupported 不同，它是瞬时的：上层短退避重试即可。
-var ErrPortNotReady = errors.New("Spotify 带着调试 flag 在跑，但调试端口尚未就绪")
+var ErrPortNotReady = i18n.Sentinel("Spotify is running with the debug flag, but the debug port is not ready yet")
 
 // scan 是一次进程扫描的结果。
 type scan struct {

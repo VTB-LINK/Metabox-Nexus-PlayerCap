@@ -2,7 +2,6 @@ package player
 
 import (
 	"encoding/base64"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 )
 
@@ -93,7 +93,7 @@ var newCoverClient = func(timeout time.Duration) *http.Client {
 						return err
 					}
 					if ip := net.ParseIP(host); ip == nil || isBlockedCoverIP(ip) {
-						return fmt.Errorf("封面拒绝连接内网/非法地址: %s", address)
+						return i18n.Errorf("cover download refused to connect to a private or invalid address: %s", address)
 					}
 					return nil
 				},

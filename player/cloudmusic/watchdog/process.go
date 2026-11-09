@@ -1,11 +1,11 @@
 package watchdog
 
 import (
-	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/launch"
 
@@ -38,7 +38,7 @@ var LaunchFlags = []string{
 func EnsureDebugMode() (bool, error) {
 	procs, err := process.Processes()
 	if err != nil {
-		return false, fmt.Errorf("failed to list processes: %v", err)
+		return false, i18n.Errorf("failed to list processes: %v", err)
 	}
 
 	var hasNetease bool
@@ -115,7 +115,7 @@ func EnsureDebugMode() (bool, error) {
 	log.Info("Restarting %s (%s)", exePath, strings.Join(LaunchFlags, " "))
 	detached, err := launch.Detached(exePath, LaunchFlags, "")
 	if err != nil {
-		return false, fmt.Errorf("failed to restart process: %v", err)
+		return false, i18n.Errorf("failed to restart process: %v", err)
 	}
 	if !detached {
 		log.Warn("%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well", TargetProcessName)

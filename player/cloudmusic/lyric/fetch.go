@@ -124,7 +124,7 @@ func FetchSongDetail(songID string) (*SongDetail, error) {
 		return detail, nil
 	}
 
-	return nil, fmt.Errorf("failed to parse song detail for %s", songID)
+	return nil, i18n.Errorf("failed to parse song detail for %s", songID)
 }
 
 // FetchLyrics fetches lyrics from the NetEase Cloud Music API by song ID.
@@ -151,11 +151,11 @@ func FetchLyrics(songID string, offsetSec float32) ([]LyricLine, error) {
 
 	var apiResp apiResponse
 	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, fmt.Errorf("lyrics API JSON parse error: %v", err)
+		return nil, i18n.Errorf("lyrics API JSON parse error: %v", err)
 	}
 
 	if apiResp.Lrc.Lyric == "" {
-		return nil, fmt.Errorf("no lyrics found for song %s", songID)
+		return nil, i18n.Errorf("no lyrics found for song %s", songID)
 	}
 
 	lines := ParseLRC(apiResp.Lrc.Lyric)
@@ -215,11 +215,11 @@ func SearchSongID(songName string, artist string, targetDurationMs int) (string,
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(body, &searchResp); err != nil {
-		return "", fmt.Errorf("search API parse error: %v", err)
+		return "", i18n.Errorf("search API parse error: %v", err)
 	}
 
 	if len(searchResp.Result.Songs) == 0 {
-		return "", fmt.Errorf("no results for '%s'", query)
+		return "", i18n.Errorf("no results for '%s'", query)
 	}
 
 	// Prefer exact name + artist + duration match.
@@ -248,7 +248,7 @@ func SearchSongID(songName string, artist string, targetDurationMs int) (string,
 	}
 
 	if targetDurationMs > 0 {
-		return "", fmt.Errorf("no duration match for '%s' within ±5%% (%dms)", query, targetDurationMs)
+		return "", i18n.Errorf("no duration match for '%s' within ±5%% (%dms)", query, targetDurationMs)
 	}
 
 	if exactNameFallback != "" {

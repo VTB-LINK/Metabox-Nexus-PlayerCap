@@ -27,10 +27,10 @@
 package pos
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
 )
 
@@ -54,7 +54,7 @@ const (
 )
 
 // ErrNotFound 表示在进程内存里没找到当前歌曲的结构。
-var ErrNotFound = errors.New("kuwo pos: song info structure not found")
+var ErrNotFound = i18n.Sentinel("kuwo pos: song info structure not found")
 
 // Song 是一次定位的结果。
 type Song struct {

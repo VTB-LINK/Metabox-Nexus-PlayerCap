@@ -21,6 +21,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/audiocap/frame"
 	"Metabox-Nexus-PlayerCap/audiocap/procscan"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
@@ -523,10 +524,10 @@ func (m *Manager) spawnHelper() error {
 		var aerr error
 		h, herr := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
 		if herr != nil {
-			aerr = fmt.Errorf("取 helper 进程句柄失败: %w", herr)
+			aerr = i18n.Errorf("failed to open the helper process handle: %w", herr)
 		} else {
 			if err := assignToJob(j, h); err != nil {
-				aerr = fmt.Errorf("assignToJob 失败: %w", err)
+				aerr = i18n.Errorf("assignToJob failed: %w", err)
 			}
 			windows.CloseHandle(h)
 		}

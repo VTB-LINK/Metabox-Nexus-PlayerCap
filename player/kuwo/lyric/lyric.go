@@ -30,7 +30,6 @@ import (
 	"compress/zlib"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +38,8 @@ import (
 	"time"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 const (
@@ -58,13 +59,13 @@ const (
 
 // ErrNoLyrics 表示这首歌没有歌词（响应 `tp=none` 且载荷为空）。实测四首歌都是这个形态。
 // 调用方应把它当"没有"而不是故障：重试没有意义，换歌才有。
-var ErrNoLyrics = errors.New("kuwo lyric: no lyrics for this song")
+var ErrNoLyrics = i18n.Sentinel("kuwo lyric: no lyrics for this song")
 
 // ErrTooLarge rejects oversized network/decompression input before parsing.
-var ErrTooLarge = errors.New("kuwo lyric: response exceeds size limit")
+var ErrTooLarge = i18n.Sentinel("kuwo lyric: response exceeds size limit")
 
 // ErrInvalidRID rejects non-numeric identifiers before building a query.
-var ErrInvalidRID = errors.New("kuwo lyric: invalid song identifier")
+var ErrInvalidRID = i18n.Sentinel("kuwo lyric: invalid song identifier")
 
 // Request 描述一次歌词请求。
 type Request struct {
@@ -208,7 +209,7 @@ func (c *Client) Fetch(ctx context.Context, req Request) (Response, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return out, fmt.Errorf("kuwo lyric: unexpected status %d", resp.StatusCode)
+		return out, i18n.Errorf("kuwo lyric: unexpected status %d", resp.StatusCode)
 	}
 	body, err := readLimited(resp.Body, maxLRCBytes)
 	if err != nil {
@@ -228,27 +229,27 @@ func DecodeResponse(body []byte) (Response, error) {
 	}
 	sep := bytes.Index(body, []byte("\r\n\r\n"))
 	if sep < 0 {
-		return out, fmt.Errorf("kuwo lyric: missing header separator (body %d bytes)", len(body))
+		return out, i18n.Errorf("kuwo lyric: missing header separator (body %d bytes)", len(body))
 	}
 	out.Header = parseHeader(string(body[:sep]))
 	payload := body[sep+4:]
 	if len(payload) == 0 || strings.EqualFold(out.Header["tp"], "none") {
-		return out, fmt.Errorf("%w（tp=%q payload=%d bytes）", ErrNoLyrics, out.Header["tp"], len(payload))
+		return out, i18n.Errorf("%w（tp=%q payload=%d bytes）", ErrNoLyrics, out.Header["tp"], len(payload))
 	}
 
 	zr, err := zlib.NewReader(bytes.NewReader(payload))
 	if err != nil {
-		return out, fmt.Errorf("kuwo lyric: zlib open: %w", err)
+		return out, i18n.Errorf("kuwo lyric: zlib open: %w", err)
 	}
 	defer zr.Close()
 	inner, err := readLimited(zr, maxLRCBytes*2)
 	if err != nil {
-		return out, fmt.Errorf("kuwo lyric: zlib read: %w", err)
+		return out, i18n.Errorf("kuwo lyric: zlib read: %w", err)
 	}
 	encoded := strings.TrimSpace(string(inner))
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return out, fmt.Errorf("kuwo lyric: base64: %w", err)
+		return out, i18n.Errorf("kuwo lyric: base64: %w", err)
 	}
 	lrc, err := gb18030Decode(xorCycle(raw))
 	if err != nil {
@@ -436,7 +437,7 @@ func gbkBytes(s string) ([]byte, error) {
 	}
 	b, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte(s))
 	if err != nil {
-		return nil, fmt.Errorf("kuwo lyric: gbk encode: %w", err)
+		return nil, i18n.Errorf("kuwo lyric: gbk encode: %w", err)
 	}
 	return b, nil
 }
@@ -446,7 +447,7 @@ func gbkBytes(s string) ([]byte, error) {
 func gb18030Decode(b []byte) ([]byte, error) {
 	out, err := simplifiedchinese.GB18030.NewDecoder().Bytes(b)
 	if err != nil {
-		return nil, fmt.Errorf("kuwo lyric: gb18030 decode: %w", err)
+		return nil, i18n.Errorf("kuwo lyric: gb18030 decode: %w", err)
 	}
 	return out, nil
 }

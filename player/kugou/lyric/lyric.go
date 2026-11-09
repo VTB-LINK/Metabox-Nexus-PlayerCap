@@ -229,16 +229,16 @@ func callSearch(keyword string, durationMs int, hash string) (*searchResponse, e
 	)
 	resp, err := httpClient.Get(searchURL)
 	if err != nil {
-		return nil, fmt.Errorf("lyric search: %w", err)
+		return nil, i18n.Errorf("lyric search: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("lyric search body: %w", err)
+		return nil, i18n.Errorf("lyric search body: %w", err)
 	}
 	var sr searchResponse
 	if err := json.Unmarshal(body, &sr); err != nil {
-		return nil, fmt.Errorf("lyric search parse: %w", err)
+		return nil, i18n.Errorf("lyric search parse: %w", err)
 	}
 	if sr.Status != 200 {
 		return nil, nil
@@ -272,7 +272,7 @@ func download(id, accessKey string) ([]Line, error) {
 	}
 	lrcBytes, err := base64.StdEncoding.DecodeString(content)
 	if err != nil {
-		return nil, fmt.Errorf("lyric base64 decode: %w", err)
+		return nil, i18n.Errorf("lyric base64 decode: %w", err)
 	}
 	return parseLRC(string(lrcBytes)), nil
 }
@@ -285,16 +285,16 @@ func fetchContent(id, accessKey, format string) (string, error) {
 	)
 	resp, err := httpClient.Get(dlURL)
 	if err != nil {
-		return "", fmt.Errorf("lyric download: %w", err)
+		return "", i18n.Errorf("lyric download: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("lyric download body: %w", err)
+		return "", i18n.Errorf("lyric download body: %w", err)
 	}
 	var dr downloadResponse
 	if err := json.Unmarshal(body, &dr); err != nil {
-		return "", fmt.Errorf("lyric download parse: %w", err)
+		return "", i18n.Errorf("lyric download parse: %w", err)
 	}
 	if dr.Status != 200 {
 		return "", nil
@@ -349,16 +349,16 @@ func resolveCanonicalHash(normName, normSinger string, targetDurationMs int) (st
 	)
 	resp, err := httpClient.Get(searchURL)
 	if err != nil {
-		return "", fmt.Errorf("catalog search: %w", err)
+		return "", i18n.Errorf("catalog search: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("catalog search body: %w", err)
+		return "", i18n.Errorf("catalog search body: %w", err)
 	}
 	var sr songCatalogResponse
 	if err := json.Unmarshal(body, &sr); err != nil {
-		return "", fmt.Errorf("catalog search parse: %w", err)
+		return "", i18n.Errorf("catalog search parse: %w", err)
 	}
 	if sr.Status != 1 || len(sr.Data.Info) == 0 {
 		return "", nil
@@ -400,7 +400,7 @@ var krcXORKey = [16]byte{0x40, 0x47, 0x61, 0x77, 0x5E, 0x32, 0x74, 0x47, 0x51, 0
 func krcDecrypt(contentB64 string) (string, error) {
 	blob, err := base64.StdEncoding.DecodeString(contentB64)
 	if err != nil {
-		return "", fmt.Errorf("krc base64: %w", err)
+		return "", i18n.Errorf("krc base64: %w", err)
 	}
 	if len(blob) <= 4 || string(blob[:4]) != "krc1" {
 		return "", i18n.Errorf("KRC magic mismatch (first 4 bytes are not krc1)")
@@ -412,12 +412,12 @@ func krcDecrypt(contentB64 string) (string, error) {
 	}
 	zr, err := zlib.NewReader(bytes.NewReader(dec))
 	if err != nil {
-		return "", fmt.Errorf("krc zlib init: %w", err)
+		return "", i18n.Errorf("krc zlib init: %w", err)
 	}
 	defer zr.Close()
 	out, err := io.ReadAll(zr)
 	if err != nil {
-		return "", fmt.Errorf("krc zlib decompress: %w", err)
+		return "", i18n.Errorf("krc zlib decompress: %w", err)
 	}
 	return string(out), nil
 }

@@ -2,10 +2,10 @@ package lyric
 
 import (
 	"syscall"
+	"unicode/utf16"
 
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
-	"Metabox-Nexus-PlayerCap/player/wesing/proc"
 )
 
 // LyricLine 表示一行歌词
@@ -26,19 +26,23 @@ type LyricLine struct {
 	RomaDetailed player.LyricTextDetailed
 }
 
-// LoadLyrics 从内存中加载所有歌词行
-// 数据结构: subStructAddr+0x48 = vector<LyricEntry*> begin
-//
-//	subStructAddr+0x50 = vector<LyricEntry*> end
+// LoadLyrics 从内存中加载所有歌词行。subStructAddr 是 FindLyricHost 返回的主歌词子结构，
+// 其 +0x48 / +0x4C 是 vector<LyricEntry*> 的 begin / end（+0x50 是容量末尾，不是 end；见 roma.go 头注释）。
 func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error) {
-	// 读取歌词条目向量的 begin 和 end 指针
-	beginPtr, err := proc.ReadUint32(handle, subStructAddr+0x48)
-	if err != nil {
-		return nil, i18n.Errorf("Failed to read lyric vector begin: %v", err)
+	return loadLyrics(procMemory{handle}, subStructAddr)
+}
+
+func loadLyrics(m memory, subStructAddr uint32) ([]LyricLine, error) {
+	// 读取歌词条目向量的 begin 和 end 指针。end 在 +0x4C（issue #85）：此前读的 +0x50 是容量末尾，
+	// 越过真实行数读进来的是堆残留，只靠下面的三道时间闸挡掉；三道闸保留作兜底。
+	beginAddr := subStructAddr + trackLinesOff
+	beginPtr, ok := m.u32(beginAddr)
+	if !ok {
+		return nil, i18n.Errorf("Failed to read lyric vector begin at 0x%X", beginAddr)
 	}
-	endPtr, err := proc.ReadUint32(handle, subStructAddr+0x50)
-	if err != nil {
-		return nil, i18n.Errorf("Failed to read lyric vector end: %v", err)
+	endPtr, ok := m.u32(beginAddr + 4)
+	if !ok {
+		return nil, i18n.Errorf("Failed to read lyric vector end at 0x%X", beginAddr+4)
 	}
 
 	if endPtr <= beginPtr || beginPtr == 0 {
@@ -46,7 +50,7 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 	}
 
 	numEntries := (endPtr - beginPtr) / 4
-	if numEntries > 1000 {
+	if numEntries > maxTrackLines {
 		return nil, i18n.Errorf("Abnormal lyric count: %d", numEntries)
 	}
 
@@ -54,14 +58,14 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 
 	for i := uint32(0); i < numEntries; i++ {
 		// 读取 LyricEntry 指针
-		entryPtr, err := proc.ReadUint32(handle, beginPtr+i*4)
-		if err != nil || entryPtr == 0 {
+		entryPtr, ok := m.u32(beginPtr + i*4)
+		if !ok || entryPtr == 0 {
 			continue
 		}
 
 		// 读取开始时间（LyricEntry+0x00 = float）
-		timeVal, err := proc.ReadFloat32(handle, entryPtr)
-		if err != nil {
+		timeVal, ok := m.f32(entryPtr)
+		if !ok {
 			continue
 		}
 
@@ -70,7 +74,8 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 		// 回退），连同乱码文本被当成一行歌词 append、推上对外 API——1.5e18 的 timestamp 会把
 		// 前端插值直接带飞。复用 IsPlausiblePlayTime（接受式 [0,100000)、拒 NaN/Inf，已由
 		// plausibleplaytime_test 覆盖）挡掉它；合法开场行 time=0 在范围内、照常通过，
-		// 不碰 :56 的 len(lyrics)>0 有意设计。
+		// 不碰下面 len(lyrics)>0 的有意设计。end 改读 +0x4C 之后（issue #85）残留项不再被读到，
+		// 这道闸与下面两道留作兜底。
 		if !IsPlausiblePlayTime(timeVal) {
 			break
 		}
@@ -85,17 +90,17 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 		}
 
 		// 读取字符向量（LyricEntry+0x08 = begin, +0x0C = end）
-		charBegin, err := proc.ReadUint32(handle, entryPtr+0x08)
-		if err != nil || charBegin == 0 {
+		charBegin, ok := m.u32(entryPtr + 0x08)
+		if !ok || charBegin == 0 {
 			continue
 		}
-		charEnd, err := proc.ReadUint32(handle, entryPtr+0x0C)
-		if err != nil || charEnd <= charBegin {
+		charEnd, ok := m.u32(entryPtr + 0x0C)
+		if !ok || charEnd <= charBegin {
 			continue
 		}
 
 		numChars := (charEnd - charBegin) / 4
-		if numChars > 500 {
+		if numChars > maxLineWords {
 			continue // 跳过异常数据
 		}
 
@@ -108,31 +113,33 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 		wordsOK := true            // 时间轴是否全程合法（有一处坏就整行退回行级）
 		var lastWordT float32 = -1 // 单调性检查锚
 		for c := uint32(0); c < numChars; c++ {
-			charElemPtr, err := proc.ReadUint32(handle, charBegin+c*4)
-			if err != nil || charElemPtr == 0 {
+			charElemPtr, ok := m.u32(charBegin + c*4)
+			if !ok || charElemPtr == 0 {
 				continue
 			}
 
 			// CharElement+0x00 → RenderData*
-			renderPtr, err := proc.ReadUint32(handle, charElemPtr)
-			if err != nil || renderPtr < 0x00100000 {
+			renderPtr, ok := m.u32(charElemPtr)
+			if !ok || renderPtr < minHeapPtr {
 				continue
 			}
 
 			// RenderData+0x00 → null 结尾的 UTF-16LE 字符串
 			// 读取最多 64 个 wchar（128 字节），覆盖最长的英文单词
-			rawBytes, err := proc.ReadBytes(handle, renderPtr, 128)
-			if err != nil || len(rawBytes) < 2 {
+			rawBytes, ok := m.bytes(renderPtr, 128)
+			if !ok || len(rawBytes) < 2 {
 				continue
 			}
-			wordRunes := make([]rune, 0, 8)
+			// 先收齐码元再整体解码：扩展汉字、emoji 是一对代理码元，逐个转 rune 会变成两个 U+FFFD。
+			units := make([]uint16, 0, 8)
 			for j := 0; j+1 < len(rawBytes); j += 2 {
 				wchar := uint16(rawBytes[j]) | uint16(rawBytes[j+1])<<8
 				if wchar == 0 {
 					break
 				}
-				wordRunes = append(wordRunes, rune(wchar))
+				units = append(units, wchar)
 			}
+			wordRunes := utf16.Decode(units)
 			if len(wordRunes) == 0 {
 				continue
 			}
@@ -140,10 +147,12 @@ func LoadLyrics(handle syscall.Handle, subStructAddr uint32) ([]LyricLine, error
 
 			// 字级时间：+0x04 起始（秒，绝对）、+0x08 时长（秒）。复用行级同一个接受式判定
 			// IsPlausiblePlayTime（拒 NaN/Inf/越界，防堆残留把时间轴带飞）；再加单调与时长合理性。
-			// 任一处不合法即 wordsOK=false → 整行 Detailed 作废、退回行级，不推半截错位的逐字。
-			wStart, _ := proc.ReadFloat32(handle, charElemPtr+0x04)
-			wDur, _ := proc.ReadFloat32(handle, charElemPtr+0x08)
-			if !IsPlausiblePlayTime(wStart) || wStart < lastWordT-0.001 || wDur < 0 || wDur > 100 {
+			// 任一处不合法、或读不出，即 wordsOK=false → 整行 Detailed 作废、退回行级，不推半截错位的逐字。
+			// 时长同样写成接受式（issue #85）：拒绝式 `wDur < 0 || wDur > 100` 对 NaN 恒假，NaN 时长
+			// 会进 words 与整行 duration，encoding/json 编码不了 NaN，事件序列化失败。
+			wStart, ok1 := m.f32(charElemPtr + 0x04)
+			wDur, ok2 := m.f32(charElemPtr + 0x08)
+			if !ok1 || !ok2 || !IsPlausiblePlayTime(wStart) || wStart < lastWordT-0.001 || !(wDur >= 0 && wDur <= 100) {
 				wordsOK = false
 			}
 			lastWordT = wStart

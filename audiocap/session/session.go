@@ -14,6 +14,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/audiocap/frame"
 	"Metabox-Nexus-PlayerCap/audiocap/procscan"
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 const (
@@ -106,9 +107,9 @@ const hrNoSingleProcess = 0x0889000D
 func pidProblem(hr uint32, system bool) error {
 	switch {
 	case hr&0x80000000 != 0:
-		return fmt.Errorf("GetProcessId hr=0x%08X", hr)
+		return i18n.Errorf("GetProcessId hr=0x%08X", hr)
 	case hr == hrNoSingleProcess && !system:
-		return fmt.Errorf("GetProcessId 报告跨进程会话（AUDCLNT_S_NO_SINGLE_PROCESS），无法确定当前出声的进程")
+		return i18n.Errorf("GetProcessId reported a cross-process session (AUDCLNT_S_NO_SINGLE_PROCESS); cannot tell which process is producing the sound")
 	}
 	return nil
 }
@@ -140,16 +141,16 @@ type Enumerator interface {
 func scan(eps []endpoint) (pids []uint32, problems []string) {
 	for i, ep := range eps {
 		if ep.err != nil {
-			problems = append(problems, fmt.Sprintf("端点 #%d: %v", i, ep.err))
+			problems = append(problems, fmt.Sprintf(i18n.T("endpoint #%d: %v"), i, ep.err))
 			continue
 		}
 		for j, s := range ep.sessions {
 			switch {
 			case s.err != nil:
-				problems = append(problems, fmt.Sprintf("端点 #%d 会话 #%d: %v", i, j, s.err))
+				problems = append(problems, fmt.Sprintf(i18n.T("endpoint #%d session #%d: %v"), i, j, s.err))
 			case !s.active:
 			case s.pidErr != nil:
-				problems = append(problems, fmt.Sprintf("端点 #%d 会话 #%d（Active）: %v", i, j, s.pidErr))
+				problems = append(problems, fmt.Sprintf(i18n.T("endpoint #%d session #%d (Active): %v"), i, j, s.pidErr))
 			case !s.system:
 				pids = append(pids, s.pid)
 			}
@@ -281,7 +282,7 @@ func (w *Watcher) probe(enum Enumerator, slots []*Slot) {
 	pids, problems := scan(eps)
 	parent, err := w.parents(at, pids)
 	if err != nil {
-		w.diag(at, append(problems, "进程快照失败: "+err.Error()))
+		w.diag(at, append(problems, fmt.Sprintf(i18n.T("Process snapshot failed: %v"), err)))
 		return
 	}
 	for _, s := range slots {
@@ -331,6 +332,6 @@ func (w *Watcher) diag(now time.Time, problems []string) {
 	if w.diagged && now.Sub(w.diagAt) < diagInterval {
 		return
 	}
-	w.report(fmt.Sprintf("[helper] 会话探测不完整，本拍 %d 项失败，首项：%s；自上条以来共 %d 拍不完整", len(problems), problems[0], w.failed))
+	w.report(fmt.Sprintf(i18n.T("[helper] session probing incomplete: %d failures this tick, first: %s; %d incomplete ticks since the last report"), len(problems), problems[0], w.failed))
 	w.diagAt, w.diagged, w.failed = now, true, 0
 }

@@ -5,10 +5,10 @@
 
 package pos
 
-import "errors"
+import "Metabox-Nexus-PlayerCap/i18n"
 
 // ErrNotSupported 表示当前平台没有实现。
-var ErrNotSupported = errors.New("kuwo pos: only supported on windows")
+var ErrNotSupported = i18n.Sentinel("kuwo pos: only supported on windows")
 
 // Reader 在非 Windows 下恒为不可用。
 type Reader struct{}

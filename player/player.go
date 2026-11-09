@@ -313,7 +313,8 @@ func (b *BaseEmitter) InvalidateSongGen() {
 	atomic.AddUint64(&b.songGen, 1)
 }
 
-// EmitForGen 仅当 gen 仍是当前代次时才 Emit，返回是否真的发出。异步回写的标准出口。
+// EmitForGen 仅当 gen 仍是当前代次时才 Emit，返回是否真的发出：代次已变、或事件通道满被丢弃，都返回假。
+// 异步回写的标准出口；要据此决定是否重发的调用方（wesing 的封面补读）看返回值。
 //
 // 残留竞态：load 与 send 之间若恰好换歌，仍可能发出过期事件。该窗口是纳秒级，而它要防的
 // 是秒级的下载窗口（5s，wesing 最长约 10s），二者差约 8 个数量级；消除它需要在 Emit 热
@@ -322,8 +323,7 @@ func (b *BaseEmitter) EmitForGen(gen uint64, evtType string, data interface{}) b
 	if atomic.LoadUint64(&b.songGen) != gen {
 		return false
 	}
-	b.Emit(evtType, data)
-	return true
+	return b.emit(evtType, data)
 }
 
 // ClampFloat32 将值限制在 [min, max] 范围内

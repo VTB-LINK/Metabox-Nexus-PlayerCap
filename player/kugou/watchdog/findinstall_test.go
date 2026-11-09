@@ -123,7 +123,7 @@ func TestFindLibcefForExe(t *testing.T) {
 }
 
 // TestFindKuGouInstallRealMachine 在真机上端到端验证 FindKuGouInstall 选中的是酷狗
-// 实际加载的版本目录（CI 无此安装且编译不了本包，Skip）。
+// 实际加载的版本目录（没装酷狗的机器上 Skip）。
 //
 // 本机 KuGou.exe 是 20.1.22.27795，旁边残留 10.1.94.25498 —— 旧实现会误选后者。
 func TestFindKuGouInstallRealMachine(t *testing.T) {

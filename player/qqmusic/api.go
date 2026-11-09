@@ -36,7 +36,7 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 //
 // 不区分的代价是实测过的：把两类都当错误，会让「crypt=1 但服务端回明文」这种
 // 本来能正常显示歌词的情况变成 0 行。
-var errNotCiphertext = errors.New("输入不是 QRC 密文")
+var errNotCiphertext = i18n.Sentinel("input is not QRC ciphertext")
 
 // QRC 3DES key from QQ Music
 var qrc3DESKey = []byte("!@#)(*$%123ZXC!@!@#)(NHL")
@@ -290,7 +290,7 @@ func qrcDecrypt(encrypted string) (string, error) {
 	// 而不是「密文坏了」——故包 errNotCiphertext 供调用方区分。
 	ciphertext, err := hex.DecodeString(encrypted)
 	if err != nil {
-		return "", fmt.Errorf("%w: hex decode: %v", errNotCiphertext, err)
+		return "", i18n.Errorf("%w: hex decode: %v", errNotCiphertext, err)
 	}
 
 	if len(ciphertext)%8 != 0 {
@@ -309,13 +309,13 @@ func qrcDecrypt(encrypted string) (string, error) {
 	// zlib decompress
 	reader, err := zlib.NewReader(bytes.NewReader(plaintext))
 	if err != nil {
-		return "", fmt.Errorf("zlib init: %w", err)
+		return "", i18n.Errorf("zlib init: %w", err)
 	}
 	defer reader.Close()
 
 	decompressed, err := io.ReadAll(reader)
 	if err != nil {
-		return "", fmt.Errorf("zlib decompress: %w", err)
+		return "", i18n.Errorf("zlib decompress: %w", err)
 	}
 
 	return string(decompressed), nil
@@ -372,14 +372,14 @@ func fetchLRCBySongMid(songMid string, durationMs uint32) ([]lyricLine, string, 
 	url := "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=" + songMid + "&g_tk=5381&format=json&nobase64=1"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("create request: %w", err)
+		return nil, "", "", i18n.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Referer", "https://y.qq.com/")
 
 	client := httpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("http request: %w", err)
+		return nil, "", "", i18n.Errorf("http request: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -390,10 +390,10 @@ func fetchLRCBySongMid(songMid string, durationMs uint32) ([]lyricLine, string, 
 		Trans   string `json:"trans"`
 	}
 	if err := json.Unmarshal(body, &fcgResp); err != nil {
-		return nil, "", "", fmt.Errorf("json parse: %w", err)
+		return nil, "", "", i18n.Errorf("json parse: %w", err)
 	}
 	if fcgResp.Retcode != 0 {
-		return nil, "", "", fmt.Errorf("no lyric data for songMid=%s (retcode=%d)", songMid, fcgResp.Retcode)
+		return nil, "", "", i18n.Errorf("no lyric data for songMid=%s (retcode=%d)", songMid, fcgResp.Retcode)
 	}
 	if fcgResp.Lyric == "" {
 		// 纯音乐：API 成功但返回空歌词，不是错误
@@ -442,7 +442,7 @@ func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) (
 	jsonPayload, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", "https://u.y.qq.com/cgi-bin/musicu.fcg", bytes.NewReader(jsonPayload))
 	if err != nil {
-		return nil, "", "", fmt.Errorf("create request: %w", err)
+		return nil, "", "", i18n.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "QQMusic/2216 CFNetwork/1.0 Darwin/23.0.0")
@@ -454,17 +454,17 @@ func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) (
 	client := httpClient
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("http request: %w", err)
+		return nil, "", "", i18n.Errorf("http request: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
 	var musicuResp musicuResponse
 	if err := json.Unmarshal(body, &musicuResp); err != nil {
-		return nil, "", "", fmt.Errorf("json parse: %w", err)
+		return nil, "", "", i18n.Errorf("json parse: %w", err)
 	}
 	if musicuResp.Req0.Code != 0 {
-		return nil, "", "", fmt.Errorf("API error code: %d", musicuResp.Req0.Code)
+		return nil, "", "", i18n.Errorf("API error code: %d", musicuResp.Req0.Code)
 	}
 
 	data := musicuResp.Req0.Data

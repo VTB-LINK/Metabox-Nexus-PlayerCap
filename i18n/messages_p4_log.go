@@ -107,6 +107,7 @@ var p4LogMessages = map[string]string{
 	"Cover URL updated: %s":                                                         "封面 URL 已更新: %s",
 	"Cover URL fetch failed, skipping base64 encoding":                              "封面 URL 获取失败，跳过 base64 编码",
 	"Cover URL fetched on retry %d":                                                 "封面 URL 重试第 %d 次获取成功",
+	"Song info fetched on retry %d":                                                 "歌曲信息重试第 %d 次获取成功",
 	"Cover (MID album): %s → %s":                                                    "封面(MID专辑): %s → %s",
 	"Cover (MID singer): %s → %s":                                                   "封面(MID歌手): %s → %s",
 	"Cover (album): %s → %s":                                                        "封面(专辑): %s → %s",
@@ -289,6 +290,21 @@ var p4LogMessages = map[string]string{
 	"Helper exited (alive for %v); restarting in %v":            "helper 退出（存活 %v），%v 后重启",
 	"Cleaning up leftover orphaned audio helper process pid=%d": "清理遗留音频 helper 孤儿进程 pid=%d",
 
+	// 音频波形：helper 子进程写 stderr 的诊断（audiocap/helper、audiocap/session，issue #143）
+	"[helper] ignoring invalid control line: %v": "[helper] 忽略非法控制行: %v",
+	"[helper] stdin read ended or failed: %v":    "[helper] stdin 读取结束/出错: %v",
+	"[helper] shutdown timed out: capture goroutines or the session watcher did not exit within %v (possibly stuck in a COM call); exiting the process": "[helper] 关停超时：%v 内仍有采集 goroutine 或会话 watcher 未退出（可能卡在 COM 调用），直接退出进程",
+	"[helper] frame write failed (the parent's read end may be closed): %v":                                                                             "[helper] 写帧失败（父进程读端可能已关闭）: %v",
+	"[helper][%s] CoInitializeEx failed: %v":             "[helper][%s] CoInitializeEx 失败: %v",
+	"[helper][%s] WASAPI activation failed (pid=%d): %v": "[helper][%s] WASAPI 激活失败(pid=%d): %v",
+	"[helper][%s] WASAPI reported a data discontinuity (DATA_DISCONTINUITY) %d times, %d in total for this capture: a stretch of audio may have been lost; this is not an error": "[helper][%s] WASAPI 报告数据不连续（DATA_DISCONTINUITY）%d 次，本路累计 %d 次：可能丢了一段音频，不是错误",
+	"[helper][%s] read failed: %v": "[helper][%s] 读取失败: %v",
+	"[helper] CoInitializeEx for session probing failed; this helper reports no session signals: %v":                   "[helper] 会话探测的 CoInitializeEx 失败，本 helper 不给出会话信号: %v",
+	"[helper] session probing incomplete: %d failures this tick, first: %s; %d incomplete ticks since the last report": "[helper] 会话探测不完整，本拍 %d 项失败，首项：%s；自上条以来共 %d 拍不完整",
+	"endpoint #%d: %v":                      "端点 #%d: %v",
+	"endpoint #%d session #%d: %v":          "端点 #%d 会话 #%d: %v",
+	"endpoint #%d session #%d (Active): %v": "端点 #%d 会话 #%d（Active）: %v",
+
 	// 音频波形：/audio-ws 与音频 goroutine 的本地恢复（server/audio.go、main.go）
 	"[audio] %s panic recovered locally: %v":                      "[audio] %s panic 已本地恢复: %v",
 	"Audio WS upgrade failed: %v":                                 "音频WS Upgrade 失败: %v",
@@ -310,6 +326,38 @@ var p4LogMessages = map[string]string{
 	"%d play-time candidates; using 0x%08X [%s]":                                                                                                              "播放时间候选 %d 处，选用 0x%08X [%s]",
 	"Play-time address 0x%08X is stalled while another one advances; switching to 0x%08X":                                                                     "播放时间地址 0x%08X 停着而另一处在走，改用 0x%08X",
 	"Romanization attached: %d/%d lines":                                                                                                                      "音译已配上: %d/%d 行",
+
+	// wesing：CKSongsGraph 总时长（player/wesing/lyric/songsgraph.go、wesing.go，#139）
+	"CKSongsGraph vtable: 0x%08X":                                                             "CKSongsGraph 虚表: 0x%08X",
+	"CKSongsGraph instances: %d (vtable matches: %d)":                                         "CKSongsGraph 实例 %d 个（虚表匹配 %d 处）",
+	"CKSongsGraph unavailable (%v); song duration keeps its existing source for this session": "CKSongsGraph 不可用（%v），本会话的歌曲总时长沿用原有来源",
+	"Song duration corrected by CKSongsGraph: %.2fs → %.2fs (previous value from %s)":         "按 CKSongsGraph 纠正歌曲总时长: %.2fs → %.2fs（原值来自%s）",
+	"the UI duration string":                                                                  "界面时长字符串",
+	"last lyric line + 10s":                                                                   "末行歌词 + 10s",
+
+	// wesing：伴奏解码器 CAudioDecodeForPCM 的进度与总时长（player/wesing/lyric/pcm.go、wesing.go，#145）
+	"CAudioDecodeForPCM vtable: 0x%08X":                                                                               "CAudioDecodeForPCM 虚表: 0x%08X",
+	"CAudioDecodeForPCM vtable matches: %d":                                                                           "CAudioDecodeForPCM 虚表匹配 %d 处",
+	"Accompaniment decoder path %q does not match song mid %q":                                                        "伴奏解码器的路径 %q 与歌曲 mid %q 不符",
+	"PCM decoder rate: %.3f over %.2fs":                                                                               "PCM 解码速率: %.3f（历时 %.2fs）",
+	"Song clock: PCM decoder 0x%08X (duration %.2fs)":                                                                 "歌曲时钟: PCM 解码器 0x%08X（总时长 %.2fs）",
+	"Song clock: play-time address 0x%08X":                                                                            "歌曲时钟: 播放时间地址 0x%08X",
+	"PCM clock unavailable (%s); using the existing play-time source for this song":                                   "PCM 时钟不可用（%s），本首改用原有的播放时间来源",
+	"PCM decoder rate %.3f is outside [0.95, 1.05]; using the existing play-time source for the rest of this session": "PCM 解码速率 %.3f 不在 [0.95, 1.05] 内，本会话此后改用原有的播放时间来源",
+	"the accompaniment decoder did not advance within 5s":                                                             "伴奏解码器 5s 内没有推进",
+
+	// wesing：PCM 模式按路径 mid 取歌曲信息与封面（player/wesing/wesing.go、coverfetch.go，#146）
+	"The accompaniment path carries no song mid; announcing the window title without singer or cover": "伴奏路径里没有歌曲 mid，宣告窗口歌名，不带歌手与封面",
+	"Song info found by mid %s": "按 mid %s 查到歌曲信息",
+	"Song info for mid %s taken from the record matching the window title": "mid %s 的歌曲信息取自与窗口歌名相符的记录",
+	"Song info for mid %s not found yet; announcing the window title":      "mid %s 的歌曲信息暂未查到，先宣告窗口歌名",
+	"Album mid for %s: %s":           "%s 的专辑 mid: %s",
+	"Album mid for %s not found yet": "%s 的专辑 mid 暂未查到",
+
+	// wesing：兜底模式按窗口歌名匹配的记录（player/wesing/wesing.go、coverfetch.go，#146）
+	"No song record matches the window title; announcing it without singer or cover":     "没有与窗口歌名相符的歌曲记录，宣告窗口歌名，不带歌手与封面",
+	"The song record matching the window title has no mid; the cover is left to retries": "与窗口歌名相符的歌曲记录没有 mid，封面留给重试",
+	"Song mid fetched on retry %d: %s":                                                   "歌曲 mid 重试第 %d 次获取成功: %s",
 
 	// 封面规范化为 800×800（player/cover.go 的 CoverDataURI，issue #101）
 	"[%s] cover not normalized, sent as is: %v":              "[%s] 封面未规范化，原样发出: %v",
@@ -344,4 +392,7 @@ var p4LogMessages = map[string]string{
 	"No lyrics for this track (HTTP 404); not retrying":                                                   "平台没有这首歌的歌词（HTTP 404），不再重试",
 	"Giving up on lyrics for this track after %d attempts":                                                "已补取 %d 次仍取不到歌词，本首不再重试",
 	"Large cover unavailable; falling back to the page's cover URL":                                       "大尺寸封面取不到，改用页面上的封面地址",
+
+	// —— player/kugou/watchdog：提权 helper 先于酷狗启动退出（issue #141）——
+	"Elevated patch helper has exited (it waits at most 10 minutes); KuGou will not be stopped when it starts, and the repair will be retried after that": "提权 helper 已退出（它至多等 10 分钟）；酷狗启动后不会被结束，随后重试修复",
 }

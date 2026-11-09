@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 
 	"github.com/gorilla/websocket"
@@ -64,21 +65,21 @@ type Client struct {
 func Connect() (*Client, error) {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/json", cdpPort))
 	if err != nil {
-		return nil, fmt.Errorf("GET /json: %w", err)
+		return nil, i18n.Errorf("GET /json: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read /json body: %w", err)
+		return nil, i18n.Errorf("read /json body: %w", err)
 	}
 
 	var pages []DevToolsPage
 	if err := json.Unmarshal(body, &pages); err != nil {
-		return nil, fmt.Errorf("parse /json: %w", err)
+		return nil, i18n.Errorf("parse /json: %w", err)
 	}
 	if len(pages) == 0 {
-		return nil, fmt.Errorf("no DevTools pages found on port %d", cdpPort)
+		return nil, i18n.Errorf("no DevTools pages found on port %d", cdpPort)
 	}
 
 	// Prefer desktop-popup page (has KgSuperCall), otherwise fall back to first page
@@ -97,7 +98,7 @@ func Connect() (*Client, error) {
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
 	if err != nil {
-		return nil, fmt.Errorf("WebSocket dial: %w", err)
+		return nil, i18n.Errorf("WebSocket dial: %w", err)
 	}
 
 	c := &Client{wsUrl: wsUrl, conn: conn, msgID: 1}
@@ -152,7 +153,7 @@ func (c *Client) GetPlayInfo() (*PlayInfo, error) {
 
 	var info PlayInfo
 	if err := json.Unmarshal([]byte(raw), &info); err != nil {
-		return nil, fmt.Errorf("parse PlayInfo: %w (raw: %s)", err, raw)
+		return nil, i18n.Errorf("parse PlayInfo: %w (raw: %s)", err, raw)
 	}
 	return &info, nil
 }
@@ -163,7 +164,7 @@ func (c *Client) evaluateAsync(expr string, timeout time.Duration) (string, erro
 	defer c.mu.Unlock()
 
 	if c.closed {
-		return "", fmt.Errorf("connection closed")
+		return "", i18n.Errorf("connection closed")
 	}
 
 	id := c.msgID
@@ -181,7 +182,7 @@ func (c *Client) evaluateAsync(expr string, timeout time.Duration) (string, erro
 
 	if err := c.conn.WriteJSON(req); err != nil {
 		c.closed = true
-		return "", fmt.Errorf("write: %w", err)
+		return "", i18n.Errorf("write: %w", err)
 	}
 
 	c.conn.SetReadDeadline(time.Now().Add(timeout + 500*time.Millisecond))
@@ -189,13 +190,13 @@ func (c *Client) evaluateAsync(expr string, timeout time.Duration) (string, erro
 		var res cdpResult
 		if err := c.conn.ReadJSON(&res); err != nil {
 			c.closed = true
-			return "", fmt.Errorf("read: %w", err)
+			return "", i18n.Errorf("read: %w", err)
 		}
 		if res.ID != id {
 			continue
 		}
 		if res.Result.ExceptionDetails != nil {
-			return "", fmt.Errorf("JS exception: %v", res.Result.ExceptionDetails)
+			return "", i18n.Errorf("JS exception: %v", res.Result.ExceptionDetails)
 		}
 		valStr, ok := res.Result.Result.Value.(string)
 		if !ok {

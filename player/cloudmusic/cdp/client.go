@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 
@@ -299,7 +300,7 @@ func Connect() (*Client, error) {
 			wsUrl = pages[0].WebSocketDebuggerUrl
 			matchUrl = pages[0].URL
 		} else {
-			return nil, fmt.Errorf("no DevTools page found")
+			return nil, i18n.Errorf("no DevTools page found")
 		}
 	}
 
@@ -349,17 +350,17 @@ func (c *Client) Extract() (*ExtractionData, error) {
 
 		if res.ID == id {
 			if res.Result.ExceptionDetails != nil {
-				return nil, fmt.Errorf("JS Exception: %v", res.Result.ExceptionDetails)
+				return nil, i18n.Errorf("JS Exception: %v", res.Result.ExceptionDetails)
 			}
 
 			valStr, ok := res.Result.Result.Value.(string)
 			if !ok || valStr == "" || valStr == "null" {
-				return nil, fmt.Errorf("extraction returned null or invalid. Got: %v", res.Result.Result.Value)
+				return nil, i18n.Errorf("extraction returned null or invalid. Got: %v", res.Result.Result.Value)
 			}
 
 			var data ExtractionData
 			if err := json.Unmarshal([]byte(valStr), &data); err != nil {
-				return nil, fmt.Errorf("json parse error: %v, raw string: %s", err, valStr)
+				return nil, i18n.Errorf("json parse error: %v, raw string: %s", err, valStr)
 			}
 			return &data, nil
 		}
@@ -408,11 +409,11 @@ func (c *Client) Evaluate(expression string) (string, error) {
 		}
 		if res.ID == id {
 			if res.Result.ExceptionDetails != nil {
-				return "", fmt.Errorf("JS Exception: %v", res.Result.ExceptionDetails)
+				return "", i18n.Errorf("JS Exception: %v", res.Result.ExceptionDetails)
 			}
 			valStr, ok := res.Result.Result.Value.(string)
 			if !ok {
-				return "", fmt.Errorf("unexpected return type: %v", res.Result.Result.Value)
+				return "", i18n.Errorf("unexpected return type: %v", res.Result.Result.Value)
 			}
 			return valStr, nil
 		}
@@ -452,12 +453,12 @@ func (c *Client) EvaluateAsync(expression string) (string, error) {
 
 		if res.ID == id {
 			if res.Result.ExceptionDetails != nil {
-				return "", fmt.Errorf("JS Exception: %v", res.Result.ExceptionDetails)
+				return "", i18n.Errorf("JS Exception: %v", res.Result.ExceptionDetails)
 			}
 
 			valStr, ok := res.Result.Result.Value.(string)
 			if !ok {
-				return "", fmt.Errorf("unexpected return type: %v", res.Result.Result.Value)
+				return "", i18n.Errorf("unexpected return type: %v", res.Result.Result.Value)
 			}
 			return valStr, nil
 		}
@@ -494,7 +495,7 @@ func (c *Client) SearchSongViaCDP(songName string, artist string) (string, error
 		return "", err
 	}
 	if result == "" || strings.HasPrefix(result, "err:") {
-		return "", fmt.Errorf("search failed: %s", result)
+		return "", i18n.Errorf("search failed: %s", result)
 	}
 	return result, nil
 }
@@ -527,10 +528,10 @@ func (c *Client) FetchLyricsViaCDP(songID string) (*LyricFetchResult, error) {
 		return nil, err
 	}
 	if strings.HasPrefix(result, "err:") {
-		return nil, fmt.Errorf("lyrics fetch failed: %s", result)
+		return nil, i18n.Errorf("lyrics fetch failed: %s", result)
 	}
 	if result == "" {
-		return nil, fmt.Errorf("lyrics fetch failed: empty result")
+		return nil, i18n.Errorf("lyrics fetch failed: empty result")
 	}
 	if result == "[PURE_MUSIC]" {
 		return &LyricFetchResult{PureMusic: true}, nil
@@ -545,7 +546,7 @@ func (c *Client) FetchLyricsViaCDP(songID string) (*LyricFetchResult, error) {
 		Yrc     string `json:"yrc"`
 	}
 	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
-		return nil, fmt.Errorf("lyrics JSON parse error: %v", err)
+		return nil, i18n.Errorf("lyrics JSON parse error: %v", err)
 	}
 	return &LyricFetchResult{Lrc: parsed.Lrc, Tlyric: parsed.Tlyric, Romalrc: parsed.Romalrc, Yrc: parsed.Yrc}, nil
 }
@@ -569,7 +570,7 @@ func (c *Client) FetchCoverViaCDP(songID string) (string, error) {
 		return "", err
 	}
 	if result == "" || strings.HasPrefix(result, "err:") {
-		return "", fmt.Errorf("cover fetch failed: %s", result)
+		return "", i18n.Errorf("cover fetch failed: %s", result)
 	}
 	return result, nil
 }

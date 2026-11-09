@@ -1,9 +1,11 @@
 package lyric
 
 import (
+	"encoding/json"
 	"strings"
 	"syscall"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player/wesing/proc"
@@ -16,206 +18,304 @@ type SongInfo struct {
 	Singer string // 歌手名
 }
 
-// FindSongInfo 从进程内存中搜索当前歌曲的 JSON 信息
-// expectedName 是从窗口标题获取的歌名，用于从多个缓存中匹配当前歌曲
+// FindSongInfo 按窗口歌名 expectedName 在进程内存里找歌曲信息记录（UTF-16 JSON 里的 "songname"），供 PCM 模式的
+// 交叉核对（设计 §3.1）：只认歌名等于 expectedName 的记录，取地址最高的一条。匹配不到（含 expectedName 为空）返回
+// 错误，不退回别的记录：#146 之前退回地址最高的有效记录，可能是上一首（#145 真机：「blue hour」读到了「High」的）。
 func FindSongInfo(handle syscall.Handle, expectedName string) (SongInfo, error) {
-	// 搜索 UTF-16LE 编码的 "songname":"
-	pattern, mask := proc.ParseAOBPattern(
-		"22 00 73 00 6F 00 6E 00 67 00 6E 00 61 00 6D 00 65 00 22 00 3A 00 22 00")
+	return findSongInfo(procMemory{handle}, procScan(handle), expectedName, false)
+}
 
-	regions := proc.EnumWritableRegions(handle)
-	results := proc.AOBScan(handle, pattern, mask, regions)
+// FindSongInfoPreferMID 同 FindSongInfo，供兜底模式（宣告与补读）：同名的记录里取地址最高的、有 mid 的一条，都没有
+// mid 才取地址最高的一条（设计 §3.1，§9 二测：内存里有前半段被覆盖、没有 mid 的残缺副本）。PCM 模式的核对不用它：
+// 同名的旧记录会带着别的 mid 进入核对，把正确的解码器拒掉（兜底歌手设计审 R3）。
+func FindSongInfoPreferMID(handle syscall.Handle, expectedName string) (SongInfo, error) {
+	return findSongInfo(procMemory{handle}, procScan(handle), expectedName, true)
+}
 
+// findSongInfo 在可写区全扫一遍 "songname":"，从地址最高的命中往下解析，只认歌名等于 expectedName 的记录。
+// preferMID 为假时第一条即结果；为真时第一条有 mid 的即结果，都没有 mid 取第一条。命中数不设上限（#163）。
+func findSongInfo(m memory, scan scanFunc, expectedName string, preferMID bool) (SongInfo, error) {
+	pattern, mask := stringToUTF16LEAOB(`"songname":"`)
+	results := scan(pattern, mask)
 	if len(results) == 0 {
 		return SongInfo{}, i18n.Errorf("songname field not found")
 	}
-
-	// 优先匹配窗口标题对应的歌名（如果有多个匹配，取最高地址的）
-	if expectedName != "" {
-		var bestInfo SongInfo
-		var bestAddr uint32
-		for _, addr := range results {
-			info, ok := tryParseFromSongNameAddr(handle, addr)
-			if ok && info.Name == expectedName && addr > bestAddr {
-				bestInfo = info
-				bestAddr = addr
-			}
-		}
-		if bestAddr > 0 {
-			return bestInfo, nil
-		}
-	}
-
-	// 没有匹配到预期歌名，返回最高地址的有效结果（最新分配的数据）
+	var best SongInfo
+	found := false
 	for i := len(results) - 1; i >= 0; i-- {
-		info, ok := tryParseFromSongNameAddr(handle, results[i])
-		if ok {
-			return info, nil
+		info, ok := tryParseFromSongNameAddr(m, results[i])
+		if !ok || info.Name != expectedName {
+			continue
+		}
+		if !found {
+			best, found = info, true
+		}
+		if !preferMID || info.Mid != "" {
+			best = info
+			break
 		}
 	}
-
-	return SongInfo{}, i18n.Errorf("Found %d songname matches but no valid song info", len(results))
+	if !found {
+		return SongInfo{}, i18n.Errorf("Found %d songname matches but none named %q", len(results), expectedName)
+	}
+	return best, nil
 }
 
-func tryParseFromSongNameAddr(handle syscall.Handle, addr uint32) (SongInfo, bool) {
-	buf, err := proc.ReadBytes(handle, addr+24, 2048)
-	if err != nil {
+// tryParseFromSongNameAddr 解析 "songname":" 命中 addr 处的记录：向后读 2048 字节取歌名与歌手，向前读 200 字节取 mid。
+// 歌手只在同一个对象里取（设计 §3.2，§9 二测）："singername":" 须在歌名之后的第一个 } 之前，没有就歌手为空、记录
+// 仍有效。#146 之前在读到的 2 KB 里找，越过对象结尾取到别的记录的歌手（Shivers 读成了林俊杰），找不到则整条作废。
+func tryParseFromSongNameAddr(m memory, addr uint32) (SongInfo, bool) {
+	buf, ok := m.bytes(addr+24, 2048)
+	if !ok {
 		return SongInfo{}, false
 	}
 
 	text := utf16LEBytesToString(buf)
 
-	nameEndIdx := strings.Index(text, `"`)
-	if nameEndIdx <= 0 || nameEndIdx > 200 {
+	// 歌名、歌手按 JSON 规则解码（jsonString）：转义的引号不是结尾（#146 代码审）。长度上限按原文计。
+	name, nameEndIdx, ok := jsonString(text)
+	if !ok || nameEndIdx <= 0 || nameEndIdx > 200 {
 		return SongInfo{}, false
 	}
-	name := text[:nameEndIdx]
-	if len([]rune(name)) < 1 || len([]rune(name)) > 50 {
-		return SongInfo{}, false
-	}
-
-	singerKey := `"singername":"`
-	singerIdx := strings.Index(text, singerKey)
-	if singerIdx < 0 {
+	if n := utf8.RuneCountInString(name); n < 1 || n > 50 {
 		return SongInfo{}, false
 	}
 
-	rest := text[singerIdx+len(singerKey):]
-	singerEndIdx := strings.Index(rest, `"`)
-	if singerEndIdx <= 0 || singerEndIdx > 100 {
-		return SongInfo{}, false
+	// 从歌名的结尾引号之后找：歌名里的 } 不算对象结尾。值为空也有效；有值时找不到结尾引号、转义不合法、或超过 100
+	// 字节，整条不合格。
+	singer := ""
+	after := text[nameEndIdx+1:]
+	const singerKey = `"singername":"`
+	if i := strings.Index(after, singerKey); i >= 0 {
+		if end := strings.IndexByte(after, '}'); end < 0 || i < end {
+			s, singerEndIdx, ok := jsonString(after[i+len(singerKey):])
+			if !ok || singerEndIdx > 100 {
+				return SongInfo{}, false
+			}
+			singer = s
+		}
 	}
-	singer := rest[:singerEndIdx]
 
 	// 提取 MID：向前读取找到 "mid":"..." 字段
 	mid := ""
 	if addr > 200 {
-		prevBuf, err := proc.ReadBytes(handle, addr-200, 200)
-		if err == nil {
-			prevText := utf16LEBytesToString(prevBuf)
-			midKey := `"mid":"`
-			if midIdx := strings.LastIndex(prevText, midKey); midIdx >= 0 {
-				midRest := prevText[midIdx+len(midKey):]
-				if endIdx := strings.Index(midRest, `"`); endIdx > 0 && endIdx <= 20 {
-					mid = midRest[:endIdx]
-				}
-			}
+		if prevBuf, ok := m.bytes(addr-200, 200); ok {
+			mid = midBefore(utf16LEBytesToString(prevBuf))
 		}
 	}
 
 	return SongInfo{Mid: mid, Name: name, Singer: singer}, true
 }
 
-// FindCoverURL 从进程内存中搜索当前歌曲的封面 URL
-// songMID: 当前歌曲的 MID（如 "003msPI80HftbW"），用于精确匹配避免拿到其他歌的封面
-// 策略: 搜索 "{songMID}.jpg" 的 UTF-16LE，在附近查找完整的 imgcache URL
-func FindCoverURL(handle syscall.Handle, songMID string) string {
-	if songMID == "" {
+// midBefore 在 "songname" 之前的文本 prev 里取同一个对象的 mid：最后一个 "mid":" 之后的值。从那里到 prev 末尾
+// 不能有 {、} 或 NUL，否则 mid 属于前面别的记录，不认（#146 审查：兜底模式按它查封面）。值的长度上限 20。
+func midBefore(prev string) string {
+	const key = `"mid":"`
+	i := strings.LastIndex(prev, key)
+	if i < 0 {
 		return ""
 	}
-
-	regions := proc.EnumWritableRegions(handle)
-
-	// 构造 "{songMID}.jpg" 的 UTF-16LE AOB 模式
-	jpgSuffix := songMID + ".jpg"
-	jpgPattern, jpgMask := stringToUTF16LEAOB(jpgSuffix)
-	results := proc.AOBScan(handle, jpgPattern, jpgMask, regions)
-
-	for _, addr := range results {
-		// 向前读取更多内容，查找 "http" 开头的 URL
-		// 典型格式: http://imgcache.qq.com/music/photo/mid_album_500/X/Y/{albumMID}.jpg
-		// songMID.jpg 出现在本地路径中（只做定位用），封面 URL 通常在附近内存区域
-		// 先检查这个 .jpg 是不是在一个 URL 里（向前最多 300 字节）
-		url := tryExtractURLBefore(handle, addr, 300)
-		if url != "" && strings.Contains(url, "imgcache.qq.com") {
-			return url
-		}
+	rest := prev[i+len(key):]
+	if strings.ContainsAny(rest, "{}\x00") {
+		return ""
 	}
-
-	// 备选策略: 搜索 "mid_album_500/" 模式，找到所有封面 URL，
-	// 然后看哪个 URL 在距离 songMID 最近的内存区域
-	midAlbumPattern, midAlbumMask := proc.ParseAOBPattern(
-		"6D 00 69 00 64 00 5F 00 61 00 6C 00 62 00 75 00 6D 00 5F 00 35 00 30 00 30 00 2F 00")
-	albumResults := proc.AOBScan(handle, midAlbumPattern, midAlbumMask, regions)
-
-	// 同时搜索 songMID 出现的位置
-	midPattern, midMask := stringToUTF16LEAOB(songMID)
-	midResults := proc.AOBScan(handle, midPattern, midMask, regions)
-
-	// 找到离 songMID 最近的 mid_album_500 URL
-	for _, albumAddr := range albumResults {
-		url := tryExtractURLBefore(handle, albumAddr, 300)
-		if url == "" || !strings.Contains(url, "imgcache.qq.com") {
-			continue
-		}
-		if !strings.HasSuffix(url, ".jpg") && !strings.HasSuffix(url, ".png") {
-			// 截取到 .jpg 或 .png 结尾
-			if idx := strings.Index(url, ".jpg"); idx > 0 {
-				url = url[:idx+4]
-			} else if idx := strings.Index(url, ".png"); idx > 0 {
-				url = url[:idx+4]
-			} else {
-				continue
-			}
-		}
-		// 检查附近（±8KB）是否有当前歌曲的 songMID
-		for _, midAddr := range midResults {
-			dist := int64(albumAddr) - int64(midAddr)
-			if dist < 0 {
-				dist = -dist
-			}
-			if dist < 8192 {
-				return url
-			}
-		}
+	if end := strings.IndexByte(rest, '"'); end > 0 && end <= 20 {
+		return rest[:end]
 	}
-
-	// 最后备选: 返回最后一个有效的 imgcache URL（最新的通常在最高地址）
-	for i := len(albumResults) - 1; i >= 0; i-- {
-		url := tryExtractURLBefore(handle, albumResults[i], 300)
-		if url != "" && strings.Contains(url, "imgcache.qq.com") {
-			if idx := strings.Index(url, ".jpg"); idx > 0 {
-				return url[:idx+4]
-			}
-			if idx := strings.Index(url, ".png"); idx > 0 {
-				return url[:idx+4]
-			}
-		}
-	}
-
 	return ""
 }
 
-// tryExtractURLBefore 从指定地址向前搜索 "http" 并提取完整 URL
-func tryExtractURLBefore(handle syscall.Handle, addr uint32, backBytes uint32) string {
-	if addr < backBytes {
-		return ""
+// ===== 按 mid 查歌曲信息与专辑（#146，设计见 doc/design/wesing-cover-by-mid-design.md）=====
+//
+// FindSongInfo 在 #146 之前匹配不到窗口歌名时退回地址最高的记录，可能是上一首；原有的 FindCoverURL 有两层不以 mid
+// 为依据（设计 §1，已删除）。这里只认以 mid 为锚的记录。按 mid 查歌曲信息在 PCM 模式取歌曲信息，mid 取自伴奏解码器
+// 的路径（PCMClock.MID）；兜底模式只用它补歌手（设计 §3.2）。专辑两种模式都用，兜底模式的 mid 取自窗口歌名匹配上的
+// 记录（设计 §3.4）。
+
+const (
+	midLen          = 14   // 歌曲 mid 与专辑 mid 的长度
+	byMIDMaxHits    = 64   // 每种形式从地址最高的命中往下至多看几处（设计 §3.2，设计审 F3）
+	songObjReadLen  = 1024 // 歌曲信息每处命中向后至多读的字节数
+	albumReadBack   = 64   // 专辑 mid 每处命中向前至多读的字节数（设计 §3.4）
+	songNameMaxRune = 50   // 歌名长度上限，同 tryParseFromSongNameAddr
+	singerMaxBytes  = 100  // 歌手长度上限（UTF-8 字节），同 tryParseFromSongNameAddr
+	albumLogKey     = "m_strAlbumID = "
+	albumRespKey    = `"albummid":"`
+)
+
+// scanFunc 在可写区全扫一遍 pattern，按地址升序返回命中（同 proc.AOBScan）。测试里换成扫假内存。
+type scanFunc func(pattern []byte, mask []bool) []uint32
+
+func procScan(handle syscall.Handle) scanFunc {
+	return func(pattern []byte, mask []bool) []uint32 {
+		return proc.AOBScan(handle, pattern, mask, proc.EnumWritableRegions(handle))
 	}
-	backBuf, err := proc.ReadBytes(handle, addr-backBytes, backBytes)
-	if err != nil {
-		return ""
+}
+
+// validMID 报告 s 是否为 14 位字母数字（歌曲 mid、专辑 mid 的形状）。
+func validMID(s string) bool {
+	if len(s) != midLen {
+		return false
 	}
-	// UTF-16LE 中搜索最后出现的 "http" = 68 00 74 00 74 00 70 00
-	httpStart := -1
-	for i := len(backBuf) - 8; i >= 0; i -= 2 {
-		if backBuf[i] == 0x68 && backBuf[i+1] == 0x00 &&
-			backBuf[i+2] == 0x74 && backBuf[i+3] == 0x00 &&
-			backBuf[i+4] == 0x74 && backBuf[i+5] == 0x00 &&
-			backBuf[i+6] == 0x70 && backBuf[i+7] == 0x00 {
-			httpStart = i
-			break
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z') {
+			return false
 		}
 	}
-	if httpStart < 0 {
-		return ""
-	}
+	return true
+}
 
-	urlStartAddr := addr - backBytes + uint32(httpStart)
-	urlBuf, err := proc.ReadBytes(handle, urlStartAddr, 512)
-	if err != nil {
+// FindSongInfoByMID 按歌曲 mid 查开唱时留下的 StartKSong 记录（设计 §3.2），返回其歌名与歌手。
+func FindSongInfoByMID(handle syscall.Handle, mid string) (SongInfo, bool) {
+	return songInfoByMID(procMemory{handle}, procScan(handle), mid)
+}
+
+// songInfoByMID 在可写区找 UTF-16 的 "mid":"<mid>"，从地址最高的命中往下至多看 64 处，第一处合格的即结果。
+// 只匹配 "mid":" 紧跟 mid 的写法：歌单类记录的引号被转义（\"mid\":\"…），不认，其字段内容与 StartKSong 相同，
+// 漏掉不影响结果。每处向后读 1 KB，读不出的这一处不合格；一次查找的额外读取量因此不超过 64 KB。
+func songInfoByMID(m memory, scan scanFunc, mid string) (SongInfo, bool) {
+	if !validMID(mid) {
+		return SongInfo{}, false
+	}
+	key, mask := stringToUTF16LEAOB(`"mid":"` + mid + `"`)
+	hits := scan(key, mask)
+	for i, n := len(hits)-1, 0; i >= 0 && n < byMIDMaxHits; i, n = i-1, n+1 {
+		b, ok := m.bytes(hits[i]+uint32(len(key)), songObjReadLen)
+		if !ok {
+			continue
+		}
+		if name, singer, ok := parseSongObject(utf16LEBytesToString(b)); ok {
+			return SongInfo{Mid: mid, Name: name, Singer: singer}, true
+		}
+	}
+	return SongInfo{}, false
+}
+
+// parseSongObject 在 text（"mid":"<mid>" 之后的内容）里取同一个 JSON 对象的 songname 与 singername：读到
+// 第一个 } 为止，两个键都要有，歌名非空。长度上限同 tryParseFromSongNameAddr；歌手可以为空。
+func parseSongObject(text string) (name, singer string, ok bool) {
+	end := strings.IndexByte(text, '}')
+	if end < 0 {
+		return "", "", false
+	}
+	obj := text[:end]
+	name, ok = jsonStringField(obj, `"songname":"`)
+	if !ok || name == "" || utf8.RuneCountInString(name) > songNameMaxRune {
+		return "", "", false
+	}
+	singer, ok = jsonStringField(obj, `"singername":"`)
+	if !ok || len(singer) > singerMaxBytes {
+		return "", "", false
+	}
+	return name, singer, true
+}
+
+// jsonStringField 取 obj 里 key（含开头的引号与冒号、值的开引号）之后的 JSON 字符串值，解码见 jsonString。
+func jsonStringField(obj, key string) (string, bool) {
+	i := strings.Index(obj, key)
+	if i < 0 {
+		return "", false
+	}
+	v, _, ok := jsonString(obj[i+len(key):])
+	return v, ok
+}
+
+// jsonString 解码 rest 开头的 JSON 字符串值（开引号在 rest 之前），返回值与结尾引号在 rest 里的字节下标：结尾是第一个
+// 未被反斜杠转义的引号，按 JSON 规则解码转义（#146 代码审：歌名里的 \" 不能当成结尾）。没有结尾或转义不合法时不认。
+func jsonString(rest string) (string, int, bool) {
+	for j := 0; j < len(rest); j++ {
+		switch rest[j] {
+		case '\\':
+			j++ // 跳过被转义的字符
+		case '"':
+			var v string
+			if json.Unmarshal([]byte(`"`+rest[:j]+`"`), &v) != nil {
+				return "", 0, false
+			}
+			return v, j, true
+		}
+	}
+	return "", 0, false
+}
+
+// FindAlbumMID 按歌曲 mid 查它的专辑 mid（设计 §3.4），找不到返回空串。
+func FindAlbumMID(handle syscall.Handle, mid string) string {
+	return albumMID(procMemory{handle}, procScan(handle), mid)
+}
+
+// albumMID 依次查两种以歌曲 mid 为锚的形式，各在可写区全扫一遍，值须为 14 位字母数字：
+//  1. 日志行（UTF-16）「…, m_strAlbumID = <A>, strMid = <mid>」：向前至多 64 字节，取同一行里 m_strAlbumID = 之后
+//     到 , strMid 之前的值；
+//  2. 回包（UTF-8）「{…"albummid":"<A>","ksongmid":"<mid>"}」：向前至多 64 字节，在同一个对象里取 "albummid":"
+//     之后的值。
+//
+// 日志行查到即返回，不再扫回包：两处都有而不相等时取日志行的（设计 §3.4），所以回包只在日志行查不到时才有用。
+func albumMID(m memory, scan scanFunc, mid string) string {
+	if !validMID(mid) {
 		return ""
 	}
-	return utf16LEBytesToStringUntilNull(urlBuf)
+	key, mask := stringToUTF16LEAOB(", strMid = " + mid)
+	if a := albumBefore(m, scan(key, mask), func(b []byte) string {
+		back := utf16LEBytesToString(b)
+		i := strings.LastIndex(back, albumLogKey)
+		if i < 0 {
+			return ""
+		}
+		// 命中紧跟在值后面：值之后到命中之间不能有别的字符，同一行由此保证。
+		return back[i+len(albumLogKey):]
+	}); a != "" {
+		return a
+	}
+	resp := []byte(`"ksongmid":"` + mid + `"`)
+	return albumBefore(m, scan(resp, allTrue(len(resp))), func(b []byte) string {
+		back := string(b)
+		i := strings.LastIndex(back, albumRespKey)
+		if i < 0 {
+			return ""
+		}
+		rest := back[i+len(albumRespKey):]
+		if strings.ContainsAny(rest, "{}") { // 跨了对象
+			return ""
+		}
+		j := strings.IndexByte(rest, '"')
+		if j < 0 {
+			return ""
+		}
+		return rest[:j]
+	})
+}
+
+// albumBefore 从地址最高的命中往下至多看 64 处，每处读命中之前至多 64 字节交给 extract，第一个合格的值即结果。
+func albumBefore(m memory, hits []uint32, extract func(back []byte) string) string {
+	for i, n := len(hits)-1, 0; i >= 0 && n < byMIDMaxHits; i, n = i-1, n+1 {
+		start := hits[i] - min(hits[i], albumReadBack)
+		b, ok := m.bytes(start, hits[i]-start)
+		if !ok {
+			continue
+		}
+		if a := extract(b); validMID(a) {
+			return a
+		}
+	}
+	return ""
+}
+
+// AlbumCoverURL 由专辑 mid 构造封面地址（设计 §3.4）：…/mid_album_800/<A[12]>/<A[13]>/<A>.jpg。专辑 mid 不合格
+// 时返回空串。
+func AlbumCoverURL(albumMID string) string {
+	if !validMID(albumMID) {
+		return ""
+	}
+	return "http://imgcache.qq.com/music/photo/mid_album_800/" + albumMID[12:13] + "/" + albumMID[13:] + "/" + albumMID + ".jpg"
+}
+
+func allTrue(n int) []bool {
+	mask := make([]bool, n)
+	for i := range mask {
+		mask[i] = true
+	}
+	return mask
 }
 
 // stringToUTF16LEAOB 将 ASCII 字符串转换为 UTF-16LE 的 AOB 字节模式
@@ -235,19 +335,6 @@ func utf16LEBytesToString(buf []byte) string {
 	chars := make([]uint16, 0, len(buf)/2)
 	for i := 0; i+1 < len(buf); i += 2 {
 		val := uint16(buf[i]) | uint16(buf[i+1])<<8
-		chars = append(chars, val)
-	}
-	return string(utf16.Decode(chars))
-}
-
-// utf16LEBytesToStringUntilNull 将 UTF-16LE 字节转为字符串（遇 null 终止）
-func utf16LEBytesToStringUntilNull(buf []byte) string {
-	chars := make([]uint16, 0, len(buf)/2)
-	for i := 0; i+1 < len(buf); i += 2 {
-		val := uint16(buf[i]) | uint16(buf[i+1])<<8
-		if val == 0 {
-			break
-		}
 		chars = append(chars, val)
 	}
 	return string(utf16.Decode(chars))

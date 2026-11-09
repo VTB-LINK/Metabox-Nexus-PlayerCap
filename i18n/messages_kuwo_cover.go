@@ -1,7 +1,6 @@
 package i18n
 
-// Kuwo cover lookup errors; the no-cover sentinel is handled by callers rather
-// than translated at package initialization.
+// 酷我封面查询的错误文案，含包级 sentinel ErrNoCover（i18n.Sentinel，Error() 时才本地化）。
 func init() {
 	for en, zh := range kuwoCoverMessages {
 		if _, ok := chinese[en]; !ok {
@@ -22,4 +21,5 @@ var kuwoCoverMessages = map[string]string{
 	"kuwo: cover lookup response too large":   "酷我：封面查询响应过大",
 	"kuwo: invalid cover URL":                 "酷我：封面 URL 无效",
 	"kuwo: unexpected cover URL":              "酷我：封面 URL 不符合预期",
+	"kuwo: no cover":                          "酷我：没有封面",
 }

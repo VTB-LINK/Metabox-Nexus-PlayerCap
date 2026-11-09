@@ -25,13 +25,14 @@
 package wasapi
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 // ---------------------------------------------------------------------------
@@ -259,7 +260,7 @@ func unpinHandler(h *completionHandler) {
 func newCompletionHandler() (*completionHandler, error) {
 	ev, err := windows.CreateEvent(nil, 1, 0, nil) // manual-reset, 初始非信号
 	if err != nil && ev == 0 {
-		return nil, fmt.Errorf("CreateEvent(完成事件) 失败: %w", err)
+		return nil, i18n.Errorf("CreateEvent(completion event) failed: %w", err)
 	}
 	h := &completionHandler{
 		vtbl:     &completionHandlerVtblInstance,
@@ -312,7 +313,7 @@ func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer
 	mmdev := windows.NewLazySystemDLL("Mmdevapi.dll")
 	proc := mmdev.NewProc("ActivateAudioInterfaceAsync")
 	if err := proc.Find(); err != nil {
-		return nil, fmt.Errorf("ActivateAudioInterfaceAsync 不可用（需 Windows 10 build 19041+）: %w", err)
+		return nil, i18n.Errorf("ActivateAudioInterfaceAsync unavailable (requires Windows 10 build 19041+): %w", err)
 	}
 
 	mode := uint32(processLoopbackModeIncludeTree)
@@ -355,24 +356,24 @@ func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer
 	}
 	if failed(ret) {
 		handlerRelease(h) // 同步失败：不会再有回调，安全释放 owner 引用
-		return nil, fmt.Errorf("ActivateAudioInterfaceAsync 失败: 0x%08X", uint32(ret))
+		return nil, i18n.Errorf("ActivateAudioInterfaceAsync failed: 0x%08X", uint32(ret))
 	}
 
 	// 异步转同步：等 2s。超时则 ABANDON —— 不释放 owner 引用（对象连同 event 泄漏），system 仍持引用，
 	// 晚到的 ActivateCompleted 落在存活对象上，绝不 UAF。
 	wr, _ := windows.WaitForSingleObject(h.event, 2000)
 	if wr != windows.WAIT_OBJECT_0 {
-		return nil, fmt.Errorf("激活超时（2s 未完成，已放弃并泄漏 handler 以避免 UAF；wait=0x%X）", wr)
+		return nil, i18n.Errorf("activation timed out (not completed within 2s; abandoned, leaking the handler to avoid UAF; wait=0x%X)", wr)
 	}
 	if failed(h.result) {
 		handlerRelease(h)
-		return nil, fmt.Errorf("激活结果失败: 0x%08X", uint32(h.result))
+		return nil, i18n.Errorf("activation result failed: 0x%08X", uint32(h.result))
 	}
 	client := h.client
 	h.client = nil    // 所有权转移给调用方
 	handlerRelease(h) // 释放 owner 引用（成功路径：completion handler 与其 event 在此归零回收）
 	if client == nil {
-		return nil, fmt.Errorf("激活成功但 IAudioClient 为空")
+		return nil, i18n.Errorf("activation succeeded but IAudioClient is nil")
 	}
 	return client, nil
 }
@@ -431,19 +432,19 @@ func Activate(pid uint32, includeTree bool) (*Capturer, error) {
 	)
 	if failed(hr) {
 		c.Close()
-		return nil, fmt.Errorf("IAudioClient.Initialize 失败: 0x%08X", uint32(hr))
+		return nil, i18n.Errorf("IAudioClient.Initialize failed: 0x%08X", uint32(hr))
 	}
 
 	// 采集事件（auto-reset），SetEventHandle 绑定。
 	ev, err := windows.CreateEvent(nil, 0, 0, nil)
 	if err != nil && ev == 0 {
 		c.Close()
-		return nil, fmt.Errorf("CreateEvent(采集) 失败: %w", err)
+		return nil, i18n.Errorf("CreateEvent(capture) failed: %w", err)
 	}
 	c.event = ev
 	if hr := comCall(client, idxAudioClientSetEvt, uintptr(ev)); failed(hr) {
 		c.Close()
-		return nil, fmt.Errorf("SetEventHandle 失败: 0x%08X", uint32(hr))
+		return nil, i18n.Errorf("SetEventHandle failed: 0x%08X", uint32(hr))
 	}
 
 	// GetService(IID_IAudioCaptureClient)
@@ -453,13 +454,13 @@ func Activate(pid uint32, includeTree bool) (*Capturer, error) {
 		uintptr(unsafe.Pointer(&capClient)),
 	); failed(hr) || capClient == nil {
 		c.Close()
-		return nil, fmt.Errorf("GetService(IAudioCaptureClient) 失败: 0x%08X", uint32(hr))
+		return nil, i18n.Errorf("GetService(IAudioCaptureClient) failed: 0x%08X", uint32(hr))
 	}
 	c.captureClient = capClient
 
 	if hr := comCall(client, idxAudioClientStart); failed(hr) {
 		c.Close()
-		return nil, fmt.Errorf("IAudioClient.Start 失败: 0x%08X", uint32(hr))
+		return nil, i18n.Errorf("IAudioClient.Start failed: 0x%08X", uint32(hr))
 	}
 	return c, nil
 }
@@ -497,7 +498,7 @@ func awaitPacket(resetEvent, waitEvent func(), size func() (uint32, error)) (uin
 // 不影响返回值：样本照常写出。
 func (c *Capturer) Read(dst []float32) (frames int, silent bool, err error) {
 	if c == nil || c.captureClient == nil {
-		return 0, false, fmt.Errorf("Read 在已关闭的 Capturer 上调用")
+		return 0, false, i18n.Errorf("Read called on a closed Capturer")
 	}
 	// 等待的返回值无需处理：超时也再查一次队列，不完全信任事件。
 	packet, err := awaitPacket(
@@ -506,7 +507,7 @@ func (c *Capturer) Read(dst []float32) (frames int, silent bool, err error) {
 		func() (uint32, error) {
 			var n uint32
 			if hr := comCall(c.captureClient, idxCaptureNextPacket, uintptr(unsafe.Pointer(&n))); failed(hr) {
-				return 0, fmt.Errorf("GetNextPacketSize 失败: 0x%08X", uint32(hr))
+				return 0, i18n.Errorf("GetNextPacketSize failed: 0x%08X", uint32(hr))
 			}
 			return n, nil
 		},
@@ -523,7 +524,7 @@ func (c *Capturer) Read(dst []float32) (frames int, silent bool, err error) {
 		uintptr(unsafe.Pointer(&bufFlags)),
 		0, 0,
 	); failed(hr) {
-		return 0, false, fmt.Errorf("GetBuffer 失败: 0x%08X", uint32(hr))
+		return 0, false, i18n.Errorf("GetBuffer failed: 0x%08X", uint32(hr))
 	}
 
 	if bufFlags&audclntBufferflagsDataDiscontinuity != 0 {

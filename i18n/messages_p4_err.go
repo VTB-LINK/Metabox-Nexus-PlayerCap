@@ -1,6 +1,6 @@
-// P4b err 类：i18n.Errorf(...) / errors.New(i18n.T(...)) 的错误文案，本表提供其中文。
+// P4b err 类：i18n.Errorf(...) / i18n.Sentinel(...) 的错误文案，本表提供其中文。
 // 最初由 i18n-p4-catalog 生成（中文 → 英文），issue #61 改向时逐条对调。
-// 包级 sentinel 无法本地化（init 早于 SetLanguage），不经 i18n.T、不在此表。
+// 包级 sentinel 须写 i18n.Sentinel（Error() 时才本地化）；errors.New(i18n.T(...)) 写在包级会冻结成 init 时的中文。
 package i18n
 
 func init() {
@@ -57,7 +57,7 @@ var p4ErrMessages = map[string]string{
 	"open libcef.dll: %w":                                                                                           "打开 libcef.dll: %w",
 	"failed to open named mapping %q (target is not Node/Electron, or inspector disabled): %v":                      "打开命名映射 %q 失败（目标非 Node/Electron 或禁用了 inspector）: %v",
 	"failed to open target process: %w":                                                                             "打开目标进程失败: %w",
-	"Found %d songname matches but no valid song info":                                                              "找到 %d 个 songname 匹配但无有效歌曲信息",
+	"Found %d songname matches but none named %q":                                                                   "找到 %d 个 songname 匹配，但没有歌名为 %q 的有效记录",
 	"extraction unsuccessful: %s":                                                                                   "提取未成功: %s",
 	"failed to parse extraction result: %w":                                                                         "提取结果解析失败: %w",
 	"extraction returned empty":                                                                                     "提取返回空",
@@ -72,6 +72,14 @@ var p4ErrMessages = map[string]string{
 	"songname field not found":                                                                                      "未找到 songname 字段",
 	"Play time address not found":                                                                                   "未找到播放时间地址",
 	"Song duration string not found":                                                                                "未找到歌曲时长字符串",
+	"KSongsAVCapture.dll not found":                                                                                 "未找到 KSongsAVCapture.dll",
+	"KSongsAVCapture.dll image size 0x%X is out of range":                                                           "KSongsAVCapture.dll 映像大小 0x%X 超出范围",
+	"%s RTTI yields %d primary vtables, expected exactly 1":                                                         "%s 的 RTTI 解析出 %d 个主虚表，应恰为 1 个",
+	"the accompaniment decoder is not unique":                                                                       "伴奏解码器不唯一",
+	"the accompaniment decoder is not ready":                                                                        "伴奏解码器未就绪",
+	"no accompaniment decoder found":                                                                                "未找到伴奏解码器",
+	"the accompaniment decoder changed before the announcement":                                                     "伴奏解码器在宣告之前变了",
+	"the accompaniment decoder path does not match the song mid":                                                    "伴奏解码器的路径与歌曲 mid 不符",
 	"SodaMusic main process not found (%s not running?)":                                                            "未找到汽水音乐主进程（%s 未运行？）",
 	"Process not found: %s":                                                                                         "未找到进程: %s",
 	"failed to enumerate processes: %w":                                                                             "枚举进程失败: %w",
@@ -92,8 +100,8 @@ var p4ErrMessages = map[string]string{
 	"failed to parse /json/list: %w":                                                                                "解析 /json/list 失败: %w",
 	"failed to read CDP reply: %w":                                                                                  "读 CDP 回复失败: %w",
 	"Failed to read PE offset: %v":                                                                                  "读取 PE 偏移失败: %v",
-	"Failed to read lyric vector begin: %v":                                                                         "读取歌词向量 begin 失败: %v",
-	"Failed to read lyric vector end: %v":                                                                           "读取歌词向量 end 失败: %v",
+	"Failed to read lyric vector begin at 0x%X":                                                                     "读取歌词向量 begin 失败（地址 0x%X）",
+	"Failed to read lyric vector end at 0x%X":                                                                       "读取歌词向量 end 失败（地址 0x%X）",
 	"connection failed: %v":                                                                                         "连接失败: %v",
 	"KuGou process has exited":                                                                                      "酷狗进程已退出",
 
@@ -152,4 +160,157 @@ var p4ErrMessages = map[string]string{
 	"cmd.exe did not exit within %s while starting %s; stopped it": "cmd.exe 启动 %[2]s 时未在 %[1]s 内退出，已将其结束",
 	"cmd.exe exited with code %d while starting %s":                "cmd.exe 启动 %[2]s 时以退出码 %[1]d 退出",
 	"start cmd.exe: %w":                                            "启动 cmd.exe: %w",
+
+	// —— player/kugou/watchdog：提权 helper 跟随主进程（issue #140）——
+	"expected 3 arguments after --kugou-patch-helper (libcef.dll path, main process PID, token), got %d": "--kugou-patch-helper 之后应有 3 个参数（libcef.dll 路径、主进程 PID、令牌），实有 %d 个",
+	"libcef.dll path not provided":    "未提供 libcef.dll 路径",
+	"invalid main process PID: %q":    "主进程 PID 无效: %q",
+	"invalid helper token: %q":        "helper 令牌无效: %q",
+	"query process creation time: %w": "查询进程创建时间失败: %w",
+	"open main process (PID %d): %w":  "打开主进程（PID %d）失败: %w",
+	"process %d was not created before this helper; the main process has exited": "进程 %d 并非早于本 helper 创建，主进程已退出",
+	"timed out waiting (no patch instruction within 10 minutes)":                 "等待超时（10分钟内未收到 patch 指令）",
+
+	// —— player/kugou/watchdog：提权 helper 先于酷狗启动退出（issue #141）——
+	"elevated patch helper exited before KuGou was stopped; KuGou was left running and the repair will be retried": "提权 helper 在结束酷狗之前已退出；酷狗未被结束，稍后重试修复",
+
+	// —— player/kugou/watchdog：提权 helper 启动即失败（issue #142）——
+	"elevated helper failed at startup: %s":                     "elevated helper 启动即失败: %s",
+	"elevated helper exited at startup without giving a reason": "elevated helper 启动后即退出，未留下原因",
+
+	// —— 包级 sentinel（i18n.Sentinel）：kugou/spotify watchdog、qqmusic、applemusic/mem、audiocap/frame ——
+	"KuGou installation not found (KuGou.exe or libcef.dll is missing)":                                    "未找到酷狗安装（KuGou.exe 或 libcef.dll 不存在）",
+	"libcef.dll version unsupported (byte fingerprint at the known offsets does not match)":                "libcef.dll 版本不受支持（已知偏移处字节指纹不匹配）",
+	"Administrator rights not obtained":                                                                    "未取得管理员权限",
+	"Spotify is not running":                                                                               "Spotify 未在运行",
+	"this Spotify version does not support remote-debugging-port (or the installation file is unreadable)": "这一版 Spotify 不支持 remote-debugging-port（或安装文件不可读）",
+	"Spotify is running with the debug flag, but the debug port is not ready yet":                          "Spotify 带着调试 flag 在跑，但调试端口尚未就绪",
+	"input is not QRC ciphertext":                                                                          "输入不是 QRC 密文",
+	"songMid unavailable (possibly playing a local file)":                                                  "songMid 不可用（可能是本地文件播放）",
+	"AppleMusic.exe is not running":                                                                        "AppleMusic.exe 未运行",
+	"no permission to read the AppleMusic.exe process":                                                     "无权读取 AppleMusic.exe 进程",
+	"frame length is shorter than the fixed header":                                                        "帧长小于定长头",
+	"version unsupported":                                                                                  "version 不受支持",
+	"headerLen is shorter than the fixed header":                                                           "headerLen 小于定长头",
+	"headerLen is not a multiple of 4":                                                                     "headerLen 非 4 的倍数",
+	"headerLen exceeds the frame length":                                                                   "headerLen 大于帧长",
+	"headerLen+playerLen exceeds the frame length":                                                         "headerLen+playerLen 大于帧长",
+	"bins byte count is not a multiple of 4":                                                               "bins 字节数非 4 的倍数",
+
+	// —— audiocap/frame：坏帧错误的包装 ——
+	"frame: payloadLen %d exceeds the limit %d; bad frame":   "frame: payloadLen %d 超过上限 %d，判坏帧",
+	"frame: frame length %d: %w":                             "frame: 帧长 %d: %w",
+	"frame: headerLen %d, frame length %d: %w":               "frame: headerLen %d，帧长 %d: %w",
+	"frame: headerLen %d, playerLen %d, frame length %d: %w": "frame: headerLen %d，playerLen %d，帧长 %d: %w",
+	"frame: bins byte count %d: %w":                          "frame: bins 字节数 %d: %w",
+	"frame: version %d: %w":                                  "frame: version %d: %w",
+	"frame: headerLen %d: %w":                                "frame: headerLen %d: %w",
+
+	// —— audiocap/helper：控制行解析（issue #143）——
+	"empty control line": "空控制行",
+	"capture requires <pid> <player> <norm> <target_dbfs> <maxgain_db> <fps>, got %q": "capture 需 <pid> <player> <norm> <target_dbfs> <maxgain_db> <fps>，得到 %q",
+	"invalid capture pid %q: %w":         "capture pid 非法 %q: %w",
+	"invalid capture target_dbfs %q: %w": "capture target_dbfs 非法 %q: %w",
+	"invalid capture maxgain_db %q: %w":  "capture maxgain_db 非法 %q: %w",
+	"invalid capture fps %q":             "capture fps 非法 %q",
+	"stop requires <player>, got %q":     "stop 需 <player>，得到 %q",
+	"unknown control command %q":         "未知控制命令 %q",
+
+	// —— audiocap/session、audiocap/wasapi：会话探测与进程 loopback 捕获（issue #143）——
+	"GetProcessId reported a cross-process session (AUDCLNT_S_NO_SINGLE_PROCESS); cannot tell which process is producing the sound": "GetProcessId 报告跨进程会话（AUDCLNT_S_NO_SINGLE_PROCESS），无法确定当前出声的进程",
+	"CreateEvent(completion event) failed: %w":                                                               "CreateEvent(完成事件) 失败: %w",
+	"ActivateAudioInterfaceAsync unavailable (requires Windows 10 build 19041+): %w":                         "ActivateAudioInterfaceAsync 不可用（需 Windows 10 build 19041+）: %w",
+	"ActivateAudioInterfaceAsync failed: 0x%08X":                                                             "ActivateAudioInterfaceAsync 失败: 0x%08X",
+	"activation timed out (not completed within 2s; abandoned, leaking the handler to avoid UAF; wait=0x%X)": "激活超时（2s 未完成，已放弃并泄漏 handler 以避免 UAF；wait=0x%X）",
+	"activation result failed: 0x%08X":                                                                       "激活结果失败: 0x%08X",
+	"activation succeeded but IAudioClient is nil":                                                           "激活成功但 IAudioClient 为空",
+	"IAudioClient.Initialize failed: 0x%08X":                                                                 "IAudioClient.Initialize 失败: 0x%08X",
+	"CreateEvent(capture) failed: %w":                                                                        "CreateEvent(采集) 失败: %w",
+	"SetEventHandle failed: 0x%08X":                                                                          "SetEventHandle 失败: 0x%08X",
+	"GetService(IAudioCaptureClient) failed: 0x%08X":                                                         "GetService(IAudioCaptureClient) 失败: 0x%08X",
+	"IAudioClient.Start failed: 0x%08X":                                                                      "IAudioClient.Start 失败: 0x%08X",
+	"Read called on a closed Capturer":                                                                       "Read 在已关闭的 Capturer 上调用",
+	"GetNextPacketSize failed: 0x%08X":                                                                       "GetNextPacketSize 失败: 0x%08X",
+	"GetBuffer failed: 0x%08X":                                                                               "GetBuffer 失败: 0x%08X",
+	"GetProcessId hr=0x%08X":                                                                                 "GetProcessId hr=0x%08X",
+	"%s hr=0x%08X":                                                                                           "%s hr=0x%08X",
+
+	// —— audiocap/manager：helper 赋入 Job Object（issue #143）——
+	"failed to open the helper process handle: %w": "取 helper 进程句柄失败: %w",
+	"assignToJob failed: %w":                       "assignToJob 失败: %w",
+
+	// —— player/cover.go：封面下载拒绝内网地址（issue #143）——
+	"cover download refused to connect to a private or invalid address: %s": "封面拒绝连接内网/非法地址: %s",
+
+	// —— main.go：自动更新下载（issue #144）——
+	"HTTP %d": "HTTP %d",
+
+	// —— cloudmusic：CDP 求值与页面内请求、歌词与搜索接口、watchdog（issue #144）——
+	"no DevTools page found":                        "未找到 DevTools 页面",
+	"JS Exception: %v":                              "JS 异常: %v",
+	"extraction returned null or invalid. Got: %v":  "提取返回空值或无效值，实际为: %v",
+	"json parse error: %v, raw string: %s":          "JSON 解析失败: %v，原始字符串: %s",
+	"unexpected return type: %v":                    "返回类型不符合预期: %v",
+	"search failed: %s":                             "搜索失败: %s",
+	"lyrics fetch failed: %s":                       "取歌词失败: %s",
+	"lyrics fetch failed: empty result":             "取歌词失败: 结果为空",
+	"lyrics JSON parse error: %v":                   "歌词 JSON 解析失败: %v",
+	"cover fetch failed: %s":                        "取封面失败: %s",
+	"failed to parse song detail for %s":            "解析歌曲 %s 的详情失败",
+	"lyrics API JSON parse error: %v":               "歌词 API 的 JSON 解析失败: %v",
+	"no lyrics found for song %s":                   "未找到歌曲 %s 的歌词",
+	"search API parse error: %v":                    "搜索 API 解析失败: %v",
+	"no results for '%s'":                           "'%s' 没有搜索结果",
+	"no duration match for '%s' within ±5%% (%dms)": "'%s' 的搜索结果里没有时长在 ±5%% 以内的（目标 %dms）",
+	"failed to list processes: %v":                  "列举进程失败: %v",
+	"failed to restart process: %v":                 "重启进程失败: %v",
+
+	// —— kugou：CDP、歌词与曲库接口、watchdog 的补丁读写（issue #144）——
+	"GET /json: %w":                      "GET /json: %w",
+	"read /json body: %w":                "读取 /json 响应体: %w",
+	"parse /json: %w":                    "解析 /json: %w",
+	"no DevTools pages found on port %d": "端口 %d 上未找到 DevTools 页面",
+	"WebSocket dial: %w":                 "WebSocket 连接: %w",
+	"parse PlayInfo: %w (raw: %s)":       "解析 PlayInfo: %w（原文: %s）",
+	"connection closed":                  "连接已关闭",
+	"write: %w":                          "写入: %w",
+	"read: %w":                           "读取: %w",
+	"JS exception: %v":                   "JS 异常: %v",
+	"stopped":                            "已停止",
+	"lyric search: %w":                   "歌词搜索: %w",
+	"lyric search body: %w":              "歌词搜索响应体: %w",
+	"lyric search parse: %w":             "歌词搜索解析: %w",
+	"lyric base64 decode: %w":            "歌词 base64 解码: %w",
+	"lyric download: %w":                 "歌词下载: %w",
+	"lyric download body: %w":            "歌词下载响应体: %w",
+	"lyric download parse: %w":           "歌词下载解析: %w",
+	"catalog search: %w":                 "曲库搜索: %w",
+	"catalog search body: %w":            "曲库搜索响应体: %w",
+	"catalog search parse: %w":           "曲库搜索解析: %w",
+	"krc base64: %w":                     "krc base64: %w",
+	"krc zlib init: %w":                  "krc zlib 初始化: %w",
+	"krc zlib decompress: %w":            "krc zlib 解压: %w",
+	"read Patch%d (offset=0x%X): %w":     "读取 Patch%d（offset=0x%X）: %w",
+	"Patch%d seek: %w":                   "Patch%d 定位: %w",
+	"Patch%d write (offset=0x%X): %w":    "Patch%d 写入（offset=0x%X）: %w",
+	"fsync libcef.dll: %w":               "fsync libcef.dll: %w",
+
+	// —— qqmusic：歌词接口与 QRC 解压、进程内存与 Hook 注入（issue #144）——
+	"%w: hex decode: %v":                               "%w: hex 解码: %v",
+	"zlib init: %w":                                    "zlib 初始化: %w",
+	"zlib decompress: %w":                              "zlib 解压: %w",
+	"create request: %w":                               "创建请求: %w",
+	"http request: %w":                                 "HTTP 请求: %w",
+	"json parse: %w":                                   "JSON 解析: %w",
+	"no lyric data for songMid=%s (retcode=%d)":        "songMid=%s 没有歌词数据（retcode=%d）",
+	"API error code: %d":                               "API 错误码: %d",
+	"CreateToolhelp32Snapshot failed":                  "CreateToolhelp32Snapshot 失败",
+	"QQMusic.exe not found":                            "未找到 QQMusic.exe",
+	"QQMusic.dll not found in any QQMusic.exe process": "所有 QQMusic.exe 进程中都未找到 QQMusic.dll",
+	"QQMusic_GFWrapper.dll not found":                  "未找到 QQMusic_GFWrapper.dll",
+	"aob pattern not found in memory (might be already injected)": "内存中未找到 AOB 模式（可能已注入）",
+	"VirtualAllocEx failed":                       "VirtualAllocEx 失败",
+	"unexpected bytes at dll+%X: got %X, want %X": "dll+%X 处的字节不符合预期: 实际 %X，期望 %X",
+	"VirtualAllocEx failed for progress hook":     "进度 Hook 的 VirtualAllocEx 失败",
+	"process not attached":                        "未附加到进程",
 }

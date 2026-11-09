@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 
+	"Metabox-Nexus-PlayerCap/i18n"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -51,7 +53,7 @@ func OpenLag(mainPID int) (*LagReader, error) {
 		in.name, in.hash, in.stamp, out.name, out.hash, out.stamp)
 	build, ok := matchLagBuild(in.hash, out.hash)
 	if !ok {
-		return nil, fmt.Errorf("%w: unknown build: %s", ErrLagUnsupported, fp)
+		return nil, i18n.Errorf("%w: unknown build: %s", ErrLagUnsupported, fp)
 	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, pid)
 	if err != nil {
@@ -101,7 +103,7 @@ func (m *lagModule) load(pid uint32) error {
 func lagOpenErr(what string, err error) error {
 	var errno windows.Errno
 	if errors.As(err, &errno) {
-		return fmt.Errorf("kuwo: seek-lag: %s: %w", what, err)
+		return i18n.Errorf("kuwo: seek-lag: %s: %w", what, err)
 	}
 	return fmt.Errorf("%w: %s: %w", ErrLagUnsupported, what, err)
 }

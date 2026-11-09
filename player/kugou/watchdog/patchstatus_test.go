@@ -115,7 +115,7 @@ func TestClassifyLibcef(t *testing.T) {
 }
 
 // TestCheckPatchStatusRealDLL 用真机上的真实 libcef.dll 锚定 orig/data 字节表
-// （CI 的 Linux runner 没有此文件也编译不了本包，故 Skip；本机是唯一门禁）。
+// （没装该版本酷狗的机器上没有此文件，故 Skip；装了它的开发机是唯一门禁）。
 //
 // **这是全仓唯一验证 orig 表保真度的测试**：合成测试从 orig 表生成数据，改错表数据也
 // 跟着变，自洽而无从发现；只有读真机原始字节才能发现表写错了。

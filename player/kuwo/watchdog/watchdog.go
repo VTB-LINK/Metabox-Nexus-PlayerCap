@@ -38,15 +38,15 @@ var knownBuilds = map[string]string{
 }
 
 var (
-	ErrNotRunning         = errors.New("酷我未在运行")
-	ErrVersionUnsupported = errors.New("酷我版本或可执行文件未经验证")
-	ErrPortNotReady       = errors.New("酷我调试端口尚未就绪")
-	ErrAmbiguous          = errors.New("酷我进程身份不明确")
-	ErrRestartLimited     = errors.New("本次服务已尝试重启酷我，不再自动重启")
+	ErrNotRunning         = i18n.Sentinel("Kuwo is not running")
+	ErrVersionUnsupported = i18n.Sentinel("Kuwo version or executable is not verified")
+	ErrPortNotReady       = i18n.Sentinel("Kuwo debug port is not ready yet")
+	ErrAmbiguous          = i18n.Sentinel("Kuwo process identity is ambiguous")
+	ErrRestartLimited     = i18n.Sentinel("Kuwo has already been restarted once in this service run; no further automatic restart")
 	// ErrRestartNotAuthorized means the running build is not in knownBuilds, so
 	// it is not eligible for a destructive auto-restart. The user must launch it
 	// with the debug port themselves; the read path still works once it is open.
-	ErrRestartNotAuthorized = errors.New("酷我当前构建不在已验证白名单内，不自动重启")
+	ErrRestartNotAuthorized = i18n.Sentinel("This Kuwo build is not on the verified allowlist; no automatic restart")
 )
 
 var log = logger.New("Kuwo] [Watchdog")

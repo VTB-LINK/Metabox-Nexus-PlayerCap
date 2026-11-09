@@ -7,78 +7,75 @@ on:
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: [windows, X64]
     environment: build-dev
+    defaults:
+      run:
+        shell: pwsh
     env:
       GOOS: windows
       GOARCH: amd64
+      # 固定为交叉编译时的隐含值：原生 Windows 上找得到 gcc 时 CGO_ENABLED 默认为 1，
+      # 开发构建应与发版构建（release.yml，同样固定为 0）一致。
+      CGO_ENABLED: '0'
       OUTPUT_NAME: Metabox-Nexus-PlayerCap
       HTML_FILE_NAME: lyric_display.html
-    
+
+    # pwsh 的退出码：Actions 只检查脚本最后一条原生命令的 $LASTEXITCODE，中间的失败会被吞掉，
+    # 故每条原生命令之后都显式检查。
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.25'
-
-      - name: Set up zip
-        # 与 release.yml 同因：self-hosted runner 上不保证有 zip，缺了会在
-        # 「Create compressed archive」以 exit 127 挂掉。两条流水线都打 zip，故两边都要装。
-        run: |
-          if command -v zip &>/dev/null; then
-            echo "zip already installed: $(zip -v | head -2 | tail -1)"
-          else
-            echo "Installing zip..."
-            sudo apt-get update && sudo apt-get install -y zip
-            echo "Installed: $(zip -v | head -2 | tail -1)"
-          fi
 
       - name: Generate Windows icon resource (main/dev logo)
         run: |
           # 从开发变体母版(10)生成多尺寸图标 .syso（16..256 每档高质量重采样）。取代旧的
           # 「拷贝单尺寸静态 .syso」——单尺寸会让 Windows 在小尺寸场景现缩大图产生锯齿。
           # dev 构建不需要有意义的 Win32 版本号（真实版本经 ldflags 的 main.Version 携带），
-          # 故 version 用 0.0.0 占位。GOOS= GOARCH= 让生成器在 runner(linux) 原生运行，
-          # 产物仍是 windows/amd64 资源。
-          GOOS= GOARCH= go run ./tools/winicon \
-            -master build-assets/winicon/masters/metabox10-sqr.png \
-            -version 0.0.0 \
+          # 故 version 用 0.0.0 占位。runner 是 Windows，生成器原生运行，产物即 windows/amd64 资源。
+          go run ./tools/winicon `
+            -master build-assets/winicon/masters/metabox10-sqr.png `
+            -version 0.0.0 `
             -o resource_windows_amd64.syso
-      
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
       - name: Prepare variables
         id: vars
         run: |
           # 获取commit hash（短版本）
-          COMMIT_HASH=$(git rev-parse --short HEAD)
-          echo "COMMIT_HASH=${COMMIT_HASH}" >> $GITHUB_OUTPUT
-          
-          # 获取当前日期时间（格式：YYYYMMDD-HHMMSS）
-          BUILD_TIME=$(date +%Y%m%d-%H%M%S)
-          echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_OUTPUT
-          
+          $COMMIT_HASH = git rev-parse --short HEAD
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "COMMIT_HASH=${COMMIT_HASH}" -Encoding utf8
+
+          # 获取当前日期时间（格式：YYYYMMDD-HHMMSS）。按 InvariantCulture 格式化，不受 runner 区域设置影响
+          $BUILD_TIME = (Get-Date).ToString('yyyyMMdd-HHmmss', [cultureinfo]::InvariantCulture)
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "BUILD_TIME=${BUILD_TIME}" -Encoding utf8
+
           # 获取完整的timestamp用于展示
-          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-          echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_OUTPUT
-          
-          echo "Build Info: Commit=$COMMIT_HASH, Time=$BUILD_TIME"
-      
+          $TIMESTAMP = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss', [cultureinfo]::InvariantCulture)
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "TIMESTAMP=${TIMESTAMP}" -Encoding utf8
+
+          Write-Output "Build Info: Commit=${COMMIT_HASH}, Time=${BUILD_TIME}"
+
       - name: Build Windows executable
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           # 获取commit hash和build time
-          COMMIT_HASH=${{ steps.vars.outputs.COMMIT_HASH }}
-          BUILD_TIME=${{ steps.vars.outputs.BUILD_TIME }}
+          $COMMIT_HASH = '${{ steps.vars.outputs.COMMIT_HASH }}'
+          $BUILD_TIME = '${{ steps.vars.outputs.BUILD_TIME }}'
 
           # 开发构建使用非 semver 版本号，客户端会跳过自动更新检查
-          VERSION="${OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
+          $VERSION = "${env:OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
 
           # 构建可执行文件，文件名格式：<name>-<date-time>-<commit-hash>.exe
-          EXE_NAME="${VERSION}.exe"
-          echo "EXE_NAME=${EXE_NAME}" >> $GITHUB_ENV
+          $EXE_NAME = "${VERSION}.exe"
+          Add-Content -Path $env:GITHUB_ENV -Value "EXE_NAME=${EXE_NAME}" -Encoding utf8
 
           # Sentry DSN 从 secret 注入。secret 没配 → 空串 → 客户端自动禁用遥测，构建照常成功
           # （telemetry.Enabled 只看这个变量）。启动日志第一行会说「未注入 DSN，遥测已禁用」，
@@ -87,76 +84,71 @@ jobs:
           # 这里的 VERSION 是非 semver 的，会把遥测送进 Sentry 的 development 环境 ——
           # 与它让客户端跳过自动更新是同一个判据（main.isReleaseVersion）。改这个格式会同时
           # 挪动两件事。
-          go build -ldflags "-X 'main.Version=${VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${SENTRY_DSN}'" -o "${EXE_NAME}"
-          
-          if [ -f "${EXE_NAME}" ]; then
-            ls -lh "${EXE_NAME}"
-            echo "Build successful!"
-          else
-            echo "Build failed!"
+          go build -ldflags "-X 'main.Version=${VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${env:SENTRY_DSN}'" -o "${EXE_NAME}"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          if (Test-Path -LiteralPath $EXE_NAME) {
+            Write-Output "${EXE_NAME}: $((Get-Item -LiteralPath $EXE_NAME).Length) bytes"
+            Write-Output 'Build successful!'
+          } else {
+            Write-Output 'Build failed!'
             exit 1
-          fi
-      
+          }
+
       - name: Prepare files for packaging
         run: |
           # 获取commit hash和build time
-          COMMIT_HASH=${{ steps.vars.outputs.COMMIT_HASH }}
-          BUILD_TIME=${{ steps.vars.outputs.BUILD_TIME }}
-          
+          $COMMIT_HASH = '${{ steps.vars.outputs.COMMIT_HASH }}'
+          $BUILD_TIME = '${{ steps.vars.outputs.BUILD_TIME }}'
+
           # 创建临时目录用于打包
-          PACKAGE_DIR="${OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
-          mkdir -p "${PACKAGE_DIR}"
-          
+          $PACKAGE_DIR = "${env:OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
+          New-Item -ItemType Directory -Force -Path $PACKAGE_DIR | Out-Null
+
           # 复制需要的文件
-          cp "${EXE_NAME}" "${PACKAGE_DIR}/"
-          # 用内置默认生成 clean config.yml（不受开发者本地 config.yml 影响）；CI 在 linux 跑需原生 GOOS。
+          Copy-Item -LiteralPath $env:EXE_NAME -Destination $PACKAGE_DIR
+          # 用内置默认生成 clean config.yml（不受开发者本地 config.yml 影响）。
           # -version 传与可执行文件相同的版本号（Build Windows executable 步骤的 VERSION，即 PACKAGE_DIR）：
           # 它不是 semver，随包 config.yml 的版本键 config-version 取开发构建的盖章值
-          GOOS= GOARCH= go run ./tools/genconfig -version "${PACKAGE_DIR}" "${PACKAGE_DIR}/config.yml"
-          cp "${HTML_FILE_NAME}" "${PACKAGE_DIR}/"
-          cp lyric_page.html "${PACKAGE_DIR}/"
-          cp effect_display.html "${PACKAGE_DIR}/"
-          cp effect_page.html "${PACKAGE_DIR}/"
-          cp doc/API_RESPONSE_EXAMPLES.md "${PACKAGE_DIR}/"
-          cp README.md "${PACKAGE_DIR}/" 2>/dev/null || true
+          go run ./tools/genconfig -version "${PACKAGE_DIR}" "${PACKAGE_DIR}/config.yml"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html', 'effect_page.html', 'doc/API_RESPONSE_EXAMPLES.md' -Destination $PACKAGE_DIR
+          Copy-Item -LiteralPath 'README.md' -Destination $PACKAGE_DIR -ErrorAction SilentlyContinue
 
-          echo "PACKAGE_DIR=${PACKAGE_DIR}" >> $GITHUB_ENV
-      
+          Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE_DIR=${PACKAGE_DIR}" -Encoding utf8
+
       - name: Create compressed archive
         run: |
           # 获取commit hash和build time
-          COMMIT_HASH=${{ steps.vars.outputs.COMMIT_HASH }}
-          BUILD_TIME=${{ steps.vars.outputs.BUILD_TIME }}
-          
+          $COMMIT_HASH = '${{ steps.vars.outputs.COMMIT_HASH }}'
+          $BUILD_TIME = '${{ steps.vars.outputs.BUILD_TIME }}'
+
           # 创建zip压缩包
-          ARCHIVE_NAME="${OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}.zip"
-          
-          # 进入目录后压缩，这样zip内不会包含目录层级
-          cd "${PACKAGE_DIR}"
-          zip -r "../${ARCHIVE_NAME}" .
-          cd ..
-          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
-          
-          if [ -f "${ARCHIVE_NAME}" ]; then
-            ls -lh "${ARCHIVE_NAME}"
-            echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
-            echo "Archive created successfully!"
-          else
-            echo "Archive creation failed!"
+          $ARCHIVE_NAME = "${env:OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}.zip"
+
+          # 压缩目录下的各文件而非目录本身，这样zip内不会包含目录层级
+          Compress-Archive -Path "${env:PACKAGE_DIR}/*" -DestinationPath $ARCHIVE_NAME
+
+          if (Test-Path -LiteralPath $ARCHIVE_NAME) {
+            Write-Output "${ARCHIVE_NAME}: $((Get-Item -LiteralPath $ARCHIVE_NAME).Length) bytes"
+            Add-Content -Path $env:GITHUB_ENV -Value "ARCHIVE_NAME=${ARCHIVE_NAME}" -Encoding utf8
+            Write-Output 'Archive created successfully!'
+          } else {
+            Write-Output 'Archive creation failed!'
             exit 1
-          fi
-      
+          }
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
         with:
           name: ${{ env.OUTPUT_NAME }}-${{ steps.vars.outputs.BUILD_TIME }}-${{ steps.vars.outputs.COMMIT_HASH }}
           path: ${{ env.OUTPUT_NAME }}-${{ steps.vars.outputs.BUILD_TIME }}-${{ steps.vars.outputs.COMMIT_HASH }}.zip
           retention-days: 30
-      
+
       - name: List artifacts
         run: |
-          echo "Build completed successfully!"
-          echo "Executable: ${OUTPUT_NAME}-${{ steps.vars.outputs.BUILD_TIME }}-${{ steps.vars.outputs.COMMIT_HASH }}.exe"
-          echo "Archive: ${OUTPUT_NAME}-${{ steps.vars.outputs.BUILD_TIME }}-${{ steps.vars.outputs.COMMIT_HASH }}.zip"
-          echo "Commit: ${{ steps.vars.outputs.COMMIT_HASH }}"
-          echo "Build Time: ${{ steps.vars.outputs.TIMESTAMP }}"
+          Write-Output 'Build completed successfully!'
+          Write-Output "Executable: ${env:OUTPUT_NAME}-${{ steps.vars.outputs.BUILD_TIME }}-${{ steps.vars.outputs.COMMIT_HASH }}.exe"
+          Write-Output "Archive: ${env:OUTPUT_NAME}-${{ steps.vars.outputs.BUILD_TIME }}-${{ steps.vars.outputs.COMMIT_HASH }}.zip"
+          Write-Output "Commit: ${{ steps.vars.outputs.COMMIT_HASH }}"
+          Write-Output "Build Time: ${{ steps.vars.outputs.TIMESTAMP }}"

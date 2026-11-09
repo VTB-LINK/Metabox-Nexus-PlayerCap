@@ -3,10 +3,11 @@
 package session
 
 import (
-	"fmt"
 	"syscall"
 	"time"
 	"unsafe"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 
 	"golang.org/x/sys/windows"
 )
@@ -204,7 +205,7 @@ func (e *COMEnumerator) releaseEndpoints() {
 
 func failed(hr uintptr) bool { return uint32(hr)&0x80000000 != 0 }
 
-func hrError(step string, hr uintptr) error { return fmt.Errorf("%s hr=0x%08X", step, uint32(hr)) }
+func hrError(step string, hr uintptr) error { return i18n.Errorf("%s hr=0x%08X", step, uint32(hr)) }
 
 // comCall 调 obj 接口 vtable 第 idx 个方法，this 作为隐式首参（同 audiocap/wasapi 的 comCall）。
 //

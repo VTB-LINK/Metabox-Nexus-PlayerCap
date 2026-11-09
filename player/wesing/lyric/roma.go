@@ -244,11 +244,16 @@ func trackLine(m memory, entry uint32) (text string, words []player.LyricTextDet
 // readCString 读一个 CString 的内容：字符数取自指针前的头部。读不出、长度离谱返回 ("", false)；
 // 长度为 0 的空串是读出来了，返回 ("", true)——调用方要分得清「没有内容」与「没读到」。
 func readCString(m memory, ptr uint32) (string, bool) {
-	if ptr < minHeapPtr {
+	return readCStringIn(m, ptr, minHeapPtr, maxPathChars)
+}
+
+// readCStringIn 同 readCString，字符指针的下限 minPtr 与字符数的上限 maxChars 由调用方给出。
+func readCStringIn(m memory, ptr, minPtr, maxChars uint32) (string, bool) {
+	if ptr < minPtr {
 		return "", false
 	}
 	n, ok := m.u32(ptr - cstringLenOffset)
-	if !ok || n > maxPathChars {
+	if !ok || n > maxChars {
 		return "", false
 	}
 	if n == 0 {

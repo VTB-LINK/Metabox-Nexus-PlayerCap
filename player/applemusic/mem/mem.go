@@ -15,6 +15,8 @@ import (
 	"time"
 	"unsafe"
 
+	"Metabox-Nexus-PlayerCap/i18n"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -23,9 +25,9 @@ const TargetProcessName = "AppleMusic.exe"
 
 var (
 	// ErrNotRunning AppleMusic.exe 没有在运行。
-	ErrNotRunning = errors.New("AppleMusic.exe 未运行")
+	ErrNotRunning = i18n.Sentinel("AppleMusic.exe is not running")
 	// ErrAccessDenied 进程在，但打不开（例如 Apple Music 以管理员身份运行、本服务没有）。
-	ErrAccessDenied = errors.New("无权读取 AppleMusic.exe 进程")
+	ErrAccessDenied = i18n.Sentinel("no permission to read the AppleMusic.exe process")
 )
 
 var (

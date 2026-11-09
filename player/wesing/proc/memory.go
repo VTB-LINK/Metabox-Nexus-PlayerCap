@@ -158,12 +158,6 @@ func HasSingingWindow(pid uint32) bool {
 	return state.Phase != PhaseStandby
 }
 
-// GetSongTitle 从 K歌窗口标题提取歌曲信息
-func GetSongTitle(pid uint32) string {
-	state := GetPlayState(pid)
-	return state.SongTitle
-}
-
 // PlayPhase 播放阶段
 type PlayPhase int
 

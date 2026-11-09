@@ -1,0 +1,86 @@
+name: Quality Gates
+
+# 四道门禁（agent-doc §8）加 go test -race，在 push main 与目标为 main 的 PR 上跑。
+# 发版流水线（release.yml）经 workflow_call 调用本 workflow，门禁不通过即不建 draft（#164）。
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: [windows, X64]
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+
+    # pwsh 的退出码：Actions 只检查脚本最后一条原生命令的 $LASTEXITCODE，中间的失败会被吞掉。
+    # 故每道门禁单独占一个 step，且每条原生命令之后都显式检查 $LASTEXITCODE。
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.25'
+
+      - name: Show Go environment
+        run: |
+          go version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          go env GOOS GOARCH CGO_ENABLED
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: gofmt
+        run: |
+          # gofmt -l 列出待格式化文件时退出码仍为 0，只能按输出是否为空判定。
+          # 行尾由 .gitattributes 的 eol=lf 兜住，Windows 上检出也是 LF，不会误报。
+          $files = gofmt -l .
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($files) {
+            Write-Output '::error::gofmt -l reported files that need formatting:'
+            $files | ForEach-Object { Write-Output $_ }
+            exit 1
+          }
+
+      - name: go build
+        run: |
+          go build ./...
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: go vet
+        run: |
+          go vet ./...
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: go test
+        run: |
+          go test ./...
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: go test -race
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          # -race 需要 cgo 与 C 编译器。找不到 gcc 时本步失败，不跳过：
+          # 跳过会让门禁显示为绿，而 -race 实际没有跑。
+          $gcc = Get-Command gcc -ErrorAction SilentlyContinue
+          if (-not $gcc) {
+            Write-Output '::error::gcc not found in PATH; go test -race needs cgo and a C compiler.'
+            exit 1
+          }
+          Write-Output "gcc: $($gcc.Source)"
+          gcc --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          go test -race ./...
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

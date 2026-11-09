@@ -4,7 +4,6 @@ package cover
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,7 +16,7 @@ import (
 
 const endpoint = "http://artistpic.kwcdn.kuwo.cn/pic.web"
 
-var ErrNoCover = errors.New("kuwo: no cover")
+var ErrNoCover = i18n.Sentinel("kuwo: no cover")
 
 // Result retains the RID so a caller can discard results arriving after a song change.
 type Result struct {

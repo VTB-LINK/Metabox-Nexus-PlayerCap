@@ -1,7 +1,6 @@
 package qqmusic
 
 import (
-	"errors"
 	"strings"
 	"time"
 
@@ -16,7 +15,7 @@ const PlayerName = "qqmusic"
 
 // errSongMidUnavailable 表示 v20.05 上 songMid 等窗已尽仍为空（多半是本地文件播放）。
 // 走 err 分支即可——那条路径会发标题 + 空歌词，是这种情况下唯一诚实的降级。
-var errSongMidUnavailable = errors.New("songMid 不可用（可能是本地文件播放）")
+var errSongMidUnavailable = i18n.Sentinel("songMid unavailable (possibly playing a local file)")
 
 func init() { config.RegisterPlayer(PlayerName) }
 

@@ -22,6 +22,7 @@ import (
 	"Metabox-Nexus-PlayerCap/audiocap/procscan"
 	"Metabox-Nexus-PlayerCap/audiocap/session"
 	"Metabox-Nexus-PlayerCap/audiocap/wasapi"
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
@@ -122,7 +123,7 @@ func Run(stdin io.Reader, stdout io.Writer) {
 	for scanner.Scan() {
 		ctl, err := parseControl(scanner.Text())
 		if err != nil {
-			log.Printf("[helper] 忽略非法控制行: %v", err)
+			log.Printf(i18n.T("[helper] ignoring invalid control line: %v"), err)
 			continue
 		}
 		switch ctl.op {
@@ -149,7 +150,7 @@ func Run(stdin io.Reader, stdout io.Writer) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		log.Printf("[helper] stdin 读取结束/出错: %v", err)
+		log.Printf(i18n.T("[helper] stdin read ended or failed: %v"), err)
 	}
 
 	// stdin EOF/错误 → 关停所有捕获与会话 watcher、排空、干净收尾。
@@ -164,7 +165,7 @@ func Run(stdin io.Reader, stdout io.Writer) {
 	}
 	watcher.Stop()
 	if !waitTimeout(&capWG, shutdownGrace) {
-		log.Printf("[helper] 关停超时：%v 内仍有采集 goroutine 或会话 watcher 未退出（可能卡在 COM 调用），直接退出进程", shutdownGrace)
+		log.Printf(i18n.T("[helper] shutdown timed out: capture goroutines or the session watcher did not exit within %v (possibly stuck in a COM call); exiting the process"), shutdownGrace)
 		os.Exit(0)
 	}
 	close(frames)
@@ -184,7 +185,7 @@ func Run(stdin io.Reader, stdout io.Writer) {
 func writeLoop(w io.Writer, frames <-chan []byte) {
 	for f := range frames {
 		if _, err := w.Write(f); err != nil {
-			log.Printf("[helper] 写帧失败（父进程读端可能已关闭）: %v", err)
+			log.Printf(i18n.T("[helper] frame write failed (the parent's read end may be closed): %v"), err)
 			return
 		}
 	}
@@ -211,7 +212,7 @@ func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames c
 	defer runtime.UnlockOSThread()
 
 	if err := coInitMTA(); err != nil {
-		log.Printf("[helper][%s] CoInitializeEx 失败: %v", ctl.player, err)
+		log.Printf(i18n.T("[helper][%s] CoInitializeEx failed: %v"), ctl.player, err)
 		return
 	}
 	defer windows.CoUninitialize()
@@ -225,7 +226,7 @@ func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames c
 
 	c, err := wasapi.Activate(ctl.pid, true) // 含子进程树
 	if err != nil {
-		log.Printf("[helper][%s] WASAPI 激活失败(pid=%d): %v", ctl.player, ctl.pid, err)
+		log.Printf(i18n.T("[helper][%s] WASAPI activation failed (pid=%d): %v"), ctl.player, ctl.pid, err)
 		return // 这一路失败不崩整个 helper（其余路照跑）
 	}
 	defer c.Close()
@@ -235,7 +236,7 @@ func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames c
 	// 下次限频到期时补报。
 	var disc discLog
 	send := func(n uint64) bool {
-		return sendDiag(diag, fmt.Sprintf("[helper][%s] WASAPI 报告数据不连续（DATA_DISCONTINUITY）%d 次，本路累计 %d 次：可能丢了一段音频，不是错误", ctl.player, n, c.Discontinuities()))
+		return sendDiag(diag, fmt.Sprintf(i18n.T("[helper][%s] WASAPI reported a data discontinuity (DATA_DISCONTINUITY) %d times, %d in total for this capture: a stretch of audio may have been lost; this is not an error"), ctl.player, n, c.Discontinuities()))
 	}
 	read := func(dst []float32) (int, bool, error) {
 		n, silent, err := c.Read(dst)
@@ -243,7 +244,7 @@ func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames c
 		return n, silent, err
 	}
 	if err := pumpCapture(read, time.Now, ctl, atomic.AddUint32(&epochCounter, 1), slot, done, frames); err != nil {
-		log.Printf("[helper][%s] 读取失败: %v", ctl.player, err)
+		log.Printf(i18n.T("[helper][%s] read failed: %v"), ctl.player, err)
 	}
 	// 捕获已结束：补报投递失败时次数退回 disc 后不再重试，这些次数不会出现在日志里。
 	disc.report(disc.flush(), send)
@@ -316,7 +317,7 @@ func watchSessions(w *session.Watcher, diag chan<- string) {
 	defer runtime.UnlockOSThread()
 
 	if err := coInitMTA(); err != nil {
-		sendDiag(diag, fmt.Sprintf("[helper] 会话探测的 CoInitializeEx 失败，本 helper 不给出会话信号: %v", err))
+		sendDiag(diag, fmt.Sprintf(i18n.T("[helper] CoInitializeEx for session probing failed; this helper reports no session signals: %v"), err))
 		return
 	}
 	defer windows.CoUninitialize()

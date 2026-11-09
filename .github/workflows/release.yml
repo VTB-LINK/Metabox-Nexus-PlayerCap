@@ -5,17 +5,40 @@ on:
     tags:
       # 现有 glob 已覆盖 prerelease tag，例如 v3.0.0-beta.32、v3.0.0-rc.1.a
       - 'v*.*.*'
+  # 演练：手动派发一律只演练、不发布（判据见 jobs.release.env.PUBLISH）。
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # 五道门禁（gates.yml）。不通过则发版作业不启动，任何 draft 都不建。
+  gates:
+    uses: ./.github/workflows/gates.yml
+    permissions:
+      contents: read
+
   release:
-    runs-on: [self-hosted,Linux]
-    environment: build-production
+    needs: gates
+    runs-on: [windows, X64]
+    # 发布用 build-production，演练用 build-dev。environment 取不到 env 上下文，判据只能在这里
+    # 再写一遍，须与下面的 PUBLISH 一致（releaseworkflow_test.go 核对两处）。
+    environment:
+      name: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'build-production' || 'build-dev' }}
+    defaults:
+      run:
+        shell: pwsh
     env:
+      # 发布与否的唯一判据：只有 tag 推送才发布（建两边 draft、取发版说明、建 Sentry release）。
+      # 手动派发即使选了 tag 作为 ref 也只演练。各发布步骤以 `if: env.PUBLISH == 'true'` 限定，
+      # 发布用的两个凭据也只在它为真时引用；releaseworkflow_test.go 核对这些写法。
+      # 设计见 doc/design/ci-windows-release-design.md §3.2。
+      PUBLISH: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
       GOOS: windows
       GOARCH: amd64
+      # 固定为交叉编译时的隐含值：原生 Windows 上找得到 gcc 时 CGO_ENABLED 默认为 1。
+      # 迁移到 Windows runner 之前，发版在 Linux 上交叉编译，exe 一直不含 cgo。
+      CGO_ENABLED: '0'
       OUTPUT_NAME: Metabox-Nexus-PlayerCap
       DOTCOM_ARCHIVE_NAME: Metabox-Nexus-PlayerCap.zip
       DOTCOM_OWNER: VTB-LINK
@@ -23,8 +46,18 @@ jobs:
       DOTCOM_GITHUB_BASE: https://github.com
       DOWNLOAD_PROXY_PREFIX: https://github.boki.moe
       HTML_FILE_NAME: lyric_display.html
-      GH_HOST: github.com
-      GH_TOKEN: ${{ secrets.GH_DOTCOM_TOKEN }}
+
+      # gh 与 sentry-cli 钉死版本，每次下载后按 SHA-256 校验，不依赖 runner 镜像预装。SHA-256 的出处：
+      #   gh：https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_checksums.txt
+      #       中 gh_2.103.3_windows_amd64.zip 一行
+      #   sentry-cli：Sentry 发布注册表 https://release-registry.services.sentry.io/apps/sentry-cli/3.8.2
+      #       （源文件 getsentry/sentry-release-registry 的 apps/sentry-cli/3.8.2.json）中
+      #       sentry-cli-Windows-x86_64.exe 的 sha256-hex，与 GitHub release 该资产的 digest 相同
+      # 升级时版本与 SHA-256 一起改，按同一出处重取。
+      GH_CLI_VERSION: 2.103.3
+      GH_CLI_SHA256: 98d0cfa794721665d7973dd728c78aff7bd836d58f10f6d7a03568eccb0a22e0
+      SENTRY_CLI_VERSION: 3.8.2
+      SENTRY_CLI_SHA256: 50009f23c49d6e9ff7624204c7035855303b49c5e326708ee783c1fdf783ac83
 
       # Sentry（遥测上报，issue #33）。org/project 是字面量，放这里方便改；
       # token 与 DSN 都走 secret，不进仓库。
@@ -32,6 +65,8 @@ jobs:
       SENTRY_ORG: kzmtech
       SENTRY_PROJECT: vtb-tools-metabox-nexus-playercap
 
+    # pwsh 的退出码：Actions 只检查脚本最后一条原生命令的 $LASTEXITCODE，中间的失败会被吞掉，
+    # 故每条原生命令之后都显式检查。
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -63,192 +98,240 @@ jobs:
 
       - name: Set up GitHub CLI
         run: |
-          if command -v gh &>/dev/null; then
-            echo "gh already installed: $(gh --version | head -1)"
-          else
-            echo "Installing GitHub CLI..."
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-            sudo apt-get update && sudo apt-get install -y gh
-            echo "Installed: $(gh --version | head -1)"
-          fi
+          # 发版说明一步靠 pwsh 7.4 起「原生命令的标准输出重定向到文件时保留字节」取 gh 的输出，
+          # 低于 7.4 即在这里失败。本步两种模式都跑，演练中就能看到。
+          Write-Output "pwsh: $($PSVersionTable.PSVersion)"
+          if ($PSVersionTable.PSVersion -lt [version]'7.4') {
+            Write-Output '::error::pwsh 7.4 or later is required to keep native command output bytes intact.'
+            exit 1
+          }
 
-      - name: Set up zip
-        # self-hosted runner 上不保证有 zip：v3.0.0-rc.12 首次打 tag 时，构建全过、
-        # 卡在「Create compressed archive」的 `zip: command not found`（exit 127）——
-        # 产物已经编好却一个 Release draft 都没建出来。装它比换打包方式便宜得多。
-        # 样式同上面的 gh：有就跳过，不重复装。
-        run: |
-          if command -v zip &>/dev/null; then
-            echo "zip already installed: $(zip -v | head -2 | tail -1)"
-          else
-            echo "Installing zip..."
-            sudo apt-get update && sudo apt-get install -y zip
-            echo "Installed: $(zip -v | head -2 | tail -1)"
-          fi
+          # 不依赖镜像预装：每次下载钉死版本的官方 zip，按官方 checksums 校验（出处见作业级 env）。
+          $ProgressPreference = 'SilentlyContinue'
+          $zip = Join-Path $env:RUNNER_TEMP "gh_${env:GH_CLI_VERSION}_windows_amd64.zip"
+          Invoke-WebRequest -Uri "https://github.com/cli/cli/releases/download/v${env:GH_CLI_VERSION}/gh_${env:GH_CLI_VERSION}_windows_amd64.zip" -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
+          if ($hash -ne $env:GH_CLI_SHA256) {
+            Write-Output "::error::gh zip SHA-256 mismatch: got ${hash}, want ${env:GH_CLI_SHA256}"
+            exit 1
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'gh'
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
 
-      - name: Extract version from tag
-        id: vars
+          # GITHUB_PATH 只对后续步骤生效：本步以绝对路径执行刚校验的这一份，核对为钉死版本。
+          $exe = Join-Path $dir 'bin\gh.exe'
+          $version = @(& $exe --version)
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $version | ForEach-Object { Write-Output $_ }
+          if ($version[0] -notmatch "^gh version $([regex]::Escape($env:GH_CLI_VERSION)) ") {
+            Write-Output "::error::${exe} is not gh ${env:GH_CLI_VERSION}"
+            exit 1
+          }
+          # 前置于 PATH：后续步骤里镜像自带的 gh（如有）不会被用到。
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $dir 'bin') -Encoding utf8
+
+      - name: Extract version
         run: |
-          # 从 refs/tags/vX.Y.Z[-prerelease] 中提取版本号
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG_NAME#v}"
-          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
-          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Release version: ${VERSION} (tag: ${TAG_NAME})"
+          # 后续步骤取到的 gh 应为上一步装的那一份（GITHUB_PATH 自本步起生效）。
+          Write-Output "gh: $((Get-Command gh).Source)"
+
+          if ($env:PUBLISH -eq 'true') {
+            # 发布：tag 去掉一个前导 v 即版本号，如 v4.0.0-rc.5 为 4.0.0-rc.5（同迁移前 bash 的 ${TAG_NAME#v}）。
+            $TAG_NAME = $env:GITHUB_REF_NAME
+            $VERSION = $TAG_NAME -creplace '^v', ''
+          } else {
+            # 演练：取开发构建同形的非 semver 版本号（同 build-windows.yml），产物因此跳过自动更新
+            # 检查（main.isReleaseVersion，§12 的 kill switch）。演练不发布，没有 tag。
+            $COMMIT_HASH = git rev-parse --short HEAD
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            $BUILD_TIME = (Get-Date).ToString('yyyyMMdd-HHmmss', [cultureinfo]::InvariantCulture)
+            $TAG_NAME = ''
+            $VERSION = "${env:OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "TAG_NAME=${TAG_NAME}" -Encoding utf8
+          Add-Content -Path $env:GITHUB_ENV -Value "VERSION=${VERSION}" -Encoding utf8
+          Write-Output "Release version: ${VERSION} (tag: ${TAG_NAME}, publish: ${env:PUBLISH})"
 
       - name: Generate Windows icon resource (multi-size + version)
         run: |
           # 从高分母版生成多尺寸图标 .syso（16..256 共 10 档，每档 Lanczos3 降采样 + unsharp 锐化）
-          # 并写入版本信息（tag 版本）。取代旧的「拷贝单尺寸静态 .syso」——单尺寸会让 Windows 在
-          # 小尺寸场景现缩大图产生锯齿。纯 Go、跨平台：GOOS= GOARCH= 让生成器在 runner(linux) 原生
-          # 运行，产物仍是 windows/amd64 资源，随后被 go build 自动链接。
-          GOOS= GOARCH= go run ./tools/winicon \
-            -master build-assets/winicon/masters/metabox5-sqr.png \
-            -version "${{ steps.vars.outputs.VERSION }}" \
+          # 并写入版本信息（发布时为 tag 版本）。取代旧的「拷贝单尺寸静态 .syso」——单尺寸会让 Windows 在
+          # 小尺寸场景现缩大图产生锯齿。runner 是 Windows，生成器原生运行，产物即 windows/amd64 资源，
+          # 随后被 go build 自动链接。
+          go run ./tools/winicon `
+            -master build-assets/winicon/masters/metabox5-sqr.png `
+            -version $env:VERSION `
             -o resource_windows_amd64.syso
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Build Windows executable
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
-          VERSION=${{ steps.vars.outputs.VERSION }}
-          TAG_NAME=${{ steps.vars.outputs.TAG_NAME }}
-
           # 输出文件名保持固定名（由 job env.OUTPUT_NAME 控制）
-          # EXE_NAME="${OUTPUT_NAME}-V${VERSION}.exe"
-          EXE_NAME="${OUTPUT_NAME}.exe"
-          echo "EXE_NAME=${EXE_NAME}" >> $GITHUB_ENV
+          $EXE_NAME = "${env:OUTPUT_NAME}.exe"
+          Add-Content -Path $env:GITHUB_ENV -Value "EXE_NAME=${EXE_NAME}" -Encoding utf8
 
           # Sentry DSN 从 secret 注入。secret 没配 → 空串 → 客户端自动禁用遥测，构建照常成功
           # （telemetry.Enabled 只看这个变量）。启动日志第一行会说「未注入 DSN，遥测已禁用」，
           # 那就是 secret 没生效的信号。
           #
-          # 这里的 VERSION 是剥掉 v 前缀的 semver，会把遥测送进 production 环境，且直接用作
-          # Sentry 的 release 名 —— 要在 CI 里建 Sentry release，用的就是这个 ${VERSION}。
-          go build -ldflags "-X 'main.Version=${VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${SENTRY_DSN}'" -o "${EXE_NAME}"
+          # 发布时 VERSION 是剥掉 v 前缀的 semver，会把遥测送进 production 环境，且直接用作
+          # Sentry 的 release 名 —— 下面建 Sentry release 用的就是同一个 VERSION。
+          # 演练时 VERSION 不是 semver，遥测进 development 环境，与开发构建相同。
+          go build -ldflags "-X 'main.Version=${env:VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${env:SENTRY_DSN}'" -o "${EXE_NAME}"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-          if [ -f "${EXE_NAME}" ]; then
-            ls -lh "${EXE_NAME}"
-            echo "Build successful: ${EXE_NAME}"
-          else
-            echo "Build failed!"
+          if (Test-Path -LiteralPath $EXE_NAME) {
+            Write-Output "${EXE_NAME}: $((Get-Item -LiteralPath $EXE_NAME).Length) bytes"
+            Write-Output "Build successful: ${EXE_NAME}"
+          } else {
+            Write-Output 'Build failed!'
             exit 1
-          fi
+          }
+
+      - name: Show build info
+        run: |
+          # 演练与首发的证据：main.Version、CGO_ENABLED、GOOS、GOARCH、vcs.revision。
+          # -ldflags 一行含注入的 DSN，打印前把它的值换掉，不依赖日志对 secret 的脱敏；
+          # 未注入时保持空值原样，看得出来。
+          $info = go version -m $env:EXE_NAME
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $info -replace "telemetry\.dsn=[^'\s]+", 'telemetry.dsn=<redacted>' | ForEach-Object { Write-Output $_ }
 
       - name: Prepare files for packaging
         run: |
-          VERSION=${{ steps.vars.outputs.VERSION }}
+          $PACKAGE_DIR = "${env:OUTPUT_NAME}-V${env:VERSION}"
+          New-Item -ItemType Directory -Force -Path $PACKAGE_DIR | Out-Null
 
-          PACKAGE_DIR="${OUTPUT_NAME}-V${VERSION}"
-          mkdir -p "${PACKAGE_DIR}"
+          Copy-Item -LiteralPath $env:EXE_NAME -Destination $PACKAGE_DIR
+          # 用内置默认生成 clean config.yml（不受开发者本地 config.yml 影响）。
+          # -version 定随包 config.yml 的版本键 config-version（发版得到 "v<VERSION>"，演练得到开发构建的盖章值）
+          go run ./tools/genconfig -version $env:VERSION "${PACKAGE_DIR}/config.yml"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html', 'effect_page.html', 'doc/API_RESPONSE_EXAMPLES.md' -Destination $PACKAGE_DIR
+          Copy-Item -LiteralPath 'README.md' -Destination $PACKAGE_DIR -ErrorAction SilentlyContinue
 
-          cp "${EXE_NAME}" "${PACKAGE_DIR}/"
-          # 用内置默认生成 clean config.yml（不受开发者本地 config.yml 影响）；CI 在 linux 跑需原生 GOOS。
-          # -version 定随包 config.yml 的版本键 config-version（发版得到 "v<VERSION>"）
-          GOOS= GOARCH= go run ./tools/genconfig -version "${VERSION}" "${PACKAGE_DIR}/config.yml"
-          cp "${HTML_FILE_NAME}" "${PACKAGE_DIR}/"
-          cp lyric_page.html "${PACKAGE_DIR}/"
-          cp effect_display.html "${PACKAGE_DIR}/"
-          cp effect_page.html "${PACKAGE_DIR}/"
-          cp doc/API_RESPONSE_EXAMPLES.md "${PACKAGE_DIR}/"
-          cp README.md "${PACKAGE_DIR}/" 2>/dev/null || true
-
-          echo "PACKAGE_DIR=${PACKAGE_DIR}" >> $GITHUB_ENV
+          Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE_DIR=${PACKAGE_DIR}" -Encoding utf8
 
       - name: Create compressed archive
         run: |
-          VERSION=${{ steps.vars.outputs.VERSION }}
-          ARCHIVE_NAME="${OUTPUT_NAME}-V${VERSION}.zip"
+          $ARCHIVE_NAME = "${env:OUTPUT_NAME}-V${env:VERSION}.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "ARCHIVE_NAME=${ARCHIVE_NAME}" -Encoding utf8
 
-          cd "${PACKAGE_DIR}"
-          zip -r "../${ARCHIVE_NAME}" .
-          cd ..
+          # 本仓库发布用压缩包：压缩目录下的各文件而非目录本身，zip 内不含目录层级。
+          Compress-Archive -Path "${env:PACKAGE_DIR}/*" -DestinationPath $ARCHIVE_NAME
+          # github.com 发布用压缩包（仅 exe + html；4.0 起不含 effect_page.html，见 issue #63）。
+          # 以文件为输入，条目都在根下。
+          Compress-Archive -LiteralPath $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html' -DestinationPath $env:DOTCOM_ARCHIVE_NAME -Force
 
-          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
-
-          if [ -f "${ARCHIVE_NAME}" ]; then
-            ls -lh "${ARCHIVE_NAME}"
-            echo "Archive created: ${ARCHIVE_NAME}"
-          else
-            echo "Archive creation failed!"
-            exit 1
-          fi
+          # 列出两个包的条目，作为演练与首发的证据。
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          foreach ($name in $ARCHIVE_NAME, $env:DOTCOM_ARCHIVE_NAME) {
+            $path = (Resolve-Path -LiteralPath $name).Path
+            $archive = [IO.Compression.ZipFile]::OpenRead($path)
+            try {
+              Write-Output "${name}: $((Get-Item -LiteralPath $path).Length) bytes, $($archive.Entries.Count) entries"
+              $archive.Entries | ForEach-Object { Write-Output "  $($_.FullName) $($_.Length)" }
+            } finally {
+              $archive.Dispose()
+            }
+          }
 
       - name: Create Release Draft (本仓库)
         # release 标题默认与 tag_name 一致；需要强制回退时，在 GitHub Release 页面手动追加 -force
+        if: env.PUBLISH == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.vars.outputs.TAG_NAME }}
-          name: ${{ steps.vars.outputs.TAG_NAME }}
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.TAG_NAME }}
           draft: true
           generate_release_notes: true
           files: |
-            ${{ env.OUTPUT_NAME }}-V${{ steps.vars.outputs.VERSION }}.zip
+            ${{ env.OUTPUT_NAME }}-V${{ env.VERSION }}.zip
             ${{ env.OUTPUT_NAME }}.exe
-            # ${{ env.OUTPUT_NAME }}-V${{ steps.vars.outputs.VERSION }}.exe
+            # ${{ env.OUTPUT_NAME }}-V${{ env.VERSION }}.exe
+
+      - name: Generate release notes (dotcom mirror)
+        if: env.PUBLISH == 'true'
+        env:
+          GH_HOST: github.com
+          GH_TOKEN: ${{ env.PUBLISH == 'true' && secrets.GH_DOTCOM_TOKEN || '' }}
+        run: |
+          # 镜像仓库的自动 release notes，原样写入文件：pwsh 7.4 起，原生命令的标准输出重定向到
+          # 文件时保留字节，不经字符串解码（Set up GitHub CLI 一步已要求 pwsh 7.4 以上）。
+          gh api "repos/${env:DOTCOM_OWNER}/${env:DOTCOM_REPO_NAME}/releases/generate-notes" `
+            --method POST `
+            -f "tag_name=${env:TAG_NAME}" `
+            --jq '.body' > auto-release-notes.md
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Compose release notes (dotcom mirror)
+        run: |
+          # 拼镜像仓库的发版说明，逐字节复现迁移前 bash 的拼接（cp RELEASE_BODY.md、heredoc 追加、
+          # echo 分隔、cat 追加）：
+          #   RELEASE_BODY.md 原字节 + 固定模板（下载表格 + 项目信息）+ 分隔与标题 + 上一步写下的文件
+          # 前后两段按字节拼入、不经解码；中间一段换行一律为 LF，按 UTF-8（无 BOM）编码。
+          # 演练时没有 tag、没有上一步的文件，两处换成固定的占位。
+          $utf8 = [Text.UTF8Encoding]::new($false)
+          if ($env:PUBLISH -eq 'true') {
+            $tag = $env:TAG_NAME
+            $tail = [IO.File]::ReadAllBytes((Join-Path $PWD 'auto-release-notes.md'))
+          } else {
+            $tag = 'DRYRUN'
+            $tail = $utf8.GetBytes("（演练：此处为 Generate release notes (dotcom mirror) 一步的输出）`n")
+          }
+
+          $base = "${env:DOTCOM_GITHUB_BASE}/${env:DOTCOM_OWNER}/${env:DOTCOM_REPO_NAME}"
+          $download = "${env:DOWNLOAD_PROXY_PREFIX}/${base}/releases/download"
+          $latest = "${env:DOWNLOAD_PROXY_PREFIX}/${base}/releases/latest/download"
+          $lines = @(
+            ''
+            '---'
+            ''
+            '### 一键下载'
+            ''
+            '| 文件 | 最新版 | 当前版本 |'
+            '| --- | --- | --- |'
+          )
+          foreach ($file in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html') {
+            $lines += "| ${file} | [下载](${latest}/${file}) | [下载](${download}/${tag}/${file}) |"
+          }
+          $lines += @(
+            ''
+            '### 关于'
+            '- 感谢您使用VTB-TOOLS Metabox Nexus PlayerCap！这是一个多播放器歌词实时推送工具，旨在提升您的K歌与直播体验。'
+            "- 问题反馈请前往Discussions：${base}/discussions"
+            '- API文档请前往：http://playercap.nexus.metabox.apifox.vtb.link/'
+            ''
+            '---'
+            ''
+            '### 自动生成变更'
+            ''
+          )
+
+          $notes = [IO.MemoryStream]::new()
+          foreach ($part in [IO.File]::ReadAllBytes((Join-Path $PWD 'RELEASE_BODY.md')), $utf8.GetBytes(($lines -join "`n") + "`n"), $tail) {
+            $notes.Write($part, 0, $part.Length)
+          }
+          $path = Join-Path $PWD 'combined-release-notes.md'
+          [IO.File]::WriteAllBytes($path, $notes.ToArray())
+          Write-Output ([IO.File]::ReadAllText($path))
 
       - name: Create Release Draft (dotcom mirror)
+        if: env.PUBLISH == 'true'
+        env:
+          GH_HOST: github.com
+          GH_TOKEN: ${{ env.PUBLISH == 'true' && secrets.GH_DOTCOM_TOKEN || '' }}
         run: |
           # 镜像仓库标题默认与 tag_name 一致；需要强制回退时，在 GitHub Release 页面手动追加 -force
-          TAG_NAME=${{ steps.vars.outputs.TAG_NAME }}
-          DOTCOM_REPO="${DOTCOM_OWNER}/${DOTCOM_REPO_NAME}"
-          DOTCOM_REPO_BASE_URL="${DOTCOM_GITHUB_BASE}/${DOTCOM_REPO}"
-          DOWNLOAD_PROXY_BASE="${DOWNLOAD_PROXY_PREFIX}/${DOTCOM_REPO_BASE_URL}/releases/download"
-          LATEST_DOWNLOAD_PROXY_BASE="${DOWNLOAD_PROXY_PREFIX}/${DOTCOM_REPO_BASE_URL}/releases/latest/download"
-          DOTCOM_DISCUSSIONS_URL="${DOTCOM_REPO_BASE_URL}/discussions"
-
-          # 生成 github.com 发布用压缩包（仅 exe + html；4.0 起不含 effect_page.html，见 issue #63）
-          rm -f "${DOTCOM_ARCHIVE_NAME}"
-          zip -j "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" lyric_page.html effect_display.html
-
-          # 生成自动 release notes
-          gh api "repos/${DOTCOM_REPO}/releases/generate-notes" \
-            --method POST \
-            -f tag_name="${TAG_NAME}" \
-            --jq '.body' > auto-release-notes.md
-
-          # 从仓库读取自定义发布内容
-          cp RELEASE_BODY.md custom-release-notes.md
-
-          # 拼接模板化的固定内容（下载表格 + 项目信息）
-          cat >> custom-release-notes.md <<EOF
-
-          ---
-
-          ### 一键下载
-
-          | 文件 | 最新版 | 当前版本 |
-          | --- | --- | --- |
-          | ${DOTCOM_ARCHIVE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${DOTCOM_ARCHIVE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${DOTCOM_ARCHIVE_NAME}) |
-          | ${EXE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${EXE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${EXE_NAME}) |
-          | ${HTML_FILE_NAME} | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/${HTML_FILE_NAME}) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/${HTML_FILE_NAME}) |
-          | lyric_page.html | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/lyric_page.html) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/lyric_page.html) |
-          | effect_display.html | [下载](${LATEST_DOWNLOAD_PROXY_BASE}/effect_display.html) | [下载](${DOWNLOAD_PROXY_BASE}/${TAG_NAME}/effect_display.html) |
-
-          ### 关于
-          - 感谢您使用VTB-TOOLS Metabox Nexus PlayerCap！这是一个多播放器歌词实时推送工具，旨在提升您的K歌与直播体验。
-          - 问题反馈请前往Discussions：${DOTCOM_DISCUSSIONS_URL}
-          - API文档请前往：http://playercap.nexus.metabox.apifox.vtb.link/
-          EOF
-
-          # 合并：自定义内容 + 固定模板在前，自动生成变更在后
-          {
-            cat custom-release-notes.md
-            echo
-            echo "---"
-            echo
-            echo "### 自动生成变更"
-            echo
-            cat auto-release-notes.md
-          } > combined-release-notes.md
-
           # 创建 Release Draft 并上传 zip + 独立文件（含特效页 effect_display.html）
-          gh release create "${TAG_NAME}" "${DOTCOM_ARCHIVE_NAME}" "${EXE_NAME}" "${HTML_FILE_NAME}" lyric_page.html effect_display.html \
-            --repo "${DOTCOM_REPO}" \
-            --title "${TAG_NAME}" \
-            --draft \
+          gh release create $env:TAG_NAME $env:DOTCOM_ARCHIVE_NAME $env:EXE_NAME $env:HTML_FILE_NAME lyric_page.html effect_display.html `
+            --repo "${env:DOTCOM_OWNER}/${env:DOTCOM_REPO_NAME}" `
+            --title $env:TAG_NAME `
+            --draft `
             --notes-file combined-release-notes.md
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       # 放在全部 release draft 之后：artifact 都发出去了，这个 Sentry release 才对应得上真实
       # 可下载的版本。
@@ -266,7 +349,7 @@ jobs:
       #
       # 两个反直觉的地方，记下来免得有人再踩：
       #   - 那个 setup-node 步骤带着 `if: runner.os == 'macOS' || runner.os == 'Windows'`，
-      #     我们的 Linux runner 根本不会执行它 —— 但 **"Set up job" 的预下载不看 if**。
+      #     当时的 Linux runner 根本不会执行它 —— 但 **"Set up job" 的预下载不看 if**。
       #   - `getsentry/action-release` 本身下载成功了：非 `actions/*` 的仓库走 GitHub Connect
       #     去 github.com 拉，不受本地镜像限制。所以「能拉这个却拉不到那个」并不矛盾。
       #
@@ -285,27 +368,49 @@ jobs:
       # 那比干脆不做 set-commits **更糟**。
       - name: Install sentry-cli
         continue-on-error: true
-        env:
-          # 装到 runner 的临时目录。get-cli 默认装 /usr/local/bin —— 那会污染整台共享 runner。
-          # 脚本自己会先试无 sudo 的 mv、失败才回落 `sudo -k`，所以指到可写目录就完全不碰 sudo。
-          INSTALL_DIR: ${{ runner.temp }}
         run: |
-          set -euo pipefail
-          curl -sL https://sentry.io/get-cli/ | bash
-          # 放进 PATH，后面三步直接 `sentry-cli xxx`，不用各自拼路径。
-          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+          # 下载钉死版本的官方可执行文件（Sentry 文档「Manual Download」：GitHub release 提供
+          # Windows 可执行文件，单文件），按发布注册表的 SHA-256 校验（出处见作业级 env）。
+          # 装到 runner 的临时目录，不碰系统目录。本步两种模式都跑，演练中就能验证下载与校验。
+          $ProgressPreference = 'SilentlyContinue'
+          $dir = Join-Path $env:RUNNER_TEMP 'sentry-cli'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $exe = Join-Path $dir 'sentry-cli.exe'
+          Invoke-WebRequest -Uri "https://github.com/getsentry/sentry-cli/releases/download/${env:SENTRY_CLI_VERSION}/sentry-cli-Windows-x86_64.exe" -OutFile $exe
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash
+          if ($hash -ne $env:SENTRY_CLI_SHA256) {
+            Write-Output "::error::sentry-cli SHA-256 mismatch: got ${hash}, want ${env:SENTRY_CLI_SHA256}"
+            exit 1
+          }
+
+          # GITHUB_PATH 只对后续步骤生效：本步以绝对路径执行刚校验的这一份，核对为钉死版本。
+          $version = @(& $exe --version)
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $version | ForEach-Object { Write-Output $_ }
+          if ($version[0] -ne "sentry-cli ${env:SENTRY_CLI_VERSION}") {
+            Write-Output "::error::${exe} is not sentry-cli ${env:SENTRY_CLI_VERSION}"
+            exit 1
+          }
+          # 校验全部通过才把这一份的绝对路径交给后面三步（SENTRY_CLI）。后面三步只按这个路径调用：本步
+          # continue-on-error，失败时 SENTRY_CLI 为空，它们报错退出，不会按名字取到 PATH 里未经校验的
+          # 另一份并交出凭据（代码审第 1 轮）。
+          Add-Content -Path $env:GITHUB_ENV -Value "SENTRY_CLI=${exe}" -Encoding utf8
 
       - name: Create Sentry release
+        if: env.PUBLISH == 'true'
         continue-on-error: true
         env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ env.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ env.SENTRY_PROJECT }}
+          SENTRY_AUTH_TOKEN: ${{ env.PUBLISH == 'true' && secrets.SENTRY_AUTH_TOKEN || '' }}
         run: |
           # release 名必须与客户端 ldflags 注入的 main.Version **逐字一致**，否则上报的 event
-          # 认领不到这个 release。两边用的是同一个 steps.vars.outputs.VERSION（tag 剥掉 v 前缀），
+          # 认领不到这个 release。两边用的是同一个 VERSION（tag 剥掉 v 前缀，Extract version 一步写入），
           # 见上面的 "Build Windows executable"。
-          sentry-cli releases new "${{ steps.vars.outputs.VERSION }}"
+          if (-not $env:SENTRY_CLI) {
+            Write-Output '::error::sentry-cli was not installed and verified (see Install sentry-cli).'
+            exit 1
+          }
+          & $env:SENTRY_CLI releases new $env:VERSION
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       # **实测可用**（v3.0.0-beta.24，run #22271）：
       #
@@ -320,6 +425,9 @@ jobs:
       # free plan 的 token 读不到该接口，不代表没有 repo。**唯一真正挡路的是浅克隆**，
       # 上面的 checkout 加了 fetch-depth: 0 之后就通了。
       #
+      # 注意：自 v4.0.0-beta.6 起这一步每次失败（"Could not find the SHA of the previous release"），
+      # 被 continue-on-error 掩盖，见 #166。
+      #
       # 仍然保留 continue-on-error 与独立 step：SCM 集成是 Sentry 侧的配置，随时可能被改动
       # 或失效，而它失效时不该拖累 release 本身（new/finalize/deploy 各自独立完成）。
       #
@@ -330,27 +438,35 @@ jobs:
       # 有了这层关联，issue 页就能出 Suspect Commits —— Sentry 会指出崩溃最可能由哪个 commit
       # 引入。这是 telemetry 从「知道崩了」到「知道谁弄崩的」的那一步。
       - name: Associate commits to Sentry release
+        if: env.PUBLISH == 'true'
         continue-on-error: true
         env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ env.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ env.SENTRY_PROJECT }}
+          SENTRY_AUTH_TOKEN: ${{ env.PUBLISH == 'true' && secrets.SENTRY_AUTH_TOKEN || '' }}
         run: |
-          sentry-cli releases set-commits "${{ steps.vars.outputs.VERSION }}" --auto
+          if (-not $env:SENTRY_CLI) {
+            Write-Output '::error::sentry-cli was not installed and verified (see Install sentry-cli).'
+            exit 1
+          }
+          & $env:SENTRY_CLI releases set-commits $env:VERSION --auto
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Finalize Sentry release
+        if: env.PUBLISH == 'true'
         continue-on-error: true
         env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ env.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ env.SENTRY_PROJECT }}
+          SENTRY_AUTH_TOKEN: ${{ env.PUBLISH == 'true' && secrets.SENTRY_AUTH_TOKEN || '' }}
         run: |
-          set -euo pipefail
-          VERSION=${{ steps.vars.outputs.VERSION }}
-          sentry-cli releases finalize "$VERSION"
+          if (-not $env:SENTRY_CLI) {
+            Write-Output '::error::sentry-cli was not installed and verified (see Install sentry-cli).'
+            exit 1
+          }
+          # finalize 失败则不 deploy（同迁移前的 set -euo pipefail）。
+          & $env:SENTRY_CLI releases finalize $env:VERSION
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
           # deploy 的 environment 与 event 的 environment 是**两回事**：
           #   - 这里的 deploy：让 Sentry UI 知道「这个 release 部署到了 production」
           #   - event 的：由客户端 SDK 设（telemetry.environmentFor），semver tag → production
           # 两边都用 production 保持一致；对不上的话 UI 里会出现「部署到 X 但事件来自 Y」。
-          sentry-cli deploys new -r "$VERSION" -e production
+          & $env:SENTRY_CLI deploys new -r $env:VERSION -e production
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

@@ -62,20 +62,25 @@ func (f *fakeMem) alloc(n uint32) uint32 {
 }
 
 // cstring 写一个 ATL 式 CString，返回字符指针：头部 16 字节（字符数在指针前 12 字节），其后是
-// UTF-16 字符与结尾的 0。
+// UTF-16 字符与结尾的 0。结尾之后补 0 到 textReadLen 字节：主歌词不看头部、从字符指针一次读
+// textReadLen 字节再找结尾的 0（reader.go），真机上字符串后面的堆内存是读得出的。
 func (f *fakeMem) cstring(s string) uint32 {
+	const textReadLen = 128
 	u := utf16.Encode([]rune(s))
-	hdr := f.alloc(16 + uint32(len(u)+1)*2)
+	n := max(uint32(len(u)+1)*2, textReadLen)
+	hdr := f.alloc(16 + n)
 	p := hdr + 16
 	f.put32(hdr, 0x5EFD9000)
 	f.put32(hdr+4, uint32(len(u)))
 	f.put32(hdr+8, uint32(len(u))+2)
 	f.put32(hdr+12, 1)
+	for i := uint32(0); i < n; i++ {
+		f.b[p+i] = 0
+	}
 	for i, c := range u {
 		f.b[p+uint32(i)*2] = byte(c)
 		f.b[p+uint32(i)*2+1] = byte(c >> 8)
 	}
-	f.b[p+uint32(len(u))*2], f.b[p+uint32(len(u))*2+1] = 0, 0
 	return p
 }
 

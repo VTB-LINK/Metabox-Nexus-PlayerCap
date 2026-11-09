@@ -270,7 +270,7 @@ func (p *KuGouPlayer) waitForCDP() (*cdp.Client, error) {
 	for {
 		select {
 		case <-p.StopCh:
-			return nil, fmt.Errorf("stopped")
+			return nil, i18n.Errorf("stopped")
 		default:
 		}
 

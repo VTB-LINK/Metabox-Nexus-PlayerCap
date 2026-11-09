@@ -2,7 +2,7 @@
 //
 // 设计要点（见 AGENTS.md §0.3 与 §6.4）：
 //   - 本包是纯 Go，可 GOOS=linux 构建 —— logger/ 与 config/ 依赖它，而这两个包必须保持
-//     Linux 可构建（tools/genconfig 的打包流水线）。Windows-only 的语言探测隔离在
+//     Linux 可构建（tools/genconfig，退回 Linux 发版流水线的前提）。Windows-only 的语言探测隔离在
 //     detect_windows.go（!windows 侧是 detect_other.go 桩），不污染本文件。
 //   - 语言由 main 在启动早期一次性注入（SetLanguage），此后只读；运行期不切换。
 //   - 文案以「英文原文」为 key：英文是源语言，中文是译文表（chinese，见 messages*.go）。

@@ -55,16 +55,24 @@ func main() {
 	// os.Exit 不跑 defer，所以正常退出路径不受影响。
 	defer telemetry.Guard()
 
+	// 界面语言：只看 Windows 显示语言，中文系统用中文、其余一律英文（规则见 i18n 包）。
+	// 必须早于任何用户可见输出（Banner / config 告警 / mainLog），也早于下面两种 helper 模式：helper 的
+	// 诊断与错误经 i18n 本地化，写进 stderr 或结果文件后由主进程打进日志（issue #143）。探测是 Windows-only，
+	// 结果注入纯 Go 的 i18n 包，使 logger/ 与 config/ 保持 GOOS=linux 可构建（AGENTS.md §0.3）。
+	i18n.SetLanguage(i18n.DetectSystemLanguage())
+
 	// 提权 helper 模式：由 watchdog.launchElevatedHelper 通过 ShellExecuteExW("runas")
-	// 拉起，命令行形如 --kugou-patch-helper <libcefPath>。libcefPath 走命令行参数而非
-	// %TEMP% 文件（防 UAC 窗口内被篡改重定向）。在任何初始化之前处理并退出。
-	if len(os.Args) >= 3 && os.Args[1] == "--kugou-patch-helper" {
-		watchdog.RunPatchHelper(os.Args[2])
+	// 拉起，命令行形如 --kugou-patch-helper <libcefPath> <主进程 PID> <令牌>。libcefPath 走命令行参数
+	// 而非 %TEMP% 文件（防 UAC 窗口内被篡改重定向）；主进程退出时 helper 随之退出；令牌区分每次拉起的
+	// 信号文件。参数个数与取值由 RunPatchHelper 校验。除上面的界面语言外，在任何初始化之前处理并退出。
+	if len(os.Args) >= 2 && os.Args[1] == "--kugou-patch-helper" {
+		watchdog.RunPatchHelper(os.Args[2:])
 		return // RunPatchHelper 内部调用 os.Exit，此 return 仅作为安全保障
 	}
 
 	// 音频波形捕获 helper 模式：由主服务通过 exec.Command 拉起，命令行形如 --audio-capture-helper。
-	// 只初始化遥测，随即调用 helper.Run(stdin, stdout) 并退出，绕过其余一切初始化（隐私提示/更新检查等）。
+	// 除上面的界面语言外只初始化遥测，随即调用 helper.Run(stdin, stdout) 并退出，绕过其余一切初始化
+	// （隐私提示/更新检查等）。
 	// 遥测在这里而不在 helper 包里初始化：版本号与 isReleaseVersion 在 main 包，helper 包不反向依赖。
 	// helper 不加载配置，故不传 Config（见 telemetry.Options.Process）。
 	if len(os.Args) >= 2 && os.Args[1] == "--audio-capture-helper" {
@@ -75,11 +83,6 @@ func main() {
 
 	// 设置日志格式
 	log.SetFlags(log.Ldate | log.Ltime)
-
-	// 界面语言：只看 Windows 显示语言，中文系统用中文、其余一律英文（规则见 i18n 包）。
-	// 必须早于任何用户可见输出（Banner / config 告警 / mainLog）。探测是 Windows-only，
-	// 结果注入纯 Go 的 i18n 包，使 logger/ 与 config/ 保持 GOOS=linux 可构建（AGENTS.md §0.3）。
-	i18n.SetLanguage(i18n.DetectSystemLanguage())
 
 	// 确保以标准文件名运行。文件名不标准时本进程启动复制品并等它结束，不再往下执行。
 	ensureCanonicalName()
@@ -773,7 +776,7 @@ func downloadFile(client *http.Client, url, destPath string, expectedSize int64,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return i18n.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	totalSize := resp.ContentLength

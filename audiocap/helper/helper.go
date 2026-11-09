@@ -9,7 +9,6 @@
 package helper
 
 import (
-	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/audiocap/dsp"
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 // control 是一行控制命令解析后的结构。op ∈ {"capture","stop"}；归一化字段（norm/target/
@@ -43,37 +43,37 @@ type control struct {
 func parseControl(line string) (control, error) {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
-		return control{}, fmt.Errorf("空控制行")
+		return control{}, i18n.Errorf("empty control line")
 	}
 	switch fields[0] {
 	case "capture":
 		if len(fields) != 7 {
-			return control{}, fmt.Errorf("capture 需 <pid> <player> <norm> <target_dbfs> <maxgain_db> <fps>，得到 %q", line)
+			return control{}, i18n.Errorf("capture requires <pid> <player> <norm> <target_dbfs> <maxgain_db> <fps>, got %q", line)
 		}
 		pid, e := strconv.ParseUint(fields[1], 10, 32)
 		if e != nil {
-			return control{}, fmt.Errorf("capture pid 非法 %q: %w", fields[1], e)
+			return control{}, i18n.Errorf("invalid capture pid %q: %w", fields[1], e)
 		}
 		target, e := strconv.Atoi(fields[4])
 		if e != nil {
-			return control{}, fmt.Errorf("capture target_dbfs 非法 %q: %w", fields[4], e)
+			return control{}, i18n.Errorf("invalid capture target_dbfs %q: %w", fields[4], e)
 		}
 		maxGain, e := strconv.Atoi(fields[5])
 		if e != nil {
-			return control{}, fmt.Errorf("capture maxgain_db 非法 %q: %w", fields[5], e)
+			return control{}, i18n.Errorf("invalid capture maxgain_db %q: %w", fields[5], e)
 		}
 		fps, e := strconv.Atoi(fields[6])
 		if e != nil || fps < 1 {
-			return control{}, fmt.Errorf("capture fps 非法 %q", fields[6])
+			return control{}, i18n.Errorf("invalid capture fps %q", fields[6])
 		}
 		return control{op: "capture", pid: uint32(pid), player: fields[2], norm: fields[3] == "1", target: target, maxGain: maxGain, fps: fps}, nil
 	case "stop":
 		if len(fields) != 2 {
-			return control{}, fmt.Errorf("stop 需 <player>，得到 %q", line)
+			return control{}, i18n.Errorf("stop requires <player>, got %q", line)
 		}
 		return control{op: "stop", player: fields[1]}, nil
 	default:
-		return control{}, fmt.Errorf("未知控制命令 %q", fields[0])
+		return control{}, i18n.Errorf("unknown control command %q", fields[0])
 	}
 }
 

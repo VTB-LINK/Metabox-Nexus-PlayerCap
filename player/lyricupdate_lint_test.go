@@ -5,9 +5,9 @@ package player
 //
 // # 为什么这条要用 AST 门禁，而不是单元测试
 //
-// 发出 index:-1 的包（cloudmusic / kugou / qqmusic / sodamusic / applemusic）**CI 永远跑不了**（AGENTS.md §8：
-// GOOS=linux go vet 全部 FAIL）。而 AST 扫描不需要编译目标平台，所以这是这条契约唯一
-// 能自动化的守法。
+// 发出 index:-1 的包（cloudmusic / kugou / qqmusic / sodamusic / applemusic）都是 Windows-only
+// （AGENTS.md §8：GOOS=linux go vet 全部 FAIL）。AST 扫描不需要编译目标平台，一条规则就覆盖
+// 全仓的字面量，包括以后新增的调用点。
 //
 // # 它守的是什么
 //

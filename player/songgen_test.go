@@ -22,6 +22,23 @@ func drain(b *BaseEmitter) []Event {
 	}
 }
 
+// TestEmitForGenReportsDrop EmitForGen 的返回值是事件是否真的入队：代次有效、但事件通道满被丢弃时为假
+// （#146 代码审）。wesing 的封面补读据此决定下一拍是否重发。
+//
+// 变异自证（实测）：改回 b.Emit 之后恒返回真，「通道满」一例红。
+func TestEmitForGenReportsDrop(t *testing.T) {
+	b := NewBaseEmitter("test")
+	b.EventCh = make(chan Event) // 无缓冲、无人接收：发不出
+	gen := b.NewSongGen()
+	if b.EmitForGen(gen, EventSongInfoUpdate, &SongInfo{Title: "A"}) {
+		t.Error("通道满：事件被丢弃，EmitForGen 却返回真")
+	}
+	b.EventCh = make(chan Event, 1)
+	if !b.EmitForGen(gen, EventSongInfoUpdate, &SongInfo{Title: "A"}) {
+		t.Error("通道有空位：事件已入队，EmitForGen 却返回假")
+	}
+}
+
 // TestEmitForGenDropsStaleWriteback 钉死代次守卫：过期代次的异步回写必须被丢弃。
 //
 // 真实场景：封面靠 goroutine 异步下载（cloudmusic/qqmusic 5s，wesing 最长约 10s），

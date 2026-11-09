@@ -8,7 +8,6 @@ package cdp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -39,11 +38,11 @@ var (
 const netsongDir = "/bin/html/webdata/netsong/"
 
 var (
-	ErrSongChanged = errors.New("酷我快照期间歌曲或状态变化")
-	ErrUnavailable = errors.New("酷我 CDP 尚未就绪或响应不符合已验证协议")
+	ErrSongChanged = i18n.Sentinel("Kuwo song or state changed during the snapshot")
+	ErrUnavailable = i18n.Sentinel("Kuwo CDP is not ready, or its response does not match the verified protocol")
 	// ErrVersionUnsupported means the debugger answered, but its bridge version,
 	// page directory or their suffix agreement is not the verified 9.6.0.0 build.
-	ErrVersionUnsupported = errors.New("酷我 CDP 桥版本或页面目录未经验证")
+	ErrVersionUnsupported = i18n.Sentinel("Kuwo CDP bridge version or page directory is not verified")
 )
 
 // Snapshot preserves the native status enum. Callers must not interpret an

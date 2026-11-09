@@ -1,7 +1,7 @@
 package qqmusic
 
 // 本文件只测未知版本的距离回退：nearestKnownVersion / latestKnownVersion / parseVer。
-// 这三个是纯函数（不碰内存），能本机跑；qqmusic 整包 Windows-only、CI 跑不了（§8），
+// 这三个是纯函数（不碰内存）；qqmusic 整包 Windows-only，只在 Windows 上跑（§8），
 // 而 fallback 选错会让整台机器的 QQ 音乐读到垃圾，值得有测试钉住选择逻辑。
 //
 // 版本表（knownVersions）当前：20.05 / 21.81 / 22.16 / 22.22 / 22.31 / 22.41 / 22.52 / 22.60 / 22.71 / 22.76。

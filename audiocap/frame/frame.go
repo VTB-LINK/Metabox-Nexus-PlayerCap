@@ -23,9 +23,9 @@ package frame
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"math"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 // Magic 是分帧同步魔数，供 desync 后重对齐。按小端写出后，线上字节序列为 57 41 54 56，即 ASCII "WATV"。
@@ -58,13 +58,13 @@ const prefixLen = 8
 
 // 坏帧哨兵错误，每条 §3 校验一个；Next 返回的错误可用 errors.Is 区分。
 var (
-	errShort         = errors.New("帧长小于定长头")
-	errVersion       = errors.New("version 不受支持")
-	errHeaderShort   = errors.New("headerLen 小于定长头")
-	errHeaderAlign   = errors.New("headerLen 非 4 的倍数")
-	errHeaderOverrun = errors.New("headerLen 大于帧长")
-	errPlayerOverrun = errors.New("headerLen+playerLen 大于帧长")
-	errBinsAlign     = errors.New("bins 字节数非 4 的倍数")
+	errShort         = i18n.Sentinel("frame length is shorter than the fixed header")
+	errVersion       = i18n.Sentinel("version unsupported")
+	errHeaderShort   = i18n.Sentinel("headerLen is shorter than the fixed header")
+	errHeaderAlign   = i18n.Sentinel("headerLen is not a multiple of 4")
+	errHeaderOverrun = i18n.Sentinel("headerLen exceeds the frame length")
+	errPlayerOverrun = i18n.Sentinel("headerLen+playerLen exceeds the frame length")
+	errBinsAlign     = i18n.Sentinel("bins byte count is not a multiple of 4")
 )
 
 // magicBytes 是 Magic 的小端字节串，用于在缓冲里定位/重对齐。
@@ -141,7 +141,7 @@ func (d *Decoder) Next() (Frame, bool, error) {
 	payloadLen := binary.LittleEndian.Uint32(d.buf[4:prefixLen])
 	if payloadLen > MaxPayload {
 		d.buf = d.buf[len(magicBytes):] // 跳过这个 Magic，去找下一个
-		return Frame{}, false, fmt.Errorf("frame: payloadLen %d 超过上限 %d，判坏帧", payloadLen, MaxPayload)
+		return Frame{}, false, i18n.Errorf("frame: payloadLen %d exceeds the limit %d; bad frame", payloadLen, MaxPayload)
 	}
 
 	total := prefixLen + int(payloadLen)
@@ -165,28 +165,28 @@ func decodePayload(p []byte) (Frame, error) {
 	frameLen := int64(prefixLen + len(p))
 	// 先于任何字段读取：此后定长头内的偏移均不越界。
 	if frameLen < HeaderLen {
-		return Frame{}, fmt.Errorf("frame: 帧长 %d: %w", frameLen, errShort)
+		return Frame{}, i18n.Errorf("frame: frame length %d: %w", frameLen, errShort)
 	}
 	// at 把帧内偏移换成 p 内偏移。
 	at := func(off int) []byte { return p[off-prefixLen:] }
 
 	if v := le.Uint32(at(8)); v != Version {
-		return Frame{}, fmt.Errorf("frame: version %d: %w", v, errVersion)
+		return Frame{}, i18n.Errorf("frame: version %d: %w", v, errVersion)
 	}
 	// 按 int64 比较：两个 u32 相加不回绕。
 	hdr := int64(le.Uint32(at(12)))
 	playerLen := int64(le.Uint32(at(44)))
 	switch {
 	case hdr < HeaderLen:
-		return Frame{}, fmt.Errorf("frame: headerLen %d: %w", hdr, errHeaderShort)
+		return Frame{}, i18n.Errorf("frame: headerLen %d: %w", hdr, errHeaderShort)
 	case hdr%4 != 0:
-		return Frame{}, fmt.Errorf("frame: headerLen %d: %w", hdr, errHeaderAlign)
+		return Frame{}, i18n.Errorf("frame: headerLen %d: %w", hdr, errHeaderAlign)
 	case hdr > frameLen:
-		return Frame{}, fmt.Errorf("frame: headerLen %d，帧长 %d: %w", hdr, frameLen, errHeaderOverrun)
+		return Frame{}, i18n.Errorf("frame: headerLen %d, frame length %d: %w", hdr, frameLen, errHeaderOverrun)
 	case hdr+playerLen > frameLen:
-		return Frame{}, fmt.Errorf("frame: headerLen %d，playerLen %d，帧长 %d: %w", hdr, playerLen, frameLen, errPlayerOverrun)
+		return Frame{}, i18n.Errorf("frame: headerLen %d, playerLen %d, frame length %d: %w", hdr, playerLen, frameLen, errPlayerOverrun)
 	case (frameLen-hdr-playerLen)%4 != 0:
-		return Frame{}, fmt.Errorf("frame: bins 字节数 %d: %w", frameLen-hdr-playerLen, errBinsAlign)
+		return Frame{}, i18n.Errorf("frame: bins byte count %d: %w", frameLen-hdr-playerLen, errBinsAlign)
 	}
 
 	f := Frame{

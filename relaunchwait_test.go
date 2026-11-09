@@ -62,6 +62,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv(loadHelperEnv) != "" {
 		loadHelperMain() // 见 cliexit_test.go
 	}
+	if mode := os.Getenv(helperLangEnv); mode != "" {
+		helperLangMain(mode) // 见 helperlang_test.go
+	}
 	os.Exit(m.Run())
 }
 

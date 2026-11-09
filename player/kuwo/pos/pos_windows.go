@@ -8,9 +8,10 @@
 package pos
 
 import (
-	"fmt"
 	"strings"
 	"unsafe"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 
 	"golang.org/x/sys/windows"
 )
@@ -49,7 +50,7 @@ func Open(pid int, rid string, durationMs int32) (*Reader, error) {
 func OpenSnapshot(pid int, rid string, durationMs int32) (*Reader, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, uint32(pid))
 	if err != nil {
-		return nil, fmt.Errorf("kuwo pos: open process %d: %w", pid, err)
+		return nil, i18n.Errorf("kuwo pos: open process %d: %w", pid, err)
 	}
 	rid = RIDWithPrefix(rid)
 	var song Song
@@ -82,7 +83,7 @@ func (r *Reader) Position() (int32, error) {
 	}
 	b, err := readAt(r.h, r.addr, 4)
 	if err != nil || len(b) < 4 {
-		return 0, fmt.Errorf("kuwo pos: read at 0x%X: %w", r.addr, err)
+		return 0, i18n.Errorf("kuwo pos: read at 0x%X: %w", r.addr, err)
 	}
 	return int32(getU32(b)), nil
 }

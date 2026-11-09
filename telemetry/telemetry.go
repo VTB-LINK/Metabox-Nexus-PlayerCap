@@ -47,13 +47,15 @@ var dsn = ""
 // 判据直接复用 main.isReleaseVersion —— 那是自动更新的 kill switch，updatedecision_test.go
 // 守着它，且两条流水线的 VERSION 形状正好落在判据两边（实测）：
 //
-//	release.yml        VERSION="${TAG_NAME#v}"                     → "2.1.0"        → semver 有效 → production
-//	build-windows.yml  VERSION="${OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
+//	release.yml        $VERSION = $TAG_NAME -creplace '^v', ''     → "2.1.0"        → semver 有效 → production
+//	build-windows.yml  $VERSION = "${env:OUTPUT_NAME}-${BUILD_TIME}-${COMMIT_HASH}"
 //	                                                               → "Metabox-..."  → semver 无效 → development
 //
+// release.yml 的演练（非 tag 推送）取与 build-windows.yml 相同的非 semver 形状，同样落在 development。
+//
 // dev 构建用非 semver 是**故意的**（它同时是「跳过自动更新检查」的开关），我们只是搭了这趟
-// 顺风车，没有新增任何机制。反过来说：**谁要改 build-windows.yml 的 VERSION 格式，得知道
-// 它会同时挪动 Sentry 的环境归属。**
+// 顺风车，没有新增任何机制。反过来说：**谁要改 build-windows.yml 或 release.yml 演练的 VERSION
+// 格式，得知道它会同时挪动 Sentry 的环境归属。**
 //
 // 注意 prerelease（如 3.0.0-beta.32）判为 production —— 它是发给主播、走自动更新的真实流量。
 // environment 回答的是「谁在跑」，不是「多稳定」。要单独看 beta，用 release 维度筛。

@@ -341,7 +341,7 @@ func TestTransientDSReseekDuringFilter(t *testing.T) {
 	var f TransientFilter
 	ticks := []tick{
 		{ms: 0, rid: rA, core: 0, out: dsOut(0, 0), play: true},
-		{ms: 50, rid: rA, core: 313, out: dsOut(0, 313), play: true}, // filtering seg 1
+		{ms: 50, rid: rA, core: 313, out: dsOut(0, 313), play: true},        // filtering seg 1
 		{ms: 100, rid: rA, core: 40313, out: dsOut(40000, 313), play: true}, // new base: seg 2
 		{ms: 150, rid: rA, core: 40600, out: dsOut(40000, 600), play: true},
 	}
@@ -449,7 +449,7 @@ func TestTransientWaveOutPerTick(t *testing.T) {
 	// not yet consuming), then hdr_d catches up.
 	ticks := []tick{
 		{ms: 0, rid: rA, core: 0, out: woOut(0, 0, 0, 0, 0), play: true},
-		{ms: 50, rid: rA, core: 52, out: woOut(0, 2*tfBlock, 2, 0, 0), play: true}, // played 0 → cand 0
+		{ms: 50, rid: rA, core: 52, out: woOut(0, 2*tfBlock, 2, 0, 0), play: true},     // played 0 → cand 0
 		{ms: 100, rid: rA, core: 313, out: woOut(0, 12*tfBlock, 12, 0, 0), play: true}, // played 0 → cand 0
 		{ms: 150, rid: rA, core: 313, out: woOut(0, 12*tfBlock, 12, 3, 0), play: true}, // played 3 blocks → 78
 		{ms: 200, rid: rA, core: 313, out: woOut(0, 12*tfBlock, 12, 6, 0), play: true}, // played 6 → 156
@@ -845,7 +845,7 @@ func TestTransientAnchorActualGapDegrades(t *testing.T) {
 	var f TransientFilter
 	pfs, res := drive(t, &f,
 		tick{ms: 0, rid: rA, core: 0, out: dsOut(0, 0), play: true},
-		tick{ms: 50, rid: rA, core: 313, out: dsOut(0, 313), play: true},    // engage; prevFedBelow, prevValidAt=50
+		tick{ms: 50, rid: rA, core: 313, out: dsOut(0, 313), play: true},     // engage; prevFedBelow, prevValidAt=50
 		tick{ms: 1000, rid: rA, core: 1515, out: dsOut(0, 2000), play: true}, // fed crosses, but 950 ms after the last valid sample
 	)
 	if res[2] {

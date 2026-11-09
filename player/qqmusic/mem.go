@@ -3,7 +3,6 @@ package qqmusic
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
@@ -400,7 +400,7 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 	// 1. Find process ID
 	hSnap, _, _ := procCreateToolhelp32.Call(uintptr(TH32CS_SNAPPROCESS), 0)
 	if hSnap == uintptr(syscall.InvalidHandle) {
-		return nil, errors.New("CreateToolhelp32Snapshot failed")
+		return nil, i18n.Errorf("CreateToolhelp32Snapshot failed")
 	}
 	defer procCloseHandle.Call(hSnap)
 
@@ -418,7 +418,7 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 	}
 
 	if len(pids) == 0 {
-		return nil, errors.New("QQMusic.exe not found")
+		return nil, i18n.Errorf("QQMusic.exe not found")
 	}
 
 	for _, pid := range pids {
@@ -491,7 +491,7 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 		procCloseHandle.Call(hProcess)
 	}
 
-	return nil, errors.New("QQMusic.dll not found in any QQMusic.exe process")
+	return nil, i18n.Errorf("QQMusic.dll not found in any QQMusic.exe process")
 }
 
 // detectVersion 从 QQMusic.exe 的 PE 版本资源中提取版本号并匹配偏移表
@@ -748,7 +748,7 @@ func aobMatch(data, pattern, mask []byte) int {
 // AOB Injection for Accompaniment Slider
 func (m *QQMusicMem) InjectSliderAOB() error {
 	if m.gfWrapperBase == 0 {
-		return errors.New("QQMusic_GFWrapper.dll not found")
+		return i18n.Errorf("QQMusic_GFWrapper.dll not found")
 	}
 	// Pattern: 39 86 F0000000 74 ?? 8B CE 89 86 F0000000
 	// New version: cmp [esi+F0],eax / je +XX / mov ecx,esi / mov [esi+F0],eax
@@ -792,7 +792,7 @@ func (m *QQMusicMem) InjectSliderAOB() error {
 		}
 	}
 	if matchedPattern == -1 {
-		return errors.New("aob pattern not found in memory (might be already injected)")
+		return i18n.Errorf("aob pattern not found in memory (might be already injected)")
 	}
 
 	log.Info("AOB slider target address: 0x%X (pattern %d)", targetAddr, matchedPattern)
@@ -807,7 +807,7 @@ func (m *QQMusicMem) InjectSliderAOB() error {
 	// Allocate codecave
 	caveAddr, _, _ := procVirtualAllocEx.Call(m.hProcess, 0, 0x1000, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE)
 	if caveAddr == 0 {
-		return errors.New("VirtualAllocEx failed")
+		return i18n.Errorf("VirtualAllocEx failed")
 	}
 
 	m.sliderPointer = caveAddr + 0x100
@@ -884,7 +884,7 @@ func (m *QQMusicMem) InjectProgressAOB() error {
 			log.Info("Progress hook already active")
 			return nil
 		}
-		return fmt.Errorf("unexpected bytes at dll+%X: got %X, want %X", targetOffset, actual, expect)
+		return i18n.Errorf("unexpected bytes at dll+%X: got %X, want %X", targetOffset, actual, expect)
 	}
 
 	// Resolve tick count: use KUSER_SHARED_DATA (fixed at 0x7FFE0000 in all Windows processes).
@@ -896,7 +896,7 @@ func (m *QQMusicMem) InjectProgressAOB() error {
 	// Allocate codecave
 	caveAddr, _, _ := procVirtualAllocEx.Call(m.hProcess, 0, 0x1000, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE)
 	if caveAddr == 0 {
-		return errors.New("VirtualAllocEx failed for progress hook")
+		return i18n.Errorf("VirtualAllocEx failed for progress hook")
 	}
 
 	// Data area at cave+0x100 (progressMs) and cave+0x104 (timestamp)
@@ -1266,7 +1266,7 @@ func extractSongMid(data []byte, durationMs uint32) string {
 
 func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 	if m.qqmusicDllBase == 0 {
-		return nil, errors.New("process not attached")
+		return nil, i18n.Errorf("process not attached")
 	}
 
 	meta := &SongMetadata{}

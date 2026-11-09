@@ -3,19 +3,20 @@ package pos
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"strings"
 	"time"
+
+	"Metabox-Nexus-PlayerCap/i18n"
 )
 
 var (
-	ErrUnsupportedCore = errors.New("kuwo: unsupported playback core")
-	ErrSongChanged     = errors.New("kuwo: playback core song changed")
-	ErrInvalidSample   = errors.New("kuwo: invalid playback core sample")
+	ErrUnsupportedCore = i18n.Sentinel("kuwo: unsupported playback core")
+	ErrSongChanged     = i18n.Sentinel("kuwo: playback core song changed")
+	ErrInvalidSample   = i18n.Sentinel("kuwo: invalid playback core sample")
 	// ErrClockStalled means a song played long enough that a live core would
 	// have advanced, yet the position never moved: a behavioural check beyond
 	// the static structure match, in case the position field has moved elsewhere.
-	ErrClockStalled = errors.New("kuwo: playback core position stalled while playing")
+	ErrClockStalled = i18n.Sentinel("kuwo: playback core position stalled while playing")
 )
 
 const (

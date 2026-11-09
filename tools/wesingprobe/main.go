@@ -344,7 +344,7 @@ func main() {
 	for _, host := range hosts {
 		sub := host + 0x0C
 		b, _ := proc.ReadUint32(h, sub+0x48)
-		e, _ := proc.ReadUint32(h, sub+0x50)
+		e, _ := proc.ReadUint32(h, sub+0x4C)
 		if !looksPtr(b) || e <= b {
 			continue
 		}
@@ -362,7 +362,7 @@ func main() {
 	fmt.Println()
 
 	beginPtr, _ := proc.ReadUint32(h, subStruct+0x48)
-	endPtr, _ := proc.ReadUint32(h, subStruct+0x50)
+	endPtr, _ := proc.ReadUint32(h, subStruct+0x4C)
 	if beginPtr == 0 || endPtr <= beginPtr {
 		log.Fatalf("歌词向量为空 begin=0x%X end=0x%X（换歌或等歌词加载后重试）", beginPtr, endPtr)
 	}
