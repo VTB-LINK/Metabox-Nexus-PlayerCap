@@ -39,8 +39,12 @@ type assetJobs struct {
 	fetch          func(context.Context, assetRequest, bool) assetResult
 }
 
+// assetFetch is what a session's workers call to fetch lyrics and covers. A
+// package var so tests can keep sessions off Kuwo's servers (see TestMain).
+var assetFetch = fetchAsset
+
 func newAssetJobs(parent context.Context) *assetJobs {
-	return newAssetJobsWithFetch(parent, fetchAsset)
+	return newAssetJobsWithFetch(parent, assetFetch)
 }
 
 func newAssetJobsWithFetch(parent context.Context, fetch func(context.Context, assetRequest, bool) assetResult) *assetJobs {

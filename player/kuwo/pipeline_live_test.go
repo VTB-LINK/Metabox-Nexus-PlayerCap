@@ -16,6 +16,9 @@ func TestLivePipeline(t *testing.T) {
 	if os.Getenv("PLAYERCAP_KUWO_PIPELINE_LIVE") != "1" {
 		t.Skip("PLAYERCAP_KUWO_PIPELINE_LIVE=1 required")
 	}
+	// The live pipeline needs real lyrics and covers; TestMain stubs them out.
+	defer func(f func(context.Context, assetRequest, bool) assetResult) { assetFetch = f }(assetFetch)
+	assetFetch = fetchAsset
 	duration := 12 * time.Second
 	if raw := os.Getenv("PLAYERCAP_KUWO_LIVE_DURATION"); raw != "" {
 		v, err := time.ParseDuration(raw)
