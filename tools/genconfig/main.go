@@ -7,9 +7,7 @@
 // 或传的不是发布版本号（CI 开发构建的非 semver 版本号）时，得到开发构建的盖章值。规则见
 // config.StampVersion。
 //
-// 两条打包流水线（release.yml、build-windows.yml）都在 Windows runner 上直接 go run。本命令的依赖暂须保持
-// GOOS=linux 可构建，作为退回 Linux 发版流水线的前提（AGENTS.md §0.3）；在 Linux 上运行时须清空作业级的
-// GOOS：  GOOS= GOARCH= go run ./tools/genconfig -version <版本> <path>
+// 两条打包流水线（release.yml、build-windows.yml）都在 Windows runner 上直接 go run。
 package main
 
 import (

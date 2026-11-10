@@ -58,7 +58,7 @@ func main() {
 	// 界面语言：只看 Windows 显示语言，中文系统用中文、其余一律英文（规则见 i18n 包）。
 	// 必须早于任何用户可见输出（Banner / config 告警 / mainLog），也早于下面两种 helper 模式：helper 的
 	// 诊断与错误经 i18n 本地化，写进 stderr 或结果文件后由主进程打进日志（issue #143）。探测是 Windows-only，
-	// 结果注入纯 Go 的 i18n 包，使 logger/ 与 config/ 保持 GOOS=linux 可构建（AGENTS.md §0.3）。
+	// 结果由此注入 i18n 包，logger/ 与 config/ 不自行探测（AGENTS.md §6.4 ⑦）。
 	i18n.SetLanguage(i18n.DetectSystemLanguage())
 
 	// 提权 helper 模式：由 watchdog.launchElevatedHelper 通过 ShellExecuteExW("runas")

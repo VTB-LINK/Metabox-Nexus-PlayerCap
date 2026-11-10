@@ -5,8 +5,7 @@
 // 本文件（gating.go，无 build tag）只放**无平台依赖的纯决策**：AudioSink 接口、门控函数
 // desiredCaptures、退避与看门狗常量、看门狗判定 judgeWatchdog 与逐播放器失败记账、空闲帧判定
 // idlePlayers，故 CI 可测且能 GOOS=linux 编译；捕获编排/Job Object/退避执行/看门狗与空闲帧接线在
-// manager_windows.go + jobobject_windows.go（//go:build windows）。gating.go 不 import config/logger
-// （保 §0.3 GOOS=linux 绿）。
+// manager_windows.go + jobobject_windows.go（//go:build windows）。
 package manager
 
 import "time"
@@ -126,7 +125,7 @@ func filterWant(want map[string]uint32, fails map[string]captureFailure, now tim
 }
 
 // NormParams 是某播放器本轮的音量归一化下发参数：manager 据 config 解析后构造 capture 控制命令用。
-// 无平台依赖，置于 gating.go 以保 GOOS=linux 可构建（§0.3）。
+// 无平台依赖，故置于 gating.go（见文件头）。
 type NormParams struct {
 	Enabled bool
 	Target  int // 目标响度 dBFS

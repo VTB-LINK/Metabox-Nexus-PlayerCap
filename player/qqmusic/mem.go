@@ -300,6 +300,22 @@ var knownVersions = map[string]dllOffsets{
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
 	},
+	"22.81": {
+		// qqprobe 实测（32-bit x86，2026-11-10，构建目录 QQMusic2281.02.26.01）：
+		// 「Change of Coast / Neon Indian」命中宽字符显示对象，时长 192733ms；会话
+		// songID=5020330，经单曲详情接口核对为该曲（专辑 GTA V Volume 2: The Score）。
+		// 字段布局同 22.31+，Struct1 与会话相对偏移均迁移。
+		Struct1:           0xCCB488,
+		NameOff:           0x00,
+		SingerOff:         0x04,
+		AlbumOff:          0x08,
+		ProgressOff:       0x0C,
+		DurationOff:       0x10,
+		SongIDOff:         0x73F20,
+		SongIDDurCheckOff: 0x73F28,
+		UseWideStrings:    true,
+		SongMidFromHeap:   true,
+	},
 }
 
 // parseVer 把 "22.21" 解析成可比较的整数（major*1000+minor）。detectVersion 用

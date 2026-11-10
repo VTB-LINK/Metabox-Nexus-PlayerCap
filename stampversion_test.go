@@ -3,7 +3,7 @@ package main
 // 本文件只测一件事：config 包定 config.yml 版本键盖章值时对「发布版本」的判定，与本包自动更新所用的
 // isReleaseVersion 是同一个判据。
 //
-// config 包须保持 GOOS=linux 可构建，不能引用本包，所以它自带一份同样的判定（config.StampVersion 内）。
+// config 包不能引用本包（本包是 main 包，且 import 了 config），所以它自带一份同样的判定（config.StampVersion 内）。
 // 两份分叉的后果：某个版本号在这里算开发构建、不联网，在那里却被当作发布版本盖进 config.yml（或反过来），
 // 开发构建盖下的 0.0.0 之类的值低于任何迁移边界，下次启动会把已迁移的 offset 再取反一遍。
 
