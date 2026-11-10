@@ -1,10 +1,12 @@
 package qqmusic
 
-// 本文件是 runSession 一拍的复述，供 issue #96 的回放用例使用（nextline_test.go、carriedover_test.go）。
+// 本文件是 runSession 一拍的复述，供 issue #96、#171 的回放用例使用（nextline_test.go、carriedover_test.go、
+// pausetail_test.go）。
 //
-// 只复述换歌认领（含等进度从上一首换过来）、回跳检测、暂停检测、本地时钟插值与歌词行匹配，顺序与判据
-// 照 runSession；不取词、不重读、不发状态与位置采样，换歌时的歌词与时长直接取自 songs。轮询循环要真
-// 进程，没有离线夹具：这份复述经 progressCarriedOver、midWaitGate 与 nextLine，改它们本身会让回放变红；
+// 只复述换歌认领（含等进度从上一首换过来）、回跳检测、暂停检测与暂停中的恢复判定、本地时钟插值与歌词行
+// 匹配，顺序与判据照 runSession；不取词、不重读、不发状态与位置采样，换歌时的歌词与时长直接取自 songs。
+// 轮询循环要真进程，没有离线夹具：这份复述经 progressCarriedOver、midWaitGate、resumeGate 与 nextLine，
+// 改它们本身会让回放变红；
 // 直接改 runSession 的调用点（比如换歌分支不等、行匹配不经 nextLine）不会，那一层靠读代码与真机。
 
 import (
@@ -48,6 +50,7 @@ type replay struct {
 	durSec      float32
 	lastLineIdx int
 	isPaused    bool
+	resume      resumeGate
 	anchorMs    uint32
 	anchorTime  time.Time
 	lastMem     uint32
@@ -98,8 +101,9 @@ func (r *replay) tick(ms int, name string, progMs uint32) {
 			r.emit("playback_resume", -1, pos)
 			resumed = true
 		}
-		if r.isPaused {
+		if r.isPaused && (seek || r.resume.observe(int64(progMs)-int64(r.lastMem), now, replayPauseTimeoutSec*time.Second)) {
 			r.isPaused = false
+			r.resume.reset()
 			if !resumed {
 				r.emit("playback_resume", -1, pos)
 			}
@@ -109,6 +113,7 @@ func (r *replay) tick(ms int, name string, progMs uint32) {
 
 	if now.Sub(r.anchorTime).Seconds() > replayPauseTimeoutSec && !r.isPaused && r.lastName != "" {
 		r.isPaused = true
+		r.resume.reset()
 		r.emit("playback_pause", -1, float32(r.anchorMs)/1000)
 	}
 
@@ -124,6 +129,7 @@ func (r *replay) claim(name string, progMs uint32, now time.Time) {
 	s := r.songs[name]
 	r.lastName, r.lastLineIdx = name, -1
 	r.anchorMs, r.anchorTime, r.lastMem, r.isPaused = progMs, now, progMs, false
+	r.resume.reset()
 	r.cur, r.durSec = s.lyrics, float32(s.durMs)/1000
 	pos := player.LivePosition(float32(progMs)/1000, now, now, true, r.durSec)
 	r.emit("all_lyrics", -1, pos)

@@ -52,7 +52,8 @@ func TestNextLine(t *testing.T) {
 // TestReplayIssue96Pause 回放 issue #96 录音 01-qqmusic 的暂停序列（《枝江》，时长 195s，offset -400ms，
 // 每 30ms 一拍）：计时器停在 43.886s，插值在 44.549s 推过第 8 行（44.949 - 0.4），判出暂停时位置退回
 // 43.886s。录音里的事件是「index 8 → 暂停时 index 7 → 恢复后 index 8」，修正后是「index 8 → 暂停 →
-// 恢复 → index 9」。playback_pause 与 playback_resume 的位置照旧是计时器读数。
+// 恢复 → index 9」。playback_pause 与 playback_resume 的位置照旧是计时器读数。本例的进度每拍前进 30ms，
+// 恢复首步不足 resumeStepMs，按 resumeGate 在第二步（43.946s）判恢复（#171）。
 //
 // 变异自证：nextLine 的判据改回旧写法，本例红，得到 `all lu7 lu8 pause lu7 resume lu8 lu9`，即录音里的
 // 序列；改成 `idx >= last`，本例红。
@@ -77,8 +78,8 @@ func TestReplayIssue96Pause(t *testing.T) {
 	if e := r.find(t, "playback_pause", 0); !approx(e.pos, 43.886) {
 		t.Errorf("playback_pause 的位置 %.3f，期望计时器停下的读数 43.886", e.pos)
 	}
-	if e := r.find(t, "playback_resume", 0); !approx(e.pos, 43.916) {
-		t.Errorf("playback_resume 的位置 %.3f，期望恢复后的读数 43.916", e.pos)
+	if e := r.find(t, "playback_resume", 0); !approx(e.pos, 43.946) {
+		t.Errorf("playback_resume 的位置 %.3f，期望恢复后第二步的读数 43.946", e.pos)
 	}
 }
 

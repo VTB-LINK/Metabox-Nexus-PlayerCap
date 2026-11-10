@@ -111,6 +111,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	var lastLineIdx int = -1
 	var currentDurationSec float32 = 0
 	var isPaused bool = false
+	var resume resumeGate // 已判暂停时的恢复判定，见 resumeGate
 	var currentTitle string
 
 	// 换歌后歌词补取：songID/songMid 落位可能滞后于显示结构体几秒（v22.41 实测），换歌那帧
@@ -200,6 +201,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			anchorTime = sampleTime
 			lastMemProgress = meta.ProgressMs
 			isPaused = false
+			resume.reset()
 			lyricsPending = false // 默认这一首已了结；仅下面取词失败时重新 arm
 
 			log.Info("♪ song: %s - %s", meta.Name, meta.Singer)
@@ -416,16 +418,23 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				resumeEmitted = true
 			}
 
+			// 已判暂停时，非 seek 的变化先过 resumeGate：暂停后的补写只重锚、不判恢复。
 			if isPaused {
-				isPaused = false
-				if !resumeEmitted {
-					posSec := float32(meta.ProgressMs) / 1000.0
-					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
-						Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
-					})
+				step := int64(meta.ProgressMs) - int64(lastMemProgress)
+				if seekDetected || resume.observe(step, sampleTime, pauseTimeoutSec*time.Second) {
+					isPaused = false
+					resume.reset()
+					if !resumeEmitted {
+						posSec := float32(meta.ProgressMs) / 1000.0
+						p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
+							Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
+						})
+					}
+					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
+					log.Info("resumed @ %.2fs", float32(meta.ProgressMs)/1000.0)
+				} else {
+					log.Detail("progress moved %+dms while paused; resume not yet confirmed", step)
 				}
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
-				log.Info("resumed @ %.2fs", float32(meta.ProgressMs)/1000.0)
 			}
 			anchorProgressMs = meta.ProgressMs
 			anchorTime = sampleTime
@@ -435,6 +444,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		// 暂停检测：快速计时器停滞超过阈值。停滞时长量到本轮读数的时刻（见 sampleTime），不量到当前时刻。
 		if sampleTime.Sub(anchorTime).Seconds() > pauseTimeoutSec && !isPaused && lastName != "" {
 			isPaused = true
+			resume.reset()
 			posSec := float32(anchorProgressMs) / 1000.0
 			p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{
 				Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
@@ -477,6 +487,30 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 func rereadSameSong(fresh *SongMetadata, err error, name string) bool {
 	return err == nil && fresh != nil && name != "" && fresh.Name == name
 }
+
+// resumeStepMs：已判暂停时，读数单次前进不小于它即判恢复。实测暂停后的补写最大 116ms、稳定播放单步最大
+// 371ms，恢复首步最小 859ms（#171）。
+const resumeStepMs = 500
+
+// resumeGate 判定已判暂停时、读数的非 seek 变化是否为恢复（#171，doc/design/qqmusic-pause-tail-design.md §3）。
+// QQ 音乐暂停后进度先停 1.85–3.0s，再补写一次 +93～116ms 才停住；按「一变即恢复」会把补写判成恢复、1s 后
+// 再判暂停。小步先记为待确认，window 内再变一次才判恢复。
+type resumeGate struct {
+	pendingAt time.Time // 待确认变化的读数时刻；零值为没有
+}
+
+// observe 在已判暂停、读数变化且不是 seek 时调用：step 为本次读数减上次读数（ms，有符号），now 为本次读数的
+// 时刻。返回 true 即判恢复，并清空待确认。
+func (g *resumeGate) observe(step int64, now time.Time, window time.Duration) bool {
+	if step >= resumeStepMs || (!g.pendingAt.IsZero() && now.Sub(g.pendingAt) <= window) {
+		g.pendingAt = time.Time{}
+		return true
+	}
+	g.pendingAt = now
+	return false
+}
+
+func (g *resumeGate) reset() { g.pendingAt = time.Time{} }
 
 // shouldDeferForSongMid 判断本次换歌是否**可能**需要等 songMid 就绪。
 //

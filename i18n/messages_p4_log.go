@@ -160,6 +160,7 @@ var p4LogMessages = map[string]string{
 	"normal group all inactive, holding present, starting group-level countdown %ds":                              "普通组全员非活跃，存在 holding，开始组级倒计时 %ds",
 	"normal group paused timeout (%ds)":                                                                           "普通组暂停超时 (%ds)",
 	"paused @ %.2fs":                                                                                              "暂停 @ %.2fs",
+	"progress moved %+dms while paused; resume not yet confirmed":                                                 "暂停中进度变化 %+dms，尚未确认恢复",
 	"service started: %s":                                                                                         "服务启动: %s",
 	"Server startup failed: %v":                                                                                   "服务启动失败: %v",
 	"Administrator rights not obtained (attempt %d/%d): %v — retrying in %v":                                      "未取得管理员权限（第 %d/%d 次）: %v —— %v 后重试",
