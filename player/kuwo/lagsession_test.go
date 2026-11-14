@@ -110,6 +110,10 @@ type lagRig struct {
 	at     time.Time      // the latest poll's time
 	fe     frontEnd       // the front end, fed every event emitted so far
 	next   []int          // lyrics the next poll delivers
+	// hold applies runSession's #185 hold before observe, each poll answering a
+	// fresh snapshot (snapAt = the poll's time). Off, every poll is observed: the
+	// session-level behaviour the cases written before #185 pin.
+	hold bool
 }
 
 func newLagRig(t *testing.T) *lagRig {
@@ -133,7 +137,10 @@ func (r *lagRig) poll(ms int, core int32, lag pos.LagSample, lagErr error) []pla
 		r.t.Fatalf("t=%d ms: Read returned %v", ms, err)
 	}
 	r.out, r.at = out, at
-	r.s.observe(cdp.Snapshot{RID: r.rid, Title: "song " + r.rid, Artist: "artist", Status: r.status}, out)
+	snap := cdp.Snapshot{RID: r.rid, Title: "song " + r.rid, Artist: "artist", Status: r.status}
+	if !r.hold || !r.s.hold(snap, at, out) {
+		r.s.observe(snap, out)
+	}
 	if r.next != nil {
 		r.s.accept(assetResult{gen: r.s.gen, rid: r.s.rid, lines: lyricLines(r.next)}, at)
 		r.next = nil
@@ -413,7 +420,11 @@ func TestLagEventCounts(t *testing.T) {
 	// Review round 6: two decreases, 250 → 100 (+150) and 100 → 0 on failure
 	// (+100). The line change on the first anchors the front end; when the
 	// channel is full and drops that lyric_update, the second decrease leaves
-	// the public position 250 ms ahead of the front end and publishes.
+	// the public position 250 ms ahead of the front end and publishes. A dropped
+	// lyric_update is retried on the next tick (#175) and would anchor the front
+	// end there, so the channel stays full up to the second decrease (t=650 ms).
+	// The resume resets the line index, and the line goes out after it, at the
+	// same position.
 	t.Run("event channel full", func(t *testing.T) {
 		for _, full := range []bool{true, false} {
 			r, a, b := newLagRig(t), newFeedSeg(10000), newFeedSeg(20000)
@@ -430,7 +441,14 @@ func TestLagEventCounts(t *testing.T) {
 				t.Fatalf("full %v: lyric_update on the first decrease %+v", full, lu)
 			}
 			for ms := 200; ms <= 800; ms += 50 {
-				r.step(ms, int32(10000+ms), noLag)
+				if full && ms < 650 {
+					fillEvents(r.p)
+				}
+				ev := r.step(ms, int32(10000+ms), noLag)
+				if lu := ofType(ev, player.EventLyricUpdate); full && ms == 650 && (len(lu) != 1 || eventMs(lu[0]) != 10650 || positioned(ev)[0].Type != player.EventPlaybackResume) ||
+					full && ms != 650 && len(lu) != 0 {
+					t.Fatalf("full: t=%d ms: lyric_update %+v in %+v", ms, lu, positioned(ev))
+				}
 			}
 			if full {
 				r.wantResumes(mark, 10650)

@@ -314,19 +314,24 @@ var p4LogMessages = map[string]string{
 	"Audio WS disconnected: %s player=%q":                         "音频WS 断开: %s player=%q",
 
 	// 封面与音译（player/cover.go、player/qqmusic/api.go、player/sodamusic）
-	"[%s] cover URL is not http/https, skipping: %q":                                                                                                          "[%s] cover URL is not http/https, skipping: %q",
-	"Romanization lyric decryption failed; no roma_text for this song (main lyrics and translation unaffected): %v":                                           "音译歌词解密失败，本首无 roma_text（不影响主歌词/翻译）: %v",
-	"roma plaintext (first 120 chars): %s":                                                                                                                    "roma 明文(前120字符): %s",
-	"attachRoma: %d/%d lines have roma_text":                                                                                                                  "attachRoma: %d/%d 行有 roma_text",
-	"Borrowing romanization from KuGou failed: search for \"%s - %s\" errored: %v":                                                                            "酷狗音译借取失败：按「%s - %s」搜索出错：%v",
-	"No KuGou romanization match: no song found for \"%s - %s\"; romanization left empty":                                                                     "酷狗音译未命中：按「%s - %s」搜不到对应曲，音译留空",
+	"[%s] cover URL is not http/https, skipping: %q":                                                                "[%s] cover URL is not http/https, skipping: %q",
+	"[%s] cover download failed: %v":                                                                                "[%s] cover download failed: %v",
+	"[%s] cover download failed: HTTP %d: %s":                                                                       "[%s] cover download failed: HTTP %d: %s",
+	"[%s] cover download failed while reading: %v: %s":                                                              "[%s] cover download failed while reading: %v: %s",
+	"[%s] cover larger than %d bytes, sending the URL only: %s":                                                     "[%s] cover larger than %d bytes, sending the URL only: %s",
+	"[%s] cover download incomplete (%d of %d bytes): %s":                                                           "[%s] cover download incomplete (%d of %d bytes): %s",
+	"Romanization lyric decryption failed; no roma_text for this song (main lyrics and translation unaffected): %v": "音译歌词解密失败，本首无 roma_text（不影响主歌词/翻译）: %v",
+	"roma plaintext (first 120 chars): %s":                                                                          "roma 明文(前120字符): %s",
+	"attachRoma: %d/%d lines have roma_text":                                                                        "attachRoma: %d/%d 行有 roma_text",
+	"Borrowing romanization from KuGou failed: search for \"%s - %s\" errored: %v":                                  "酷狗音译借取失败：按「%s - %s」搜索出错：%v",
+	"No KuGou romanization match: no song found for \"%s - %s\"; romanization left empty":                           "酷狗音译未命中：按「%s - %s」搜不到对应曲，音译留空",
 	"KuGou matched \"%s - %s\" with %d lines, but none align with the SodaMusic main lyrics (different version/master/cover?); romanization left empty":       "酷狗命中「%s - %s」%d 行，但与汽水主歌词无一对齐（版本/母带/翻唱不同？），音译留空",
 	"KuGou romanization aligned: \"%s - %s\" matched %d KuGou lines; word-level %d + line-level fallback %d = %d/%d lines in total, %d left empty; sample %s": "酷狗音译已对齐：按「%s - %s」命中酷狗 %d 行；字级 %d + 行级回落 %d = 共 %d/%d 行、留空 %d 行；样本 %s",
-	"Romanization filled in; re-emitting all_lyrics (%d lines)":                                                                                               "音译已补入，重发 all_lyrics（%d 行）",
-	"synced to UI progress: %.2fs → %.2fs":                                                                                                                    "按界面进度对表: %.2fs → %.2fs",
-	"%d play-time candidates; using 0x%08X [%s]":                                                                                                              "播放时间候选 %d 处，选用 0x%08X [%s]",
-	"Play-time address 0x%08X is stalled while another one advances; switching to 0x%08X":                                                                     "播放时间地址 0x%08X 停着而另一处在走，改用 0x%08X",
-	"Romanization attached: %d/%d lines":                                                                                                                      "音译已配上: %d/%d 行",
+	"Romanization filled in; re-emitting all_lyrics (%d lines)":                           "音译已补入，重发 all_lyrics（%d 行）",
+	"synced to UI progress: %.2fs → %.2fs":                                                "按界面进度对表: %.2fs → %.2fs",
+	"%d play-time candidates; using 0x%08X [%s]":                                          "播放时间候选 %d 处，选用 0x%08X [%s]",
+	"Play-time address 0x%08X is stalled while another one advances; switching to 0x%08X": "播放时间地址 0x%08X 停着而另一处在走，改用 0x%08X",
+	"Romanization attached: %d/%d lines":                                                  "音译已配上: %d/%d 行",
 
 	// wesing：CKSongsGraph 总时长（player/wesing/lyric/songsgraph.go、wesing.go，#139）
 	"CKSongsGraph vtable: 0x%08X":                                                             "CKSongsGraph 虚表: 0x%08X",
@@ -337,15 +342,17 @@ var p4LogMessages = map[string]string{
 	"last lyric line + 10s":                                                                   "末行歌词 + 10s",
 
 	// wesing：伴奏解码器 CAudioDecodeForPCM 的进度与总时长（player/wesing/lyric/pcm.go、wesing.go，#145）
-	"CAudioDecodeForPCM vtable: 0x%08X":                                                                               "CAudioDecodeForPCM 虚表: 0x%08X",
-	"CAudioDecodeForPCM vtable matches: %d":                                                                           "CAudioDecodeForPCM 虚表匹配 %d 处",
-	"Accompaniment decoder path %q does not match song mid %q":                                                        "伴奏解码器的路径 %q 与歌曲 mid %q 不符",
-	"PCM decoder rate: %.3f over %.2fs":                                                                               "PCM 解码速率: %.3f（历时 %.2fs）",
-	"Song clock: PCM decoder 0x%08X (duration %.2fs)":                                                                 "歌曲时钟: PCM 解码器 0x%08X（总时长 %.2fs）",
-	"Song clock: play-time address 0x%08X":                                                                            "歌曲时钟: 播放时间地址 0x%08X",
-	"PCM clock unavailable (%s); using the existing play-time source for this song":                                   "PCM 时钟不可用（%s），本首改用原有的播放时间来源",
-	"PCM decoder rate %.3f is outside [0.95, 1.05]; using the existing play-time source for the rest of this session": "PCM 解码速率 %.3f 不在 [0.95, 1.05] 内，本会话此后改用原有的播放时间来源",
-	"the accompaniment decoder did not advance within 5s":                                                             "伴奏解码器 5s 内没有推进",
+	"CAudioDecodeForPCM vtable: 0x%08X":                                                                "CAudioDecodeForPCM 虚表: 0x%08X",
+	"CAudioDecodeForPCM vtable matches: %d":                                                            "CAudioDecodeForPCM 虚表匹配 %d 处",
+	"Accompaniment decoder path %q does not match song mid %q":                                         "伴奏解码器的路径 %q 与歌曲 mid %q 不符",
+	"PCM decoder rate: %.3f over %.2fs":                                                                "PCM 解码速率: %.3f（历时 %.2fs）",
+	"PCM rate segment voided: advanced %.2fs over %.2fs":                                               "PCM 速率段作废：推进 %.2fs（历时 %.2fs）",
+	"Song clock: PCM decoder 0x%08X (duration %.2fs)":                                                  "歌曲时钟: PCM 解码器 0x%08X（总时长 %.2fs）",
+	"Song clock: play-time address 0x%08X":                                                             "歌曲时钟: 播放时间地址 0x%08X",
+	"PCM clock unavailable (%s); using the existing play-time source for this song":                    "PCM 时钟不可用（%s），本首改用原有的播放时间来源",
+	"PCM decoder rate %.3f is outside [0.95, 1.05]; using the existing play-time source for this song": "PCM 解码速率 %.3f 不在 [0.95, 1.05] 内，本首改用原有的播放时间来源",
+	"PCM decoder rate was not measured: out-of-range advances (seeks or a wrong sample format) kept voiding the measurement for 30s; using the existing play-time source for this song": "PCM 解码速率未能测出：超出范围的推进（跳转或采样格式不符）反复作废测量累计 30s，本首改用原有的播放时间来源",
+	"the accompaniment decoder did not advance within 5s": "伴奏解码器 5s 内没有推进",
 
 	// wesing：PCM 模式按路径 mid 取歌曲信息与封面（player/wesing/wesing.go、coverfetch.go，#146）
 	"The accompaniment path carries no song mid; announcing the window title without singer or cover": "伴奏路径里没有歌曲 mid，宣告窗口歌名，不带歌手与封面",
@@ -396,4 +403,11 @@ var p4LogMessages = map[string]string{
 
 	// —— player/kugou/watchdog：提权 helper 先于酷狗启动退出（issue #141）——
 	"Elevated patch helper has exited (it waits at most 10 minutes); KuGou will not be stopped when it starts, and the repair will be retried after that": "提权 helper 已退出（它至多等 10 分钟）；酷狗启动后不会被结束，随后重试修复",
+
+	// —— player/sodamusic：汽水退出时释放 inspector 会话（issue #188）——
+	"SodaMusic main process is exiting; releasing the inspector session":                                 "汽水音乐主进程正在退出，释放 inspector 会话",
+	"SodaMusic data unavailable for %s (%v); treating it as exiting and releasing the inspector session": "汽水音乐取数已连续失败 %s（%v），按正在退出处理，释放 inspector 会话",
+
+	// —— player/kugou：换歌过渡态读到上一首的进度（issue #195）——
+	"Progress %.2fs read while switching songs matches the previous song; announcing from 0": "换歌过渡态读到的进度 %.2fs 与上一首吻合，按 0 宣告",
 }

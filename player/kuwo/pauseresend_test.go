@@ -12,6 +12,9 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"Metabox-Nexus-PlayerCap/player/kuwo/cdp"
+	"Metabox-Nexus-PlayerCap/player/kuwo/pos"
 )
 
 // The resent pause carries the current clock position, and the front-end model
@@ -101,6 +104,79 @@ func TestPauseResendClearedByResume(t *testing.T) {
 	}
 	if s.pausePending {
 		t.Fatal("resuming playback must clear pausePending")
+	}
+}
+
+// heldTick is one tick in runSession's order for a sample whose raw core position
+// is ms, with the snapshot answered at at: the #185 hold, observe unless held,
+// then the pause resend.
+func heldTick(s *session, rid string, status int, ms int32, at time.Time) {
+	snap := cdp.Snapshot{RID: rid, Title: "song " + rid, Artist: "artist", Status: status}
+	sample := pos.Sample{RID: rid, PositionMs: ms, CoreMs: ms, DurationMs: 100000, ObservedAt: at}
+	if !s.hold(snap, at, sample) {
+		s.observe(snap, sample)
+	}
+	s.resendPauseIfPending()
+}
+
+// Review round 1 of #185, item 3, the sibling of TestPauseResendClearedByResume:
+// a pause was dropped, then the user resumed playback and dragged to the start.
+// The snapshot reports playing, but the sample is held, so observe has not taken
+// the state: s.playing is stale and pausePending still set. The held ticks send
+// no pause (it is void: playback resumed); the release publishes the state
+// change and one resume, and clears pausePending
+// (doc/design/kuwo-switch-fallback-design.md §5.2 "播放状态与暂停补发").
+// 变异自证：resendPauseIfPending 去掉持有期间的状态门槛，持有拍按过期的 s.playing 补发 playback_pause，变红（实测）。
+func TestPauseResendVoidWhileHeldPlaying(t *testing.T) {
+	defer func(v time.Duration) { switchConfirmAfter = v }(switchConfirmAfter)
+	switchConfirmAfter = 300 * time.Millisecond
+	p := New(0, 50)
+	s := newSession(p)
+	t0 := time.Now()
+	heldTick(s, "MUSIC_1", 1, 10000, t0)
+	drainEvents(p)
+	fillEvents(p)
+	heldTick(s, "MUSIC_1", 2, 10000, after(t0, 50)) // pause dropped
+	drainEvents(p)
+	if !s.pausePending {
+		t.Fatal("a dropped pause must set pausePending")
+	}
+	heldTick(s, "MUSIC_1", 1, 0, after(t0, 100))  // resumed and dragged to 0:00: held
+	heldTick(s, "MUSIC_1", 1, 50, after(t0, 150)) // still held
+	if got := drainEvents(p); len(got) != 0 {
+		t.Fatalf("held ticks published %v, want nothing", eventTypes(got))
+	}
+	heldTick(s, "MUSIC_1", 1, 300, after(t0, 400)) // confirmed
+	got := drainEvents(p)
+	if pub := published(got); !slices.Equal(pub, []string{resumeAt(300)}) {
+		t.Fatalf("the release published %v, want just resume@300", pub)
+	}
+	if statusCount(got, "playing") != 1 {
+		t.Fatalf("the release must publish the playing state: %v", eventTypes(got))
+	}
+	if s.pausePending {
+		t.Fatal("the release resumed playback: pausePending must clear")
+	}
+}
+
+// Counterexample: still paused (the snapshot reports status 2) while a step back
+// is held, the pending pause is resent on the held tick as on any tick.
+// 变异自证：持有期间一律不补发，pause 推迟到确认之后，变红（实测）。
+func TestPauseResendWhileHeldPaused(t *testing.T) {
+	p := New(0, 50)
+	s := newSession(p)
+	t0 := time.Now()
+	heldTick(s, "MUSIC_1", 1, 10000, t0)
+	drainEvents(p)
+	fillEvents(p)
+	heldTick(s, "MUSIC_1", 2, 10000, after(t0, 50)) // pause dropped
+	drainEvents(p)
+	heldTick(s, "MUSIC_1", 2, 0, after(t0, 100)) // held, still paused
+	if pub := published(drainEvents(p)); !slices.Equal(pub, []string{pauseAt(10000)}) {
+		t.Fatalf("the held paused tick published %v, want pause@10000", pub)
+	}
+	if s.pausePending {
+		t.Fatal("the resent pause enqueued: pausePending must clear")
 	}
 }
 

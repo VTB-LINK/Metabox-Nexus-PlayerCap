@@ -26,6 +26,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -39,16 +40,64 @@ import (
 func TestGuardOnlyUsedAsDirectDefer(t *testing.T) {
 	pkgPath := reflect.TypeOf(Options{}).PkgPath() // 包挪目录/module 改名都自动跟上
 
-	var violations []string
-	var scanned, guarded int
+	violations, scanned, guarded, err := scanGuardCalls("..", pkgPath)
+	if err != nil {
+		t.Fatalf("遍历仓库失败: %v", err)
+	}
 
-	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+	if len(violations) > 0 {
+		t.Errorf("下列位置的 %s.Guard 不是 `defer` 直接调用：\n  %s\n\n"+
+			"Go 的 recover() 只在被 defer 直接调用的函数里有效。包一层闭包"+
+			"（defer func(){ Guard() }()）会让 recover() 返回 nil —— panic 照常向上跑、"+
+			"进程照常死，看不出任何区别，但**上报静默失效**。",
+			pkgPath, strings.Join(violations, "\n  "))
+	}
+
+	// 反向自证：如果一个 Guard 调用点都没扫到，说明这个门禁在空转 —— 那比没有门禁更糟，
+	// 因为它会让人以为「已经守住了」。main.go 现在就有 11 处（main 自己 + 10 个 goroutine）。
+	if guarded == 0 {
+		t.Errorf("全仓没有扫到任何 %s.Guard 调用点（检查了 %d 个 import 了本包的文件）—— "+
+			"要么接线全没了，要么这个门禁的匹配逻辑坏了。两种都得查。", pkgPath, scanned)
+	}
+	t.Logf("扫过 %d 个 import 了 telemetry 的文件，%d 处合法的 defer Guard()", scanned, guarded)
+}
+
+// TestGuardScanSkipsAgentWorktrees 钉住全仓扫描跳过 .claude：主目录下的 agent worktree 是停在
+// 各自提交上的仓库副本，扫进去会让主目录跑出别的分支的旧代码。别处的子目录照扫。
+//
+// 变异自证：去掉对 .claude 的跳过即红（实测）。
+func TestGuardScanSkipsAgentWorktrees(t *testing.T) {
+	const pkgPath = "example.com/m/telemetry"
+	bad := []byte("package p\nimport telemetry \"example.com/m/telemetry\"\nfunc f() { defer func() { telemetry.Guard() }() }\n")
+	root := t.TempDir()
+	for _, dir := range []string{"sub", filepath.Join(".claude", "worktrees", "old", "sub")} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, dir, "x.go"), bad, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _, _, err := scanGuardCalls(root, pkgPath)
+	if err != nil {
+		t.Fatalf("扫描失败: %v", err)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "/sub/x.go:") || strings.Contains(got[0], "/.claude/") {
+		t.Errorf("应只报 sub/x.go 一处、不报 .claude 下的副本，实得 %v", got)
+	}
+}
+
+// scanGuardCalls 扫 root 下所有 .go，返回不是 `defer <pkg>.Guard()` 直接调用的位置，
+// 以及扫到的 import 了 pkgPath 的文件数与合法调用点数。跳过 .git、.claude、build-assets、node_modules。
+func scanGuardCalls(root, pkgPath string) (violations []string, scanned, guarded int, err error) {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint // 读不到的目录跳过，不让门禁因权限问题假红
 		}
 		if d.IsDir() {
+			// .claude 下是 agent 的 worktree（各自一份仓库副本，可能停在旧提交上），不属于本仓库的源码。
 			switch d.Name() {
-			case ".git", "build-assets", "node_modules":
+			case ".git", ".claude", "build-assets", "node_modules":
 				return fs.SkipDir
 			}
 			return nil
@@ -99,25 +148,7 @@ func TestGuardOnlyUsedAsDirectDefer(t *testing.T) {
 		})
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("遍历仓库失败: %v", err)
-	}
-
-	if len(violations) > 0 {
-		t.Errorf("下列位置的 %s.Guard 不是 `defer` 直接调用：\n  %s\n\n"+
-			"Go 的 recover() 只在被 defer 直接调用的函数里有效。包一层闭包"+
-			"（defer func(){ Guard() }()）会让 recover() 返回 nil —— panic 照常向上跑、"+
-			"进程照常死，看不出任何区别，但**上报静默失效**。",
-			pkgPath, strings.Join(violations, "\n  "))
-	}
-
-	// 反向自证：如果一个 Guard 调用点都没扫到，说明这个门禁在空转 —— 那比没有门禁更糟，
-	// 因为它会让人以为「已经守住了」。main.go 现在就有 11 处（main 自己 + 10 个 goroutine）。
-	if guarded == 0 {
-		t.Errorf("全仓没有扫到任何 %s.Guard 调用点（检查了 %d 个 import 了本包的文件）—— "+
-			"要么接线全没了，要么这个门禁的匹配逻辑坏了。两种都得查。", pkgPath, scanned)
-	}
-	t.Logf("扫过 %d 个 import 了 telemetry 的文件，%d 处合法的 defer Guard()", scanned, guarded)
+	return violations, scanned, guarded, err
 }
 
 // localNameOf 返回 pkgPath 在文件 f 里的本地名（别名 import 时是别名），没 import 则返回 ""。

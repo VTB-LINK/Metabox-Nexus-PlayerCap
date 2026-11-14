@@ -6,7 +6,9 @@ package player
 // 变异自证（均实测，逐条记在各用例注释里）。
 
 import (
+	"bytes"
 	"encoding/base64"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -81,6 +83,63 @@ func TestFetchCoverBase64Normalizes(t *testing.T) {
 	}
 	if got := FetchCoverBase64("Test", srv.URL+"/big.jpg", 5*time.Second); got != "" {
 		t.Fatalf("超过 5MB 应返回空串，got %d 字节", len(got))
+	}
+}
+
+// 下载失败时记一条带原因的 Detail（#199）：非 200 写状态码与 URL，超过 5MB 写上限与 URL；返回值仍为空串。
+//
+// 变异自证：删掉非 200 那一支的日志，「HTTP 404」一步红；删掉超限那一支的日志，「larger than」一步红。
+func TestFetchCoverBase64LogsFailureReason(t *testing.T) {
+	orig := newCoverClient
+	newCoverClient = func(timeout time.Duration) *http.Client { return &http.Client{Timeout: timeout} }
+	t.Cleanup(func() { newCoverClient = orig })
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldOut) })
+
+	srv, _ := coverServer(t, map[string][2]string{"/big.jpg": {"image/jpeg", strings.Repeat("x", 5<<20+1)}})
+	for _, c := range []struct{ path, want string }{
+		{"/missing.jpg", "HTTP 404: " + srv.URL + "/missing.jpg"},
+		{"/big.jpg", "larger than 5242880 bytes, sending the URL only: " + srv.URL + "/big.jpg"},
+	} {
+		buf.Reset()
+		if got := FetchCoverBase64("Test", srv.URL+c.path, 5*time.Second); got != "" {
+			t.Fatalf("%s: 应返回空串，got %d 字节", c.path, len(got))
+		}
+		if !strings.Contains(buf.String(), c.want) {
+			t.Fatalf("%s: 日志应含 %q，got %q", c.path, c.want, buf.String())
+		}
+	}
+}
+
+// 下载带浏览器标识的 User-Agent（#194）：酷狗歌手图的图床拒绝 Go 默认的 User-Agent（http、https 都回 403）。
+// 服务端照此行为：User-Agent 以 Go-http-client 开头即 403。
+//
+// 变异自证：删掉 FetchCoverBase64 里设置 User-Agent 的一行，请求带 Go 默认的 User-Agent，得 403、返回空串而红。
+func TestFetchCoverBase64SendsBrowserUserAgent(t *testing.T) {
+	orig := newCoverClient
+	newCoverClient = func(timeout time.Duration) *http.Client { return &http.Client{Timeout: timeout} }
+	t.Cleanup(func() { newCoverClient = orig })
+
+	jpg := photoJPEG(t, 800, 800)
+	var gotUA atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA.Store(r.UserAgent())
+		if strings.HasPrefix(r.UserAgent(), "Go-http-client") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(jpg)
+	}))
+	t.Cleanup(srv.Close)
+
+	if got := FetchCoverBase64("Test", srv.URL+"/singer.jpg", 5*time.Second); !strings.HasPrefix(got, "data:image/jpeg;base64,") {
+		t.Fatalf("应带浏览器标识取到图片，got %q，服务端收到的 User-Agent %q", got[:min(len(got), 40)], gotUA.Load())
+	}
+	if ua, _ := gotUA.Load().(string); ua != "Mozilla/5.0" {
+		t.Fatalf("User-Agent 应为 Mozilla/5.0，got %q", ua)
 	}
 }
 

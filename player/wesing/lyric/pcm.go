@@ -51,6 +51,25 @@ const (
 	pcmRateMin      = 0.95
 	pcmRateMax      = 1.05
 	pcmStallTimeout = 5 * time.Second // 口径同 wesing.go 的 deadAddrTimeout（#44）
+
+	// pcmRateDeadline 速率核对的完成期限（#177）：只累计推进超出范围的拍各自的拍间时长（#190，见 Observe），满了
+	// 仍未测满两段即判为不符。runSession 的 Warn 文案写的是 30s，改这里要一起改。
+	pcmRateDeadline = 30 * time.Second
+
+	// pcmRateCapPerSec 是每拍推进上限的系数：合格速率的上限 pcmRateMax 换算成每秒的字节数（185220）。常量运算
+	// 是精确的，换算不出整数时编译不过。
+	pcmRateCapPerSec = int64(pcmRateMax * pcmBytesPerSec)
+
+	// pcmRateSlack 是每拍推进上限的宽余：0.2 s（35280 字节，4 个 50 ms 台阶）。设计见
+	// doc/design/wesing-small-seek-design.md §3.3（#190）。
+	//   - 下限：上一拍读到的值在它读数之前不到一个台阶内生效，所以合格速率下两次读数之间的推进不超过
+	//     1.05 ×（拍间时长 + 上一拍读数之后、取时刻之前被抢占的时长）+ 一个台阶。0.2 s 容得下约 0.14 s 的抢占，
+	//     以及粗到 0.15 s 的计数台阶（#145 代码审 F4）。取 0.1 s 时，192 kHz 在 30 ms 一拍下约六成的拍超出，要到期
+	//     才判出。
+	//   - 漏判（设计审第 1 轮 F1，已接受的残余，设计 §3.5）：跳变那一拍的正常推进可以为 0（30 ms 的拍里不落
+	//     50 ms 台阶），漏过的前跳至多「1.05 × 拍间时长 + 0.2 s」，30 ms 一拍约 0.23 s，所在的一段可测得约 1.0545。
+	//     收紧宽余会贴近下限，并使比例偏高的伴奏反复被作废、退出变慢（设计 §8 第 2 轮 F3）。
+	pcmRateSlack = pcmBytesPerSec / 5
 )
 
 // FindPCMVtable 在 KSongsAVCapture.dll 的映像里定位 CAudioDecodeForPCM 的主虚表。模块不在、映像大于 64 MB、
@@ -194,8 +213,8 @@ func pickReady(m memory, vtable uint32, hits []uint32, wait func()) (uint32, pic
 
 // confirmPCM 在宣告之前再查一次选中的实例：仍满足挑选的四条，并且 mid 非空时路径的文件名是
 // <mid>_accompany.pcm（不分大小写）。不过关时隔一步（wait）重读，至多 pcmRetries 次：路径稍后才换成这首歌的、
-// 中间还有总字节清零的那一下。mid 为空时不核对路径，也不重读。过关那次的读数即宣告用的总时长与初始位置，
-// 那次的路径给出路径 mid（#146）。
+// 中间还有总字节清零的那一下。mid 为空时不核对路径，也不重读。过关那次的读数即宣告用的总时长（初始位置在
+// 宣告之前另行重读，#191），那次的路径给出路径 mid（#146）。
 func confirmPCM(m memory, vtable, inst uint32, mid string, wait func()) (*PCMClock, error) {
 	for try := 0; ; try++ {
 		h, path, st := checkInstance(m, inst, vtable)
@@ -235,6 +254,13 @@ type PCMClock struct {
 	segPos   uint32
 	segs     int
 	rate     float64
+
+	// 完成期限（#177、#190）：prevAt 是上一次 Observe 的时刻；voided 是推进超出范围的拍累计的拍间时长；timedOut
+	// 为真表示速率核对是到期判为不符的，不是测出来的。voidNoted 记本首是否已记过作废的 Detail。
+	prevAt    time.Time
+	voided    time.Duration
+	timedOut  bool
+	voidNoted bool
 }
 
 // Addr 是实例的地址。
@@ -266,11 +292,14 @@ func pathMID(path string) string {
 // Total 是宣告用的总时长（秒）。
 func (c *PCMClock) Total() float32 { return float32(float64(c.total) / pcmBytesPerSec) }
 
-// Position 是最近一次读到的位置（秒），创建时即宣告用的初始位置。由整数换算，不会是 NaN 或负数。
+// Position 是最近一次读到的位置（秒），创建时是核对那次的。由整数换算，不会是 NaN 或负数。
 func (c *PCMClock) Position() float32 { return float32(float64(c.pos) / pcmBytesPerSec) }
 
 // Rate 是速率核对已测完的各段中较大的 Δpos / Δ墙钟，一段都没测完时为 0。
 func (c *PCMClock) Rate() float64 { return c.rate }
+
+// RateTimedOut 报告速率核对是否因完成期限到期而判为不符（#177，设计 §4.9）：此时 Rate 不是判定的依据。
+func (c *PCMClock) RateTimedOut() bool { return c.timedOut }
 
 // PCMRead 是每拍读数的结论。
 type PCMRead int
@@ -306,14 +335,15 @@ type PCMVerdict int
 
 const (
 	PCMKeep PCMVerdict = iota
-	// PCMRateOff：推进速率不在 [0.95, 1.05]，采样格式不是 44.1 kHz、16 bit、双声道，换算比例不成立。
+	// PCMRateOff：推进速率不在 [0.95, 1.05]，采样格式不是 44.1 kHz、16 bit、双声道，换算比例不成立；或速率
+	// 核对到期未能测满（RateTimedOut）。这一首改走兜底，下一首仍先试 PCM（#196，见 wesing.go 的 pcmSkip）。
 	PCMRateOff
 	// PCMStalled：进入轮询后 5 s 内一次都没推进。
 	PCMStalled
 )
 
-// Observe 在每拍读数成功、本拍的暂停判定之后调用：now 是本拍的时刻，paused 是本拍判定的暂停状态，位置取
-// 本拍 Read 读到的。
+// Observe 在每拍读数成功、本拍的暂停判定之后调用：now 是本拍的时刻，paused 是本拍判定的暂停状态，位置取本拍
+// Read 读到的。
 //
 // 停滞检测：唯一的实例也可能是停住的残留对象，速率核对要等推进满 5 s 才判，拦不住它（设计审 F1）。开歌即
 // 暂停的歌会因此本首走兜底，结果与现状相同。「推进」是比上一拍大：重唱归零之后再走也算。
@@ -321,22 +351,48 @@ const (
 // 速率核对：按段测，一段是推进中、没有判为暂停的区间，推进满 5 s 时算一次 Δpos / Δ墙钟；测完一段紧接着
 // 从这一拍起测下一段。测满两段后取较大的一个判定，每首只判一次（设计 §4.2，代码审 F1、F4、F5）。不足 1 s
 // 的停顿判不成暂停，落在一段里只会拉低这一段的速率，所以较大的一个更接近真实：一段干净即可判对；不按
-// 停顿作废区间，否则轮询间隔大时看不见停顿、计数台阶粗时区间永远凑不满。判为暂停、或读数回退（重唱）
-// 时只作废正在测的那一段；读数停着的拍顺延这一段的起点，开播前、重唱归零之后停着的那一会儿不算进去。
+// 停顿作废区间，否则轮询间隔大时看不见停顿、计数台阶粗时区间永远凑不满。判为暂停时只作废正在测的那一段。
+// 读数不高于段起点时从本拍重新起算：停着的拍由此顺延起点，开播前、重唱归零之后停着的那一会儿不算进去。
+//
+// 每拍上限（#190，设计 doc/design/wesing-small-seek-design.md §3.3）：从第二次调用起，本拍推进（比上一拍的
+// 读数，可为负）为负、或超过「1.05 × 拍间时长 + 0.2 s」即超出范围，作废正在测的那一段：跳转与回退不论大小、
+// 方向都不算进速率段，也不必经跳转判定（门槛 2 s）来报。上限是合格速率在本拍间隔内可能给出的最大推进加宽余，
+// 比例正确时没有跳变的拍不会超出（见 pcmRateSlack）。上限以内的跳变照常计入，是已接受的残余（设计 §3.5）。
+//
+// 完成期限（#177）：只累计超出范围的拍各自的拍间时长，判为暂停的拍、正常推进的拍不累计也不清零；满
+// pcmRateDeadline 仍未测满两段即判为不符。比例不对的伴奏每拍都超出范围时，段每拍作废，没有期限就永远测不满；
+// 正常暂停不累计，反复「播几秒、停几秒」不会到期。期限累计的是拍间时长，不是墙钟：超出范围的拍稀疏而段仍测
+// 不满时，判出可慢到数百秒（设计 §3.5 残余 2）。
 func (c *PCMClock) Observe(now time.Time, paused bool) PCMVerdict {
 	pos := c.pos
 	if c.start.IsZero() {
 		c.start, c.last = now, pos
 	}
+	adv := int64(pos) - int64(c.last) // 本拍推进（字节）
 	if pos > c.last {
 		c.advanced = true
 	}
 	c.last = pos
+	prev := c.prevAt
+	c.prevAt = now
 	if !c.advanced && now.Sub(c.start) > pcmStallTimeout {
 		return PCMStalled
 	}
 
 	if c.rateDone {
+		return PCMKeep
+	}
+	if dt := now.Sub(prev); !prev.IsZero() && advanceOutOfRange(adv, dt) {
+		if !c.voidNoted {
+			c.voidNoted = true
+			log.Detail("PCM rate segment voided: advanced %.2fs over %.2fs", float64(adv)/pcmBytesPerSec, dt.Seconds())
+		}
+		c.voided += dt
+		if c.voided >= pcmRateDeadline {
+			c.rateDone, c.timedOut = true, true
+			return PCMRateOff
+		}
+		c.segOn = false
 		return PCMKeep
 	}
 	if paused {
@@ -365,4 +421,19 @@ func (c *PCMClock) Observe(now time.Time, paused bool) PCMVerdict {
 		return PCMRateOff
 	}
 	return PCMKeep
+}
+
+// advanceOutOfRange 报告一拍推进 adv 字节在拍间时长 dt 内是否超出范围（#190，见 Observe）：为负，或超过
+// pcmRateCapPerSec × dt + pcmRateSlack。整数运算、按整秒与零头分开乘，不溢出也没有浮点误差：adv 是整数，
+// adv 大于上限的下取整，即大于上限本身。dt 不为正时上限只剩宽余。
+func advanceOutOfRange(adv int64, dt time.Duration) bool {
+	if adv < 0 {
+		return true
+	}
+	limit := int64(pcmRateSlack)
+	if dt > 0 {
+		sec, frac := int64(dt/time.Second), int64(dt%time.Second)
+		limit += sec*pcmRateCapPerSec + frac*pcmRateCapPerSec/int64(time.Second)
+	}
+	return adv > limit
 }

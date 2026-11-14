@@ -1,6 +1,10 @@
 package kuwo
 
-import "Metabox-Nexus-PlayerCap/player/kuwo/pos"
+import (
+	"time"
+
+	"Metabox-Nexus-PlayerCap/player/kuwo/pos"
+)
 
 // lagReader is the seek-lag source the corrected source reads after the core:
 // *pos.LagReader, or a fake in tests. Read returns the #131 seek-lag sample and
@@ -15,9 +19,13 @@ type lagReader interface {
 // position (#135) and then deducts the seek lag (#131)
 // (doc/design/kuwo-output-transient-design.md §3.2, §3.8;
 // doc/design/kuwo-seek-lag-design.md §3.3, §3.4). The filter and the corrector
-// both live as long as the core reader: runSession closes the reader when there
-// is no song and opens a new one, with a fresh zero-value filter and corrector,
-// when a song plays again.
+// both live as long as the core reader. runSession keeps this reader through a
+// song switch, the bridge's no-song and settling moments included, and has it
+// observe the output on the ticks with no core sample, so the next song's
+// opening segment is seen from its start (#198,
+// doc/design/kuwo-switch-start-transient-design.md §5.1); it closes the reader
+// once the session clears, and a song after that opens a new one, with a fresh
+// zero-value filter and corrector.
 type correctedSource struct {
 	core   positionSource
 	lag    lagReader
@@ -36,9 +44,16 @@ func newCorrectedSource(core positionSource, lag lagReader, warned *bool, pollMs
 	return &correctedSource{core: core, lag: lag, warned: warned, pollMs: pollMs}
 }
 
+// trackNow stamps an output-only observation (#198). A package var so tests can
+// run the filter on their fake's clock.
+var trackNow = time.Now
+
 func (s *correctedSource) Read(rid string, playing bool) (pos.Sample, error) {
 	sample, err := s.core.Read(rid, playing)
 	if err != nil {
+		// A failed core read (the core still on the previous song, a torn sample)
+		// still observes the output, for the next song's opening (#198 A-2).
+		s.observeOutput()
 		return sample, err
 	}
 	// Neither the transient filter nor the correction may fail the session. A
@@ -64,6 +79,23 @@ func (s *correctedSource) Read(rid string, playing bool) (pos.Sample, error) {
 		}
 		log.Detail("Kuwo output transient filter engaged: method %s, base %d ms", method, out.Base)
 	}
+	// One Detail when a song's opening DirectSound segment, after a song change,
+	// passes a multi-report through (#198 A-5): for the real-device acceptance to
+	// tell why, and how often, the switch was not filtered.
+	if p, ok := s.filter.TakeOpenPass(); ok {
+		switch p.Reason {
+		case pos.OpenPassCrossingNotAfter:
+			log.Detail("Kuwo output transient not filtered at the song start: the Play crossing at %s is not after the previous song's last core sample at %s, base %d ms",
+				p.CrossAt.Format("15:04:05.000"), p.LastSongAt.Format("15:04:05.000"), p.Base)
+		case pos.OpenPassLongPoll:
+			log.Detail("Kuwo output transient not filtered at the song start: the poll interval is too long to anchor, base %d ms", p.Base)
+		case pos.OpenPassPassedAbove:
+			log.Detail("Kuwo output transient not filtered at the song start: a value above the base already went out uncapped, so the Play crossing at %s is not taken, base %d ms",
+				p.CrossAt.Format("15:04:05.000"), p.Base)
+		default:
+			log.Detail("Kuwo output transient not filtered at the song start: no fresh Play crossing was observed, base %d ms", p.Base)
+		}
+	}
 	corrected, note := s.c.Apply(filtered, lag)
 	k := note.Key
 	switch note.Kind {
@@ -78,6 +110,22 @@ func (s *correctedSource) Read(rid string, playing bool) (pos.Sample, error) {
 		}
 	}
 	return corrected, nil
+}
+
+// outputReader is a lagReader that reads the output state alone (#198):
+// *pos.LagReader, and the fakes of the tests that cover the switch.
+type outputReader interface {
+	ReadOutput() pos.OutputState
+}
+
+// observeOutput reads the output state on a tick with no core sample and gives it
+// to the filter's output tracking only (#198 A-2): neither the filter's state
+// machine nor the #131 corrector sees the tick, and the seek-lag fields are not
+// read. A failed read is an invalid state, which the tracking skips.
+func (s *correctedSource) observeOutput() {
+	if r, ok := s.lag.(outputReader); ok {
+		s.filter.Track(r.ReadOutput(), trackNow())
+	}
 }
 
 func (s *correctedSource) Close() {

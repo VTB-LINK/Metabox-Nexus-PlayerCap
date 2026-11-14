@@ -45,9 +45,28 @@ type Client struct {
 	closed bool
 }
 
-// cdpResponse 是 Runtime.evaluate 的响应壳（双层 result 嵌套）。
+// ErrHostExiting 表示汽水主进程已进入退出前「等待全部调试会话断开」的阶段（见 waitingForDisconnect）。
+// 返回它时会话已经关闭。
+var ErrHostExiting = i18n.Sentinel("SodaMusic main process is exiting and waiting for the debugger to disconnect")
+
+// waitingForDisconnect 是 Node inspector 在退出前等待调试会话断开时发出的事件。
+//
+// **不断开，汽水就退不掉**（issue #188）。Node 在 Agent::Start 里登记了一个 AtExit 回调：只要
+// inspector 的 I/O 线程开着（_debugProcess 激活后即如此），退出时就调 WaitForDisconnect，先停止
+// 接受新连接，再在主线程上循环处理调试消息，直到不再有连着的 WebSocket 会话为止（经 9229 连入的
+// 会话一律带 prevent_shutdown）。Electron 的主进程在 PostMainMessageLoopRun 里释放 Node 环境时走到
+// 这一步，此时窗口已经关闭、Node 已禁止执行 JS，Extract 不会再成功；runSession 若把失败一律当瞬时
+// 原地重试、不断开，主进程就一直停在这里，留下几个没有窗口的进程，重开汽水时新实例的窗口也随之
+// 卡住。出处与推断的边界见 AGENTS §7.7.4。
+//
+// dial 时订阅它（NodeRuntime.notifyWhenWaitingForDisconnect），evaluate 读到即断开。订阅只作用于
+// 我们这条会话，不改变汽水的行为：没有会话时 Node 不发它，也不等待。
+const waitingForDisconnect = "NodeRuntime.waitingForDisconnect"
+
+// cdpResponse 是 Runtime.evaluate 的响应壳（双层 result 嵌套）。Method 只在事件帧上非空。
 type cdpResponse struct {
-	ID     int `json:"id"`
+	ID     int    `json:"id"`
+	Method string `json:"method"`
 	Result struct {
 		Result struct {
 			Type  string          `json:"type"`
@@ -112,9 +131,23 @@ func Connect() (*Client, error) {
 	if wsURL == "" {
 		return nil, i18n.Errorf("target has no webSocketDebuggerUrl")
 	}
+	return dial(wsURL)
+}
+
+// dial 建立会话，并订阅 waitingForDisconnect。订阅只发不等：它的回复（旧版 Node 不认这条命令时是
+// 一条报错）id 为 1，由 evaluate 按 id 跳过。
+func dial(wsURL string) (*Client, error) {
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		return nil, i18n.Errorf("WebSocket connection failed: %w", err)
+	}
+	if err := conn.WriteJSON(map[string]interface{}{
+		"id":     1,
+		"method": "NodeRuntime.notifyWhenWaitingForDisconnect",
+		"params": map[string]interface{}{"enabled": true},
+	}); err != nil {
+		conn.Close()
+		return nil, i18n.Errorf("failed to write CDP request: %w", err)
 	}
 	return &Client{conn: conn, msgID: 1}, nil
 }
@@ -166,13 +199,17 @@ func (c *Client) evaluate(expression string, awaitPromise bool) (string, error) 
 		c.markClosed()
 		return "", i18n.Errorf("failed to write CDP request: %w", err)
 	}
-	// 读到匹配 id 的回复；忽略其它帧。ReadDeadline 兜底防卡死。
+	// 读到匹配 id 的回复；忽略其它帧，waitingForDisconnect 除外。ReadDeadline 兜底防卡死。
 	_ = c.conn.SetReadDeadline(time.Now().Add(9 * time.Second))
 	for {
 		var res cdpResponse
 		if err := c.conn.ReadJSON(&res); err != nil {
 			c.markClosed()
 			return "", i18n.Errorf("failed to read CDP reply: %w", err)
+		}
+		if res.Method == waitingForDisconnect {
+			c.markClosed()
+			return "", ErrHostExiting
 		}
 		if res.ID != id {
 			continue

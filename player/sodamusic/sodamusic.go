@@ -11,6 +11,7 @@ package sodamusic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -77,6 +78,51 @@ func EffectivePollInterval(pollMs int) time.Duration {
 	return d
 }
 
+// exitFailGrace：Extract 连续失败满这么久，即按汽水正在退出处理，释放 inspector 会话（issue #188）。
+//
+// 这是 waitingForDisconnect 事件之外的兜底（AGENTS §7.7.4）：事件没来（旧版 Node 不认订阅、或别的
+// 原因）时，会话最多把退出中的主进程多拖这么久。取 10s：取数平时偶有失败（换歌间隙、渲染器繁忙，
+// 探针自身的超时是 2.5s），正常运行中连续失败能持续多久没有实测数据，10s 是四个探针超时的量级；
+// 误判的代价只是断开后隔一段时间重连（见 reattachCooldown）。托盘播放时取数照常成功（真机上托盘
+// 播放进度正常），不会走到这里。
+const exitFailGrace = 10 * time.Second
+
+// reattachCooldown：因察觉退出而释放会话后，同一主进程 pid 在这段时间内不激活 inspector、也不连接。
+//
+// 释放后主进程约 2s 内退出（issue #188 真机）。其间再去激活，是往正在拆除 Node 环境的进程里建远程
+// 线程：按 Node 源码，激活入口在环境清理后会断言失败（AGENTS §7.7.4）。15s 给足余量；若其实是误判、
+// 汽水还在，冷却期满照常重连。
+const reattachCooldown = 15 * time.Second
+
+// noSongTolerance：已宣告过歌曲后，取到的播放态连续没有歌曲（mediaId 与歌名都为空）满这么久，才清空歌曲数据并报
+// waiting_song（issue #193）。其间保留上一首，不发它的位置与状态事件；已在下载的封面照常补给这一首（它仍是对外显示的
+// 那首），清空时取消。新歌到来即按换歌直接替换。
+//
+// 取 kuwo 的值（#182：酷我换歌时网页桥报告没有歌曲，实测 0.57s、1.10s）。汽水换歌时是否也有这样一刻未实测：已知的
+// 换歌过渡是 mediaId 先变、歌名晚到（见换歌分支），不走这里。真机未覆盖：汽水会自动填充播放列表，正常操作碰不到
+// 没有歌曲；本条只有离线用例（nosong_test.go）。
+const noSongTolerance = 2 * time.Second
+
+// noSongStatus 是读到没有歌曲时报的状态。
+func noSongStatus() *player.StatusInfo {
+	return &player.StatusInfo{Status: "waiting_song", Detail: i18n.T("Soda Music has no current song"), Reason: player.ReasonNoSong}
+}
+
+// extractSource 是 Start / runSession 用到的 CDP 客户端方法。生产恒为 *cdp.Client，测试注入按脚本返回的桩。
+type extractSource interface {
+	Extract() (*cdp.ExtractionData, error)
+	IsClosed() bool
+	Close()
+}
+
+// findMainPID、ensureInspector、connectCDP 是 Start 用到的 watchdog / cdp 入口的可替换 seam：仅供 Start 的
+// 离线测试注入桩。生产恒为原函数，不导出。
+var (
+	findMainPID     = watchdog.FindMainPID
+	ensureInspector = watchdog.EnsureInspector
+	connectCDP      = func() (extractSource, error) { return cdp.Connect() }
+)
+
 // sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
 func (p *SodaMusicPlayer) sleepOrStop(d time.Duration) bool {
 	select {
@@ -89,6 +135,9 @@ func (p *SodaMusicPlayer) sleepOrStop(d time.Duration) bool {
 
 // Start 启动汽水音乐轮询循环（阻塞，须在 goroutine 中调用）。
 func (p *SodaMusicPlayer) Start() {
+	// releasedPID / releasedAt：最近一次因察觉退出而释放会话的主进程与时刻（见 reattachCooldown）。
+	var releasedPID int
+	var releasedAt time.Time
 	for {
 		select {
 		case <-p.StopCh:
@@ -99,16 +148,16 @@ func (p *SodaMusicPlayer) Start() {
 		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Soda Music not running or not connected"), Reason: player.ReasonProcessNotRunning})
 		p.Emit(player.EventClearSongData, nil)
 
-		pid, err := watchdog.FindMainPID()
-		if err != nil {
-			// 未运行——用户可能稍后启动，静默等待重试。
+		pid, err := findMainPID()
+		if err != nil || (pid == releasedPID && time.Since(releasedAt) < reattachCooldown) {
+			// 未运行——用户可能稍后启动，静默等待重试。刚释放的那个主进程正在退出，冷却期内同样等待。
 			if p.sleepOrStop(3 * time.Second) {
 				return
 			}
 			continue
 		}
 
-		if err := watchdog.EnsureInspector(pid); err != nil {
+		if err := ensureInspector(pid); err != nil {
 			log.Warn("failed to open SodaMusic inspector: %v", err)
 			if p.sleepOrStop(3 * time.Second) {
 				return
@@ -116,7 +165,7 @@ func (p *SodaMusicPlayer) Start() {
 			continue
 		}
 
-		client, err := cdp.Connect()
+		client, err := connectCDP()
 		if err != nil {
 			log.Warn("CDP connection failed: %v", err)
 			if p.sleepOrStop(2 * time.Second) {
@@ -126,7 +175,9 @@ func (p *SodaMusicPlayer) Start() {
 		}
 
 		log.Info("CDP connected, monitoring playback state")
-		p.runSession(client)
+		if p.runSession(client) {
+			releasedPID, releasedAt = pid, time.Now()
+		}
 		client.Close()
 
 		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("Soda Music CDP disconnected"), Reason: player.ReasonCDPDisconnected})
@@ -137,12 +188,25 @@ func (p *SodaMusicPlayer) Start() {
 	}
 }
 
-// runSession 轮询 sharedState 播放态并 emit 事件，直到 CDP 断开。
-func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
+// runSession 轮询 sharedState 播放态并 emit 事件，直到 CDP 断开、收到停止信号，或察觉汽水正在退出。
+// 返回 true 表示察觉退出：调用方须立即关闭 client，汽水主进程才能结束（见 exitFailGrace）。
+func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	pollInterval := EffectivePollInterval(p.pollMs)
 
+	// failSince 是这一段连续取数失败的起点，取数成功即清零。
+	var failSince time.Time
+
+	// lastMediaID 是已宣告的那首歌，空 = 没有（会话刚建立，或因持续没有歌曲已清空）。announced 是本会话宣告过歌曲，
+	// 清空之后仍为真：换歌分支「是不是本会话第一首」的判据用它，不用 lastMediaID。
 	var lastMediaID string
+	var announced bool
+	// noSongSince 是这一段连续读到没有歌曲的起点，读到歌曲即清零（见 noSongTolerance）。
+	var noSongSince time.Time
+	// clearStatus / clearData：已判清空、还没入队的 waiting_song 与 clear_song_data。通道满时 Emit 直接丢弃，而清空
+	// 之后 lastMediaID 已复位、不会再判一次，丢了就再没有机会补，服务端缓存里一直留着上一首。故二者经 TryEmit 逐拍
+	// 重试，状态入队之后才发清空；宣告了新歌即作罢：新歌的 all_lyrics 与 song_info_update 覆盖清空要清的全部缓存字段。
+	var clearStatus, clearData bool
 	var lastPlaying = -1 // -1 未知 / 0 暂停 / 1 播放
 	// pendingID / pendingSince / pendingRawFresh：正在等就绪的那首歌、从哪一刻开始等、
 	// 以及**这首歌出现之后有没有见过新采样**（见换歌分支的两道就绪闸）。
@@ -217,7 +281,7 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 			if coverCancel != nil {
 				coverCancel()
 			}
-			return
+			return false
 		default:
 		}
 
@@ -225,27 +289,71 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 			if coverCancel != nil {
 				coverCancel()
 			}
-			return
+			return false
 		}
 
 		data, err := client.Extract()
 		if err != nil {
-			// 提取失败可能是瞬时（换歌间隙/无歌曲）。连接真断了才退出重连。
-			if client.IsClosed() {
+			// 提取失败多是瞬时的（换歌间隙、渲染器繁忙），原地重试；连接真断了才退出重连。
+			//
+			// 汽水退出时不是瞬时的：主进程停在 Node 退出前的等待里，直到这条会话断开（issue #188，
+			// AGENTS §7.7.4）。inspector 宣告进入这一等待（ErrHostExiting），或取数连续失败满
+			// exitFailGrace，都按退出处理，交 Start 释放会话。
+			if failSince.IsZero() {
+				failSince = time.Now()
+			}
+			hostExiting := errors.Is(err, cdp.ErrHostExiting)
+			exiting := hostExiting || time.Since(failSince) >= exitFailGrace
+			if !exiting && !client.IsClosed() {
+				time.Sleep(pollInterval)
+				continue
+			}
+			if hostExiting {
+				log.Info("SodaMusic main process is exiting; releasing the inspector session")
+			} else if exiting {
+				log.Warn("SodaMusic data unavailable for %s (%v); treating it as exiting and releasing the inspector session", exitFailGrace, err)
+			}
+			if coverCancel != nil {
+				coverCancel()
+			}
+			return exiting
+		}
+		failSince = time.Time{}
+
+		// 没有歌曲（首页、清空播放列表）：还没宣告过歌曲当即报 waiting_song；已宣告的歌保留，不发它的位置与状态事件，
+		// 连续满 noSongTolerance 才清空并报 waiting_song（issue #193）。不能静默等待：路由不让 playing 超时（只有
+		// loading 与暂停中的占位会超时），已宣告的歌会一直停在那首。清空后各变量回到会话刚建立时的值，announced 除外；
+		// 同一首歌再出现按换歌重新宣告。汽水退出不经过这里：那时取数只会失败，见上。
+		//
+		// 已在下载的封面照常补给保留的这一首，清空时 coverCancel 取消。残余：封面协程通过 ctx 检查之后、清空之前的
+		// 极窄窗口里，它的 song_info_update 可能落在 clear_song_data 之后；换歌时取消上一首的封面同样如此（既有）。
+		if data.MediaID == "" && data.Name == "" {
+			if noSongSince.IsZero() {
+				noSongSince = time.Now()
+			}
+			if lastMediaID != "" && time.Since(noSongSince) >= noSongTolerance {
 				if coverCancel != nil {
 					coverCancel()
 				}
-				return
+				romaCh = nil
+				lastMediaID, pendingID, lastPlaying, isPlaying, lastLineIdx = "", "", -1, false, -1
+				currentLyrics, currentLyricItems, currentDurationSec, currentTitle, anchorProgressSec = nil, nil, 0, "", 0
+				clearStatus, clearData = true, true
+			}
+			// 先报状态、后清空，同 Start；各自入队才算发出（见 clearStatus）。清空之外，持续没有歌曲时状态经
+			// EmitStatusIfChanged，不随轮询重发，没入队的下一轮补发。
+			if clearStatus {
+				clearStatus = !p.TryEmit(player.EventStatusUpdate, noSongStatus())
+			} else if lastMediaID == "" {
+				p.EmitStatusIfChanged(noSongStatus())
+			}
+			if clearData && !clearStatus {
+				clearData = !p.TryEmit(player.EventClearSongData, nil)
 			}
 			time.Sleep(pollInterval)
 			continue
 		}
-
-		// 无歌曲加载（首页/未播放）：静默等待，交给路由超时判 idle。
-		if data.MediaID == "" && data.Name == "" {
-			time.Sleep(pollInterval)
-			continue
-		}
+		noSongSince = time.Time{}
 
 		progressSec := data.ProgressSeconds
 		durationSec := data.DurationSeconds
@@ -293,8 +401,11 @@ func (p *SodaMusicPlayer) runSession(client *cdp.Client) {
 				time.Sleep(pollInterval)
 				continue
 			}
-			// 先记「这是不是本会话的第一首」，再改 lastMediaID —— 顺序反了这个判据永远为假。
-			firstSong := lastMediaID == ""
+			// 先记「这是不是本会话的第一首」，再改 announced —— 顺序反了这个判据永远为假。因没有歌曲而清空之后
+			// 再来的歌不算第一首，照常过下面的新鲜度闸：它出现那一拍的读数可能仍是清空之前的旧值。
+			firstSong := !announced
+			announced = true
+			clearStatus, clearData = false, false
 			lastMediaID = data.MediaID
 			lastLineIdx = -1
 			currentDurationSec = durationSec

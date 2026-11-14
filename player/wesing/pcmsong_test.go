@@ -26,6 +26,7 @@ type fakePCM struct {
 	path    string
 	records map[string]lyric.SongInfo // 按 mid 查得到的记录
 	albums  map[string]string         // 歌曲 mid → 专辑 mid
+	pos     float32                   // 宣告前重读到的位置；假时钟核对那次的位置恒为 0
 	calls   []string
 }
 
@@ -54,6 +55,10 @@ func (f *fakePCM) queries() pcmQueries {
 			f.calls = append(f.calls, "album("+mid+")")
 			return f.albums[mid]
 		},
+		position: func(*lyric.PCMClock) float32 {
+			f.calls = append(f.calls, "position")
+			return f.pos
+		},
 	}
 }
 
@@ -71,6 +76,11 @@ func (f *fakePCM) queries() pcmQueries {
 //   - 情形 b 不记为已确认：「情形 b」红；
 //   - 路径 mid 为空也去查：「路径 mid 为空」多出两次查询而红；
 //   - 没有歌手也拼「 - 」：没有歌手的七例标题不对而红。
+//
+// 宣告用的初始位置在查找全部做完之后重读（#191）。变异自证（实测）：
+//   - 重读挪到核对之后、查找之前：带调用次序的五个成功例红；
+//   - 不重读、取核对那次的读数（clock.Position()）：「情形 a：按路径 mid 查到记录」「路径 mid 为空」的位置为 0 而红；
+//   - 重读挪进路径 mid 非空的分支：「路径 mid 为空」少了重读而红。
 func TestResolvePCM(t *testing.T) {
 	cur := lyric.SongInfo{Mid: psMID, Name: psWindow, Singer: "柳爽"}
 	prev := lyric.SongInfo{Mid: psPrevMID, Name: "这世界那么多人", Singer: "莫文蔚"}
@@ -85,16 +95,16 @@ func TestResolvePCM(t *testing.T) {
 		calls   string
 	}{
 		{"情形 a：按路径 mid 查到记录", psWindow,
-			fakePCM{rec: cur, path: psMID, records: map[string]lyric.SongInfo{psMID: cur}, albums: albums}, false,
-			pcmSong{title: psWindow + " - 柳爽", name: psWindow, singer: "柳爽", cover: cover, mid: psMID, confirmed: true},
-			"info(漠河舞厅) confirm(" + psMID + ") bymid(" + psMID + ") album(" + psMID + ")"},
+			fakePCM{rec: cur, path: psMID, records: map[string]lyric.SongInfo{psMID: cur}, albums: albums, pos: 1.65}, false,
+			pcmSong{title: psWindow + " - 柳爽", name: psWindow, singer: "柳爽", cover: cover, mid: psMID, confirmed: true, pos: 1.65},
+			"info(漠河舞厅) confirm(" + psMID + ") bymid(" + psMID + ") album(" + psMID + ") position"},
 		{"情形 a，歌手为空", psWindow,
 			fakePCM{rec: cur, path: psMID, records: map[string]lyric.SongInfo{psMID: {Mid: psMID, Name: psWindow}}, albums: albums}, false,
 			pcmSong{title: psWindow, name: psWindow, cover: cover, mid: psMID, confirmed: true}, ""},
 		{"情形 a：按窗口歌名退回的是上一首，按路径 mid 查到这首", psWindow,
 			fakePCM{rec: prev, path: psMID, records: map[string]lyric.SongInfo{psMID: cur}, albums: albums}, false,
 			pcmSong{title: psWindow + " - 柳爽", name: psWindow, singer: "柳爽", cover: cover, mid: psMID, confirmed: true},
-			"info(漠河舞厅) confirm() bymid(" + psMID + ") album(" + psMID + ")"},
+			"info(漠河舞厅) confirm() bymid(" + psMID + ") album(" + psMID + ") position"},
 		{"a 与 b 都有，取 a", psWindow,
 			fakePCM{rec: lyric.SongInfo{Mid: psMID, Name: psWindow, Singer: "窗口记录的歌手"}, path: psMID,
 				records: map[string]lyric.SongInfo{psMID: cur}, albums: albums}, false,
@@ -102,11 +112,11 @@ func TestResolvePCM(t *testing.T) {
 		{"情形 b：按路径 mid 查不到，窗口歌名匹配上的记录的 mid 等于路径 mid", psWindow,
 			fakePCM{rec: cur, path: psMID, albums: albums}, false,
 			pcmSong{title: psWindow + " - 柳爽", name: psWindow, singer: "柳爽", cover: cover, mid: psMID, confirmed: true},
-			"info(漠河舞厅) confirm(" + psMID + ") bymid(" + psMID + ") album(" + psMID + ")"},
+			"info(漠河舞厅) confirm(" + psMID + ") bymid(" + psMID + ") album(" + psMID + ") position"},
 		{"情形 c：记录尚未写入", psWindow,
 			fakePCM{path: psMID, albums: albums}, false,
 			pcmSong{title: psWindow, name: psWindow, cover: cover, mid: psMID},
-			"info(漠河舞厅) confirm() bymid(" + psMID + ") album(" + psMID + ")"},
+			"info(漠河舞厅) confirm() bymid(" + psMID + ") album(" + psMID + ") position"},
 		{"情形 c：窗口歌名匹配上的记录没有 mid", psWindow,
 			fakePCM{rec: lyric.SongInfo{Name: psWindow, Singer: "柳爽"}, path: psMID, albums: albums}, false,
 			pcmSong{title: psWindow, name: psWindow, cover: cover, mid: psMID}, ""},
@@ -119,7 +129,7 @@ func TestResolvePCM(t *testing.T) {
 		{"F1：按路径 mid 查不到，按窗口歌名退回上一首 A 的完整记录", psWindow,
 			fakePCM{rec: prev, path: psMID, albums: albums}, false,
 			pcmSong{title: psWindow, name: psWindow, cover: cover, mid: psMID},
-			"info(漠河舞厅) confirm() bymid(" + psMID + ") album(" + psMID + ")"},
+			"info(漠河舞厅) confirm() bymid(" + psMID + ") album(" + psMID + ") position"},
 		{"F2：同名的 A、B，窗口歌名匹配上的是 B，路径是上一首残留的 A", psWindow,
 			fakePCM{rec: lyric.SongInfo{Mid: psMID, Name: psWindow, Singer: "B 的歌手"}, path: psPrevMID,
 				records: map[string]lyric.SongInfo{psPrevMID: {Mid: psPrevMID, Name: psWindow, Singer: "A 的歌手"}}, albums: albums}, true,
@@ -128,8 +138,8 @@ func TestResolvePCM(t *testing.T) {
 			fakePCM{rec: cur, path: ""}, true,
 			pcmSong{}, "info(漠河舞厅) confirm(" + psMID + ")"},
 		{"路径 mid 为空（跳过核对）：不查歌曲信息与专辑", psWindow,
-			fakePCM{path: "", albums: albums}, false,
-			pcmSong{title: psWindow, name: psWindow}, "info(漠河舞厅) confirm()"},
+			fakePCM{path: "", albums: albums, pos: 2.4}, false,
+			pcmSong{title: psWindow, name: psWindow, pos: 2.4}, "info(漠河舞厅) confirm() position"},
 	}
 	for _, c := range cases {
 		clock, got, err := resolvePCM(c.window, c.f.queries())

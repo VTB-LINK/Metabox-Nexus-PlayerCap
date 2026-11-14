@@ -1,6 +1,6 @@
 package player
 
-// 本文件只测一件事：全仓 AST 门禁「LyricUpdate 字面量写了 Index: -1 就必须写 Progress」。
+// 本文件只测一件事：全仓 AST 门禁「LyricUpdate 字面量写了 Index: -1 就必须写 Position 与 Progress」。
 // 它不测 player 包的业务逻辑——扫的是整个仓库的源码。
 //
 // # 为什么这条要用 AST 门禁，而不是单元测试
@@ -20,6 +20,10 @@ package player
 // progress 为 0」。写文档的人照着 cloudmusic 看的，而 cloudmusic 只是漏了字段。
 // 一个漏写的字段，先变成 bug，再变成文档，最后变成下游据以实现的假契约。
 //
+// Position 同理：它是整曲实时位置（= progress × duration），每条 lyric_update 都带、与 index 无关。
+// 门禁起初只查 Progress，server 的无活跃隐藏清行（notifyPerPlayerIdleClear）于是只写了 Progress，
+// 对外发出 position=0 而 progress 是停下时的值（issue #176）。
+//
 // # 为什么盯 Index: -1 而不是所有 LyricUpdate
 //
 // 常规歌词行由 BuildLyricUpdate 统一构造（40e77af 把易错的语义锁在了一处），
@@ -35,10 +39,12 @@ import (
 	"testing"
 )
 
-// TestLyricUpdateIndexMinusOneHasProgress 全仓强制：写 Index: -1 的 LyricUpdate 字面量必须带 Progress。
+// TestLyricUpdateIndexMinusOneHasPositionProgress 全仓强制：写 Index: -1 的 LyricUpdate 字面量必须带
+// Position 与 Progress。
 //
-// 变异自证：把 player/kugou/kugou.go 里 index:-1 那处的 `Progress: progress` 删掉即红。
-func TestLyricUpdateIndexMinusOneHasProgress(t *testing.T) {
+// 变异自证：把 player/kugou/kugou.go 里 index:-1 那处的 `Progress: progress` 删掉即红；
+// 把 server/server.go 的 notifyPerPlayerIdleClear 里 `Position: position` 删掉即红（实测）。
+func TestLyricUpdateIndexMinusOneHasPositionProgress(t *testing.T) {
 	root, err := repoRoot()
 	if err != nil {
 		t.Fatalf("定位仓库根目录失败: %v", err)
@@ -48,11 +54,11 @@ func TestLyricUpdateIndexMinusOneHasProgress(t *testing.T) {
 		t.Fatalf("扫描源码失败: %v", err)
 	}
 	if len(violations) > 0 {
-		t.Errorf("发现 %d 处 LyricUpdate{Index: -1} 漏写 Progress（Go 零值会兜出 progress=0，"+
-			"而同一时刻 all_lyrics.progress 是实时值——同一个事件对自相矛盾，"+
+		t.Errorf("发现 %d 处 LyricUpdate{Index: -1} 漏写 Position 或 Progress（Go 零值会兜出 0，"+
+			"而同一时刻 all_lyrics 的 position/progress 是实时值——同一个事件对自相矛盾，"+
 			"且下游据此以为「纯音乐时进度条归零」）：\n  %s\n\n"+
-			"修法：Progress 通常在上面几行就由 player.ClampProgress 算好了（all_lyrics 已经带上它），"+
-			"补 `Progress: progress` 即可。参照 player/qqmusic/qqmusic.go:241。",
+			"修法：position 与 progress 通常在上面几行就算好了（all_lyrics 已经带上它们），"+
+			"补 `Position: position, Progress: progress` 即可。参照 player/qqmusic/qqmusic.go 的 emitNoLyrics。",
 			len(violations), strings.Join(violations, "\n  "))
 	}
 }
@@ -61,6 +67,8 @@ func TestLyricUpdateIndexMinusOneHasProgress(t *testing.T) {
 //
 // 照抄 callback_lint_test.go 的教训：**一个抓不住目标形状的门禁比没有门禁更糟**——
 // 它给人已经守住了的错觉。下面每种形状都是真实出现过或极可能出现的写法。
+//
+// 变异自证（均实测）：判定改成只查 Progress、只查 Position、两个都缺才报，各有应报的用例红。
 func TestLyricUpdateLintCatchesKnownHoles(t *testing.T) {
 	shouldCatch := map[string]string{
 		// cloudmusic.go:385 与 kugou.go:443 修复前的原样
@@ -86,6 +94,26 @@ import "Metabox-Nexus-PlayerCap/player"
 func f(playTime float32) {
 	emit(&player.LyricUpdate{PlayTime: playTime, Text: "", Index: -1})
 }`,
+		// server/server.go notifyPerPlayerIdleClear 修复前的原样（issue #176）：server 包经类型别名用裸名
+		"只带 Progress、缺 Position": `package server
+func f(progress float32) {
+	use(&LyricUpdate{Index: -1, Progress: progress})
+}`,
+		"只带 Position、缺 Progress": `package p
+import "Metabox-Nexus-PlayerCap/player"
+func f(pos float32) {
+	emit(&player.LyricUpdate{Index: -1, Text: "", Position: pos})
+}`,
+		"Position 缺失但字段乱序": `package p
+import "Metabox-Nexus-PlayerCap/player"
+func f(progress float32) {
+	emit(&player.LyricUpdate{Progress: progress, Text: "", Index: -1})
+}`,
+		// 嵌在别的字面量里（server 的 WSEvent{Data: &LyricUpdate{...}}）
+		"嵌在外层字面量里": `package server
+func f(name string, progress float32) {
+	use(WSEvent{Type: "lyric_update", Player: name, Data: &LyricUpdate{Index: -1, Progress: progress}})
+}`,
 	}
 	for name, src := range shouldCatch {
 		t.Run(name, func(t *testing.T) {
@@ -96,10 +124,14 @@ func f(playTime float32) {
 	}
 
 	shouldPass := map[string]string{
-		"带了 Progress（修复后的样子）": `package p
+		"两个都带（修复后的样子）": `package p
 import "Metabox-Nexus-PlayerCap/player"
-func f(playTime, progress float32) {
-	emit(&player.LyricUpdate{Index: -1, Text: "", PlayTime: playTime, Progress: progress})
+func f(playTime, pos, progress float32) {
+	emit(&player.LyricUpdate{Index: -1, Text: "", PlayTime: playTime, Position: pos, Progress: progress})
+}`,
+		"两个都带、字段乱序": `package server
+func f(pos, progress float32) {
+	use(&LyricUpdate{Progress: progress, Position: pos, Index: -1})
 }`,
 		// 常规歌词行走 BuildLyricUpdate，不是本门禁的目标
 		"非 -1 的 Index 不管": `package p
@@ -117,6 +149,30 @@ func f() { use(Other{Index: -1}) }`,
 				t.Errorf("门禁误报：%v\n%s", got, src)
 			}
 		})
+	}
+}
+
+// TestLyricUpdateLintSkipsAgentWorktrees 钉住全仓扫描跳过 .claude：主目录下的 agent worktree 是停在
+// 各自提交上的仓库副本，扫进去会让主目录跑出别的分支的旧代码。别处的子目录照扫。
+//
+// 变异自证：去掉对 .claude 的跳过即红（实测）。
+func TestLyricUpdateLintSkipsAgentWorktrees(t *testing.T) {
+	bad := []byte("package p\nfunc f() { use(&LyricUpdate{Index: -1}) }\n")
+	root := t.TempDir()
+	for _, dir := range []string{"server", filepath.Join(".claude", "worktrees", "old", "server")} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, dir, "server.go"), bad, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := scanLyricUpdateViolations(root)
+	if err != nil {
+		t.Fatalf("扫描失败: %v", err)
+	}
+	if len(got) != 1 || !strings.HasPrefix(got[0], filepath.Join(root, "server", "server.go")) {
+		t.Errorf("应只报 server/server.go 一处、不报 .claude 下的副本，实得 %v", got)
 	}
 }
 
@@ -155,7 +211,7 @@ func isNegativeOne(e ast.Expr) bool {
 	return ok && b.Kind == token.INT && b.Value == "1"
 }
 
-// checkFile 返回该文件里所有「LyricUpdate{Index: -1} 但没写 Progress」的位置。
+// checkFile 返回该文件里所有「LyricUpdate{Index: -1} 但没写 Position 或 Progress」的位置。
 func checkFile(fset *token.FileSet, f *ast.File, path string) []string {
 	var out []string
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -163,7 +219,7 @@ func checkFile(fset *token.FileSet, f *ast.File, path string) []string {
 		if !ok || !isLyricUpdateLit(lit) {
 			return true
 		}
-		var hasMinusOneIndex, hasProgress bool
+		var hasMinusOneIndex, hasPosition, hasProgress bool
 		for _, el := range lit.Elts {
 			kv, ok := el.(*ast.KeyValueExpr)
 			if !ok {
@@ -178,11 +234,13 @@ func checkFile(fset *token.FileSet, f *ast.File, path string) []string {
 				if isNegativeOne(kv.Value) {
 					hasMinusOneIndex = true
 				}
+			case "Position":
+				hasPosition = true
 			case "Progress":
 				hasProgress = true
 			}
 		}
-		if hasMinusOneIndex && !hasProgress {
+		if hasMinusOneIndex && !(hasPosition && hasProgress) {
 			out = append(out, fset.Position(lit.Pos()).String())
 		}
 		return true
@@ -200,7 +258,8 @@ func scanLyricUpdateViolations(root string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
-			if name := d.Name(); name == ".git" || name == "node_modules" {
+			// .claude 下是 agent 的 worktree（各自一份仓库副本，可能停在旧提交上），不属于本仓库的源码。
+			if name := d.Name(); name == ".git" || name == ".claude" || name == "node_modules" {
 				return filepath.SkipDir
 			}
 			return nil

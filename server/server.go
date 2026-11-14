@@ -554,9 +554,10 @@ func (s *Server) watchIdleHide() {
 	}
 }
 
-// idleClearTarget 是一次巡检里需要清除的 per-player 通道及其停下那一刻的整曲进度。
+// idleClearTarget 是一次巡检里需要清除的 per-player 通道及其停下那一刻的整曲位置与进度。
 type idleClearTarget struct {
 	name     string
+	position float32
 	progress float32
 }
 
@@ -587,9 +588,11 @@ func (s *Server) sweepIdleHide(now time.Time) {
 				ps.IdleHidden = true
 				// 与根路径「清除活跃播放器」日志对齐：清屏是可见输出变化，需留现场证据（§1.2）。
 				serverLog.Info("per-player [%s] inactive for %ds, pushing clear-screen hide", name, thr)
-				// 带上停下那一刻的整曲进度：SSE 清行的 lyric_update(index:-1) 需要它，
-				// 且它与最后一条 all_lyrics.progress 一致、不制造自相矛盾的事件（见 player/lyricupdate_lint_test.go）。
-				toClear = append(toClear, idleClearTarget{name: name, progress: ps.Progress})
+				// 带上停下那一刻的整曲位置与进度：SSE 清行的 lyric_update(index:-1) 与其余 lyric_update 一样
+				// 每条都带 position/progress（见 player/lyricupdate_lint_test.go）。取法同 HTTP 快照与连接补发
+				// （livePosition）：这里状态不是 playing，不外推，给的是缓存里最近一次采样的那一对。
+				pos, prog := ps.livePosition(now)
+				toClear = append(toClear, idleClearTarget{name: name, position: pos, progress: prog})
 			}
 		}
 	}
@@ -598,7 +601,7 @@ func (s *Server) sweepIdleHide(now time.Time) {
 	// sub.ch=[歌词, clear]，迟到的 clear 把已恢复画面清成空白。发送均 select-default 非阻塞、无网络 I/O；
 	// 锁序 s.mu→subMu 与既有 NotifySubscribers* 一致，无死锁。
 	for _, tc := range toClear {
-		s.notifyPerPlayerIdleClear(tc.name, tc.progress)
+		s.notifyPerPlayerIdleClear(tc.name, tc.position, tc.progress)
 	}
 }
 
@@ -609,11 +612,11 @@ func (s *Server) sweepIdleHide(now time.Time) {
 //     lyric_update(index:-1)（文档已定义的「无歌词」清行），song_info-SSE 发空 song_info_update。
 //
 // 只投递给 sub.player==name 的订阅者，不碰根订阅者、不读 activePlayer/skipRoot（§3.4）；全部非阻塞（§2.1）。
-func (s *Server) notifyPerPlayerIdleClear(name string, progress float32) {
+func (s *Server) notifyPerPlayerIdleClear(name string, position, progress float32) {
 	clearEvt := WSEvent{Type: player.EventPlayerClear, Player: name, Data: struct{}{}}
-	// index:-1 是文档已定义的「无歌词」清行形式；Progress 带上停下那一刻的整曲进度，
-	// 既满足 lyricupdate 门禁、又与最后一条 all_lyrics.progress 一致（不糊零值假契约）。
-	lyricClear := WSEvent{Type: player.EventLyricUpdate, Player: name, Data: &LyricUpdate{Index: -1, Progress: progress}}
+	// index:-1 是文档已定义的「无歌词」清行形式；position / progress 是调用方经 livePosition 取的停下那一刻的
+	// 整曲位置与进度。漏写任一个，Go 零值都会兜出 0，与另一个自相矛盾。
+	lyricClear := WSEvent{Type: player.EventLyricUpdate, Player: name, Data: &LyricUpdate{Index: -1, Position: position, Progress: progress}}
 	songClear := WSEvent{Type: player.EventSongInfoUpdate, Player: name, Data: struct{}{}}
 
 	s.subMu.Lock()

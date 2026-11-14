@@ -103,8 +103,8 @@ const (
 	exitDeadAddr
 	// exitAltAddr 当前的播放时间地址停着，而选址时落选的另一个候选在走：改用它（见 altWatch）。
 	exitAltAddr
-	// exitPCMRate 伴奏解码器的推进速率不在 [0.95, 1.05]：采样格式不是 44.1 kHz、16 bit、双声道，换算比例
-	// 不成立。本会话不再选 PCM，这一首改走兜底（#145）。
+	// exitPCMRate 伴奏解码器的推进速率不在 [0.95, 1.05]（或速率核对到期未能测出）：采样格式不是 44.1 kHz、
+	// 16 bit、双声道，换算比例不成立。只这一首改走兜底，下一首仍先试 PCM（#145、#196）。
 	exitPCMRate
 	// exitPCMStalled 伴奏解码器进入轮询后 5 s 内一次都没推进：可能是停住的残留对象。只这一首改走兜底，
 	// 下一首仍先试 PCM（#145）。
@@ -160,12 +160,13 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 	graphTried := false
 
 	// 伴奏解码器 CAudioDecodeForPCM 的主虚表（#145）：定位成功后会话内不再重复，失败留 0、下一首再试
-	// （见 selectPCM）。pcmOff 为真时本会话不再选 PCM（exitPCMRate）。stall 记录这一次播放的 PCM 停滞过
-	// （exitPCMStalled，见 pcmStall）。
+	// （见 selectPCM）。skip 记录这一次播放的 PCM 判为不符或停滞过（exitPCMRate、exitPCMStalled，见 pcmSkip）：
+	// 只这一首改走兜底，下一首仍先试 PCM（#196）。
 	var pcmVtable uint32
-	pcmOff := false
-	var stall pcmStall
+	var skip pcmSkip
 	notes := pcmNotes{}
+	// lyric_idle 一律经它发出：上一次宣告之后至多一条（#180）。
+	var idle idleNotice
 
 	for {
 		select {
@@ -188,16 +189,14 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				// 的 InvalidateSongGen 不会执行（同 issue #118）。✅ songgenorder_test.go（AST）
 				p.InvalidateSongGen()
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: i18n.T("WeSing window not open"), Reason: player.ReasonWindowNotOpen})
+				// clear_song_data 传 nil 无妨：它是内部事件，被 server 的 internalEvents 拦住，不会序列化。
 				p.Emit(player.EventClearSongData, nil)
-				// lyric_idle 是**对外**事件，载荷必须是 {} 而非 null（「空数据一律 {}」，
-				// openapi.yaml:10）。传 nil 会序列化成 null——实测就是这么破的。
-				// 紧邻的 clear_song_data 传 nil 无妨：它是内部事件，被 server 的
-				// internalEvents 拦住，根本不会序列化。
-				p.Emit(player.EventLyricIdle, struct{}{})
+				// 轮询以 exitWindowClosed 等原因返回时已发过一条的，这里不再发（#180）。
+				idle.emit(p.TryEmit)
 				lastPhase = proc.PhaseStandby
 			}
 			lastTitle = ""
-			stall.reset()
+			skip.reset()
 			time.Sleep(1 * time.Second)
 			continue
 
@@ -225,7 +224,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				log.Info("♪ Song: %s", state.SongTitle)
 				lastTitle = state.SongTitle
 			}
-			stall.seen(state.SongTitle)
+			skip.seen(state.SongTitle)
 		}
 
 		// === 播放中：初始化歌词并开始轮询 ===
@@ -243,18 +242,20 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		applyDetailedOffset(lyrics, offsetSec)
 		lyricItems := toLyricItems(lyrics, offsetSec)
 
-		// 时钟首选伴奏解码器（#145，设计 §4.4）：选中之后读歌曲信息、以 mid 交叉核对，总时长与初始位置取自
-		// 它的读数。选不中、或 mid 对不上，本首走兜底。核对通过之后，歌曲信息与封面按路径 mid 取（#146，
-		// 见 resolvePCM）；songConfirmed 为假即歌曲信息未确认，交给补读（startCoverFetch）。
+		// 时钟首选伴奏解码器（#145，设计 §4.4）：选中之后读歌曲信息、以 mid 交叉核对，总时长取自核对那次的
+		// 读数，初始位置取自宣告前重读的（#191，见 resolvePCM）。选不中、或 mid 对不上，本首走兜底。核对通过之后，
+		// 歌曲信息与封面按路径 mid 取（#146，见 resolvePCM）；songConfirmed 为假即歌曲信息未确认，交给补读（startCoverFetch）。
 		var songTitle, songName, singer, coverURL, songMID string
 		songConfirmed := true
+		var songDuration, initialPlayTime float32
 		var clock *lyric.PCMClock
-		if !pcmOff && !stall.on {
+		if !skip.on {
 			inst, err := selectPCM(handle, pid, &pcmVtable)
 			if err == nil {
 				var s pcmSong
 				if clock, s, err = resolvePCM(lastTitle, realPCMQueries(handle, pcmVtable, inst)); err == nil {
 					songTitle, songName, singer, coverURL, songMID, songConfirmed = s.title, s.name, s.singer, s.cover, s.mid, s.confirmed
+					initialPlayTime = s.pos
 				}
 			}
 			if err != nil {
@@ -264,12 +265,11 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 
 		var timeAddr uint32
 		var altAddrs []uint32
-		var songDuration, initialPlayTime float32
 		durSrc := lyric.DurationEstimated
 		if clock != nil {
 			// 总时长直接用解码器的，不经界面字符串与 CKSongsGraph：路径里的 mid 已确认它属于这首歌（设计 §4.5）。
-			// 两者都由整数换算，不会是 NaN。
-			songDuration, initialPlayTime = clock.Total(), clock.Position()
+			// 总时长与初始位置都由整数换算，不会是 NaN。
+			songDuration = clock.Total()
 			log.Detail("Song clock: PCM decoder 0x%08X (duration %.2fs)", clock.Addr(), songDuration)
 		} else {
 			// 兜底，次序与 #145 之前相同：定位播放时间 → 界面时长字符串 → 歌曲信息（getSongMeta，封面
@@ -306,6 +306,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		// 迟到的封面回写仍被 EmitForGen 视为有效，服务端收到后整体替换歌曲信息，这首又可能不再回写，于是一直
 		// 是上一首的。封面 goroutine 用同一个代次。✅ songgenorder_test.go（AST）
 		coverGen := p.NewSongGen()
+		idle.announced()
 		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
 		p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 			Name: songName, Singer: singer, Title: songTitle,
@@ -342,7 +343,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		// 歌词轮询循环
 		exitR, altAddr := p.pollLyrics(handle, pid, lyrics, lyricItems, timeAddr, altAddrs, offsetSec, pollInterval, lastTitle, songTitle, songDuration,
 			graph, deadAddrRetriedFor != lastTitle, clock, ann)
-		p.Emit(player.EventLyricIdle, struct{}{}) // 对外事件：{} 而非 null，理由同 :146
+		idle.emit(p.TryEmit)
 
 		switch exitR {
 		case exitProcessDied:
@@ -356,7 +357,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			log.Info("WeSing window closed")
 			lastTitle = ""
 			altSwitchedFor = ""
-			stall.reset()
+			skip.reset()
 			continue
 		case exitDeadAddr:
 			// 打掉缓存，逼 initSong 走 FindPlayTimeAddr 重扫（issue #44）。
@@ -375,14 +376,20 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			altSwitchedFor = lastTitle
 			continue
 		case exitPCMRate:
-			// 本会话不再选 PCM，这一首改走兜底重来。不清 lastTitle，理由同 exitDeadAddr。
-			log.Warn("PCM decoder rate %.3f is outside [0.95, 1.05]; using the existing play-time source for the rest of this session", clock.Rate())
-			pcmOff = true
+			// 只这一首改走兜底重来，下一首仍先试 PCM（#196，设计 doc/design/wesing-small-seek-design.md §3.6）。
+			// 不清 lastTitle，理由同 exitDeadAddr。到期判出的没有测出速率，不报 Rate（#177 设计 §4.9）。每次判出
+			// 一条 Warn，不经 pcmNotes：这是这一首的结论，测出的那条还带这一首的速率。
+			if clock.RateTimedOut() {
+				log.Warn("PCM decoder rate was not measured: out-of-range advances (seeks or a wrong sample format) kept voiding the measurement for 30s; using the existing play-time source for this song")
+			} else {
+				log.Warn("PCM decoder rate %.3f is outside [0.95, 1.05]; using the existing play-time source for this song", clock.Rate())
+			}
+			skip.mark(lastTitle)
 			continue
 		case exitPCMStalled:
 			// 只这一首改走兜底重来，下一首仍先试 PCM。不清 lastTitle，理由同 exitDeadAddr。
 			notes.unavailable(i18n.T("the accompaniment decoder did not advance within 5s"))
-			stall.mark(lastTitle)
+			skip.mark(lastTitle)
 			continue
 		}
 	}
@@ -464,26 +471,47 @@ func (n pcmNotes) unavailable(reason string) {
 	log.Warn("PCM clock unavailable (%s); using the existing play-time source for this song", reason)
 }
 
-// pcmStall 记录这一次播放的 PCM 停滞过（exitPCMStalled）：on 为真时同一首回退重来期间不再试 PCM（设计 §4.2）。
+// pcmSkip 记录这一次播放不再试 PCM：速率核对判为不符（exitPCMRate，#196）或停滞过（exitPCMStalled，#145 设计
+// §4.2）。on 为真时同一首回退重来期间不再试 PCM，换成别的歌即恢复先试（设计 doc/design/wesing-small-seek-design.md
+// §3.6）。
 //
-// 按窗口标题清除，不按退出原因（代码审 F6）：exitSongChanged 也用于同一首连续读失败的重来，在那里清除会让
-// 停住的实例再被选中。是否生效只看 on，不与 lastTitle 比较：重来时 lastTitle 被清空，窗口标题又可能短暂为空。
-type pcmStall struct {
+// 按窗口标题清除，不按退出原因（#145 代码审 F6）：exitSongChanged 也用于同一首连续读失败的重来与 PCM 总字节变化，
+// 在那里清除会让判为不符或停住的实例再被选中。是否生效只看 on，不与 lastTitle 比较：重来时 lastTitle 被清空，
+// 窗口标题又可能短暂为空。所以很快重新点开同一首（未经待机）、同名的另一首接着播放，都按同一首处理。
+// ✅ pcmskip_test.go（含 AST：两个退出原因都调 mark，选 PCM 只看 on）
+type pcmSkip struct {
 	on    bool
-	title string // 停滞时的窗口标题
+	title string // 标记时的窗口标题
 }
 
-func (s *pcmStall) mark(title string) { s.on, s.title = true, title }
+func (s *pcmSkip) mark(title string) { s.on, s.title = true, title }
 
 // seen 在播放阶段每次看到窗口标题时调用：换成别的歌（非空且不同）即清除。空标题不算换歌，同 pollLyrics。
-func (s *pcmStall) seen(title string) {
+func (s *pcmSkip) seen(title string) {
 	if title != "" && title != s.title {
 		s.on = false
 	}
 }
 
 // reset 在待机、关窗时调用。
-func (s *pcmStall) reset() { s.on = false }
+func (s *pcmSkip) reset() { s.on = false }
+
+// idleNotice 记录上一次宣告之后是否已发过 lyric_idle（#180）：每首在轮询结束时发一条，随后进入待机时不再发。
+// 此前两处各发一条，播放中关窗口时连发两条，与契约（openapi.yaml 的 lyric_idle：窗口关闭时发送一条）不符。
+// 会话开始后未宣告即进入待机（加载中关窗口）仍发一条。✅ idlenotice_test.go（含 AST：runSession 只经它发出）
+type idleNotice struct{ sent bool }
+
+// announced 在本首宣告时调用。
+func (n *idleNotice) announced() { n.sent = false }
+
+// emit 在上一次宣告之后还没有一条入队时发一条 lyric_idle，经 tryEmit（BaseEmitter.TryEmit）发出，入队才记为已发
+// （同 #133 / #134）：轮询结束时那条因事件通道满被丢弃的，进入待机时照常再发。它是对外事件，载荷必须是 {}
+// 而非 null（「空数据一律 {}」，openapi.yaml:10）：传 nil 会序列化成 null，实测出过这个问题。
+func (n *idleNotice) emit(tryEmit func(evtType string, data interface{}) bool) {
+	if !n.sent {
+		n.sent = tryEmit(player.EventLyricIdle, struct{}{})
+	}
+}
 
 // confirmMID 是交给 ConfirmPCM 核对的 mid（设计 §4.1）：只用歌名等于窗口歌名的记录的 mid，否则返回空串、
 // 跳过核对。#145 时 FindSongInfo 匹配不到窗口歌名会退回地址最高的记录，可能是上一首，用它的 mid 会把正确的伴奏
@@ -502,6 +530,7 @@ type pcmQueries struct {
 	confirm  func(mid string) (*lyric.PCMClock, string, error) // ConfirmPCM，返回时钟与路径 mid；mid 是交叉核对用的
 	byMID    func(songMID string) (lyric.SongInfo, bool)       // FindSongInfoByMID
 	album    func(songMID string) (albumMID string)            // FindAlbumMID
+	position func(c *lyric.PCMClock) float32                   // 宣告用的位置：重读一次，读不出退回核对那次的（#191）
 }
 
 func realPCMQueries(handle syscall.Handle, vtable, inst uint32) pcmQueries {
@@ -516,14 +545,22 @@ func realPCMQueries(handle syscall.Handle, vtable, inst uint32) pcmQueries {
 		},
 		byMID: func(mid string) (lyric.SongInfo, bool) { return lyric.FindSongInfoByMID(handle, mid) },
 		album: func(mid string) string { return lyric.FindAlbumMID(handle, mid) },
+		position: func(c *lyric.PCMClock) float32 {
+			if t, st := c.Read(); st == lyric.PCMOK {
+				return t
+			}
+			// 读不出，或总字节变了（换歌，由轮询的第一拍发现）：Position 仍是核对那次的读数。
+			return c.Position()
+		},
 	}
 }
 
 // pcmSong 是 PCM 模式宣告用的歌曲信息（设计 §3.3）。
 type pcmSong struct {
 	title, name, singer, cover string
-	mid                        string // 路径 mid：补读与封面都按它查
-	confirmed                  bool   // 歌名、歌手属于路径这首（情形 a、b）；为假即情形 c，交给补读
+	mid                        string  // 路径 mid：补读与封面都按它查
+	confirmed                  bool    // 歌名、歌手属于路径这首（情形 a、b）；为假即情形 c，交给补读
+	pos                        float32 // 宣告用的初始位置（秒），查找全部做完之后读的（#191）
 }
 
 // resolvePCM 是 PCM 模式的宣告前流程（设计 §3.3）。#145 的交叉核对原样保留：按窗口歌名查记录，confirmMID 只在
@@ -540,6 +577,9 @@ type pcmSong struct {
 //
 // 封面按路径 mid 查专辑 mid 构造（设计 §3.4），查不到就不发。路径 mid 为空（路径不合形状）
 // 时两者都不查，按情形 c 宣告且没有可补读的。
+//
+// 宣告用的初始位置在最后重读（#191）：核对那次的读数之后还有按 mid 查歌曲信息与专辑，共 2～3 遍可写区全扫；
+// 沿用那次的读数宣告，按真机录音推算落后约 0.55～0.65 s。
 func resolvePCM(window string, q pcmQueries) (*lyric.PCMClock, pcmSong, error) {
 	rec, _ := q.findInfo(window)
 	clock, mid, err := q.confirm(confirmMID(rec.Name, window, rec.Mid))
@@ -570,14 +610,16 @@ func resolvePCM(window string, q pcmQueries) (*lyric.PCMClock, pcmSong, error) {
 	if s.singer != "" {
 		s.title = fmt.Sprintf("%s - %s", s.name, s.singer)
 	}
+	s.pos = q.position(clock)
 	return clock, s, nil
 }
 
 // seekBack 判回跳（重唱）：读数比上一拍的位置小 2 s 以上。判为最小化的拍不判（设计 §4.3）：兜底模式下最小化
 // 时现有播放时间停住，上一拍的位置却是按墙钟外推的值，两者一比每拍都成立，每拍发 playback_resume、重发当前行
 // （真机 11-04）。还原后的第一拍照旧比较，外推跑过了头时以一次回跳纠正。PCM 模式下 minimized 恒为假。
+// 门槛与前跳共用（lyric.SeekJumpSec，#177）。
 func seekBack(lastPlayTime, playTime float32, minimized bool) bool {
-	return !minimized && lastPlayTime > 0 && playTime < lastPlayTime-2.0
+	return !minimized && lastPlayTime > 0 && playTime < lastPlayTime-lyric.SeekJumpSec
 }
 
 // altWatch 盯着定位播放时间时落选的候选：当前地址的读数停着、而某个候选在走，说明选错了。
@@ -749,17 +791,10 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 	}
 	pollCount := 0
 
-	var lastPlayTime float32 = -1
-	paused := false
+	// 回跳与前跳、最小化外推、暂停与恢复的判定（#177，见 tickJudge）。
+	judge := newTickJudge()
 	isMinimized := false
 	isMoving := false
-	var frozenSince time.Time
-	frozen := false
-	const pauseDuration = 1 * time.Second
-
-	var minimizedAt time.Time
-	var playTimeAtMinimize float32
-	wasMinimized := false
 
 	// 死地址检测（issue #44）：sawProgress 只由**内存直读的原始值**置位，
 	// 绝不能挪到最小化插值之后——那里 playTime 被改写成 playTimeAtMinimize + elapsed，
@@ -836,6 +871,8 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			continue
 		}
 		failCount = 0
+		// 本拍时刻在读数成功之后立即取（设计 §4.1）：读数之前的卡顿全部计入前跳判定的经过时间。
+		now := time.Now()
 
 		// === 死地址检测（issue #44）===
 		//
@@ -884,67 +921,19 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			}
 		}
 
-		// Replay / seek-back 检测（在暂停检测之前，避免 unpause + replay 同 tick 双重 resume）
-		if seekBack(lastPlayTime, playTime, isMinimized) {
-			log.Info("Seek-back detected: %.2fs → %.2fs", lastPlayTime, playTime)
+		// 回跳与前跳、最小化外推、暂停与恢复（#177，见 tickJudge），用内存直读的原始值；发出的次序为跳转、
+		// 暂停、恢复，都排在歌词行之前，越过行首时先 playback_resume、后 lyric_update。
+		out := judge.step(playTime, now, isMinimized, isMoving, songDuration)
+		if out.resetLine {
 			lastLineIdx = -1
-			if paused {
-				paused = false
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: fullSongTitle})
-			}
-			p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
-			frozen = false
 		}
+		p.emitTick(out, playTime, fullSongTitle, songDuration)
+		playTime = out.pos
 
-		// Minimized interpolation
-		if isMinimized {
-			if paused {
-				wasMinimized = true
-				frozen = false
-			} else {
-				if !wasMinimized {
-					minimizedAt = time.Now()
-					playTimeAtMinimize = playTime
-					wasMinimized = true
-				}
-				elapsed := float32(time.Since(minimizedAt).Seconds())
-				playTime = playTimeAtMinimize + elapsed
-				if songDuration > 0 && playTime > songDuration {
-					playTime = songDuration
-				}
-				frozen = false
-			}
-		} else {
-			if wasMinimized {
-				wasMinimized = false
-			}
-			if isMoving {
-				frozen = false
-			} else if lastPlayTime >= 0 && playTime == lastPlayTime {
-				if !frozen {
-					frozenSince = time.Now()
-					frozen = true
-				}
-				if frozen && time.Since(frozenSince) >= pauseDuration && !paused {
-					paused = true
-					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: fullSongTitle})
-					p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
-				}
-			} else {
-				frozen = false
-				if paused {
-					paused = false
-					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: fullSongTitle})
-					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: playTime, Progress: player.ClampProgress(playTime, songDuration)})
-				}
-			}
-		}
-
-		lastPlayTime = playTime
-
-		// 速率核对与停滞检测（设计 §4.2），用本拍的暂停判定。
+		// 速率核对与停滞检测（设计 §4.2），用本拍的暂停判定。跳转与回退由速率核对按每拍上限自行作废，不经
+		// 跳转判定（#190，doc/design/wesing-small-seek-design.md §3.3）。
 		if clock != nil {
-			switch clock.Observe(time.Now(), paused) {
+			switch clock.Observe(now, judge.paused) {
 			case lyric.PCMRateOff:
 				return exitPCMRate, 0
 			case lyric.PCMStalled:
@@ -959,7 +948,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 		// 位置——不足 pauseDuration 的停顿与前跳都不发事件，长间奏里又没有歌词行可推。传 playTime，
 		// 与上面 lyric_update、playback_pause / playback_resume 的 position 同一个量；offset 只进了
 		// adjustedTime，这里不带。
-		if !paused {
+		if !judge.paused {
 			p.EmitPositionSample(time.Now(), playTime, songDuration)
 		}
 

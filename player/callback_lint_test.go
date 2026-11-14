@@ -109,6 +109,30 @@ var (
 	}
 }
 
+// TestNewCallbackLintSkipsAgentWorktrees 钉住全仓扫描跳过 .claude：主目录下的 agent worktree 是停在
+// 各自提交上的仓库副本，扫进去会让主目录跑出别的分支的旧代码。别处的子目录照扫。
+//
+// 变异自证：去掉对 .claude 的跳过即红（实测）。
+func TestNewCallbackLintSkipsAgentWorktrees(t *testing.T) {
+	bad := []byte("package p\nimport \"syscall\"\nfunc f() uintptr { return syscall.NewCallback(func(a, b uintptr) uintptr { return 1 }) }\n")
+	root := t.TempDir()
+	for _, dir := range []string{"sub", filepath.Join(".claude", "worktrees", "old", "sub")} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, dir, "x.go"), bad, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := scanNewCallbackViolations(root)
+	if err != nil {
+		t.Fatalf("扫描失败: %v", err)
+	}
+	if len(got) != 1 || !strings.HasPrefix(got[0], "sub/x.go:") {
+		t.Errorf("应只报 sub/x.go 一处、不报 .claude 下的副本，实得 %v", got)
+	}
+}
+
 // scanNewCallbackViolations 扫描 root 下所有 .go，返回违规位置。
 //
 // 判定方式：全文件 ast.Inspect，维护「当前是否位于某个函数体内」的深度计数。
@@ -127,7 +151,8 @@ func scanNewCallbackViolations(root string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
-			if name := d.Name(); name == ".git" || name == "node_modules" {
+			// .claude 下是 agent 的 worktree（各自一份仓库副本，可能停在旧提交上），不属于本仓库的源码。
+			if name := d.Name(); name == ".git" || name == ".claude" || name == "node_modules" {
 				return filepath.SkipDir
 			}
 			return nil

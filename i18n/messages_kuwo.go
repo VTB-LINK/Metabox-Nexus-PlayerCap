@@ -18,15 +18,23 @@ func init() {
 		"Kuwo seek-lag correction stopped for this song: the lag drifted to %.1f ms, segment ctx 0x%08X ring 0x%08X base %d ms":                                     "酷我拖动偏差修正本首停用：偏差漂移至 %.1f ms，段：上下文 0x%08X，环形缓冲 0x%08X，起点 %d ms",
 		// Detail 级；method 是英文的方法标识，整句原样输出，免得中文句子里夹英文。
 		"Kuwo output transient filter engaged: method %s, base %d ms": "Kuwo output transient filter engaged: method %s, base %d ms",
+		// Detail 级，换歌后开播段未过滤（#198）；%s 是时刻（时:分:秒.毫秒）。
+		"Kuwo output transient not filtered at the song start: the Play crossing at %s is not after the previous song's last core sample at %s, base %d ms":           "酷我开播瞬态未过滤：越阈时刻 %s 不晚于上一首最后一个核心样本 %s，起点 %d ms",
+		"Kuwo output transient not filtered at the song start: a value above the base already went out uncapped, so the Play crossing at %s is not taken, base %d ms": "酷我开播瞬态未过滤：已直通过高于起点的值，不再追溯采用越阈时刻 %s，起点 %d ms",
+		"Kuwo output transient not filtered at the song start: the poll interval is too long to anchor, base %d ms":                                                   "酷我开播瞬态未过滤：轮询间隔过长，无法锚定，起点 %d ms",
+		"Kuwo output transient not filtered at the song start: no fresh Play crossing was observed, base %d ms":                                                       "酷我开播瞬态未过滤：未观测到新鲜的越阈，起点 %d ms",
+		// Detail 级，换歌前位置回落的持有（#185）；%s 是持有开始的时刻（时:分:秒.毫秒）。
+		"Kuwo core position went back at %s to %d ms; held %d ms, released: the bridge still reports the song": "酷我核心位置于 %s 后退到 %d ms；持有 %d ms 后放行：网页桥仍报这首歌",
+		"Kuwo core position went back at %s to %d ms; held %d ms, discarded unpublished":                       "酷我核心位置于 %s 后退到 %d ms；持有 %d ms 后丢弃，未发布",
 		// 包级 sentinel（player/kuwo/watchdog、player/kuwo/cdp；「Kuwo is not running」与状态文案共用上面那条）
-		"Kuwo version or executable is not verified":                                             "酷我版本或可执行文件未经验证",
-		"Kuwo debug port is not ready yet":                                                       "酷我调试端口尚未就绪",
-		"Kuwo process identity is ambiguous":                                                     "酷我进程身份不明确",
-		"Kuwo has already been restarted once in this service run; no further automatic restart": "本次服务已尝试重启酷我，不再自动重启",
-		"This Kuwo build is not on the verified allowlist; no automatic restart":                 "酷我当前构建不在已验证白名单内，不自动重启",
-		"Kuwo song or state changed during the snapshot":                                         "酷我快照期间歌曲或状态变化",
-		"Kuwo CDP is not ready, or its response does not match the verified protocol":            "酷我 CDP 尚未就绪或响应不符合已验证协议",
-		"Kuwo CDP bridge version or page directory is not verified":                              "酷我 CDP 桥版本或页面目录未经验证",
+		"Kuwo version or executable is not verified": "酷我版本或可执行文件未经验证",
+		"Kuwo debug port is not ready yet":           "酷我调试端口尚未就绪",
+		"Kuwo process identity is ambiguous":         "酷我进程身份不明确",
+		"The Kuwo instance of an earlier automatic restart has not been confirmed to have opened its debug port; no automatic restart until it is": "先前自动重启的酷我尚未确认开启调试端口，在此之前不再自动重启",
+		"This Kuwo build is not on the verified allowlist; no automatic restart":                                                                   "酷我当前构建不在已验证白名单内，不自动重启",
+		"Kuwo song or state changed during the snapshot":                                                                                           "酷我快照期间歌曲或状态变化",
+		"Kuwo CDP is not ready, or its response does not match the verified protocol":                                                              "酷我 CDP 尚未就绪或响应不符合已验证协议",
+		"Kuwo CDP bridge version or page directory is not verified":                                                                                "酷我 CDP 桥版本或页面目录未经验证",
 		// 包级 sentinel（player/kuwo/lyric、player/kuwo/pos；player/kuwo/cover 的在 messages_kuwo_cover.go）
 		"kuwo lyric: no lyrics for this song":                    "酷我歌词：这首歌没有歌词",
 		"kuwo lyric: response exceeds size limit":                "酷我歌词：响应超出大小上限",

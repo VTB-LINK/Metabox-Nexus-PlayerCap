@@ -72,6 +72,12 @@ func fillEvents(p *KuwoPlayer) {
 
 func after(t0 time.Time, ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
+// settleNoLyrics delivers the fetch outcome "no lyrics" (ErrNoLyrics), after
+// which emitLine sends index:-1 (#175).
+func settleNoLyrics(s *session, at time.Time) {
+	s.accept(assetResult{gen: s.gen, rid: s.rid, err: lyric.ErrNoLyrics}, at)
+}
+
 // acceptLines delivers lyrics with one line at each of lineMs.
 func acceptLines(s *session, at time.Time, lineMs ...int) {
 	var lines []lyric.Line
@@ -149,7 +155,7 @@ func TestLagNoticeAnchors(t *testing.T) {
 		{"all_lyrics", 1, 1, [4]int32{10000, 10200, 10250, 10400},
 			func(s *session, _ time.Time) { s.emitAll() }, player.EventAllLyrics, 0},
 		{"lyric_update", 1, 1, [4]int32{10000, 10200, 10250, 10400},
-			func(s *session, at time.Time) { s.emitLine(at) }, player.EventLyricUpdate, 0},
+			func(s *session, at time.Time) { settleNoLyrics(s, at); s.emitLine(at) }, player.EventLyricUpdate, 0},
 		{"playback_pause", 1, 2, [4]int32{10000, 10200, 10250, 10350}, nil, player.EventPlaybackPause, 0},
 		{"playback_resume", 2, 1, [4]int32{10000, 10150, 10200, 10350}, nil, player.EventPlaybackResume, 0},
 	}
@@ -332,6 +338,7 @@ func TestLagNoticeQueueFull(t *testing.T) {
 		observedLag(s, "MUSIC_1", 1, 10000, t0, 0, false)
 		drainEvents(p)
 		observedLag(s, "MUSIC_1", 1, 10200, after(t0, 50), 150, false)
+		settleNoLyrics(s, after(t0, 50))
 		fillEvents(p)
 		s.emitLine(after(t0, 50))
 		if n := len(ofType(drainEvents(p), player.EventLyricUpdate)); n != 0 {

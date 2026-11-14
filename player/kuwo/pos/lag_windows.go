@@ -118,6 +118,11 @@ func (r *LagReader) Read() (LagSample, OutputState, error) {
 	return sample, readOutputState(r.read, r.out), err
 }
 
+// ReadOutput reads the #135 output state alone, for a tick with no core sample
+// (#198, doc/design/kuwo-switch-start-transient-design.md §5.1 A-2): the #131
+// fields are not read. Like Read, it never fails: a failed read is Valid false.
+func (r *LagReader) ReadOutput() OutputState { return readOutputState(r.read, r.out) }
+
 // Build returns the admitted build name, for the connect log.
 func (r *LagReader) Build() string { return r.build }
 

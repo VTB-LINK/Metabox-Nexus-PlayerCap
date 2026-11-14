@@ -38,6 +38,10 @@ func (f *fakeOps) manager() *manager {
 				return instance{}, f.scanErr
 			}
 			if f.stops > 0 {
+				if f.starts > 0 {
+					// The instance the restart launched.
+					return instance{PID: f.i.PID + 1, Exe: f.i.Exe, Args: f.args, Created: f.i.Created + 1}, nil
+				}
 				return instance{}, ErrNotRunning
 			}
 			return f.i, nil
@@ -74,14 +78,10 @@ func TestRestartRetainsArgumentsAndStopsOnlyOnce(t *testing.T) {
 	if f.stops != 1 || f.starts != 1 || f.verifies != 2 || !reflect.DeepEqual(f.args, []string{"/autorun", "a b", DebugFlag}) {
 		t.Fatalf("unexpected operations %+v", f)
 	}
-	// A later manually started instance without the flag is not killed again.
-	f.stops = 0
-	f.starts = 0
-	if err := m.ensure(context.Background()); !errors.Is(err, ErrRestartLimited) {
-		t.Fatalf("second restart: %v", err)
-	}
-	if f.stops != 0 || f.starts != 0 {
-		t.Fatal("second destructive attempt")
+	// The relaunched instance is left alone. Newly opened instances without the
+	// flag are covered in restartperprocess_test.go.
+	if err := m.ensure(context.Background()); err != nil || f.stops != 1 || f.starts != 1 {
+		t.Fatalf("second ensure: %v %+v", err, f)
 	}
 }
 

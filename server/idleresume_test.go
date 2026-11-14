@@ -312,7 +312,7 @@ func TestIdleResumeDeferredPastTerminalEvents(t *testing.T) {
 	}{
 		{"进程退出后一直未启动", exited},
 		{"applemusic 清歌：waiting_song", gone("waiting_song")},
-		{"wesing 关闭 K 歌窗口", append(append([]player.Event{idleEvt(idlePlayer)}, gone("waiting_song")...), idleEvt(idlePlayer))},
+		{"wesing 关闭 K 歌窗口", append([]player.Event{idleEvt(idlePlayer)}, gone("waiting_song")...)},
 		{"wesing 进程退出", append(append([]player.Event{idleEvt(idlePlayer)}, gone("standby")...), gone("waiting_process")...)},
 	}
 	for _, c := range cases {

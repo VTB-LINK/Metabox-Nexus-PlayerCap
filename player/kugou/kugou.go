@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -59,6 +60,10 @@ const (
 	// coverAPIFallbackTimeout 走 API 兜底（歌手艺术照）时另给的下载预算。该路径下不含
 	// 封面的信息已先发过，故可以慢一点。
 	coverAPIFallbackTimeout = 5 * time.Second
+
+	// coverRetryTimeout 是下载失败、带 URL 的一条发出之后补取一次的下载预算（#194）。
+	// 此时歌曲信息已发出，补取不挡任何东西，故与 API 兜底同样给得宽。
+	coverRetryTimeout = 5 * time.Second
 )
 
 // fetchCoverBase64 是 player.FetchCoverBase64 的可替换 seam：仅供 runCoverFetch 的取消时序测试
@@ -74,6 +79,7 @@ var fetchCoverBase64 = player.FetchCoverBase64
 //	    → 取到 → 等 b64 → 补发完整信息
 //	    → 超时 → 调 API 兜底（歌手艺术照，coverAPIFallbackTimeout）
 //	      → 仍无 URL → 不再发（不含封面的信息上面已发过）
+//	阶段2: 拿到 URL 而 b64 为空 → 照发带 URL 的信息 → 再下载一次（coverRetryTimeout）→ 取到则补发带 b64 的信息
 //
 // **不变量：只要拿到了封面 URL，就必须发出 song_info_update，无论 b64 成功与否。**
 // 常见路径上封面 URL 立即命中，走的是「跳过上面整个分支」——此前一次 song_info_update
@@ -143,6 +149,25 @@ func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name,
 	default:
 	}
 	// 不变量落点：b64 为空（超时/过大/失败）也照发，带着 URL。绝不为封面吞掉歌曲信息。
+	p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
+		Name: name, Singer: singer, Title: title,
+		Cover: coverURL, CoverBase64: b64,
+	})
+	if b64 != "" || ctx.Err() != nil {
+		return
+	}
+
+	// 补取（#194）：带 URL 的一条已经发出，这里再下载一次不推迟任何东西。上面那次可能只是没赶上：
+	// 封面地址在 coverTotalBudget 末尾才到时只剩几十毫秒、甚至没有下载时间，网络抖动也会失败。
+	// 只补一次；仍取不到就停，前端按 URL 自行加载。补发的 cover 与上一条相同。
+	b64 = fetchCoverBase64("Kugou", coverURL, coverRetryTimeout)
+	if b64 == "" {
+		log.Warn("Cover download failed: %s", coverURL)
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 		Name: name, Singer: singer, Title: title,
 		Cover: coverURL, CoverBase64: b64,
@@ -296,8 +321,17 @@ func (p *KuGouPlayer) waitForCDP() (*cdp.Client, error) {
 	}
 }
 
+// playInfoSource 是 runSession 用到的 CDP 客户端方法。生产恒为 *cdp.Client，会话测试注入按脚本返回读数的桩。
+type playInfoSource interface {
+	GetPlayInfo() (*cdp.PlayInfo, error)
+	IsClosed() bool
+}
+
+// fetchLyrics 是 klyric.Fetch 的可替换 seam：仅供会话测试避开联网取词。生产恒为 klyric.Fetch，不导出。
+var fetchLyrics = klyric.Fetch
+
 // runSession polls PlayInfo and emits events until the CDP connection drops.
-func (p *KuGouPlayer) runSession(client *cdp.Client) {
+func (p *KuGouPlayer) runSession(client playInfoSource) {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
 
@@ -316,8 +350,8 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 	var coverCh chan string
 	var coverCancel context.CancelFunc
 	// 下面每条早退路径都必须显式 coverCancel()，否则最后一首歌的封面 goroutine 不会被取消
-	// ——它会在 Start() 已 Emit EventClearSongData **之后**（最长约 5.8s）再 Emit
-	// EventSongInfoUpdate，把已清空的歌曲信息重新贴回 OBS。（注：父 context 是
+	// ——它会在 Start() 已 Emit EventClearSongData **之后**（最长约 16s：等地址 0.8s、API 兜底请求 5s、
+	// 下载 5s、补取 5s）再 Emit EventSongInfoUpdate，把已清空的歌曲信息重新贴回 OBS。（注：父 context 是
 	// Background，不 cancel 几乎不泄漏资源，goroutine 退出即可 GC；真正的收益是上面
 	// 这个「迟到的 Emit 覆盖已清空状态」，不是「防泄漏」。）
 	//
@@ -335,6 +369,11 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 	var anchorProgressSec float32
 	var anchorTime time.Time
 	isPlaying := false
+
+	// confirmed：当前歌已读到过它的 hash 处于播放或暂停（会话第一首在换歌时即算）。prev 据此保存比较基准，
+	// 认出换歌过渡态读数里上一首的进度（#195）。
+	var confirmed bool
+	var prev prevProgressGuard
 
 	for {
 		select {
@@ -370,6 +409,12 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 
 		if info == nil || info.Hash == "" {
 			// No song loaded yet
+			if lastHash == "" {
+				// 连上之后还没有读到过歌：报 waiting_song，否则状态停在 Start 发出的 waiting_process（#181）。
+				// 经 EmitStatusIfChanged，持续无歌不随轮询重发。会话中途（读到过歌之后）读到没有歌照旧不发：
+				// 可能只是切歌的间隙，发出去会让路由把 kugou 判为 idle（理由同下方换歌的过渡态）。
+				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_song", Detail: i18n.T("KuGou has no current song"), Reason: player.ReasonNoSong})
+			}
 			time.Sleep(pollInterval)
 			continue
 		}
@@ -381,8 +426,17 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 		progressSec := float32(progressRaw / 1e7)
 		durationSec := float32(durationMs) / 1000.0
 
+		// prevReading：本轮采用的读数（换歌那一轮重读成功时为重读的）是过渡态、且进度判为上一首的（#195）。
+		// 这样的读数不参与下方的进度更新与跳转检测：换歌拍读到播放、取词期间转为过渡态时 isPlaying 仍为真，
+		// 不拦的话上一首的进度会被当成一次前跳，发 playback_resume 并重新落锚，刚按 0 宣告的位置又跳回去；
+		// 之后各拍读到同样的过渡态读数也一样。歌词行匹配与位置采样只用锚点推算的位置，随之不受它影响。
+		prevReading := false
+
 		// ── 切歌检测 ──
 		if info.Hash != lastHash {
+			firstSong := lastHash == "" // 本会话（本次 CDP 连接）读到的第一首
+			// 必须在下面重置锚点、时长与 isPlaying 之前：基准取的是上一首此刻的时钟。
+			prev.rebase(confirmed, anchorProgressSec, anchorTime, isPlaying, currentDurationSec)
 			lastHash = info.Hash
 			lastLineIdx = -1
 			currentDurationSec = durationSec
@@ -390,8 +444,16 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			// "play" 时这里记成未在播，而 lastStatus 也是 "play"、状态变化检测不触发，本地时钟到下一次
 			// 状态变化之前都不走。
 			isPlaying = statusStr(info.PlayStatus) == "playing"
-			// progress 仅在合法范围内时作为初始锚点，否则从 0 开始
-			if isProgressValid(progressSec, durationSec) {
+			// 换歌拍读到播放或暂停即确认：此时 lastStatus 会记成同一个值，下方状态变化检测不触发，只能在这里记。
+			transient := statusStr(info.PlayStatus) == "standby"
+			confirmed = !transient || firstSong
+			// progress 仅在合法范围内时作为初始锚点，否则从 0 开始。过渡态读数的进度可能还是上一首的（#195），
+			// 认出来的同样从 0 开始；读到播放或暂停的不比对。
+			prevReading = transient && isProgressValid(progressSec, durationSec) && prev.isPrev(progressSec, sampleTime)
+			if prevReading {
+				log.Info("Progress %.2fs read while switching songs matches the previous song; announcing from 0", progressSec)
+			}
+			if isProgressValid(progressSec, durationSec) && !prevReading {
 				anchorProgressSec = progressSec
 			} else {
 				anchorProgressSec = 0
@@ -415,7 +477,16 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			// 单播放器时则 player_clear 瞬间全黑）。故过渡态不发 status_update，留给下方 play_status
 			// 变化检测读到真实 playing/paused 再发（本轮取词后重读到的，或下一帧读到的）；真正的
 			// playing/paused 一律照发。
-			if s := statusStr(info.PlayStatus); s != "standby" {
+			//
+			// 会话的第一首例外：酷狗启动后恢复了上次的歌而未播放时，读到的同样既非播放也非暂停。此时状态还是
+			// Start 发出的 waiting_process，压下防不了闪烁，只会让状态停在「未启动」直到开始播放（#181）。
+			// 按 paused 发，不另发 playback_pause；开始播放后由下方变化检测照常发 playback_resume 与 playing。
+			// 这条 paused 不会让路由切到 kugou：它没进过 playing，不算 holding（server/router.go 的 evaluateGroup）。
+			s := statusStr(info.PlayStatus)
+			if s == "standby" && firstSong {
+				s = "paused"
+			}
+			if s != "standby" {
 				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: s, Detail: currentTitle})
 			}
 
@@ -433,7 +504,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			go p.runCoverFetch(ctx, coverCh, currentName, currentSinger, currentTitle, info.Hash)
 
 			// 获取歌词
-			lines, lyrErr := klyric.Fetch(info.Hash, int(durationMs), name, singer)
+			lines, lyrErr := fetchLyrics(info.Hash, int(durationMs), name, singer)
 			sameSong := name == prevName && singer == prevSinger
 			if lyrErr != nil {
 				log.Warn("lyric fetch failed: %v", lyrErr)
@@ -470,8 +541,21 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				freshRaw, _ := strconv.ParseFloat(fresh.Progress, 64)
 				info = fresh
 				progressSec = float32(freshRaw / 1e7)
+				// 本轮的读数换成了重读的，prevReading 也按它重判。判过渡态看的是重读到的状态，不是取词前的：
+				// 重读读到播放或暂停，进度就是新歌的；读到播放或暂停时的确认由下方同一轮的状态变化检测记。
+				prevReading = statusStr(fresh.PlayStatus) == "standby" && isProgressValid(progressSec, currentDurationSec) && prev.isPrev(progressSec, sampleTime)
+				if prevReading {
+					log.Info("Progress %.2fs read while switching songs matches the previous song; announcing from 0", progressSec)
+					// 换歌拍读到播放、重读却是过渡态且进度是上一首的：切歌还没完成，撤销换歌拍记下的确认，
+					// 过渡期延续到下方状态变化检测读到播放或暂停为止，其间各拍照样过滤。
+					confirmed = false
+				}
 				if isProgressValid(progressSec, currentDurationSec) {
-					anchorProgressSec = progressSec
+					if prevReading {
+						anchorProgressSec = 0
+					} else {
+						anchorProgressSec = progressSec
+					}
 					anchorTime = sampleTime
 				}
 			}
@@ -511,6 +595,11 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			}
 
 			lastStatus = statusAtChange // 取词前的状态，理由见 statusAtChange
+		} else if !confirmed && statusStr(info.PlayStatus) == "standby" && isProgressValid(progressSec, currentDurationSec) {
+			// 换歌之后的各拍只在过渡期内判，即当前歌尚未确认：确认之后再读到与上一首相同的进度，可能是用户
+			// 拖动到了那里，要按真实的跳转处理。用只读的 looksPrev：这里改写 (b) 的话，过渡期里一个只是接近 (a)
+			// 的读数会把 (b) 挪走，下一次未确认的换歌就会拿挪过的 (b) 去比。不打日志（每拍一次会刷屏）。
+			prevReading = prev.looksPrev(progressSec, sampleTime)
 		}
 
 		// ── 封面延迟到达（VIP 歌曲首次播放时封面为空，稍后才填入）──
@@ -526,6 +615,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 			switch info.PlayStatus {
 			case "playing", "play":
 				isPlaying = true
+				confirmed = true
 				// 恢复播放时用合法的 progress 重置锚点，否则沿用上次冻结位置
 				if isProgressValid(progressSec, currentDurationSec) {
 					anchorProgressSec = progressSec
@@ -536,6 +626,7 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 				log.Info("resumed @ %.2fs", anchorProgressSec)
 			case "paused", "pause", "pasued":
 				isPlaying = false
+				confirmed = true
 				// 暂停时冻结到合法进度；否则用本地时钟插值值冻结
 				if isProgressValid(progressSec, currentDurationSec) {
 					anchorProgressSec = progressSec
@@ -558,8 +649,8 @@ func (p *KuGouPlayer) runSession(client *cdp.Client) {
 		// ── 进度更新 + seek 检测 ──
 		// 仅当 progressSec 在合法范围内（[0, duration*1.05]）时才信任该值。
 		// KuGou 在播放状态下可能返回超出歌曲时长的值（单位非 ms），此时让
-		// 本地时钟自由运行，不更新锚点，不触发 seek 事件。
-		if isPlaying && isProgressValid(progressSec, currentDurationSec) {
+		// 本地时钟自由运行，不更新锚点，不触发 seek 事件。判为上一首的读数同样不信任（见 prevReading）。
+		if isPlaying && isProgressValid(progressSec, currentDurationSec) && !prevReading {
 			// 与读数比较的是读数时刻的推算位置，落锚也配读数时刻（见 sampleTime）。
 			interpSec := anchorProgressSec + float32(sampleTime.Sub(anchorTime).Seconds())
 			drift := progressSec - interpSec
@@ -645,6 +736,65 @@ func statusStr(playStatus string) string {
 // GetPlayInfo 在没有歌时返回 nil, nil，故须先判 fresh 非空。
 func rereadSameSong(fresh *cdp.PlayInfo, err error, hash string) bool {
 	return err == nil && fresh != nil && hash != "" && fresh.Hash == hash
+}
+
+// 认出上一首进度的两个容差（秒），理由见 prevProgressGuard。
+const (
+	prevProgressTolerance   = 1.0  // 与基准 (a) 推算位置的差
+	frozenProgressTolerance = 0.01 // 与基准 (b) 的差：停住的读数原值逐字相同，只给浮点换算留余量
+)
+
+// prevProgressGuard 认出换歌过渡态读数里上一首的进度（#195，doc/design/kugou-double-announce-design.md §4 方案 A-2）。
+//
+// 酷狗切歌时可能先给出新歌的 hash、文件名与时长，播放态既非播放也非暂停，进度却仍是上一首的
+// （推断自 15-kugou-40 中浮游天地第一次宣告的 1.512 s，见设计 §1.3；未经真机取证）。不认出来的话，它随 all_lyrics 原样发出，前端先跳到上一首的
+// 位置、再由第二次宣告或 playback_resume 拉回。
+//
+// 基准两项：(a) 最近一首已确认（读到过播放或暂停；会话第一首在换歌时即算）的歌的时钟；(b) 自 (a) 设定以来
+// 最近一次直接与 (a) 吻合的读数。未确认的宣告（包括被置 0 的锚点）一律不当基准：连续两次未起播的换歌里，
+// 拿上一次的锚点比，第二次比的是 0，上一首的进度就漏了出去。
+//
+// (b) 只管酷狗把上一首的进度停在切歌那一刻的情形：(a) 随墙钟推算，过渡态一长就与停住的读数拉开，(b) 不动。
+// (b) 只由直接与 (a) 吻合的读数设定，只与 (b) 吻合的读数不改写它，容差又只有浮点余量，所以被置 0 的只限于
+// 离已确认的歌不到 1 s 的读数与和这类读数原值相同的读数；放宽任何一条，连续未确认的换歌会把误判一跳一跳地
+// 推远，把从非 0 位置合法起播的新歌也置 0。
+type prevProgressGuard struct {
+	hasBase     bool
+	baseSec     float32 // (a) 锚点进度
+	baseAt      time.Time
+	basePlaying bool
+	baseDur     float32
+	hasFrozen   bool
+	frozenSec   float32 // (b)
+}
+
+// rebase 在换歌、重置锚点之前调用：当前歌已确认则以它此刻的时钟为 (a)，清空 (b)；未确认则 (a)、(b) 原样保留。
+// 会话第一首之前 confirmed 为假，没有基准，isPrev 恒假。
+func (g *prevProgressGuard) rebase(confirmed bool, anchorSec float32, anchorAt time.Time, playing bool, durSec float32) {
+	if confirmed {
+		*g = prevProgressGuard{hasBase: true, baseSec: anchorSec, baseAt: anchorAt, basePlaying: playing, baseDur: durSec}
+	}
+}
+
+// isPrev 判 at 时刻读到的过渡态进度 p 是不是上一首的。与 (a) 推算位置相差不到 prevProgressTolerance 时为真并把
+// (b) 设为 p；否则与 (b) 相差不到 frozenProgressTolerance 时为真，(b) 不变。只对过渡态读数调用。
+func (g *prevProgressGuard) isPrev(p float32, at time.Time) bool {
+	if !g.hasBase {
+		return false
+	}
+	if math.Abs(float64(p-player.LivePosition(g.baseSec, g.baseAt, at, g.basePlaying, g.baseDur))) < prevProgressTolerance {
+		g.frozenSec, g.hasFrozen = p, true
+		return true
+	}
+	return g.hasFrozen && math.Abs(float64(p-g.frozenSec)) < frozenProgressTolerance
+}
+
+// looksPrev 是 isPrev 的只读版：判定与 isPrev 逐条相同（直接调用它），事后把 (b) 恢复原样。
+// 换歌之后各拍用它，换歌拍与重读用 isPrev。
+func (g *prevProgressGuard) looksPrev(p float32, at time.Time) bool {
+	saved := *g
+	defer func() { *g = saved }()
+	return g.isPrev(p, at)
 }
 
 // normalizeKugouCoverURL 把 getPlayInfo 给的封面 URL 换成 800 档：路径里的 /stdmusic/120/ 换成 /stdmusic/800/。
@@ -760,6 +910,10 @@ type kugouSongInfoResp struct {
 // 对于 CDP 未提供封面的曲目（伴奏、无专辑封面等），
 // API 会返回歌手头像（imgUrl / trans_param.union_cover），
 // 其中 {size} 占位符替换为 800。
+//
+// http 地址改用 https（#194）。API 给的歌手图在 singerimg.kugou.com 上，该图床拒绝 Go 默认的 User-Agent：
+// 有的图 http 回 403、https 回 200，有的图 http 与 https 都回 403（2026-11-14 本机实测）；带浏览器标识则都回 200，
+// 封面下载已统一带上（player/cover.go）。改 https 保留。
 func fetchCoverFromAPI(hash string) string {
 	url := "https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=" + hash
 	resp, err := kugouAPIClient.Get(url)
@@ -780,5 +934,9 @@ func fetchCoverFromAPI(hash string) string {
 	if cover == "" {
 		return ""
 	}
-	return strings.ReplaceAll(cover, "{size}", "800")
+	cover = strings.ReplaceAll(cover, "{size}", "800")
+	if rest, ok := strings.CutPrefix(cover, "http://"); ok {
+		cover = "https://" + rest
+	}
+	return cover
 }

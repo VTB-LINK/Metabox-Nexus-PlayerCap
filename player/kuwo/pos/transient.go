@@ -92,6 +92,26 @@ type TransientFilter struct {
 	tDet   time.Time
 	havePf bool
 	lastPf int64
+
+	// passedAbove: a tick of this segment passed a core value above the base
+	// through while pending (paused, or with the output read failing), so the
+	// public position is already there; a tracked anchor taken afterwards would
+	// step it back (#198).
+	passedAbove bool
+	// unreported: an opening passthrough noted while the core was still at the
+	// base, reported on this segment's first published value above it (#198
+	// A-5). A segment reset drops it.
+	unreported    OpenPass
+	hasUnreported bool
+
+	// #198 (doc/design/kuwo-switch-start-transient-design.md §5.1): the output
+	// tracking (A-3), the previous song's last core sample, taken at a song change
+	// (A-4 condition 4), and the opening passthrough not yet taken for the log
+	// (A-5). Segment resets keep them.
+	track       outputTrack
+	lastSongAt  time.Time
+	openPass    OpenPass
+	openPassSet bool
 }
 
 // Apply returns core with PositionMs set to the filtered position P_f (CoreMs
@@ -102,6 +122,7 @@ type TransientFilter struct {
 func (f *TransientFilter) Apply(core Sample, out OutputState, playing bool, interval time.Duration) (Sample, bool) {
 	cRaw := int64(core.PositionMs)
 	now := core.ObservedAt
+	f.track.observe(out, now)
 
 	// Jump test against the filter's own raw history (design §3.3 attribution).
 	jump := false
@@ -113,6 +134,14 @@ func (f *TransientFilter) Apply(core Sample, out OutputState, playing bool, inte
 		advanced = step > 0
 	}
 	ridChanged := core.RID != f.prevRID
+	if ridChanged {
+		// The previous song's last core sample, #185 held ticks included (#198 A-4
+		// condition 4); none when this filter saw no previous song.
+		f.lastSongAt = time.Time{}
+		if f.havePrev {
+			f.lastSongAt = f.prevAt
+		}
+	}
 
 	// Segment detection and reset. RID change always resets; base change, a fed
 	// fall or a device change reset only when the output state is valid.
@@ -147,6 +176,11 @@ func (f *TransientFilter) Apply(core Sample, out OutputState, playing bool, inte
 		if f.phase == phaseFiltering {
 			f.degraded = true
 		}
+		// The uncapped value goes out: above the base, a tracked anchor taken later
+		// in this segment would step the public position back (#198).
+		if f.segActive && cRaw > int64(f.base)+transientTol.Milliseconds() {
+			f.passedAbove = true
+		}
 	case f.degraded:
 		// A device-specific failure earlier this segment: stay passed through.
 	case out.Device == DeviceWASAPI, out.Device == DeviceUnknown:
@@ -171,6 +205,8 @@ func (f *TransientFilter) Apply(core Sample, out OutputState, playing bool, inte
 		f.segFed = out.Fed
 	}
 
+	f.reportUnreported(pf)
+
 	out2 := core
 	out2.PositionMs = int32(pf)
 	out2.TransientResync = resync
@@ -183,12 +219,16 @@ func (f *TransientFilter) Apply(core Sample, out OutputState, playing bool, inte
 func (f *TransientFilter) resetSegment(out OutputState, openSrc bool) {
 	known := out.Valid && isTransientDevice(out.Device)
 	*f = TransientFilter{
-		havePrev:   f.havePrev,
-		prevCoreMs: f.prevCoreMs,
-		prevAt:     f.prevAt,
-		prevRID:    f.prevRID,
-		segActive:  known,
-		phase:      phasePending,
+		havePrev:    f.havePrev,
+		prevCoreMs:  f.prevCoreMs,
+		prevAt:      f.prevAt,
+		prevRID:     f.prevRID,
+		segActive:   known,
+		phase:       phasePending,
+		track:       f.track,
+		lastSongAt:  f.lastSongAt,
+		openPass:    f.openPass,
+		openPassSet: f.openPassSet,
 	}
 	if known {
 		f.device = out.Device
@@ -231,6 +271,7 @@ func (f *TransientFilter) filter(core Sample, out OutputState, playing bool, int
 		switch {
 		case interval > transientAnchorMaxGap:
 			f.dsDegraded = true // long poll: no fresh anchor
+			f.noteOpenPass(OpenPassLongPoll, out, cRaw)
 		case fedMs < transientFedPlayMs:
 			// Play not issued yet: keep waiting, cand stays at base.
 		case f.seenValid && f.prevFedBelow && !f.prevValidAt.IsZero() && now.Sub(f.prevValidAt) <= transientAnchorMaxGap:
@@ -241,6 +282,14 @@ func (f *TransientFilter) filter(core Sample, out OutputState, playing bool, int
 			// snapshot can leave two valid samples far apart even at a 50 ms config,
 			// and anchoring then would push the already-passed-through value back.
 			f.playSeen, f.tSeen, resync = true, now, true
+		case f.trackedAnchor(out):
+			// A song's opening segment whose crossing only the output tracking saw:
+			// on a tick with no core sample, before this filter's first sample of the
+			// song (#198 A-4). The anchor is as fresh as the per-tick one. On the
+			// song change tick the session judges no notice (and the change resets
+			// the front end); on a later tick the front end has been running since
+			// the announcement, so the session must judge it.
+			f.playSeen, f.tSeen, resync = true, f.track.crossAt, !ridChanged
 		default:
 			// fed is over the threshold but there is no fresh crossing to anchor on:
 			// the first filterable sample is already over (crossing before sampling),
@@ -249,6 +298,7 @@ func (f *TransientFilter) filter(core Sample, out OutputState, playing bool, int
 			// passthrough rather than leave cand pinned at base until the backstop
 			// (design §3.3 Play 判据: fed 越阈即二选一、不得悬空).
 			f.dsDegraded = true
+			f.noteOpenPass(OpenPassNoCrossing, out, cRaw)
 		}
 	}
 
@@ -288,6 +338,9 @@ func (f *TransientFilter) filter(core Sample, out OutputState, playing bool, int
 		}
 		// pending passthrough: paused, unowned, outside the band, or no
 		// multi-report yet.
+		if cRaw > int64(out.Base)+tolMs {
+			f.passedAbove = true
+		}
 		return cRaw, resync
 
 	case phaseFiltering:
@@ -375,6 +428,134 @@ func scaleTransient(x int64, out OutputState) int64 {
 // filter can correct (DirectSound or WaveOut).
 func isTransientDevice(d DeviceKind) bool {
 	return d == DeviceDirectSound || d == DeviceWaveOut
+}
+
+// outputTrack follows the output segments from output facts alone (#198,
+// doc/design/kuwo-switch-start-transient-design.md §5.1 A-3), on every valid
+// observation, including the ticks with no core sample (no song, a settling
+// bridge, a failed core read). It gives no ownership and the state machine never
+// reads it except for a song's opening segment (A-4).
+type outputTrack struct {
+	have    bool
+	device  DeviceKind
+	base    uint32
+	fed     uint32    // the latest valid observation's fed
+	bps     uint32    // and its byte rate
+	at      time.Time // and its time
+	crossAt time.Time // this segment's fresh DirectSound Play crossing; zero if none
+}
+
+// observe takes one output state. A device or base change, or fed falling,
+// starts a new segment. The crossing counts only between two valid observations
+// of the segment at most transientAnchorMaxGap apart (the per-tick anchor's
+// actual-gap rule); an invalid observation is skipped, so the gap runs from the
+// last valid one.
+func (t *outputTrack) observe(out OutputState, at time.Time) {
+	if !out.Valid || !isTransientDevice(out.Device) || out.Bps == 0 {
+		return
+	}
+	if !t.have || out.Device != t.device || out.Base != t.base || out.Fed < t.fed {
+		*t = outputTrack{have: true, device: out.Device, base: out.Base, fed: out.Fed, bps: out.Bps, at: at}
+		return
+	}
+	if t.crossAt.IsZero() && !at.Before(t.at) && at.Sub(t.at) <= transientAnchorMaxGap &&
+		bytesMs(t.fed, t.bps) < transientFedPlayMs && bytesMs(out.Fed, out.Bps) >= transientFedPlayMs {
+		t.crossAt = at
+	}
+	t.fed, t.bps, t.at = out.Fed, out.Bps, at
+}
+
+func bytesMs(n, bps uint32) int64 { return int64(n) * 1000 / int64(bps) }
+
+// Track records an output state read on a tick with no core sample (#198 A-2).
+// It changes only the output tracking, never the state machine.
+func (f *TransientFilter) Track(out OutputState, at time.Time) { f.track.observe(out, at) }
+
+// trackedAnchor reports whether a song's opening DirectSound segment may take the
+// tracked crossing as its "Play issued" anchor (#198 A-4): the segment is the one
+// current at the song change, the tracking follows the same output segment and
+// saw it cross, and the crossing came after the previous song's last core sample
+// (condition 4). A filter that saw no previous song never does. Nor does a
+// segment that already passed a core value above its base through (announced
+// paused after the crossing, or a failed output read, for two): the anchored
+// line would step the public position back, so it degrades as before.
+func (f *TransientFilter) trackedAnchor(out OutputState) bool {
+	return f.trackedCrossing(out) && f.track.crossAt.After(f.lastSongAt) && !f.passedAbove
+}
+
+// trackedCrossing reports whether the tracking follows this opening segment and
+// saw it cross, after a song change.
+func (f *TransientFilter) trackedCrossing(out OutputState) bool {
+	t := &f.track
+	return f.ownedOpen && t.have && t.device == out.Device && t.base == out.Base &&
+		!t.crossAt.IsZero() && !f.lastSongAt.IsZero()
+}
+
+// OpenPassReason is why a song's opening DirectSound segment passes the core
+// through instead of filtering it (#198 A-5).
+type OpenPassReason int
+
+const (
+	OpenPassNoCrossing       OpenPassReason = iota + 1 // no fresh crossing tracked for the segment
+	OpenPassCrossingNotAfter                           // tracked, but not after the previous song's last core sample
+	OpenPassLongPoll                                   // the effective poll is too long to anchor
+	OpenPassPassedAbove                                // tracked, but the segment already passed a value above its base through
+)
+
+// OpenPass describes an opening passthrough after a song change, for the log.
+type OpenPass struct {
+	Reason     OpenPassReason
+	Base       uint32
+	CrossAt    time.Time // the tracked crossing, zero if none
+	LastSongAt time.Time // the previous song's last core sample
+}
+
+// TakeOpenPass returns the opening passthrough noted since the last call, once.
+func (f *TransientFilter) TakeOpenPass() (OpenPass, bool) {
+	p, ok := f.openPass, f.openPassSet
+	f.openPass, f.openPassSet = OpenPass{}, false
+	return p, ok
+}
+
+// noteOpenPass records why the segment degrades, for a song's opening segment
+// after a song change only (the session's first song and in-song segments are
+// not what the log is for), and reports it only once a multi-report goes out:
+// while the passed-through core is still at the base it is kept unreported, and
+// a segment reset drops it, so a song change seen before the new song's output
+// opens (the old segment current, the core at 0; the new segment then owned by
+// the existing rules) logs nothing. A crossing tracked on this segment that was
+// not taken failed condition 4, or came before a passthrough above the base.
+func (f *TransientFilter) noteOpenPass(reason OpenPassReason, out OutputState, cRaw int64) {
+	if !f.ownedOpen || f.lastSongAt.IsZero() {
+		return
+	}
+	var crossAt time.Time
+	if f.trackedCrossing(out) {
+		crossAt = f.track.crossAt
+		if reason == OpenPassNoCrossing {
+			reason = OpenPassCrossingNotAfter
+			if crossAt.After(f.lastSongAt) {
+				reason = OpenPassPassedAbove
+			}
+		}
+	}
+	p := OpenPass{Reason: reason, Base: out.Base, CrossAt: crossAt, LastSongAt: f.lastSongAt}
+	if cRaw <= int64(out.Base)+transientTol.Milliseconds() {
+		// Nothing wrong goes out yet: report it once a value above the base does,
+		// unless the segment ends first (reportUnreported, resetSegment).
+		f.unreported, f.hasUnreported = p, true
+		return
+	}
+	f.openPass, f.openPassSet = p, true
+}
+
+// reportUnreported reports a deferred opening passthrough on this segment's
+// first published value above its base.
+func (f *TransientFilter) reportUnreported(pf int64) {
+	if f.hasUnreported && pf > int64(f.base)+transientTol.Milliseconds() {
+		f.openPass, f.openPassSet = f.unreported, true
+		f.unreported, f.hasUnreported = OpenPass{}, false
+	}
 }
 
 func clampMin0(v int64) int64 {

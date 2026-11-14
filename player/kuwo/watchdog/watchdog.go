@@ -1,6 +1,10 @@
-// Package watchdog enables the tested Kuwo debug flag by restarting at most one
-// verified running instance per service lifetime. It does not install, patch,
-// modify autostart, launch an absent player, or kill by executable name.
+// Package watchdog enables the tested Kuwo debug flag by restarting a verified
+// running instance, at most once per process: a restart replaces the process
+// with one carrying the flag, which is never restarted. Until the instance a
+// restart launched is confirmed running with the flag and an answering debug
+// port, no further restart is made; if it exits unconfirmed, none is made in
+// this service lifetime. It does not install, patch, modify autostart, launch
+// an absent player, or kill by executable name.
 package watchdog
 
 import (
@@ -12,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +47,7 @@ var (
 	ErrVersionUnsupported = i18n.Sentinel("Kuwo version or executable is not verified")
 	ErrPortNotReady       = i18n.Sentinel("Kuwo debug port is not ready yet")
 	ErrAmbiguous          = i18n.Sentinel("Kuwo process identity is ambiguous")
-	ErrRestartLimited     = i18n.Sentinel("Kuwo has already been restarted once in this service run; no further automatic restart")
+	ErrRestartLimited     = i18n.Sentinel("The Kuwo instance of an earlier automatic restart has not been confirmed to have opened its debug port; no automatic restart until it is")
 	// ErrRestartNotAuthorized means the running build is not in knownBuilds, so
 	// it is not eligible for a destructive auto-restart. The user must launch it
 	// with the debug port themselves; the read path still works once it is open.
@@ -69,9 +74,41 @@ type operations struct {
 }
 
 type manager struct {
-	mu        sync.Mutex
-	attempted bool
-	ops       operations
+	mu sync.Mutex
+	// limited is set when a restart begins and cleared only by confirmAfterProbe.
+	// While it is set no restart is made: a launcher that drops the flag would
+	// otherwise have every newly opened instance restarted in turn (#187).
+	limited bool
+	// launched is the first instance enumerated after the latest restart's
+	// start, zero until then. It is presumed to be the one start launched:
+	// startExact goes through cmd.exe and yields no PID. The presumption fails
+	// only if, between start and that first successful enumeration (normally the
+	// wait's first round, then every 250 ms until Kuwo appears), the launched
+	// instance exits and another one is opened. If that other one carries the
+	// flag it confirms the restart wrongly; the cost is one more restart of the
+	// next normally opened instance at most, and if the launcher still drops
+	// the flag, that restart's instance is unconfirmed and the limit stays: no
+	// loop.
+	launched instance
+	ops      operations
+}
+
+// confirmAfterProbe runs after the port answered. before is the instance found
+// before that probe. limited is cleared only when before is the launched
+// instance and a fresh enumeration after the probe finds the same instance
+// (sameInstance: PID, creation time, path and arguments) carrying DebugFlag; an
+// instance that changed around the probe never confirms, since the port may
+// have answered for the other one. It runs in the restart's own wait and in
+// every later ensure, so a port that answers only after that wait still
+// confirms. Any other instance, flagged or not, never does; once launched has
+// exited unconfirmed, limited stays set for this service lifetime.
+func (m *manager) confirmAfterProbe(ctx context.Context, before instance) {
+	if !m.limited || !sameInstance(before, m.launched) {
+		return
+	}
+	if cur, err := m.ops.scan(ctx); err == nil && sameInstance(cur, before) && slices.Contains(cur.Args, DebugFlag) {
+		m.limited = false
+	}
 }
 
 var defaultManager = manager{ops: operations{scan: scanProcesses, ready: debugReady, occupied: debugPortOccupied, verify: verifyExecutable, stop: stopExact, start: startExact, wait: waitContext}}
@@ -81,8 +118,9 @@ func FindMainPID() (int, error) {
 	return i.PID, err
 }
 
-// EnsureDebugMode never retries a destructive restart within this service
-// lifetime, even after start failure. A ready bridge needs no restart.
+// EnsureDebugMode restarts each process at most once. Until a restart is
+// confirmed (see confirmAfterProbe), including after a start failure, it makes
+// no further restart. A ready bridge needs no restart.
 func EnsureDebugMode(ctx context.Context) error { return defaultManager.ensure(ctx) }
 
 func (m *manager) ensure(ctx context.Context) error {
@@ -96,6 +134,7 @@ func (m *manager) ensure(ctx context.Context) error {
 		return err
 	}
 	if err := m.ops.ready(ctx); err == nil {
+		m.confirmAfterProbe(ctx, i)
 		return nil
 	} else if errors.Is(err, cdp.ErrVersionUnsupported) {
 		// The bridge answered but its build is not verified: report the version
@@ -115,7 +154,7 @@ func (m *manager) ensure(ctx context.Context) error {
 			return ErrPortNotReady
 		}
 	}
-	if m.attempted {
+	if m.limited {
 		return ErrRestartLimited
 	}
 	// An unverified build is not eligible for a destructive restart: report it
@@ -139,7 +178,7 @@ func (m *manager) ensure(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	m.attempted = true
+	m.limited, m.launched = true, instance{}
 	log.Warn("Kuwo needs its debug port; restarting the verified instance once (playback may pause)")
 	if err = m.ops.stop(ctx, i); err != nil {
 		return i18n.Errorf("kuwo: controlled restart failed: %w", err)
@@ -170,7 +209,15 @@ func (m *manager) ensure(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// Enumerate before each probe until the launched instance is seen, so a
+		// probe that succeeds can be checked against it (#187).
+		if m.launched.PID == 0 {
+			if cur, err := m.ops.scan(ctx); err == nil {
+				m.launched = cur
+			}
+		}
 		if err := m.ops.ready(ctx); err == nil {
+			m.confirmAfterProbe(ctx, m.launched)
 			return nil
 		} else if errors.Is(err, cdp.ErrVersionUnsupported) {
 			return err

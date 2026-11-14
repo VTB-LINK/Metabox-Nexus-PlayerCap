@@ -81,6 +81,7 @@ var p4ErrMessages = map[string]string{
 	"the accompaniment decoder changed before the announcement":                                                     "伴奏解码器在宣告之前变了",
 	"the accompaniment decoder path does not match the song mid":                                                    "伴奏解码器的路径与歌曲 mid 不符",
 	"SodaMusic main process not found (%s not running?)":                                                            "未找到汽水音乐主进程（%s 未运行？）",
+	"SodaMusic main process is exiting and waiting for the debugger to disconnect":                                  "汽水音乐主进程正在退出，等待调试会话断开",
 	"Process not found: %s":                                                                                         "未找到进程: %s",
 	"failed to enumerate processes: %w":                                                                             "枚举进程失败: %w",
 	"Failed to locate CreateLyricHost: %v":                                                                          "查找 CreateLyricHost 失败: %v",

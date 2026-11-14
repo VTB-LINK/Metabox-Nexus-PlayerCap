@@ -25,6 +25,8 @@ var coverLog = logger.New("Cover")
 // 检查，天然避开「先 LookupIP 再 Get」的 TOCTOU / DNS-rebinding 窗口。下载出错一律返回空串（降级，
 // 沿用本函数既有风格）；规范化失败时原字节照发（见 CoverDataURI）。不设代理：封面走公网 CDN 直连，
 // 经代理会绕过下面的内网 IP 校验。
+//
+// 下载失败时记一条 Detail，写明原因（错误、HTTP 状态码、超限或不完整），返回值不变（#199）。
 func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration) string {
 	if coverURL == "" {
 		return ""
@@ -40,13 +42,23 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 	// （Transport 默认没有空闲超时，Body.Close 与 Client.Timeout 都不清理空闲连接）。
 	client := newCoverClient(timeout)
 	defer client.CloseIdleConnections()
-	resp, err := client.Get(coverURL)
+	req, err := http.NewRequest(http.MethodGet, coverURL, nil)
 	if err != nil {
+		coverLog.Detail("[%s] cover download failed: %v", playerName, err)
+		return ""
+	}
+	// 带上通用的浏览器标识（同网易云的歌词请求）：酷狗歌手图的图床拒绝 Go 默认的 User-Agent，http 与 https 都回 403，
+	// 换成浏览器标识或不带即 200（#194，2026-11-14 实测）。
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := client.Do(req)
+	if err != nil {
+		coverLog.Detail("[%s] cover download failed: %v", playerName, err)
 		return ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		coverLog.Detail("[%s] cover download failed: HTTP %d: %s", playerName, resp.StatusCode, coverURL)
 		return ""
 	}
 
@@ -54,14 +66,17 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 	const maxSize = 5 * 1024 * 1024
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
+		coverLog.Detail("[%s] cover download failed while reading: %v: %s", playerName, err, coverURL)
 		return ""
 	}
 	if int64(len(body)) > maxSize {
+		coverLog.Detail("[%s] cover larger than %d bytes, sending the URL only: %s", playerName, maxSize, coverURL)
 		return "" // 超过上限，放弃 base64，让前端用 URL 加载
 	}
 	// 校验 Content-Length（如有）防止被 LimitReader 静默截断
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		if expected, err := strconv.ParseInt(cl, 10, 64); err == nil && int64(len(body)) < expected {
+			coverLog.Detail("[%s] cover download incomplete (%d of %d bytes): %s", playerName, len(body), expected, coverURL)
 			return "" // 下载不完整
 		}
 	}
