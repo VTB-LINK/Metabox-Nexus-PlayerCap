@@ -199,27 +199,31 @@ func TestEnsureCanonicalNameWaitsUnderOtherName(t *testing.T) {
 // 等待：复制品读标准输入而阻塞，用例此时什么都没写，原进程须自己先以 0 退出；之后放开复制品，
 // 它照常跑完。
 //
+// 10 秒从读到复制品的输出起算，不从启动原进程起算（issue #173）：原进程要先完成启动、复制自身、
+// 启动复制品，这一段在全量测试的负载下曾超过 10 秒，不等待也被判成等待。复制品能写出参数，
+// 说明原进程的启动调用已经让它运行起来，不等待的写法此后只剩返回与退出。
+//
 // 变异（均实测为红）：去掉这条例外、一律等待；这条分支改成等复制品结束再以 0 退出；文件名比较
-// 区分大小写（大写一例红）；这条分支不传命令行参数；不复制内容就去启动。前三条表现为原进程
-// 10 秒内不退出。
+// 区分大小写（大写一例红）；这条分支不传命令行参数；不复制内容就去启动。前三条表现为复制品
+// 写出参数后原进程 10 秒内不退出。反例（实测为绿）：启动复制品之前先停 12 秒、仍不等待。
 func TestEnsureCanonicalNameDoesNotWaitUnderLegacyName(t *testing.T) {
 	for _, name := range []string{legacyExeName, strings.ToUpper(legacyExeName)} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			r := startEnsure(t, dir, name, "ensure", "echo", "3", "a b")
 
+			if got := r.readLines(t, 1); got[0] != `"a b"` {
+				t.Errorf("复制品收到的参数是 %s，期望 \"a b\"", got[0])
+			}
 			code, ok := r.waitExit(10 * time.Second)
 			if !ok {
-				t.Fatal("原进程在等复制品结束，旧文件名应当不等待")
+				t.Fatal("复制品已启动，原进程在等它结束，旧文件名应当不等待")
 			}
 			if code != 0 {
 				t.Errorf("原进程退出码 %d，期望 0；标准错误：%s", code, r.stderr())
 			}
 			assertCanonicalCopy(t, dir)
 
-			if got := r.readLines(t, 1); got[0] != `"a b"` {
-				t.Errorf("复制品收到的参数是 %s，期望 \"a b\"", got[0])
-			}
 			fmt.Fprintln(r.stdin, "go")
 			if rest := r.rest(); rest != "stdin=\"go\"\n" {
 				t.Errorf("复制品没有照常跑完，后续输出 %q", rest)

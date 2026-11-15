@@ -217,12 +217,14 @@ func TestReplayQuickSwitchAfterClaim(t *testing.T) {
 
 // TestReplaySettleWindowExpires 进度一直没换过来：等满 progressSettleWindow 按当时的读数认领（等待有界），
 // 之后进度归零照旧判一次回跳。首个换歌拍在 420ms，等窗到 2420ms，其后第一拍是 2430ms。
+// 归零落在开头 1s 以内，经 #202 的暂扣：3000ms 开始暂扣，距起点不少于 400ms 的第一拍（3420ms）放行，按回跳补发，
+// 位置取那一拍的读数 0.520（doc/design/qqmusic-switch-zero-design.md §7.3 S13b）。
 //
 // 变异自证：注入在回放里——换歌分支改成只要判为没换过来就一直等（不经等窗），本例红（`all lu22 all lu0`，
 // 到 3000ms 读数归零才认领）。
 func TestReplaySettleWindowExpires(t *testing.T) {
 	r := newReplay(-0.4, recordingSongs())
-	r.run(0, 3300, 30, func(ms int) (string, uint32) {
+	r.run(0, 3600, 30, func(ms int) (string, uint32) {
 		switch {
 		case ms < 420:
 			return "Change of Coast", 119000 + uint32(ms)
@@ -235,6 +237,9 @@ func TestReplaySettleWindowExpires(t *testing.T) {
 	r.expectShape(t, "all lu22 all lu22 resume lu0")
 	if e := r.find(t, "all_lyrics", 1); !approx(e.pos, 121.43) {
 		t.Errorf("等满之后认领的进度 %.3f，期望 2430ms 那一拍的读数 121.430", e.pos)
+	}
+	if e := r.find(t, "playback_resume", 0); e.ms != 3420 || !approx(e.pos, 0.52) {
+		t.Errorf("回跳 %v，期望暂扣 400ms 之后 3420ms 那一拍补发、位置 0.520", e)
 	}
 }
 

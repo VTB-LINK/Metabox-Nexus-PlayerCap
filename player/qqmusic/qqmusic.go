@@ -112,6 +112,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	var currentDurationSec float32 = 0
 	var isPaused bool = false
 	var resume resumeGate // 已判暂停时的恢复判定，见 resumeGate
+	var hold switchHold   // 换歌前进度归零的暂扣，见 switchHold
 	var currentTitle string
 
 	// 换歌后歌词补取：songID/songMid 落位可能滞后于显示结构体几秒（v22.41 实测），换歌那帧
@@ -194,6 +195,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			}
 			midWait.reset()
 			progressWait.reset()
+			hold.drop(sampleTime) // 暂扣中的回跳是换歌造成的，不发（#202）
 
 			lastName = meta.Name
 			lastLineIdx = -1
@@ -226,9 +228,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				coverURL = fetchCoverURL(meta.SongID, meta.SongMid)
 				// 取词与取封面地址是阻塞的网络请求，返回时本轮的进度读数已过时：其间可能暂停、恢复或拖动过。
 				// 再读一次，读到的仍是这首歌就把它当作本轮的读数——进度与 sampleTime 成对替换；下面随歌词
-				// 发出的位置、本轮其后的锚点更新、seek 检测与暂停检测都基于它。读不到、或读到的已不是这首歌，
-				// 则沿用取词前的读数，留给下一轮。
-				if fresh, rerr := mem.ReadAllMetadata(); rereadSameSong(fresh, rerr, lastName) {
+				// 发出的位置、本轮其后的锚点更新、seek 检测与暂停检测都基于它。读不到、读到的已不是这首歌、或读数
+				// 落回开头附近而会触发暂扣（取词期间换歌归零，#202），则沿用取词前的读数，留给下一轮。
+				if fresh, rerr := mem.ReadAllMetadata(); rereadSameSong(fresh, rerr, lastName, lastMemProgress) {
 					sampleTime = time.Now()
 					meta.ProgressMs = fresh.ProgressMs
 				}
@@ -305,11 +307,23 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			progressWait.reset()
 		}
 
+		// --- 换歌前进度归零的暂扣（#202）---
+		// 换歌时读数先归零、歌名稍后才换，归零这一拍按回跳发会闪出上一首的第 0 行。落在开头附近的回跳先暂扣，
+		// 暂扣中的拍跳过本拍其余判定（补取、变化分支、暂停判定、行匹配、位置采样），不发这首歌的任何事件，
+		// 读数与锚点都不动；其间认领新歌即丢弃（见上面的 hold.drop），期满未换歌即放行，由变化分支补发。
+		// 必须在补取之前：暂扣中的拍不补取，阻塞的取词不吃掉暂扣时窗。
+		held, released := hold.step(lastMemProgress, meta.ProgressMs, sampleTime)
+		if held {
+			continue
+		}
+
 		// --- 换歌后歌词补取 ---
 		// songID/songMid 落位滞后于显示结构体（v22.41：数字 songID 在独立会话结构、songMid 在
 		// 堆上报 JSON，换歌瞬间都可能还是上一首或空）。上面认领并发了标题+空歌词，这里在有界
 		// 窗口内持续重试：ID 一落位就补上完整歌词（中途替换 all_lyrics），窗口用尽才收场。
-		if lyricsPending && meta.Name == lastName && meta.Name != "" {
+		// 暂扣放行的那一拍不补取（#202）：取词与取封面地址是阻塞的联网请求（各 10s 超时），排在变化分支之前，
+		// 放行拍若补取，补发的跳转要等它们返回，推迟会超出约 0.4s 加一拍的上限。补取顺延到下一拍，重试节流照旧。
+		if lyricsPending && !released && meta.Name == lastName && meta.Name != "" {
 			if time.Now().After(pendingDeadline) {
 				lyricsPending = false
 				log.Warn("Lyric backfill timed out (%v); continuing without lyrics (local file playback?)", lyricRetryWindow)
@@ -330,7 +344,8 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 					// 同换歌分支：取词返回后再读一次进度，当作本轮的读数。这里不能改用锚点与 isPaused 推算：
 					// 本块在本轮的锚点更新与暂停检测之前，它们还是上一轮的，本轮刚恢复或拖动过时位置会取到旧值。
 					// 下面的 fetchCoverURL 仍会阻塞，本轮其后的判定按 sampleTime 计，不受它影响。
-					if fresh, rerr := mem.ReadAllMetadata(); rereadSameSong(fresh, rerr, lastName) {
+					// 重读落回开头附近而会触发暂扣时不采用（#202）。
+					if fresh, rerr := mem.ReadAllMetadata(); rereadSameSong(fresh, rerr, lastName, lastMemProgress) {
 						sampleTime = time.Now()
 						meta.ProgressMs = fresh.ProgressMs
 					}
@@ -391,11 +406,13 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		// --- 快速计时器锚点更新 + seek 检测 ---
 		if meta.ProgressMs != lastMemProgress {
 			// Seek 检测：进度大幅跳变（> 2s 超出正常播放推进）视为跳转
-			seekDetected := false
+			// 暂扣放行的那一拍（#202）：读数低于暂扣前的读数即按回跳补发，不再比较 2s 门槛；不低于（从原处接着走，
+			// 或向前跳）交给下面的前跳判据，接着走不发事件。lastMemProgress 在暂扣期间没动，仍是暂扣前的读数。
+			seekDetected := released && meta.ProgressMs < lastMemProgress
 			resumeEmitted := false
 			if lastMemProgress > 0 {
 				// 回跳：进度回退超过 2s
-				if meta.ProgressMs+2000 < lastMemProgress {
+				if seekBack(lastMemProgress, meta.ProgressMs) {
 					log.Info("Seek-back detected: %.2fs → %.2fs", float32(lastMemProgress)/1000.0, float32(meta.ProgressMs)/1000.0)
 					seekDetected = true
 				}
@@ -481,11 +498,77 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	}
 }
 
-// rereadSameSong 判断取词之后重读到的元数据能否当作本轮的读数：读成功，且歌名仍是 name（已认领的
-// 那一首）。比较与轮询循环的换歌判据一致（只比歌名、逐字相等）；空闲或过渡态漏进来的占位串、空串
-// 都与已认领的歌名不同，不采用。
-func rereadSameSong(fresh *SongMetadata, err error, name string) bool {
-	return err == nil && fresh != nil && name != "" && fresh.Name == name
+// rereadSameSong 判断取词之后重读到的元数据能否当作本轮的读数：读成功，歌名仍是 name（已认领的那一首），
+// 且相对 prevMs 不构成暂扣的触发（startsHold，#202）。比较与轮询循环的换歌判据一致（只比歌名、逐字相等）；
+// 空闲或过渡态漏进来的占位串、空串都与已认领的歌名不同，不采用。
+//
+// 第三条：取词期间换歌、读数先归零而只出现在重读里时，采用它就绕过了暂扣，变化分支随即判回跳，发上一首的
+// playback_resume(0) 与第 0 行。prevMs 由调用方传 lastMemProgress：采用之后变化分支正是拿它比较，口径须一致；
+// 以本拍首读为参照会漏掉「首读是带外回跳、重读归零」的情形（doc/design/qqmusic-switch-zero-design.md §4.6）。
+// 暂扣放行的那一拍不补取（见补取块），认领拍也不是放行拍，这道检查遇不到放行拍。不采用时沿用取词前的读数，
+// 归零由下一拍的暂扣判定处理。
+func rereadSameSong(fresh *SongMetadata, err error, name string, prevMs uint32) bool {
+	return err == nil && fresh != nil && name != "" && fresh.Name == name && !startsHold(prevMs, fresh.ProgressMs)
+}
+
+// switchStartBandMs、switchConfirmAfter 管换歌前进度归零的暂扣（#202，doc/design/qqmusic-switch-zero-design.md
+// §4）。QQ 音乐 22.81 换歌时进度读数先归零，歌名晚 31～249 ms 才换成新歌（2026-11-14 录音 ws/30-qqmusic-172，
+// 10 次换歌 8 次，归零的读数都为 0）。只看读数，这一拍与拖回开头、单曲循环回到开头分不开，故落在开头附近的回跳
+// 先暂扣，switchConfirmAfter 内认领了新歌即丢弃，期满仍未换歌才补发。
+//
+// switchStartBandMs：录音里的归零读数都为 0；1 s 给未见过的情形留余量，与 kuwo 同值。带宽只决定哪些真实的回跳
+// 要等，读数恰为它时不暂扣。switchConfirmAfter：歌名晚于归零至多约 280 ms（最长一例 249 ms 加一拍，推断），
+// 留约 120 ms 余量；代价是拖到开头 1 s 以内与单曲循环回到开头的跳转晚 400 ms 到 400 ms 加一拍。项目负责人决定
+// 维持 400 ms，不为较慢的机器放宽（设计 §10）。
+const (
+	switchStartBandMs  uint32 = 1000
+	switchConfirmAfter        = 400 * time.Millisecond
+)
+
+// seekBack 判读数相对上一次读数是否为回跳：回退超过 2 s。runSession 的回跳检测与暂扣的触发共用这一处。
+func seekBack(prevMs, ms uint32) bool { return ms+2000 < prevMs }
+
+// startsHold 判读数是否开始一次暂扣：相对 prevMs 构成回跳，且落在开头 switchStartBandMs 以内（不含端点）。
+// 暂扣的触发与取词之后重读的采用（rereadSameSong）共用。
+func startsHold(prevMs, ms uint32) bool { return seekBack(prevMs, ms) && ms < switchStartBandMs }
+
+// switchHold 是换歌前进度归零的暂扣（#202）。since 为零值即没有暂扣。
+type switchHold struct {
+	since        time.Time // 暂扣起点：首个暂扣拍的读数时刻
+	fromMs, toMs uint32    // 暂扣前的读数、首个暂扣拍的读数（日志用）
+}
+
+// step 在每拍换歌分支之后、补取之前调用：prevMs 为上一次读数（lastMemProgress），ms 为本拍读数，now 为本拍读数
+// 的时刻。没有暂扣时 startsHold 成立即开始暂扣；暂扣中各拍一律暂扣、不再看读数，直到距起点不少于
+// switchConfirmAfter 那一拍放行。held 为真时调用方跳过本拍其余判定；released 为真时调用方以本拍读数与 prevMs
+// 判定补发（低于即按回跳补发，不低于交给前跳判据）。认领新歌时调用方先调 drop。
+func (h *switchHold) step(prevMs, ms uint32, now time.Time) (held, released bool) {
+	if h.since.IsZero() {
+		if !startsHold(prevMs, ms) {
+			return false, false
+		}
+		*h = switchHold{since: now, fromMs: prevMs, toMs: ms}
+	}
+	if now.Sub(h.since) < switchConfirmAfter {
+		return true, false
+	}
+	log.Detail("progress went back at %s from %.2fs to %.2fs; held %dms, released (now %.2fs): no song change",
+		h.since.Format("15:04:05.000"), float32(h.fromMs)/1000.0, float32(h.toMs)/1000.0,
+		now.Sub(h.since).Milliseconds(), float32(ms)/1000.0)
+	*h = switchHold{}
+	return false, true
+}
+
+// drop 在认领新歌时调用：暂扣中的回跳是换歌造成的，不发。日志的暂扣时长即归零到读到新歌名的时长（精度一拍），
+// 供真机复测核对 switchConfirmAfter 的余量。
+func (h *switchHold) drop(now time.Time) {
+	if h.since.IsZero() {
+		return
+	}
+	log.Detail("progress went back at %s from %.2fs to %.2fs; held %dms, discarded: song changed",
+		h.since.Format("15:04:05.000"), float32(h.fromMs)/1000.0, float32(h.toMs)/1000.0,
+		now.Sub(h.since).Milliseconds())
+	*h = switchHold{}
 }
 
 // resumeStepMs：已判暂停时，读数单次前进不小于它即判恢复。实测暂停后的补写最大 116ms、稳定播放单步最大

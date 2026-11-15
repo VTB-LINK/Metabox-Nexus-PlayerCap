@@ -161,6 +161,8 @@ var p4LogMessages = map[string]string{
 	"normal group paused timeout (%ds)":                                                                           "普通组暂停超时 (%ds)",
 	"paused @ %.2fs":                                                                                              "暂停 @ %.2fs",
 	"progress moved %+dms while paused; resume not yet confirmed":                                                 "暂停中进度变化 %+dms，尚未确认恢复",
+	"progress went back at %s from %.2fs to %.2fs; held %dms, released (now %.2fs): no song change":               "进度于 %s 由 %.2fs 回退到 %.2fs；暂扣 %dms 后放行（此时 %.2fs）：未换歌",
+	"progress went back at %s from %.2fs to %.2fs; held %dms, discarded: song changed":                            "进度于 %s 由 %.2fs 回退到 %.2fs；暂扣 %dms 后丢弃：已换歌",
 	"service started: %s":                                                                                         "服务启动: %s",
 	"Server startup failed: %v":                                                                                   "服务启动失败: %v",
 	"Administrator rights not obtained (attempt %d/%d): %v — retrying in %v":                                      "未取得管理员权限（第 %d/%d 次）: %v —— %v 后重试",

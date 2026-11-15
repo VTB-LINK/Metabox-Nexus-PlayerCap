@@ -489,8 +489,12 @@ func TestExitedReportTiming(t *testing.T) {
 // TestExitInfoOfUsesRealExitTime 断言退出信息取自 ProcessState：退出码按 uint32 原样（含 0xC0000005 这类高位
 // 置位的码），时刻取进程真实的退出时刻而非传入的观察时刻；ProcessState 为 nil 时 known 为假。
 //
+// 内核记录的退出时刻与 time.Now() 的时钟来源与精度不同，前者可略晚于 after（CI 实测晚 0.16～0.3 ms，#203），故
+// 上下界各留 exitTimeSlack；观察时刻在 after 之后 1 小时，留余量后仍能区分。
+//
 // 变异自证（实测）：不取 SysUsage 的 ExitTime、一律用观察时刻，即红。
 func TestExitInfoOfUsesRealExitTime(t *testing.T) {
+	const exitTimeSlack = 50 * time.Millisecond
 	if e := exitInfoOf(nil, time.Now()); e.known {
 		t.Fatalf("ProcessState 为 nil 时 known 应为假，得到 %+v", e)
 	}
@@ -506,8 +510,9 @@ func TestExitInfoOfUsesRealExitTime(t *testing.T) {
 	if !e.known || e.code != 0xC0000005 {
 		t.Fatalf("exitInfoOf = %+v，期望 known、code 0xC0000005", e)
 	}
-	if e.at.Equal(observed) || e.at.Before(before) || e.at.After(after) {
-		t.Fatalf("退出时刻 %v 不在 [%v, %v] 内（观察时刻 %v）：没取进程真实的退出时刻", e.at, before, after, observed)
+	if e.at.Equal(observed) || e.at.Before(before.Add(-exitTimeSlack)) || e.at.After(after.Add(exitTimeSlack)) {
+		t.Fatalf("退出时刻 %v 不在 [%v, %v] 前后 %v 内（观察时刻 %v）：没取进程真实的退出时刻",
+			e.at, before, after, exitTimeSlack, observed)
 	}
 }
 
