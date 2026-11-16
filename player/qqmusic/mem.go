@@ -316,6 +316,22 @@ var knownVersions = map[string]dllOffsets{
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
 	},
+	"22.82": {
+		// qqprobe 实测（32-bit x86，2026-11-16，构建目录 QQMusic2282.03.58.27）：
+		// 「Lettersong (致十年后的我) / Akie秋绘」命中宽字符显示对象，时长 340768ms；会话
+		// songID=203398178，经单曲详情接口核对为该曲（专辑 夏鸣。2016）。
+		// 字段布局同 22.31+，相较 22.81 Struct1 前移 0x20、会话相对偏移后移 0x8。
+		Struct1:           0xCCB468,
+		NameOff:           0x00,
+		SingerOff:         0x04,
+		AlbumOff:          0x08,
+		ProgressOff:       0x0C,
+		DurationOff:       0x10,
+		SongIDOff:         0x73F28,
+		SongIDDurCheckOff: 0x73F30,
+		UseWideStrings:    true,
+		SongMidFromHeap:   true,
+	},
 }
 
 // parseVer 把 "22.21" 解析成可比较的整数（major*1000+minor）。detectVersion 用
