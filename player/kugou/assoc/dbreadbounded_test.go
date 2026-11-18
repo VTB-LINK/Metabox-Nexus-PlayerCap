@@ -164,27 +164,32 @@ func putBTreePage(b []byte, hdr int, kind byte, cells [][]byte, right uint32) {
 	binary.BigEndian.PutUint16(b[hdr+5:], uint16(end))
 }
 
-// widePages 页、两遍读完，整个调用期间堆占用（HeapInuse，每 4096 次读页采样一次）的增量不超过 32 MiB；
-// 在第 cancelAtRead 次读页时取消，readCandidates 不再读页、不开第二遍，返回 context.Canceled。
+// widePages 页、两遍读完，整个调用期间留住的堆内存（强制 GC 之后的 HeapAlloc，每 4096 次读页采样一次）的增量
+// 不超过 32 MiB；在第 cancelAtRead 次读页时取消，readCandidates 不再读页、不开第二遍，返回 context.Canceled。
 //
-// 实测增量约 3.4 MiB。变异自证（实测）：读页层留住读过的页，增量 857 MiB，红；读页前不查取消，取消一例读满
-// 250,002 页，红。
+// 量的是存活对象，不含待回收的垃圾：读页层每页新分配缓冲区（kgdb 的 pager.Page），两遍约 1 GB 的短命垃圾，
+// 未回收部分的峰值取决于 GC 的节奏。改前按 HeapInuse 量，本机约 3.4 MiB，2 核的 CI 上 47～67 MiB（含 -race），
+// 量的是 GC 跟不跟得上，不是工作集。
+//
+// 变异自证（实测）：读页层留住读过的页，红；读页前不查取消，取消一例读满 250,002 页，红。
 func TestReadCandidatesBoundedMemory(t *testing.T) {
 	t.Run("whole database", func(t *testing.T) {
 		w := newWideDB(widePages)
 		var ms runtime.MemStats
-		runtime.GC()
-		runtime.ReadMemStats(&ms)
-		base, peak := ms.HeapInuse, ms.HeapInuse
+		live := func() uint64 {
+			runtime.GC()
+			runtime.ReadMemStats(&ms)
+			return ms.HeapAlloc
+		}
+		base := live()
+		peak := base
 		w.beforeRead = func(reads int) {
 			if reads%4096 == 0 {
-				runtime.ReadMemStats(&ms)
-				peak = max(peak, ms.HeapInuse)
+				peak = max(peak, live())
 			}
 		}
 		got, err := readCandidates(context.Background(), testDBPath, sampleSpectre, w.fs())
-		runtime.ReadMemStats(&ms)
-		peak = max(peak, ms.HeapInuse)
+		peak = max(peak, live())
 		if err != nil {
 			t.Fatalf("readCandidates: %v", err)
 		}
@@ -195,9 +200,9 @@ func TestReadCandidatesBoundedMemory(t *testing.T) {
 			t.Fatalf("read %d pages, want both passes over all %d pages", w.reads, widePages)
 		}
 		growth := int64(peak) - int64(base)
-		t.Logf("%d page reads, HeapInuse grew by at most %.1f MiB", w.reads, float64(growth)/(1<<20))
+		t.Logf("%d page reads, live heap grew by at most %.1f MiB", w.reads, float64(growth)/(1<<20))
 		if growth > 32<<20 {
-			t.Errorf("HeapInuse grew by %d bytes during the read, want at most 32 MiB", growth)
+			t.Errorf("live heap grew by %d bytes during the read, want at most 32 MiB", growth)
 		}
 	})
 
