@@ -64,7 +64,7 @@ func runScript(t *testing.T, p *KuGouPlayer, reads ...*cdp.PlayInfo) []string {
 	fetchLyrics = func(string, int, string, string) ([]klyric.Line, error) { return nil, nil }
 	defer func() { fetchLyrics = orig }()
 
-	synctest.Test(t, func(*testing.T) { p.runSession(&scriptedSource{reads: reads}) })
+	synctest.Test(t, func(*testing.T) { p.runSession(&scriptedSource{reads: reads}, nil) })
 	return drainStatus(p)
 }
 

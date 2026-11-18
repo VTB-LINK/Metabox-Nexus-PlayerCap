@@ -199,6 +199,58 @@ func (g *elevationGate) record() (time.Duration, bool) {
 // reset 在提权成功后清零，使下一次失败重新从最短退避算起。
 func (g *elevationGate) reset() { g.fails = 0 }
 
+// ensureAction 是 EnsurePatched 出错之后 Start 的处置。
+type ensureAction uint8
+
+const (
+	ensureStop       ensureAction = iota // 终态停用
+	ensureRetryLater                     // 不等 CDP，稍后重新走 EnsurePatched
+	ensureContinue                       // 照常等 CDP（用户可能手动启动酷狗）
+)
+
+// maxRunningInstallMisses 是酷狗在运行却找不到安装时，连续多少轮（含本轮）之后终态停用。不在第一轮就停用：
+// FindKuGouInstall 取进程快照与 Start 查酷狗是否在运行之间，酷狗可能恰好启动；酷狗重复启动或主进程退出时
+// 会短暂出现两个主进程（或成了孤儿的子进程），这期间按进程定位失败。两者都是短暂状态，后续轮次可能定位成功。
+const maxRunningInstallMisses = 5
+
+// classifyEnsureErr 决定 EnsurePatched 返回的错误怎么处置。err 不得为 nil（EnsurePatched 成功时不调用）；
+// ErrElevationFailed 不经本函数，由 Start 先行按退避处理。runningMisses 是酷狗在运行却找不到安装的连续轮数，
+// 含本轮。
+//
+// 找不到安装：不在运行时等待重试——它可能装在注册表与常见路径之外，启动后 FindKuGouInstall 按运行中的进程
+// 定位（设计 §6.3）；在运行时同样等待重试，满 maxRunningInstallMisses 轮才停用。启动的是另一份安装
+// （ErrInstallChanged）：等待重试，下一轮按运行中的进程定位。版本指纹不认识：停用，重试只会反复弹 UAC。
+// 其余照常等 CDP。
+func classifyEnsureErr(err error, kugouRunning bool, runningMisses int) ensureAction {
+	switch {
+	case errors.Is(err, watchdog.ErrInstallNotFound):
+		if kugouRunning && runningMisses >= maxRunningInstallMisses {
+			return ensureStop
+		}
+		return ensureRetryLater
+	case errors.Is(err, watchdog.ErrInstallChanged):
+		return ensureRetryLater
+	case errors.Is(err, watchdog.ErrVersionUnsupported):
+		return ensureStop
+	}
+	return ensureContinue
+}
+
+// installWait 记「找不到安装，等待酷狗启动」的提示是否已打过：连续多轮找不到只打一次，找到安装后重置。
+type installWait struct{ logged bool }
+
+// notify 在本轮找不到安装时调用，返回是否该打提示。
+func (w *installWait) notify() bool {
+	if w.logged {
+		return false
+	}
+	w.logged = true
+	return true
+}
+
+// reset 在找到安装（EnsurePatched 返回的不是 ErrInstallNotFound）后调用。
+func (w *installWait) reset() { w.logged = false }
+
 // sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
 // 退避最长 2min，不可打断的话会让退出卡住这么久。
 func (p *KuGouPlayer) sleepOrStop(d time.Duration) bool {
@@ -213,6 +265,8 @@ func (p *KuGouPlayer) sleepOrStop(d time.Duration) bool {
 // Start 启动酷狗音乐轮询循环（阻塞）
 func (p *KuGouPlayer) Start() {
 	var elevation elevationGate
+	var install installWait
+	runningMisses := 0 // 酷狗在运行却找不到安装的连续轮数，见 maxRunningInstallMisses
 	for {
 		select {
 		case <-p.StopCh:
@@ -224,22 +278,19 @@ func (p *KuGouPlayer) Start() {
 		p.Emit(player.EventClearSongData, nil)
 
 		// 自动检测并修复：若 libcef.dll 未 patch 则 kill → patch → 重启酷狗
-		if err := watchdog.EnsurePatched(p.StopCh); err != nil {
+		err := watchdog.EnsurePatched(p.StopCh)
+		if !errors.Is(err, watchdog.ErrInstallNotFound) {
+			install.reset() // 找到了安装（或 CDP 已可用）：下一次找不到时重新提示、重新计数
+			runningMisses = 0
+		}
+		// startLocal 只在本轮 EnsurePatched 返回 nil 时启用：返回其他错误而照常等 CDP 的会话不读本地歌词，
+		// 只在线取词（设计 §6.2「时机」）。读库之前读取者还要自行确认版本与补丁（watchdog.Confirm）。
+		var startLocal localLyricsStarter
+		if err != nil {
 			select {
 			case <-p.StopCh:
 				return
 			default:
-			}
-			if errors.Is(err, watchdog.ErrInstallNotFound) {
-				log.Error("Auto-repair failed: %v (run the KuGou launch tool manually or check the install path)", err)
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("KuGou installation not found, stopped"), Reason: player.ReasonInstallNotFound})
-				return
-			}
-			if errors.Is(err, watchdog.ErrVersionUnsupported) {
-				// 版本指纹不认识：重试也只会反复弹 UAC 打错版本，终态停止。
-				log.Error("Auto-repair failed: %v (downgrade to a supported KuGou version, or retry after adaptation)", err)
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("KuGou libcef.dll version unsupported, stopped"), Reason: player.ReasonVersionUnsupported})
-				return
 			}
 			if errors.Is(err, watchdog.ErrElevationFailed) {
 				// 退避后重试；用尽即终态。直接 continue，不去 waitForCDP——没提权就没 patch，
@@ -257,10 +308,40 @@ func (p *KuGouPlayer) Start() {
 				}
 				continue
 			}
+			running := watchdog.IsKuGouRunning()
+			if running && errors.Is(err, watchdog.ErrInstallNotFound) {
+				runningMisses++
+			} else {
+				runningMisses = 0
+			}
+			switch classifyEnsureErr(err, running, runningMisses) {
+			case ensureStop:
+				if errors.Is(err, watchdog.ErrVersionUnsupported) {
+					// 版本指纹不认识：重试也只会反复弹 UAC 打错版本，终态停止。
+					log.Error("Auto-repair failed: %v (downgrade to a supported KuGou version, or retry after adaptation)", err)
+					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("KuGou libcef.dll version unsupported, stopped"), Reason: player.ReasonVersionUnsupported})
+					return
+				}
+				log.Error("Auto-repair failed: %v (run the KuGou launch tool manually or check the install path)", err)
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "error", Detail: i18n.T("KuGou installation not found, stopped"), Reason: player.ReasonInstallNotFound})
+				return
+			case ensureRetryLater:
+				// 找到（或重新确认）安装之前不去 waitForCDP，2 秒后重新走 EnsurePatched；状态由循环顶部的 waiting_process 表达。
+				if errors.Is(err, watchdog.ErrInstallChanged) {
+					log.Warn("%v; retrying", err)
+				} else if install.notify() {
+					log.Info("KuGou installation not found; waiting for KuGou to start")
+				}
+				if p.sleepOrStop(2 * time.Second) {
+					return
+				}
+				continue
+			}
 			log.Warn("Auto-repair failed: %v (run the KuGou launch tool manually or check the install path)", err)
 			// 其他错误继续等待——用户可能手动启动酷狗
 		} else {
 			elevation.reset() // 提权成功（或本就无需提权）：下次失败重新从最短退避算起
+			startLocal = startLocalLyrics
 		}
 
 		client, err := p.waitForCDP()
@@ -277,7 +358,7 @@ func (p *KuGouPlayer) Start() {
 		}
 
 		log.Info("CDP connected, monitoring playback state")
-		p.runSession(client)
+		p.runSession(client, startLocal)
 		client.Close()
 
 		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("KuGou CDP disconnected"), Reason: player.ReasonCDPDisconnected})
@@ -331,13 +412,25 @@ type playInfoSource interface {
 var fetchLyrics = klyric.Fetch
 
 // runSession polls PlayInfo and emits events until the CDP connection drops.
-func (p *KuGouPlayer) runSession(client playInfoSource) {
+//
+// startLocal 启动本会话读本地歌词的读取者（设计 §6.7）；它为 nil、或返回 nil，本会话只在线取词，与接入本地歌词之前相同。
+func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsStarter) {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
+
+	// localCancel 让读取者退出。下面每条返回路径都必须显式调用，写法与理由同下方的 coverCancel：别改成 defer 闭包、
+	// 也别包成 helper，vet 的 lostcancel 只认直接调用。不取消的话读取者 goroutine 在会话结束后仍在，占着同时至多
+	// 一个的名额，酷狗重连后的会话起不了读取者、只能在线取词。
+	localCtx, localCancel := context.WithCancel(context.Background())
+	var local localSession
+	if startLocal != nil {
+		local.r = startLocal(localCtx)
+	}
 
 	var lastHash string   // detect song change
 	var lastStatus string // detect play/pause/stop change
 	var currentLyrics []klyric.Line
+	var currentFP [32]byte // currentLyrics 套 offset 之前的指纹（lyricFingerprint），播放中据此判酷狗的歌词是否换了
 	var lastLineIdx int = -1
 	var currentDurationSec float32
 	var currentTitle string
@@ -360,7 +453,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource) {
 	// 保持显式调用，vet 才能在将来有人新增 return 却忘了取消时当场抓住。
 	//
 	// **别把 vet 绿当成这类问题已经清了。** cloudmusic/qqmusic/wesing 三家的封面
-	// goroutine 都不带 context（非测试代码里 WithCancel 只有这里与 sodamusic 的 runSession），因此
+	// goroutine 都不带 context，因此
 	// lostcancel **结构性看不见它们**——没有 CancelFunc 可丢，分析器就无从下手。
 	// 那三处的「迟到的封面回写覆盖当前歌曲」改由代次守卫拦截（BaseEmitter 的 NewSongGen /
 	// EmitForGen），vet 同样看不见某处是否漏接。
@@ -381,6 +474,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource) {
 			if coverCancel != nil {
 				coverCancel()
 			}
+			localCancel()
 			return
 		default:
 		}
@@ -389,6 +483,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource) {
 			if coverCancel != nil {
 				coverCancel()
 			}
+			localCancel()
 			return
 		}
 
@@ -404,6 +499,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource) {
 			if coverCancel != nil {
 				coverCancel()
 			}
+			localCancel()
 			return
 		}
 
@@ -433,7 +529,8 @@ func (p *KuGouPlayer) runSession(client playInfoSource) {
 		prevReading := false
 
 		// ── 切歌检测 ──
-		if info.Hash != lastHash {
+		songChanged := info.Hash != lastHash
+		if songChanged {
 			firstSong := lastHash == "" // 本会话（本次 CDP 连接）读到的第一首
 			// 必须在下面重置锚点、时长与 isPlaying 之前：基准取的是上一首此刻的时钟。
 			prev.rebase(confirmed, anchorProgressSec, anchorTime, isPlaying, currentDurationSec)
@@ -503,28 +600,48 @@ func (p *KuGouPlayer) runSession(client playInfoSource) {
 			ctx, coverCancel = context.WithCancel(context.Background())
 			go p.runCoverFetch(ctx, coverCh, currentName, currentSinger, currentTitle, info.Hash)
 
-			// 获取歌词
-			lines, lyrErr := fetchLyrics(info.Hash, int(durationMs), name, singer)
-			sameSong := name == prevName && singer == prevSinger
+			// 获取歌词：先取酷狗为这首歌显示的本地歌词（手动关联或缓存，至多等 localWait），取不到再在线取词（设计 §6.7）。
+			lines, src, fromLocal, localNone, stopped := local.await(p.StopCh, info.Hash)
+			if stopped {
+				// 等本地歌词时收到停止：同上方各条退出路径直接返回，不再在线取词（单次至多 8 s，不受 Stop 中断）、
+				// 不发本首的歌词事件。取消照样直接调用，理由见 coverCancel 与 localCancel 的注释。
+				coverCancel()
+				localCancel()
+				return
+			}
+			var lyrErr error
+			if !fromLocal {
+				lines, lyrErr = fetchLyrics(info.Hash, int(durationMs), name, singer)
+			}
+			// 酷狗里这一首是磁盘上的文件、确实没有歌词（localNone）：同名也不沿用上一首的歌词，取不到或出错都与不同名时
+			// 相同（设计 §6.7「换歌拍」例外）。在线歌曲（含伴唱）不带本地文件标记，照旧沿用。
+			sameSong := name == prevName && singer == prevSinger && !localNone
 			if lyrErr != nil {
 				log.Warn("lyric fetch failed: %v", lyrErr)
 				if !sameSong {
 					currentLyrics = nil
+					currentFP = lyricFingerprint(nil)
 				}
+				local.carried = sameSong && len(currentLyrics) > 0 // 保留的是上一首的歌词
 			} else if len(lines) > 0 {
+				currentFP = lyricFingerprint(lines) // 套 offset 之前取，见 lyricFingerprint
 				applyDetailedOffset(lines, offsetSec)
 				currentLyrics = lines
-				log.Info("Lyrics loaded: %d lines; per-character: %s", len(lines), detailedFlag(lines))
+				if fromLocal {
+					log.Info("Lyrics loaded (%s): %d lines; per-character: %s", i18n.T(src.String()), len(lines), detailedFlag(lines))
+				} else {
+					log.Info("Lyrics loaded: %d lines; per-character: %s", len(lines), detailedFlag(lines))
+				}
 			} else if sameSong && len(currentLyrics) > 0 {
 				// 同名同歌手但本次取不到（伴唱模式 hash 变化）→ 复用上一次的歌词
 				// 复用的是已套过 offset 的 currentLyrics，不要再套一次。
+				local.carried = true
 				log.Info("Same song, hash changed; reusing previous lyrics (%d lines); word-by-word: %s", len(currentLyrics), detailedFlag(currentLyrics))
 			} else {
 				currentLyrics = nil
+				currentFP = lyricFingerprint(nil)
 				log.Info("Instrumental / no lyrics; word-by-word: %s", detailedFlag(currentLyrics))
 			}
-
-			lyricItems := toLyricLines(currentLyrics, offsetSec)
 
 			// 取词是阻塞的网络请求，返回时本轮读到的进度与播放状态都已过时：其间可能暂停、恢复或拖动过。
 			// 再读一次，读到的仍是这首歌就把它当作本轮的读数——info、progressSec 与 sampleTime 一起替换，
@@ -563,36 +680,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource) {
 			// 随歌词发出的位置取此刻的（服务端以事件到达的时刻为采样时刻）：重读成功时锚点就是刚读到的
 			// 进度，没有重读到则由取词前的锚点按经过的时间推算。算式与下方歌词行匹配处的 interpSec 是同一个。
 			initPlay := player.LivePosition(anchorProgressSec, anchorTime, time.Now(), isPlaying, currentDurationSec)
-			progress := player.ClampProgress(initPlay, currentDurationSec)
-
-			// 酷狗对没有歌词的歌返回一行「纯音乐，请欣赏」，而非空歌词。归一成
-			// index:-1，让下游只认一个判据；提示语原样留在 text 里，用不用由它决定。
-			//
-			// **currentLyrics 必须一起清**：它是下面 pollLyrics 的输入，不清的话
-			// all_lyrics 说 count:0、轮询却仍按那一行发 index:0 的 lyric_update。
-			pureHint := ""
-			if player.IsPureMusicOnly(lyricItems) {
-				log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
-				pureHint = lyricItems[0].Text
-				currentLyrics = nil
-				lyricItems = []player.LyricLine{} // 显式空 slice——nil 会序列化成 null，破坏「空数据一律 {} / []」
-			}
-
-			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-				Title:    currentTitle,
-				Duration: currentDurationSec,
-				Position: initPlay,
-				Progress: progress,
-				Lyrics:   lyricItems,
-				Count:    len(lyricItems),
-			})
-			if len(currentLyrics) == 0 {
-				// Progress 必须带上：它的契约是「整首播到哪」，纯音乐时歌照样在走。
-				// 漏掉它会让 Go 零值兜出一个 0，与同一事件里的 all_lyrics.progress 自相矛盾。
-				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index: -1, Text: pureHint, Timestamp: 0, Position: initPlay, Progress: progress,
-				})
-			}
+			currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, initPlay, currentLyrics, offsetSec)
 
 			lastStatus = statusAtChange // 取词前的状态，理由见 statusAtChange
 		} else if !confirmed && statusStr(info.PlayStatus) == "standby" && isProgressValid(progressSec, currentDurationSec) {
@@ -669,6 +757,27 @@ func (p *KuGouPlayer) runSession(client playInfoSource) {
 
 		// ── 本地时钟插值 ──
 		interpSec := player.LivePosition(anchorProgressSec, anchorTime, time.Now(), isPlaying, currentDurationSec)
+
+		// ── 酷狗换了这首歌的歌词（设计 §6.7「播放中」）──
+		// 换歌拍之外每拍非阻塞地取读取者的一条结果。是这首歌的歌词、且与当前的不同（酷狗里改了关联，或首播时酷狗
+		// 稍后写入的缓存与在线取到的不同），才以此刻的位置发一条 all_lyrics，行号置为未定，下面的行匹配随即按新歌词
+		// 发当前行；暂停中位置即冻结的位置。其余结果不发事件：关联没了也保持当前歌词到下一首（设计 §1）。例外是本地
+		// 文件确实没有歌词、而当前歌词是沿用的上一首的或另一次播放采纳的（见 poll）：poll 返回空的行，同样经 emitLyrics
+		// 以此刻的位置发无歌词。不发 playback_resume，位置时钟、跳转检测与位置采样不受影响。换歌拍不取：那一拍刚发过
+		// all_lyrics，超时后迟到的结果留到下一拍。
+		if !songChanged {
+			if lines, src, fp, ok := local.poll(lastHash, currentFP); ok {
+				currentFP = fp
+				lastLineIdx = -1
+				if len(lines) == 0 {
+					log.Info("KuGou has no lyrics for this local file; lyrics cleared")
+				} else {
+					applyDetailedOffset(lines, offsetSec)
+					log.Info("Lyrics changed in KuGou; reloaded (%s): %d lines; per-character: %s", i18n.T(src.String()), len(lines), detailedFlag(lines))
+				}
+				currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, lines, offsetSec)
+			}
+		}
 
 		matchTime := player.LyricMatchTime(interpSec, offsetSec)
 
@@ -834,6 +943,43 @@ func isProgressValid(progressSec, durationSec float32) bool {
 		return false
 	}
 	return true
+}
+
+// emitLyrics 发出一首歌的全部歌词：all_lyrics，没有歌词时紧随一条 index:-1 的 lyric_update。position 是此刻的整曲
+// 位置，lines 须已套 offset。返回处理后的 currentLyrics（只有纯音乐提示语时为 nil）。换歌拍与播放中换词共用。
+func (p *KuGouPlayer) emitLyrics(title string, duration, position float32, lines []klyric.Line, offsetSec float32) []klyric.Line {
+	lyricItems := toLyricLines(lines, offsetSec)
+	progress := player.ClampProgress(position, duration)
+
+	// 酷狗对没有歌词的歌返回一行「纯音乐，请欣赏」，而非空歌词。归一成
+	// index:-1，让下游只认一个判据；提示语原样留在 text 里，用不用由它决定。
+	//
+	// **返回的 currentLyrics 必须一起清**：它是轮询里歌词行匹配的输入，不清的话
+	// all_lyrics 说 count:0、轮询却仍按那一行发 index:0 的 lyric_update。
+	pureHint := ""
+	if player.IsPureMusicOnly(lyricItems) {
+		log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
+		pureHint = lyricItems[0].Text
+		lines = nil
+		lyricItems = []player.LyricLine{} // 显式空 slice——nil 会序列化成 null，破坏「空数据一律 {} / []」
+	}
+
+	p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+		Title:    title,
+		Duration: duration,
+		Position: position,
+		Progress: progress,
+		Lyrics:   lyricItems,
+		Count:    len(lyricItems),
+	})
+	if len(lines) == 0 {
+		// Progress 必须带上：它的契约是「整首播到哪」，纯音乐时歌照样在走。
+		// 漏掉它会让 Go 零值兜出一个 0，与同一事件里的 all_lyrics.progress 自相矛盾。
+		p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+			Index: -1, Text: pureHint, Timestamp: 0, Position: position, Progress: progress,
+		})
+	}
+	return lines
 }
 
 func toLyricLines(lines []klyric.Line, offsetSec float32) []player.LyricLine {

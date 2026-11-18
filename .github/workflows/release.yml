@@ -29,9 +29,9 @@ jobs:
       run:
         shell: pwsh
     env:
-      # 发布与否的唯一判据：只有 tag 推送才发布（建两边 draft、取发版说明、建 Sentry release）。
+      # 发布与否的唯一判据：只有 tag 推送才发布（建两边 draft 与 Gitee 发行版、取发版说明、建 Sentry release）。
       # 手动派发即使选了 tag 作为 ref 也只演练。各发布步骤以 `if: env.PUBLISH == 'true'` 限定，
-      # 发布用的两个凭据也只在它为真时引用；releaseworkflow_test.go 核对这些写法。
+      # 发布用的三个凭据也只在它为真时引用；releaseworkflow_test.go 核对这些写法。
       # 设计见 doc/design/ci-windows-release-design.md §3.2。
       PUBLISH: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
       GOOS: windows
@@ -44,7 +44,8 @@ jobs:
       DOTCOM_OWNER: VTB-LINK
       DOTCOM_REPO_NAME: Metabox-Nexus-PlayerCap
       DOTCOM_GITHUB_BASE: https://github.com
-      DOWNLOAD_PROXY_PREFIX: https://github.boki.moe
+      GITEE_OWNER: VTB-LINK
+      GITEE_REPO_NAME: Metabox-Nexus-PlayerCap
       HTML_FILE_NAME: lyric_display.html
 
       # gh 与 sentry-cli 钉死版本，每次下载后按 SHA-256 校验，不依赖 runner 镜像预装。SHA-256 的出处：
@@ -266,57 +267,126 @@ jobs:
             --jq '.body' > auto-release-notes.md
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-      - name: Compose release notes (dotcom mirror)
+      - name: Compose release notes (dotcom and Gitee mirrors)
         run: |
-          # 拼镜像仓库的发版说明，逐字节复现迁移前 bash 的拼接（cp RELEASE_BODY.md、heredoc 追加、
-          # echo 分隔、cat 追加）：
+          # 拼两个镜像仓库的发版说明，dotcom 一份逐字节复现迁移前 bash 的拼接（cp RELEASE_BODY.md、
+          # heredoc 追加、echo 分隔、cat 追加）：
           #   RELEASE_BODY.md 原字节 + 固定模板（下载表格 + 项目信息）+ 分隔与标题 + 上一步写下的文件
+          # Gitee 一份同一套模板，只到项目信息为止：上一步写下的是 GitHub 自动生成的说明，链接都指向 github.com。
           # 前后两段按字节拼入、不经解码；中间一段换行一律为 LF，按 UTF-8（无 BOM）编码。
           # 演练时没有 tag、没有上一步的文件，两处换成固定的占位。
           $utf8 = [Text.UTF8Encoding]::new($false)
           if ($env:PUBLISH -eq 'true') {
             $tag = $env:TAG_NAME
-            $tail = [IO.File]::ReadAllBytes((Join-Path $PWD 'auto-release-notes.md'))
+            $auto = [IO.File]::ReadAllBytes((Join-Path $PWD 'auto-release-notes.md'))
           } else {
             $tag = 'DRYRUN'
-            $tail = $utf8.GetBytes("（演练：此处为 Generate release notes (dotcom mirror) 一步的输出）`n")
+            $auto = $utf8.GetBytes("（演练：此处为 Generate release notes (dotcom mirror) 一步的输出）`n")
+          }
+          $body = [IO.File]::ReadAllBytes((Join-Path $PWD 'RELEASE_BODY.md'))
+
+          # 下载链接各用自家的。「最新版」的写法两边不同：GitHub 为 releases/latest/download/<文件>，
+          # Gitee 为 releases/download/latest/<文件>（GitHub 的写法在 Gitee 上 404）。Gitee 没有草稿，
+          # dotcom 发布之前 Gitee 的 latest 已指向新版；只影响说明里的链接，客户端经网关更新，不受影响。
+          $github = "${env:DOTCOM_GITHUB_BASE}/${env:DOTCOM_OWNER}/${env:DOTCOM_REPO_NAME}"
+          $gitee = "https://gitee.com/${env:GITEE_OWNER}/${env:GITEE_REPO_NAME}"
+          $targets = @(
+            @{ Path = 'combined-release-notes.md'; Latest = "${github}/releases/latest/download"; Download = "${github}/releases/download"; Auto = $true }
+            @{ Path = 'gitee-release-notes.md'; Latest = "${gitee}/releases/download/latest"; Download = "${gitee}/releases/download"; Auto = $false }
+          )
+          foreach ($target in $targets) {
+            $lines = @(
+              ''
+              '---'
+              ''
+              '### 一键下载'
+              ''
+              '| 文件 | 最新版 | 当前版本 |'
+              '| --- | --- | --- |'
+            )
+            foreach ($file in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html') {
+              $lines += "| ${file} | [下载]($($target.Latest)/${file}) | [下载]($($target.Download)/${tag}/${file}) |"
+            }
+            # 问题反馈在 GitHub，两份都指向它。
+            $lines += @(
+              ''
+              '### 关于'
+              '- 感谢您使用VTB-TOOLS Metabox Nexus PlayerCap！这是一个多播放器歌词实时推送工具，旨在提升您的K歌与直播体验。'
+              "- 问题反馈请前往Discussions：${github}/discussions"
+              '- API文档请前往：http://playercap.nexus.metabox.apifox.vtb.link/'
+            )
+            $tail = [byte[]]@()
+            if ($target.Auto) {
+              $lines += @(
+                ''
+                '---'
+                ''
+                '### 自动生成变更'
+                ''
+              )
+              $tail = $auto
+            }
+
+            $notes = [IO.MemoryStream]::new()
+            foreach ($part in $body, $utf8.GetBytes(($lines -join "`n") + "`n"), $tail) {
+              $notes.Write($part, 0, $part.Length)
+            }
+            $path = Join-Path $PWD $target.Path
+            [IO.File]::WriteAllBytes($path, $notes.ToArray())
+            Write-Output "===== $($target.Path) ====="
+            Write-Output ([IO.File]::ReadAllText($path))
           }
 
-          $base = "${env:DOTCOM_GITHUB_BASE}/${env:DOTCOM_OWNER}/${env:DOTCOM_REPO_NAME}"
-          $download = "${env:DOWNLOAD_PROXY_PREFIX}/${base}/releases/download"
-          $latest = "${env:DOWNLOAD_PROXY_PREFIX}/${base}/releases/latest/download"
-          $lines = @(
-            ''
-            '---'
-            ''
-            '### 一键下载'
-            ''
-            '| 文件 | 最新版 | 当前版本 |'
-            '| --- | --- | --- |'
-          )
-          foreach ($file in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html') {
-            $lines += "| ${file} | [下载](${latest}/${file}) | [下载](${download}/${tag}/${file}) |"
+      # Gitee 镜像的发行版，国内下载前缀指向这里。客户端按网关给出的 dotcom digest 校验下载的文件，
+      # 故附件须与 dotcom 的同名文件字节相同，即取同一次构建。tag 通常已由 sync-source-to-dotcom.yml
+      # 推上；本步先到时 Gitee 从 main 建出 tag，随后源码同步把它强制改指到快照提交。
+      # Gitee 没有草稿，建了即公开，故放在 dotcom draft 之前：本步失败时 dotcom draft 尚未建出，
+      # 整个作业重跑即可让两边取同一次构建。
+      - name: Create Release (Gitee mirror)
+        if: env.PUBLISH == 'true'
+        env:
+          GITEE_TOKEN: ${{ env.PUBLISH == 'true' && secrets.GITEE_TOKEN || '' }}
+        run: |
+          # 只依赖环境变量与工作目录里的文件，可在本地补发。Actions 的 pwsh 已默认遇错即停，这里显式设置供本地使用。
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:GITEE_TOKEN) {
+            Write-Output '::error::GITEE_TOKEN is not set.'
+            exit 1
           }
-          $lines += @(
-            ''
-            '### 关于'
-            '- 感谢您使用VTB-TOOLS Metabox Nexus PlayerCap！这是一个多播放器歌词实时推送工具，旨在提升您的K歌与直播体验。'
-            "- 问题反馈请前往Discussions：${base}/discussions"
-            '- API文档请前往：http://playercap.nexus.metabox.apifox.vtb.link/'
-            ''
-            '---'
-            ''
-            '### 自动生成变更'
-            ''
-          )
+          $api = "https://gitee.com/api/v5/repos/${env:GITEE_OWNER}/${env:GITEE_REPO_NAME}/releases"
 
-          $notes = [IO.MemoryStream]::new()
-          foreach ($part in [IO.File]::ReadAllBytes((Join-Path $PWD 'RELEASE_BODY.md')), $utf8.GetBytes(($lines -join "`n") + "`n"), $tail) {
-            $notes.Write($part, 0, $part.Length)
+          # 已有发行版即失败、不覆盖：dotcom 发布之后重跑会以另一次构建替换这里的文件，与 dotcom 的
+          # digest 对不上，国内客户端更新校验失败。没有发行版时接口返回 200、正文为 null。
+          $existing = Invoke-RestMethod -Uri "${api}/tags/${env:TAG_NAME}"
+          if ($null -ne $existing) {
+            Write-Output "::error::Gitee already has a release for ${env:TAG_NAME}. If it was left by an earlier failed run, delete it on Gitee and rerun."
+            exit 1
           }
-          $path = Join-Path $PWD 'combined-release-notes.md'
-          [IO.File]::WriteAllBytes($path, $notes.ToArray())
-          Write-Output ([IO.File]::ReadAllText($path))
+
+          # 令牌经请求头传，不进 URL。Gitee 不读 multipart 里的文本字段（实测 access_token 报 40001、其余报
+          # missing），故建发行版用 urlencoded 表单（-Body 传哈希表），只有上传附件用 multipart。
+          $auth = @{ Authorization = "token ${env:GITEE_TOKEN}" }
+
+          # 标题同 dotcom 取 tag_name；-force 只在 dotcom 上手改（网关读 dotcom）。
+          $release = Invoke-RestMethod -Method Post -Uri $api -Headers $auth -Body @{
+            tag_name         = $env:TAG_NAME
+            name             = $env:TAG_NAME
+            body             = Get-Content -Raw -Encoding utf8 -LiteralPath 'gitee-release-notes.md'
+            target_commitish = 'main'
+          }
+          Write-Output "Gitee release ${env:TAG_NAME}: id $($release.id)"
+
+          # 与 dotcom draft 的附件相同。
+          foreach ($f in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html') {
+            $asset = Invoke-RestMethod -Method Post -Uri "${api}/$($release.id)/attach_files" -Headers $auth -Form @{
+              file = Get-Item -LiteralPath $f
+            }
+            if ($asset.name -cne $f) {
+              Write-Output "::error::Gitee attachment name is '$($asset.name)', want '${f}'"
+              exit 1
+            }
+            Write-Output "${f}: $($asset.browser_download_url)"
+          }
 
       - name: Create Release Draft (dotcom mirror)
         if: env.PUBLISH == 'true'

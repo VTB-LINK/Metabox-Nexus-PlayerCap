@@ -394,32 +394,61 @@ func resolveCanonicalHash(normName, normSinger string, targetDurationMs int) (st
 // krcXORKey 是酷狗 KRC 的固定异或密钥（16 字节，循环使用）。
 var krcXORKey = [16]byte{0x40, 0x47, 0x61, 0x77, 0x5E, 0x32, 0x74, 0x47, 0x51, 0x36, 0x31, 0x2D, 0xCE, 0xD2, 0x6E, 0x69}
 
-// krcDecrypt 解开酷狗 KRC：base64 → 4 字节 "krc1" 魔数 → 逐字节异或定长密钥 → zlib → UTF-8。
-//
-// 与 QQ 的 QRC（3DES + zlib）是两套完全不同的东西，别混用。
+// krcDecrypt 解开在线取词返回的 KRC：base64 解码后交给 DecryptKRC。
 func krcDecrypt(contentB64 string) (string, error) {
 	blob, err := base64.StdEncoding.DecodeString(contentB64)
 	if err != nil {
 		return "", i18n.Errorf("krc base64: %w", err)
 	}
-	if len(blob) <= 4 || string(blob[:4]) != "krc1" {
+	return DecryptKRC(blob)
+}
+
+// wrapKRCPlain 包住 DecryptKRC 读取的 zlib 输出，供测试计数读出的明文字节；出货代码中为恒等。
+var wrapKRCPlain = func(r io.Reader) io.Reader { return r }
+
+// DecryptKRC 解开酷狗 krc1 原始字节（歌词目录里的 .krc 即此格式）：4 字节 "krc1" 魔数 → 逐字节异或
+// 定长密钥 → zlib → UTF-8。明文超过 maxKRCPlainBytes 时读到上限加一字节即停，返回 ErrLyricTooLarge。
+//
+// 解压两遍：第一遍只数明文长度，第二遍写进按该长度一次分配的缓冲，明文只占一份内存（io.ReadAll
+// 再转 string 累计约为明文的 3 倍）。正常歌词的明文只有几十 KB，多解压一遍的耗时可忽略。
+//
+// 与 QQ 的 QRC（3DES + zlib）是两套完全不同的东西，别混用。
+func DecryptKRC(raw []byte) (string, error) {
+	if len(raw) <= 4 || string(raw[:4]) != "krc1" {
 		return "", i18n.Errorf("KRC magic mismatch (first 4 bytes are not krc1)")
 	}
-	body := blob[4:]
+	body := raw[4:]
 	dec := make([]byte, len(body))
 	for i, b := range body {
 		dec[i] = b ^ krcXORKey[i%16]
 	}
+	n, err := inflateKRC(dec, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	if n > maxKRCPlainBytes {
+		return "", ErrLyricTooLarge
+	}
+	var plain strings.Builder
+	plain.Grow(int(n))
+	if _, err := inflateKRC(dec, &plain); err != nil {
+		return "", err
+	}
+	return plain.String(), nil
+}
+
+// inflateKRC 把异或还原后的 zlib 数据解压写进 w，至多写 maxKRCPlainBytes+1 字节，返回写入的字节数。
+func inflateKRC(dec []byte, w io.Writer) (int64, error) {
 	zr, err := zlib.NewReader(bytes.NewReader(dec))
 	if err != nil {
-		return "", i18n.Errorf("krc zlib init: %w", err)
+		return 0, i18n.Errorf("krc zlib init: %w", err)
 	}
 	defer zr.Close()
-	out, err := io.ReadAll(zr)
+	n, err := io.Copy(w, io.LimitReader(wrapKRCPlain(zr), maxKRCPlainBytes+1))
 	if err != nil {
-		return "", i18n.Errorf("krc zlib decompress: %w", err)
+		return n, i18n.Errorf("krc zlib decompress: %w", err)
 	}
-	return string(out), nil
+	return n, nil
 }
 
 // parseLRC parses an LRC-format string into Line slices.

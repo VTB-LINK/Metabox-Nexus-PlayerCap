@@ -220,7 +220,7 @@ var p4ErrMessages = map[string]string{
 	// —— audiocap/session、audiocap/wasapi：会话探测与进程 loopback 捕获（issue #143）——
 	"GetProcessId reported a cross-process session (AUDCLNT_S_NO_SINGLE_PROCESS); cannot tell which process is producing the sound": "GetProcessId 报告跨进程会话（AUDCLNT_S_NO_SINGLE_PROCESS），无法确定当前出声的进程",
 	"CreateEvent(completion event) failed: %w":                                                               "CreateEvent(完成事件) 失败: %w",
-	"ActivateAudioInterfaceAsync unavailable (requires Windows 10 build 19041+): %w":                         "ActivateAudioInterfaceAsync 不可用（需 Windows 10 build 19041+）: %w",
+	"ActivateAudioInterfaceAsync unavailable: %w":                                                            "ActivateAudioInterfaceAsync 不可用: %w",
 	"ActivateAudioInterfaceAsync failed: 0x%08X":                                                             "ActivateAudioInterfaceAsync 失败: 0x%08X",
 	"activation timed out (not completed within 2s; abandoned, leaking the handler to avoid UAF; wait=0x%X)": "激活超时（2s 未完成，已放弃并泄漏 handler 以避免 UAF；wait=0x%X）",
 	"activation result failed: 0x%08X":                                                                       "激活结果失败: 0x%08X",
@@ -314,4 +314,89 @@ var p4ErrMessages = map[string]string{
 	"unexpected bytes at dll+%X: got %X, want %X": "dll+%X 处的字节不符合预期: 实际 %X，期望 %X",
 	"VirtualAllocEx failed for progress hook":     "进度 Hook 的 VirtualAllocEx 失败",
 	"process not attached":                        "未附加到进程",
+
+	// —— player/kugou/kgdb：酷狗加密数据库的按页解密（issue #205）——
+	"unsupported KuGou database format": "不支持的酷狗数据库格式",
+	"%w: invalid file size %d":          "%w：文件大小 %d 不合法",
+	"%w: page %d out of range [1, %d]":  "%w：页号 %d 超出范围 [1, %d]",
+	"read KuGou database page %d: %w":   "读取酷狗数据库第 %d 页: %w",
+	"%w: database is not encrypted":     "%w：数据库未加密",
+	"%w: page 1 header check failed":    "%w：第 1 页头部校验失败",
+	"%w: page 1 integrity check failed": "%w：第 1 页完整性校验失败",
+
+	// —— player/kugou/kgdb：只读 SQLite 读取器（issue #205）——
+	"KuGou database structure is invalid":                 "酷狗数据库结构异常",
+	"table not found in KuGou database":                   "酷狗数据库中没有该表",
+	"column not found in KuGou database table":            "酷狗数据库的表中没有该列",
+	"%w: database has no pages":                           "%w：数据库没有页",
+	"%w: not an SQLite database":                          "%w：不是 SQLite 数据库",
+	"%w: page size %d, want %d":                           "%w：页大小为 %d，应为 %d",
+	"%w: file format version %d/%d, want 1/1":             "%w：文件格式读写版本为 %d/%d，应为 1/1",
+	"%w: %d reserved bytes per page, want 0":              "%w：每页保留 %d bytes，应为 0",
+	"%w: text encoding %d, want 1 (UTF-8)":                "%w：文本编码为 %d，应为 1（UTF-8）",
+	"KuGou database table kind is not supported":          "不支持该种类的酷狗数据库表",
+	"%w: table %s is WITHOUT ROWID":                       "%w：表 %s 为 WITHOUT ROWID 表",
+	"%w: table %s is a virtual table":                     "%w：表 %s 为虚拟表",
+	"%w: schema too large: more than %d tables":           "%w：表结构过大：表数超过 %d",
+	"%w: schema too large: names and SQL exceed %d bytes": "%w：表结构过大：表名与建表语句合计超过 %d bytes",
+	"%w: invalid root page %d of table %s":                "%w：根页号 %d 不合法（表 %s）",
+	"%w: cannot parse CREATE TABLE statement of table %s": "%w：无法解析表 %s 的建表语句",
+	"%w: one scan reads more than %d pages":               "%w：单次扫描读取的页数超过 %d",
+	"%w: b-tree deeper than %d pages":                     "%w：b-tree 深度超过 %d 页",
+	"%w: page %d has invalid b-tree page type 0x%02X":     "%w：第 %d 页的 b-tree 页类型 0x%02X 不合法",
+	"%w: page %d cell %d offset %d out of bounds":         "%w：第 %d 页第 %d 个单元格的偏移 %d 越界",
+	"%w: page %d cell %d is truncated":                    "%w：第 %d 页第 %d 个单元格不完整",
+	"%w: record of %d bytes exceeds the %d-byte limit":    "%w：记录长 %d bytes，超过上限 %d bytes",
+	"%w: overflow chain does not end after the record":    "%w：溢出页链在记录读完之后没有结束",
+	"%w: invalid record header":                           "%w：记录头不合法",
+	"%w: record value exceeds the payload":                "%w：记录中的值超出载荷",
+
+	// —— player/kugou/lyric：本地歌词文件解析（issue #205）——
+	"lyric exceeds size limits": "歌词超出大小上限",
+
+	// —— player/kugou/assoc：按播放 hash 取关联与缓存歌词（issue #205）——
+	"%w: KuGou lyric table layout not recognized: %v": "%w：无法识别酷狗歌词表的结构：%v",
+
+	// —— player/kugou/assoc：按页两遍读库与共享打开（issue #205）——
+	"KuGou database changed during read":                    "读取期间酷狗数据库有变动",
+	"%w: WAL file %s exists":                                "%w：存在 WAL 文件 %s",
+	"%w: journal file %s exists":                            "%w：存在日志文件 %s",
+	"%w: database size %d is not a positive multiple of %d": "%w：数据库大小 %d 不是 %d 的正整数倍",
+	"%w: database size changed from %d to %d":               "%w：数据库大小由 %d 变为 %d",
+	"%w: pages read in the two passes differ":               "%w：两遍读到的页不同",
+	"open %s: %w":     "打开 %s: %w",
+	"not a disk file": "不是磁盘文件",
+
+	// —— player/kugou/watchdog：读库之前确认运行中的酷狗（issue #205）——
+	"KuGou is not ready for reading its lyric database":                           "酷狗尚未就绪，暂不能读取其歌词数据库",
+	"reading the KuGou lyric database is not supported for this KuGou":            "此酷狗不支持读取歌词数据库",
+	"%w: take a process snapshot: %w":                                             "%w：取进程快照失败：%w",
+	"%w: KuGou.exe main process not found":                                        "%w：未找到 KuGou.exe 主进程",
+	"%w: %d KuGou.exe main processes are running":                                 "%w：有 %d 个 KuGou.exe 主进程在运行",
+	"%w: query the image path of KuGou.exe (PID %d): %w":                          "%w：取 KuGou.exe（PID %d）的映像路径失败：%w",
+	"%w: PID %d is no longer KuGou.exe (image %s)":                                "%w：PID %d 已不是 KuGou.exe（映像 %s）",
+	"%w: cannot read the version of %s":                                           "%w：读不出 %s 的版本",
+	"%w: KuGou version %s is not supported":                                       "%w：不支持酷狗 %s",
+	"%w: KuGou.exe (PID %d) has no CEF child process yet":                         "%w：KuGou.exe（PID %d）尚无 CEF 子进程",
+	"%w: the CEF child processes of KuGou.exe run from different directories: %s": "%w：KuGou.exe 的各 CEF 子进程来自不同目录：%s",
+	"%w: %s does not exist":                                                       "%w：%s 不存在",
+	"%w: check the patch status of %s: %w":                                        "%w：检查 %s 的补丁状态失败：%w",
+	"%w: byte fingerprint of %s not recognized":                                   "%w：无法识别 %s 的字节指纹",
+	"%w: %s is not fully patched":                                                 "%w：%s 未全部打上补丁",
+	"%w: KGMusicV3.db not found in any candidate data directory":                  "%w：各候选数据目录里都没有 KGMusicV3.db",
+	"%w: query the processes holding %s: %w":                                      "%w：查询打开 %s 的进程失败：%w",
+	"%w: KGMusicV3.db is not held open by KuGou.exe (PID %d)":                     "%w：KGMusicV3.db 未被 KuGou.exe（PID %d）打开",
+	"%w: KuGou.exe (PID %d) holds KGMusicV3.db in more than one directory: %s":    "%w：KuGou.exe（PID %d）打开了不止一个目录里的 KGMusicV3.db：%s",
+	"%s is larger than %d bytes":                                                  "%s 超过 %d bytes",
+	"RmStartSession failed: %w":                                                   "RmStartSession 失败：%w",
+	"RmRegisterResources failed: %w":                                              "RmRegisterResources 失败：%w",
+	"RmGetList failed: %w":                                                        "RmGetList 失败：%w",
+
+	// —— player/kugou/watchdog：酷狗启动后重新确认安装再修补（issue #205）——
+	"KuGou that started is a different installation; repair postponed": "启动的酷狗是另一份安装，修复推迟",
+	"%w: locating KuGou again after it started failed: %v":             "%w：酷狗启动后重新定位安装失败：%v",
+	"%w: started %s with %s; prepared %s with %s":                      "%w：启动的是 %s（%s），修补前选定的是 %s（%s）",
+	// —— player/kugou/assoc：后台读取者的停用原因（issue #205）——
+	"%w; gave up after %d attempts":                "%w；尝试 %d 次后放弃",
+	"internal error in the local lyric reader: %v": "本地歌词读取者内部错误：%v",
 }

@@ -4,8 +4,8 @@
 //
 // 本文件（gating.go，无 build tag）只放**无平台依赖的纯决策**：AudioSink 接口、门控函数
 // desiredCaptures、退避与看门狗常量、看门狗判定 judgeWatchdog 与逐播放器失败记账、空闲帧判定
-// idlePlayers，故 CI 可测且能 GOOS=linux 编译；捕获编排/Job Object/退避执行/看门狗与空闲帧接线在
-// manager_windows.go + jobobject_windows.go（//go:build windows）。
+// idlePlayers、系统版本判定 processLoopbackSupported，故 CI 可测且能 GOOS=linux 编译；捕获编排/
+// Job Object/退避执行/看门狗与空闲帧接线在 manager_windows.go + jobobject_windows.go（//go:build windows）。
 package manager
 
 import "time"
@@ -31,7 +31,18 @@ const (
 	// 即推 player 为其名的空闲帧。捕获正常时 helper 最长约 100ms 出一帧（见 hangThreshold），取 3 倍余量，
 	// 正常捕获中不会插入空闲帧。
 	noCaptureAfter = 300 * time.Millisecond
+
+	// processLoopbackMinBuild 是进程级 loopback 要求的最低 Windows 10 build（版本 2004）。低于此版本时
+	// ActivateAudioInterfaceAsync 照样存在，但激活进程 loopback 虚拟设备失败（issue #206 的现场：10.0.18363
+	// 上激活结果为 0x80070002）。
+	processLoopbackMinBuild = 19041
 )
+
+// processLoopbackSupported 判定真实版本为 major.x.build 的系统是否支持进程级 loopback。Windows 11 的 major
+// 仍为 10，靠 build 区分。
+func processLoopbackSupported(major, build uint32) bool {
+	return major > 10 || (major == 10 && build >= processLoopbackMinBuild)
+}
 
 // frameSnap 是看门狗判定的单行快照，在锁内从 lastFrame 取出、锁外交 judgeWatchdog 判定。
 type frameSnap struct {

@@ -597,7 +597,8 @@ func updateIfNeeded(release releaseInfo) {
 
 	if err := performUpdateAll(cdnPrefix, release.TagName, sortedAssets); err != nil {
 		taskbar.Error()
-		manualURL := release.ChinaCDN + release.TagName + "/"
+		// 与下载取同一个来源：测速时连得上 GitHub 就给 GitHub 的页面，否则给国内镜像的。
+		manualURL := releasePageURL(cdnPrefix, release.TagName)
 		mainLog.Error("Auto-update failed: %v", err)
 		mainLog.Warn("Current version is outdated, please download the latest version manually:")
 		mainLog.Warn("%s", manualURL)
@@ -1016,6 +1017,19 @@ func relaunchSelf(exePath string) error {
 	}
 	os.Exit(code)
 	return nil
+}
+
+// releasePageURL 返回 tagName 的发行版页面，供自动更新失败时提示手动下载（#210）。
+//
+// 下载前缀之下的目录没有列表页，直接给出会 404。GitHub 与 Gitee 的发行版页面都在
+// …/releases/tag/<tag>，由形如 …/releases/download/ 的下载前缀换算；前缀不是这个形状时照旧给出
+// 前缀之下的目录。
+func releasePageURL(downloadPrefix, tagName string) string {
+	base, ok := strings.CutSuffix(downloadPrefix, "/releases/download/")
+	if !ok {
+		return downloadPrefix + tagName + "/"
+	}
+	return base + "/releases/tag/" + tagName
 }
 
 func pickFastestCDNPrefix(globalPrefix, chinaPrefix, tagName, testFile string) string {

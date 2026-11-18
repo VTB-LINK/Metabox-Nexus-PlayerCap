@@ -254,6 +254,7 @@ func TestRunPanicTearsDownHelper(t *testing.T) {
 		close(exited)
 	}()
 
+	fakeOSVersion(t, 10, 0, processLoopbackMinBuild) // 低于门槛时 Run 不进 reconcile，本例无从 panic
 	m := New(panicSink{}, nil, nil, 25, os.Args[0])
 	t.Cleanup(m.Stop) // 结束 idleKeepalive
 	m.helper = &helperProc{cmd: cmd, stdin: stdin, exited: exited, start: time.Now()}

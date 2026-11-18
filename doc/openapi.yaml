@@ -643,7 +643,7 @@ paths:
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
         - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`；applemusic 为 `"Apple Music 已退出"`（进程退出；进程在而无歌时报的是 `waiting_song`，不是 `standby`）；spotify 为 `"Spotify CDP 已断开"`（`reason` 为 `cdp_disconnected`），这一版 Spotify 不支持远程调试端口时为 `"Spotify 版本不支持（无法打开远程调试端口）"`（`reason` 为 `version_unsupported`，每 30 秒重探一次）。kuwo 不产生此状态，断开与版本不受支持都报 `waiting_process`
-        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"`（只在酷狗正在运行、连续 5 次定位不到其安装时出现，酷狗未运行时先等它启动，状态保持 `waiting_process`）/ `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
 
         **`reason`（稳定机器码，仅非歌名状态出现、永不本地化）**：下游应按它做逻辑判断，取代对 `detail` 中文的字面量匹配。取值：`process_not_running`（进程未启动/未连上）、`process_exited`（已退出）、`cdp_disconnected`（CDP 断开）、`window_not_open`（窗口未打开）、`version_unsupported`（版本不受支持）、`install_not_found`（未找到安装）、`no_admin`（权限不足：kugou 为未取得管理员权限、无法自动修复；applemusic 为本服务无权打开其进程，多因 Apple Music 以管理员身份运行）、`no_song`（进程在运行，但当前没有可宣告的歌曲：没在播放、换歌加载过久或尚未认出曲目；applemusic、kuwo、kugou 与 sodamusic 产生）。playing/paused 时 `detail` 是歌名、不带 `reason`（`reason` 非空 ⟺ 非歌名状态）。另注：`detail` 现按系统显示语言本地化（中文系统中文、其余英文），供人读；机器判断一律用 `reason`。
       responses:
@@ -868,7 +868,7 @@ paths:
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
         - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`；applemusic 为 `"Apple Music 已退出"`（进程退出；进程在而无歌时报的是 `waiting_song`，不是 `standby`）；spotify 为 `"Spotify CDP 已断开"`（`reason` 为 `cdp_disconnected`），这一版 Spotify 不支持远程调试端口时为 `"Spotify 版本不支持（无法打开远程调试端口）"`（`reason` 为 `version_unsupported`，每 30 秒重探一次）。kuwo 不产生此状态，断开与版本不受支持都报 `waiting_process`
-        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"`（只在酷狗正在运行、连续 5 次定位不到其安装时出现，酷狗未运行时先等它启动，状态保持 `waiting_process`）/ `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
 
         ---
 
@@ -1145,7 +1145,7 @@ paths:
         - 捕获子进程启动失败或自身崩溃后的退避期间：依次 1、2、4、8 秒（先稳定运行过则最长 16 秒）；看门狗判定子进程无响应而重启时不额外退避
         - 捕获子进程内某一路启动或读取失败而子进程仍在运行（如 WASAPI 激活失败）：任一正在捕获的播放器（含暂停中）约 2 秒没有音频帧或静音帧即记一次失败，按该播放器退避 1、2、4、8 秒重试，连续 5 次后放弃该播放器、直到其进程重启。若另有播放器仍在出帧，只停该路；若没有（如只有这一路在捕获），服务端无法区分单路失败与子进程无响应，会重启捕获子进程，但不计入子进程失败、不额外退避，其他播放器仍按各自节奏恢复
         - 累计 5 次子进程启动失败或启动后 10 秒内退出（不含看门狗发起的重启与无连接时的按需关闭；期间有一次存活满 10 秒即清零），包括某一个播放器的捕获反复导致子进程崩溃的情况：本次服务运行期间不再捕获任何播放器，直至服务重启
-        - 系统低于 Windows 10 build 19041：进程级 loopback 要求该版本及以上，低于此版本时捕获无法启动
+        - 系统低于 Windows 10 build 19041：进程级 loopback 要求该版本及以上。服务端启动时按系统真实版本判定，低于此版本时在日志中提示一次，此后不启动任何捕获，连接期间只收到空闲帧
 
         若持续约 1 秒以上一帧都收不到，表示连接或服务端异常，而非捕获未就绪。
 
@@ -1359,7 +1359,7 @@ paths:
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
         - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`；applemusic 为 `"Apple Music 已退出"`（进程退出；进程在而无歌时报的是 `waiting_song`，不是 `standby`）；spotify 为 `"Spotify CDP 已断开"`（`reason` 为 `cdp_disconnected`），这一版 Spotify 不支持远程调试端口时为 `"Spotify 版本不支持（无法打开远程调试端口）"`（`reason` 为 `version_unsupported`，每 30 秒重探一次）。kuwo 不产生此状态，断开与版本不受支持都报 `waiting_process`
-        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"`（只在酷狗正在运行、连续 5 次定位不到其安装时出现，酷狗未运行时先等它启动，状态保持 `waiting_process`）/ `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
       parameters:
         - $ref: "#/components/parameters/PlayerParam"
       responses:
@@ -1898,7 +1898,7 @@ webhooks:
       operationId: onAllLyrics
       description: |
         新歌曲开始播放时推送完整歌词列表。连接建立时，若已有缓存则补发一次，否则不发。
-        同一首歌也可能再推一次：qqmusic 换歌时歌曲 ID 尚未就绪、先推了一条空歌词的，8 秒内补取到歌词时；kuwo 换歌时先推一条空歌词的，取到歌词时，以及时长或歌名、歌手变化时；sodamusic 时长晚到或音译补齐时、wesing 宣告的总时长被纠正时（播放中核实之后，最早约开播 6 秒，每首至多一次）、applemusic 歌词晚到时（换歌后头 3 秒约每 0.4 秒、到 15 秒约每 1.2 秒找一次，之后退避到最长 60 秒一次）、spotify 歌词取到时（换歌时不等取词、先推一条空歌词的；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止），各补发一条完整的 `all_lyrics`，前端以最新一条覆盖即可。
+        同一首歌也可能再推一次：qqmusic 换歌时歌曲 ID 尚未就绪、先推了一条空歌词的，8 秒内补取到歌词时；kuwo 换歌时先推一条空歌词的，取到歌词时，以及时长或歌名、歌手变化时；sodamusic 时长晚到或音译补齐时、wesing 宣告的总时长被纠正时（播放中核实之后，最早约开播 6 秒，每首至多一次）、applemusic 歌词晚到时（换歌后头 3 秒约每 0.4 秒、到 15 秒约每 1.2 秒找一次，之后退避到最长 60 秒一次）、spotify 歌词取到时（换歌时不等取词、先推一条空歌词的；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止）、kugou 从酷狗读到这首歌的歌词与已推的不同时（换歌后 300 毫秒内没读到、先推了在线取词结果的；或播放中酷狗换了这首歌的歌词：手动关联、或首次播放时酷狗稍后写入歌词缓存；或换歌时沿用了同名上一首的歌词、随后确认酷狗里这份本地文件没有歌词，补发一条空歌词，并发一条 `index:-1` 的 `lyric_update`），各补发一条完整的 `all_lyrics`，前端以最新一条覆盖即可。
       requestBody:
         required: true
         content:
@@ -2793,7 +2793,7 @@ components:
             - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
             - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
             - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`；sodamusic 为 `"汽水音乐 CDP 已断开"`；applemusic 为 `"Apple Music 已退出"`（进程退出；进程在而无歌时报的是 `waiting_song`，不是 `standby`）；spotify 为 `"Spotify CDP 已断开"`（`reason` 为 `cdp_disconnected`），这一版 Spotify 不支持远程调试端口时为 `"Spotify 版本不支持（无法打开远程调试端口）"`（`reason` 为 `version_unsupported`，每 30 秒重探一次）。kuwo 不产生此状态，断开与版本不受支持都报 `waiting_process`
-            - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"` / `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+            - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"`（只在酷狗正在运行、连续 5 次定位不到其安装时出现，酷狗未运行时先等它启动，状态保持 `waiting_process`）/ `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
           enum:
             - waiting_process
             - waiting_song

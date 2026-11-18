@@ -109,7 +109,7 @@ func runPositions(t *testing.T, pollMs int, rounds ...[]*cdp.PlayInfo) []posEvt 
 	defer func() { fetchLyrics, kugouAPIClient = origLyrics, origAPI }()
 
 	p := New(0, pollMs)
-	synctest.Test(t, func(*testing.T) { p.runSession(&scriptedSource{reads: reads}) })
+	synctest.Test(t, func(*testing.T) { p.runSession(&scriptedSource{reads: reads}, nil) })
 
 	var got []posEvt
 	for {

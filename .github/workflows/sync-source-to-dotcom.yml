@@ -28,6 +28,9 @@ jobs:
       GIT_COMMITTER_NAME: github-actions[bot]
       GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
       GH_TOKEN: ${{ secrets.GH_DOTCOM_TOKEN }}
+      GITEE_REPO_OWNER: VTB-LINK
+      GITEE_REPO_NAME: Metabox-Nexus-PlayerCap
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
     steps:
       - name: Checkout tagged source
@@ -42,6 +45,11 @@ jobs:
 
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "::error::Missing secret GH_DOTCOM_TOKEN"
+            exit 1
+          fi
+
+          if [ -z "${GITEE_TOKEN:-}" ]; then
+            echo "::error::Missing secret GITEE_TOKEN"
             exit 1
           fi
 
@@ -89,5 +97,14 @@ jobs:
           echo "Updating tag ${TAG_NAME} to ${TARGET_COMMIT} on ${TARGET_REPO}..."
           git tag -f "${TAG_NAME}" "${TARGET_COMMIT}"
           git push origin "refs/tags/${TAG_NAME}" --force
+
+          # Gitee 镜像与 dotcom 共用同一条快照历史，同一批提交与 tag 原样推过去。main 不强制推：
+          # 与 dotcom 分叉即失败。tag 强制推：release.yml 的 Gitee 一步若先到，会从 Gitee main 建出
+          # 这个 tag，须改指到快照提交。重跑幂等：dotcom 已推过则走上面的 No changes，这里再推一次。
+          # Gitee 的令牌用户名须为 oauth2，写 x-access-token 会被拒（403）。
+          GITEE_URL="https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_REPO_OWNER}/${GITEE_REPO_NAME}.git"
+          echo "Pushing ${TARGET_BRANCH} and tag ${TAG_NAME} to Gitee ${GITEE_REPO_OWNER}/${GITEE_REPO_NAME}..."
+          git push "${GITEE_URL}" "${TARGET_BRANCH}"
+          git push "${GITEE_URL}" "refs/tags/${TAG_NAME}" --force
 
           echo "Source sync completed for tag ${TAG_NAME}."

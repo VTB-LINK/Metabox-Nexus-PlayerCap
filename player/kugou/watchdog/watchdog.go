@@ -2,6 +2,7 @@ package watchdog
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -26,13 +27,18 @@ import (
 
 var log = logger.New("KuGou] [Watchdog") // 渲染为 [KuGou] [Watchdog]
 
-// ErrInstallNotFound 表示未找到酷狗安装，属于不可恢复错误，不应重试。
+// ErrInstallNotFound 表示未找到酷狗安装。酷狗不在运行时上层等它启动后重试，届时按运行中的进程定位（酷狗可能
+// 装在注册表与常见路径之外）；在运行时上层同样重试，连续多轮仍找不到才终态停用。见 kugou.go 的 classifyEnsureErr。
 var ErrInstallNotFound = i18n.Sentinel("KuGou installation not found (KuGou.exe or libcef.dll is missing)")
 
 // ErrVersionUnsupported 表示 libcef.dll 在已知偏移处的字节指纹既非原版也非已 patch，
-// 版本不认识，拒绝盲打补丁。与 ErrInstallNotFound 同属终态错误，不应重试（重试也只会
-// 反复弹 UAC）。上层据此停止而非空转，见 kugou.go 的分流。
+// 版本不认识，拒绝盲打补丁。属终态错误，不应重试（重试也只会反复弹 UAC）。
+// 上层据此停止而非空转，见 kugou.go 的分流。
 var ErrVersionUnsupported = i18n.Sentinel("libcef.dll version unsupported (byte fingerprint at the known offsets does not match)")
+
+// ErrInstallChanged 表示修补前预选了安装、等到酷狗启动后重新定位，启动的却是另一份安装（或重新定位出错）。
+// 此时不结束酷狗、不修补，上层稍后重试，届时按运行中的进程定位。见 killAndPatch。
+var ErrInstallChanged = i18n.Sentinel("KuGou that started is a different installation; repair postponed")
 
 // ErrElevationFailed 表示未取得管理员权限（用户拒绝了 UAC，或 helper 未按时就绪）。
 //
@@ -111,8 +117,10 @@ func isCDPAvailable() bool {
 // 等于它自己的哨兵位点，于是「打错版本的损坏 DLL」在第一次盲写后就把哨兵改成「已确认」，
 // 与健康态不可区分。现在 9 处 orig 联合校验，且 orig≠data，任何一处漂移都会被抓住——
 // 尤其 P5–P9 所在的、距 Patch1 有 12.8MB 的另一个代码簇，旧版对它零证据。
+//
+// 经 openShared 以读写删全共享打开：Confirm 每个会话都会调用本函数，句柄存续期间不能挡住酷狗更新器改名或删除该 DLL。
 func CheckPatchStatus(libcefPath string) (allPatched bool, canAutoFix bool, err error) {
-	f, err := os.Open(libcefPath)
+	f, err := openShared(libcefPath)
 	if err != nil {
 		return false, false, i18n.Errorf("open libcef.dll: %w", err)
 	}
@@ -150,23 +158,57 @@ func classifyLibcef(r io.ReaderAt) (allPatched bool, canAutoFix bool, err error)
 // libcef.dll 必须是 KuGou.exe 实际加载的那一份。酷狗把不同版本的 CEF 放在以版本号命名
 // 的子目录里，升级后旧目录常残留，选错版本就会拿不匹配的偏移把 DLL 写坏。
 //
-// 选址两级：
-//  1. 首选注册表 KuGou8 —— 酷狗自己维护、指向当前版本目录的权威指针，是「选中实际加载
-//     的那份」最直接的信号。但它会变（实测有的机器/时刻指向 KuGou.exe 而非目录），故用
-//     IsDir + 有 libcef.dll 守卫（kugou8LibcefIfDir），指文件即视为不可用。
-//  2. 拿不到才按 KuGou.exe 的 FileVersion 推导版本目录（findLibcefForExe）。
+// 酷狗在运行时以运行中的进程为准（设计 §6.3）：它可以装在任意路径，注册表可能是旧数据或指向另一份安装。
+// 进程只取一次快照，KuGou.exe 与 libcef.dll 出自同一份快照。KuGou.exe 的选址见 findKuGouExe；libcef.dll 三级：
+//  1. 运行中主进程的 CEF 子进程映像所在目录（与 Confirm 同一来源，设计 §6.2）。只在子进程恰好一个目录、
+//     其下有 libcef.dll 时采用（与 KuGou8 同一守卫）；没有子进程（酷狗刚启动）、分处多个目录时不取其一，往下走。
+//  2. 注册表 KuGou8 —— 酷狗自己维护、指向当前版本目录的指针。但它会变（实测有的机器/时刻
+//     指向 KuGou.exe 而非目录），故用 IsDir + 有 libcef.dll 守卫（kugou8LibcefIfDir），指文件即视为不可用。
+//     KuGou.exe 取自运行中的进程时，还须在 KuGou.exe 的目录之下（underDir），否则不用。
+//  3. 拿不到才按 KuGou.exe 的 FileVersion 推导版本目录（findLibcefForExe）。
 //
 // 早先的 951a361 直接删掉了 KuGou8、只留 exe 版本推导，是过度修复：当时确实读到 KuGou8
 // 指向 exe（真实观测），但正确动作是守卫而非删除——KuGou8 大多数时候（含本机现在）就是
 // 正确答案，删掉它把选址压在「exe 版本号 == CEF 目录名」这个未必成立的假设上。
+//
+// 选址只决定读哪份文件；能不能写由 9 处字节指纹决定（CheckPatchStatus），哪一级选出的都一样要过。
 func FindKuGouInstall() (exePath, libcefPath string, err error) {
-	exePath = findKuGouExe()
+	run, rerr := runningKuGouFn()
+	if rerr != nil {
+		run = runningKuGou{} // 未运行、主进程不止一个或映像路径取不到：不用它的任何内容
+	}
+	return findInstallWith(run)
+}
+
+// locateRunningInstall 只按运行中的进程定位安装，供修补前重新确认（killAndPatch）：runningKuGouFn 出错时原样返回
+// 错误，不像 FindKuGouInstall 那样退回注册表——快照时某个子进程恰好退出、映像路径取不到，退回注册表就会拿到修补前
+// 按注册表预选的那份，比较通过，结束主播启动的另一份安装。
+func locateRunningInstall() (string, string, error) {
+	run, err := runningKuGouFn()
+	if err != nil {
+		return "", "", err
+	}
+	return findInstallWith(run)
+}
+
+// findInstallWith 是 FindKuGouInstall 的选址本体：run 是运行中的酷狗，不在运行或定位不了时为零值。
+func findInstallWith(run runningKuGou) (exePath, libcefPath string, err error) {
+	exePath = findKuGouExe(run.ExePath)
 	if exePath == "" {
 		return "", "", ErrInstallNotFound
 	}
-	if lc := libcefFromKuGou8(); lc != "" {
-		libcefPath = lc
-	} else {
+	if len(run.ChildDirs) == 1 {
+		libcefPath = kugou8LibcefIfDir(run.ChildDirs[0])
+	}
+	if libcefPath == "" {
+		libcefPath = libcefFromKuGou8()
+		// exe 取自运行中的进程时，KuGou8 须在 exe 目录之下才用：它可能是旧数据或指向另一份安装，用了它 exe 与
+		// libcef.dll 就分属两份安装，补丁打到不在运行的那一份。不在其下就在 exe 目录下按版本推导。
+		if run.ExePath != "" && !underDir(libcefPath, filepath.Dir(exePath)) {
+			libcefPath = ""
+		}
+	}
+	if libcefPath == "" {
 		libcefPath = findLibcefForExe(filepath.Dir(exePath), readExeVersion(exePath))
 	}
 	if libcefPath == "" {
@@ -175,23 +217,50 @@ func FindKuGouInstall() (exePath, libcefPath string, err error) {
 	return exePath, libcefPath, nil
 }
 
-// libcefFromKuGou8 读注册表 HKCU\Software\KuGou\KuGou8 并经 kugou8LibcefIfDir 守卫，
-// 返回其下的 libcef.dll 路径；不可用（键缺失/指文件/无 libcef.dll）时返回空。
-func libcefFromKuGou8() string {
+// underDir 报告 path 是否在 dir 之下（不含 dir 本身）。filepath.Rel 先 Clean，再按路径分隔符逐段比较，Windows 上
+// 不分大小写，故 `…\B2\x` 不算在 `…\B` 之下；path 为空、不同盘符时返回 false。
+func underDir(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// runningKuGouFn 取运行中的酷狗（主进程映像与 CEF 子进程目录），供找安装用；测试替换。
+var runningKuGouFn = func() (runningKuGou, error) {
+	procs, err := snapshotProcs()
+	if err != nil {
+		return runningKuGou{}, err
+	}
+	return findRunningKuGou(procs, imagePath)
+}
+
+// regKuGouFn 只读地取注册表 HKCU\Software\KuGou 下名为 name 的字符串值，读不出返回空；测试替换。
+var regKuGouFn = func(name string) string {
 	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\KuGou`, registry.QUERY_VALUE)
 	if err != nil {
 		return ""
 	}
 	defer key.Close()
-	dir, _, err := key.GetStringValue("KuGou8")
+	v, _, err := key.GetStringValue(name)
 	if err != nil {
 		return ""
 	}
-	return kugou8LibcefIfDir(dir)
+	return v
 }
 
-// kugou8LibcefIfDir 是 KuGou8 的守卫（抽出以便不碰注册表做单测）：dir 必须是一个存在的
-// 目录、且其下有 libcef.dll，才返回该 libcef.dll 路径。KuGou8 已知会被改写成 KuGou.exe
+// kugouInstallRoots 是注册表 AppPath 不可用时依次查找 KuGou.exe 的常见安装根；测试替换。
+var kugouInstallRoots = []string{
+	`C:\Program Files\KuGou\KGMusic`,
+	`C:\Program Files (x86)\KuGou\KGMusic`,
+}
+
+// libcefFromKuGou8 读注册表 HKCU\Software\KuGou\KuGou8 并经 kugou8LibcefIfDir 守卫，
+// 返回其下的 libcef.dll 路径；不可用（键缺失/指文件/无 libcef.dll）时返回空。
+func libcefFromKuGou8() string {
+	return kugou8LibcefIfDir(regKuGouFn("KuGou8"))
+}
+
+// kugou8LibcefIfDir 是 KuGou8 的守卫（抽出以便不碰注册表做单测），运行中子进程的目录也经它：dir 必须是
+// 一个存在的目录、且其下有 libcef.dll，才返回该 libcef.dll 路径。KuGou8 已知会被改写成 KuGou.exe
 // （文件），此时返回空，让调用方回落 exe 版本推导。
 func kugou8LibcefIfDir(dir string) string {
 	if dir == "" {
@@ -208,21 +277,19 @@ func kugou8LibcefIfDir(dir string) string {
 	return lc
 }
 
-// findKuGouExe 定位 KuGou.exe：注册表 AppPath 优先，否则扫描常见安装根。
-func findKuGouExe() string {
-	if key, kerr := registry.OpenKey(registry.CURRENT_USER, `Software\KuGou`, registry.QUERY_VALUE); kerr == nil {
-		defer key.Close()
-		if appPath, _, e := key.GetStringValue("AppPath"); e == nil && appPath != "" {
-			exe := filepath.Join(appPath, "KuGou.exe")
-			if _, se := os.Stat(exe); se == nil {
-				return exe
-			}
+// findKuGouExe 定位 KuGou.exe：running（运行中主进程的映像路径，酷狗不在运行时为空）优先，其次注册表
+// AppPath（其下须有 KuGou.exe），否则扫描常见安装根。
+func findKuGouExe(running string) string {
+	if running != "" {
+		return running
+	}
+	if appPath := regKuGouFn("AppPath"); appPath != "" {
+		exe := filepath.Join(appPath, "KuGou.exe")
+		if _, se := os.Stat(exe); se == nil {
+			return exe
 		}
 	}
-	for _, base := range []string{
-		`C:\Program Files\KuGou\KGMusic`,
-		`C:\Program Files (x86)\KuGou\KGMusic`,
-	} {
+	for _, base := range kugouInstallRoots {
 		exe := filepath.Join(base, "KuGou.exe")
 		if _, e := os.Stat(exe); e == nil {
 			return exe
@@ -236,7 +303,8 @@ func findKuGouExe() string {
 // 首选与 exe 版本同名的目录——这是最可靠的信号。找不到时才扫描所有含 libcef.dll 的
 // 版本目录并取版本号最大者：这是异常兜底（ver 读取失败、或目录名与 exe 版本不一致），
 // 取最大而非 os.ReadDir 的字典序第一，是为了避免选中升级残留的旧版本目录。
-// 注：字典序对酷狗 a.b.c.d 版本号仅在同位数下与数值序一致，故仅作兜底，不作首选。
+// 版本号按数值逐段比较（compareVersion）：按字符串比较时 20.1.9.1 排在 20.1.22.27795 之后。
+// 目录名不是点分的纯数字（parseVersion 不认，如 backup、20.1.x）就不是版本目录，跳过、不参与比较。
 func findLibcefForExe(base, ver string) string {
 	if ver != "" {
 		lc := filepath.Join(base, ver, "libcef.dll")
@@ -249,6 +317,7 @@ func findLibcefForExe(base, ver string) string {
 		return ""
 	}
 	var best, bestName string
+	var bestVer []uint64
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -261,14 +330,47 @@ func findLibcefForExe(base, ver string) string {
 		if name == ver {
 			return lc // 精确匹配 exe 版本
 		}
-		if bestName == "" || name > bestName {
-			best, bestName = lc, name
+		v, ok := parseVersion(name)
+		if !ok {
+			continue // 不是版本目录
+		}
+		if best == "" || compareVersion(v, bestVer) > 0 {
+			best, bestName, bestVer = lc, name, v
 		}
 	}
 	if best != "" && ver != "" {
 		log.Warn("No libcef.dll directory matching KuGou.exe version %q; falling back to the highest version %q", ver, bestName)
 	}
 	return best
+}
+
+// parseVersion 把点分的版本目录名拆成各段数值。有空段、或某段不是十进制纯数字（含正负号）时 ok 为 false。
+func parseVersion(name string) (v []uint64, ok bool) {
+	for _, s := range strings.Split(name, ".") {
+		n, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		v = append(v, n)
+	}
+	return v, true
+}
+
+// compareVersion 逐段比较数值，a 小于、等于、大于 b 分别返回 -1、0、1；段数不同时缺的段按 0 计。
+func compareVersion(a, b []uint64) int {
+	for i := 0; i < max(len(a), len(b)); i++ {
+		var x, y uint64
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		if x != y {
+			return cmp.Compare(x, y)
+		}
+	}
+	return 0
 }
 
 // killKuGou terminates all running KuGou.exe processes and waits for them to exit.
@@ -979,6 +1081,34 @@ func readyToKill(w kugouWait, helperRunning func() bool) error {
 	return i18n.Errorf("elevated patch helper exited before KuGou was stopped; KuGou was left running and the repair will be retried")
 }
 
+// killAndPatch 在等到酷狗启动、readyToKill 通过之后调用：先经 locate（生产为 locateRunningInstall，只按运行中的
+// 进程定位）重新定位安装，与修补前预选的 exePath、libcefPath 比较（Clean 后不分大小写），都相同才 kill 结束
+// 酷狗、trigger 触发 helper 写入。不同或重新定位出错时两者都不调用，返回包装 ErrInstallChanged 的错误，由调用方
+// 关闭 helper（写 CANCEL，helper 不写 DLL）、稍后重试：预选是在酷狗没运行时按注册表做的，等到的只是「任意
+// KuGou.exe 出现」，主播打开的若是另一份安装，照旧修补就会结束它、给预选那份打补丁、再启动预选那份。
+// helper 的写入目标在弹 UAC 时已写进它的命令行，不能改，故不改用新定位的路径。
+func killAndPatch(exePath, libcefPath string, locate func() (string, string, error), kill func(), trigger func() error) error {
+	exe, lc, err := locate()
+	if err != nil {
+		// 内层错误按 %v 带出、不按 %w：不得被认作 ErrInstallNotFound，否则上层按找不到安装分流
+		return i18n.Errorf("%w: locating KuGou again after it started failed: %v", ErrInstallChanged, err)
+	}
+	if !samePath(exe, exePath) || !samePath(lc, libcefPath) {
+		return i18n.Errorf("%w: started %s with %s; prepared %s with %s", ErrInstallChanged, exe, lc, exePath, libcefPath)
+	}
+	log.Info("KuGou detected; stopping it and repairing the DLL...")
+	kill()
+	if err := trigger(); err != nil {
+		return i18n.Errorf("DLL patch failed: %w", err)
+	}
+	return nil
+}
+
+// samePath 报告两个路径 Clean 后是否相同（不分大小写）。
+func samePath(a, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+}
+
 // EnsurePatched is the main entry point called by the player before connecting to CDP.
 //
 // New workflow (like NetEase Cloud Music):
@@ -988,7 +1118,8 @@ func readyToKill(w kugouWait, helperRunning func() bool) error {
 //  4. DLL not patched →
 //     a. UAC UPFRONT: launch elevated helper that waits for a trigger
 //     b. Wait for KuGou to appear in process list (user starts KuGou)
-//     c. Kill KuGou, trigger helper to patch (no second UAC)；helper 已退出时不结束酷狗，返回错误交上层重试
+//     c. Kill KuGou, trigger helper to patch (no second UAC)；helper 已退出时不结束酷狗，返回错误交上层重试；
+//     启动的不是预选的那份安装时同样不结束酷狗，返回 ErrInstallChanged（killAndPatch）
 //     d. Verify, re-launch KuGou
 func EnsurePatched(stopCh <-chan struct{}) error {
 	if isCDPAvailable() {
@@ -1075,12 +1206,9 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 		return err
 	}
 
-	// 检测到酷狗、helper 仍在，立即停止并触发 patch（无需再次 UAC）
-	log.Info("KuGou detected; stopping it and repairing the DLL...")
-	killKuGou()
-
-	if err := helper.TriggerAndWait(); err != nil {
-		return i18n.Errorf("DLL patch failed: %w", err)
+	// 检测到酷狗、helper 仍在：确认启动的仍是预选的那份安装，再停止酷狗并触发 patch（无需再次 UAC）
+	if err := killAndPatch(exePath, libcefPath, locateRunningInstall, killKuGou, helper.TriggerAndWait); err != nil {
+		return err
 	}
 
 	verified, _, verifyErr := CheckPatchStatus(libcefPath)

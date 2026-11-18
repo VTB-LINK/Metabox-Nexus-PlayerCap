@@ -292,6 +292,7 @@ var p4LogMessages = map[string]string{
 	"Helper has failed fast %d times (spawn failure or exit within %v of starting; watchdog restarts and on-demand teardowns not counted); giving up audio capture for this session (waveform degraded) until the main service restarts": "helper 累计 %d 次快速失败（spawn 失败或启动后不足 %v 退出，不含看门狗重启与按需拆除），本会话放弃音频捕获（波形降级），待主服务下次重启再试",
 	"Helper exited (alive for %v); restarting in %v":            "helper 退出（存活 %v），%v 后重启",
 	"Cleaning up leftover orphaned audio helper process pid=%d": "清理遗留音频 helper 孤儿进程 pid=%d",
+	"Audio waveform is unavailable: capturing a single program's audio requires Windows 10 version 2004 (build %d) or later, and this system is %d.%d.%d. Upgrade Windows to use it": "音频波形不可用：单独捕获某个程序的声音需要 Windows 10 2004 版（build %d）及以上，本机为 %d.%d.%d。升级 Windows 后可用",
 
 	// 音频波形：helper 子进程写 stderr 的诊断（audiocap/helper、audiocap/session，issue #143）
 	"[helper] ignoring invalid control line: %v": "[helper] 忽略非法控制行: %v",
@@ -412,4 +413,30 @@ var p4LogMessages = map[string]string{
 
 	// —— player/kugou：换歌过渡态读到上一首的进度（issue #195）——
 	"Progress %.2fs read while switching songs matches the previous song; announcing from 0": "换歌过渡态读到的进度 %.2fs 与上一首吻合，按 0 宣告",
+
+	// —— player/kugou/assoc：按播放 hash 取关联与缓存歌词（issue #205）——
+	"Hash %s has more than %d lyric associations in KuGou; using KuGou cache only": "hash %s 在酷狗中的歌词关联超过 %d 个，只用酷狗缓存",
+	"Hash %s has %d KuGou cache lyric entries; keeping the latest %d":              "hash %s 在酷狗缓存中有 %d 条歌词记录，只保留最新的 %d 条",
+	"KuGou association": "酷狗关联", // Source.String 的返回值，由调用方 i18n.T 后注入日志
+	"KuGou cache":       "酷狗缓存",
+
+	// —— player/kugou/assoc：无关表解析不了时跳过（issue #205）——
+	"Skipping table %s in KuGou database: %v": "跳过酷狗数据库中的表 %s：%v",
+
+	// —— player/kugou：找不到安装且酷狗未运行时等待（issue #205）——
+	"KuGou installation not found; waiting for KuGou to start": "未找到酷狗安装，等待酷狗音乐启动",
+
+	// —— player/kugou：启动的酷狗是另一份安装，修补推迟（issue #205）——
+	"%v; retrying": "%v；稍后重试",
+	// —— player/kugou/assoc：后台读取者（issue #205）——
+	"Local lyric association enabled (KuGou %s, data directory %s)": "本地歌词关联已启用（酷狗 %s，数据目录 %s）",
+	"Local lyric association disabled: %v":                          "本地歌词关联已停用：%v",
+	"Local lyric association not confirmed yet: %v":                 "本地歌词关联尚未确认：%v",
+	"Reading the KuGou lyric database failed; will retry: %v":       "读取酷狗歌词数据库失败，稍后重试：%v",
+
+	// —— player/kugou：会话取本地歌词、播放中随酷狗换词（issue #205）——
+	"Lyrics loaded (%s): %d lines; per-character: %s":                                                 "歌词加载完成(%s): %d 行；逐字：%s",
+	"Lyrics changed in KuGou; reloaded (%s): %d lines; per-character: %s":                             "酷狗中的歌词已更换，重新加载(%s): %d 行；逐字：%s",
+	"KuGou has no lyrics for this local file; lyrics cleared":                                         "酷狗中这份本地文件没有歌词，已清空歌词",
+	"The previous session's local lyric reader has not exited; using online lyrics only this session": "上一个会话的本地歌词读取者尚未退出，本会话只在线取词",
 }

@@ -308,12 +308,15 @@ func releaseUnknown(obj unsafe.Pointer) uintptr {
 // ---------------------------------------------------------------------------
 
 // activateProcessLoopbackClient 对目标 PID（连/不连子进程树）异步激活进程 loopback 虚拟设备，等 2s 转同步，
-// 返回 IAudioClient*（unsafe.Pointer，调用方负责 Release）。低于 Win10 build 19041 拿不到 API → 优雅报错。
+// 返回 IAudioClient*（unsafe.Pointer，调用方负责 Release）。
+//
+// ActivateAudioInterfaceAsync 自 Windows 8 起即存在，能找到它不说明系统支持进程 loopback：低于 Win10
+// build 19041 时它照常返回，失败落在激活结果上（issue #206）。系统版本由 manager 在启动 helper 之前判定。
 func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer, error) {
 	mmdev := windows.NewLazySystemDLL("Mmdevapi.dll")
 	proc := mmdev.NewProc("ActivateAudioInterfaceAsync")
 	if err := proc.Find(); err != nil {
-		return nil, i18n.Errorf("ActivateAudioInterfaceAsync unavailable (requires Windows 10 build 19041+): %w", err)
+		return nil, i18n.Errorf("ActivateAudioInterfaceAsync unavailable: %w", err)
 	}
 
 	mode := uint32(processLoopbackModeIncludeTree)

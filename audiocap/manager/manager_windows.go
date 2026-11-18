@@ -37,6 +37,10 @@ var (
 	procQPFreq  = qpcKernel32.NewProc("QueryPerformanceFrequency")
 )
 
+// osVersion 读系统真实版本：RtlGetNtVersionNumbers 不受兼容性 shim 影响（见 telemetry/sysinfo.go）。
+// 做成变量供测试注入。
+var osVersion = windows.RtlGetNtVersionNumbers
+
 // readQPC 读一次 QueryPerformanceCounter（系统级计数器，与 helper.readQPC 同源）。
 func readQPC() int64 {
 	var c int64
@@ -214,6 +218,10 @@ func (m *Manager) BeginShutdown() {
 // Run 阻塞跑管理循环：秒级 ticker 或 Wake 或 helper 退出通知，先到即 reconcile；stopCh 关则拆
 // helper 退出。起手做一次启动孤儿清扫。
 //
+// 系统不支持进程级 loopback（processLoopbackSupported）时打一行日志，此后不 reconcile、不启动 helper，
+// 只等 stopCh：激活必然失败，看门狗会把它当作假死反复重启（issue #206）。idleKeepalive 照常运行，订阅者
+// 照样持续收到空闲帧。
+//
 // 起手 defer teardownHelper：panic 展开时同样拆除 helper，不让捕获残留到主进程退出；stop 路径
 // 已拆除时它是空操作。不调 Stop：Run 被恢复后 idleKeepalive 仍按契约推空闲帧。此 defer
 // 不 recover，panic 由调用方（main.go 的 localRecover）恢复并记日志。
@@ -222,6 +230,12 @@ func (m *Manager) Run() {
 	m.sweepOrphans()
 
 	go m.idleKeepalive() // 无捕获时的空闲帧流（独立 goroutine，本地 recover，随 stopCh 退出）
+
+	if major, minor, build := osVersion(); !processLoopbackSupported(major, build) {
+		managerLog.Warn("Audio waveform is unavailable: capturing a single program's audio requires Windows 10 version 2004 (build %d) or later, and this system is %d.%d.%d. Upgrade Windows to use it", processLoopbackMinBuild, major, minor, build)
+		<-m.stopCh
+		return
+	}
 
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
