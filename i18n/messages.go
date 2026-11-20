@@ -91,6 +91,16 @@ var chinese = map[string]string{
 	"Spotify CDP disconnected":                                                          "Spotify CDP 已断开",
 	"Spotify version unsupported (remote debugging unavailable)":                        "Spotify 版本不支持（无法打开远程调试端口）",
 
+	// 商店版门禁（issue #212）：微软商店版与读不到安装路径
+	"NetEase Cloud Music Microsoft Store version unsupported (requires the official installer version)":           "网易云音乐微软商店版不支持（需官网安装版）",
+	"Cannot read the NetEase Cloud Music installation path (NetEase Cloud Music may be running as administrator)": "读不到网易云音乐的安装路径（网易云音乐可能以管理员身份运行）",
+	"Spotify Microsoft Store version unsupported (requires the official installer version)":                       "Spotify 微软商店版不支持（需官网安装版）",
+	"Cannot read the Spotify installation path (Spotify may be running as administrator)":                         "读不到 Spotify 的安装路径（Spotify 可能以管理员身份运行）",
+	"KuGou Microsoft Store version unsupported (requires the official installer version)":                         "酷狗音乐微软商店版不支持（需官网安装版）",
+	"Cannot read the KuGou installation path (KuGou may be running as administrator)":                             "读不到酷狗音乐的安装路径（酷狗音乐可能以管理员身份运行）",
+	"Soda Music Microsoft Store version unsupported (requires the official installer version)":                    "汽水音乐微软商店版不支持（需官网安装版）",
+	"Cannot read the Soda Music installation path (Soda Music may be running as administrator)":                   "读不到汽水音乐的安装路径（汽水音乐可能以管理员身份运行）",
+
 	// —— P4c enum：被当数据注入日志的值（在源头经 i18n.T）——
 	"yes":    "是",  // detailedFlag：本批歌词含逐字
 	"no":     "否",  // detailedFlag：本批歌词无逐字

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/player/kuwo/cdp"
+	"Metabox-Nexus-PlayerCap/player/launch"
 )
 
 var errNotReady = errors.New("not ready")
@@ -119,6 +120,44 @@ func TestRestartFailsClosed(t *testing.T) {
 			err := f.manager().ensure(context.Background())
 			if !errors.Is(err, tc.want) || f.stops != 0 || f.starts != 0 {
 				t.Fatalf("err=%v stops=%d starts=%d", err, f.stops, f.starts)
+			}
+		})
+	}
+}
+
+// TestStoreInstallGate 钉住商店版门禁（#212）：映像路径在 WindowsApps 下或为空时返回门禁的错误，不 stop、不 start，
+// 且先于 ready 的提前返回（端口已就绪时同样被拒，上层才给得出改用官网安装版的提示）。桩的 verify 一律放行，
+// 拦住它们的只有门禁。
+//
+// 变异自证（均实测变红）：去掉门禁；门禁挪到 ready 之后（端口已就绪的两例）；门禁挪到 stop 之后。
+func TestStoreInstallGate(t *testing.T) {
+	const store = `C:\Program Files\WindowsApps\Kuwo.KuwoMusic_9.6.0.0_x64__abc\9.6.0.0_W1\bin\kwmusic.exe`
+	for _, tc := range []struct {
+		name     string
+		exe      string
+		ready    bool
+		packaged bool // 期望 *launch.PackagedError；否则期望 launch.ErrExeUnknown
+	}{
+		{"商店版、端口未就绪", store, false, true},
+		{"商店版、端口已就绪", store, true, true},
+		{"路径为空、端口未就绪", "", false, false},
+		{"路径为空、端口已就绪", "", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake()
+			f.i.Exe = tc.exe
+			f.ready = tc.ready
+			err := f.manager().ensure(context.Background())
+			var pe *launch.PackagedError
+			if tc.packaged {
+				if !errors.As(err, &pe) || pe.ExePath != store {
+					t.Errorf("err = %v，期望 *launch.PackagedError（%s）", err, store)
+				}
+			} else if !errors.Is(err, launch.ErrExeUnknown) {
+				t.Errorf("err = %v，期望 launch.ErrExeUnknown", err)
+			}
+			if f.stops != 0 || f.starts != 0 || f.verifies != 0 {
+				t.Errorf("stops=%d starts=%d verifies=%d，期望门禁之后什么都不做", f.stops, f.starts, f.verifies)
 			}
 		})
 	}

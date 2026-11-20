@@ -15,6 +15,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/kuwo/cdp"
 	"Metabox-Nexus-PlayerCap/player/kuwo/pos"
 	"Metabox-Nexus-PlayerCap/player/kuwo/watchdog"
+	"Metabox-Nexus-PlayerCap/player/launch"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
@@ -23,6 +24,11 @@ const PlayerName = "kuwo"
 func init() { config.RegisterPlayer(PlayerName) }
 
 var log = logger.New("Kuwo")
+
+// downloadURL is Kuwo's official download page; its Windows button served the
+// 9.6.0.0_W1 installer (2026-11-20). The installer link itself carries an
+// expiring signature, so the page is the stable address to give.
+const downloadURL = "https://www.kuwo.cn/down"
 
 type KuwoPlayer struct {
 	player.BaseEmitter
@@ -69,6 +75,10 @@ func statusFor(err error) (reason, detail string) {
 	switch {
 	case errors.Is(err, watchdog.ErrNotRunning):
 		return player.ReasonProcessNotRunning, "Kuwo is not running"
+	case errors.As(err, new(*launch.PackagedError)): // 商店版门禁（#212）
+		return player.ReasonVersionUnsupported, "Kuwo Microsoft Store version unsupported (requires the official installer version)"
+	case errors.Is(err, launch.ErrExeUnknown):
+		return player.ReasonNoAdmin, "Cannot read the Kuwo installation path (Kuwo may be running as administrator)"
 	case errors.Is(err, pos.ErrUnsupportedCore) || errors.Is(err, cdp.ErrVersionUnsupported):
 		return player.ReasonVersionUnsupported, "This Kuwo playback core is not supported"
 	case errors.Is(err, watchdog.ErrRestartNotAuthorized):
@@ -113,7 +123,16 @@ func (p *KuwoPlayer) Start() {
 		p.Emit(player.EventClearSongData, nil)
 		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T(detail), Reason: reason})
 		if reason != lastReason && err != nil {
-			log.Warn("Kuwo capture unavailable: %v", err)
+			var packaged *launch.PackagedError
+			switch {
+			case errors.As(err, &packaged):
+				log.Warn("Kuwo is the Microsoft Store version (%s) and cannot be started with the debug flag; skipped Kuwo capture. To use it, uninstall it and install the official installer version: %s", packaged.ExePath, downloadURL)
+				telemetry.ReportOnce("kuwo.store_install", "酷我为微软商店版，无法带调试参数启动", nil, map[string]any{"exe_path": packaged.ExePath})
+			case errors.Is(err, launch.ErrExeUnknown):
+				log.Warn("Cannot read the installation path of Kuwo; it was not restarted automatically. Run Kuwo with the same privileges as this program")
+			default:
+				log.Warn("Kuwo capture unavailable: %v", err)
+			}
 		}
 		lastReason = reason
 		if !wait(ctx, 3*time.Second) {

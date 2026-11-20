@@ -32,56 +32,96 @@ var LaunchFlags = []string{
 	"--disable-features=CalculateNativeWinOcclusion",
 }
 
+// proc 是一个运行中的 cloudmusic.exe：映像路径与命令行，读不到为空。
+type proc struct {
+	ExePath string
+	Cmdline string
+}
+
+// 进程枚举、结束、拉起与等待经包级变量调用，测试替换它们以离线驱动 EnsureDebugMode，不碰真进程。
+var (
+	runningFn = launch.Running
+	scanFn    = scanProcesses
+	killFn    = func() { exec.Command("taskkill", "/F", "/IM", TargetProcessName).Run() }
+	detachFn  = launch.Detached
+	sleepFn   = time.Sleep
+)
+
+// scanProcesses 枚举全部 cloudmusic.exe：按名字在进程快照里找（launch.Running），读不到映像路径的也在结果里、
+// 路径为空，由门禁拒绝；命令行按进程号读，读不到为空。
+func scanProcesses() ([]proc, error) {
+	running, err := runningFn(TargetProcessName)
+	if err != nil {
+		return nil, i18n.Errorf("failed to list processes: %w", err)
+	}
+	out := make([]proc, 0, len(running))
+	for _, r := range running {
+		c := proc{ExePath: r.ExePath}
+		if p, err := process.NewProcess(int32(r.PID)); err == nil {
+			if cmdline, err := p.Cmdline(); err == nil {
+				c.Cmdline = cmdline
+			}
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// gateAll 对 procs 逐个过 launch.Gate，任一映像路径读不到或在 WindowsApps 下即返回该错误（issue #212）。
+// taskkill /IM 按名字结束全部 cloudmusic.exe，只核验其中一个不能授权结束其余的（例如另一用户会话里的商店版）。
+func gateAll(procs []proc) error {
+	for _, p := range procs {
+		if err := launch.Gate(p.ExePath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GateRunning 枚举全部 cloudmusic.exe 并逐个过门禁（issue #212），供不经 EnsureDebugMode、独立连接 9222 或
+// 操作网易云窗口的路径（特效的 shim 注入与泊车）在连接、操作之前调用。没有运行中的 cloudmusic.exe 时返回
+// launch.ErrExeUnknown：没有可核验的映像路径，调试端口上的不是可确认的网易云。
+func GateRunning() error {
+	procs, err := scanFn()
+	if err != nil {
+		return err
+	}
+	if len(procs) == 0 {
+		return launch.ErrExeUnknown
+	}
+	return gateAll(procs)
+}
+
 // EnsureDebugMode checks if cloudmusic is running. If so, checks if it has the debug flag.
 // If not, it kills it and restarts it with the debug flag.
 // Returns true if the process was restarted, so we can wait a bit before connecting.
+//
+// 门禁不过（任一 cloudmusic.exe 的映像路径读不到或在 WindowsApps 下）时原样返回 launch 的错误，不结束、不拉起。
 func EnsureDebugMode() (bool, error) {
-	procs, err := process.Processes()
+	procs, err := scanFn()
 	if err != nil {
-		return false, i18n.Errorf("failed to list processes: %v", err)
+		return false, err
 	}
-
-	var hasNetease bool
-	var hasFlags bool
-	var exePath string
-	var pidsToKill []int
-
-	for _, p := range procs {
-		name, err := p.Name()
-		if err != nil {
-			continue
-		}
-		if strings.EqualFold(name, TargetProcessName) {
-			hasNetease = true
-			pidsToKill = append(pidsToKill, int(p.Pid))
-
-			// Try to get exe path if we haven't already
-			if exePath == "" {
-				ep, err := p.Exe()
-				if err == nil && ep != "" {
-					exePath = ep
-				}
-			}
-
-			// Check command line：是否已带我们注入的保活参数
-			cmdline, err := p.Cmdline()
-			if err == nil {
-				if strings.Contains(cmdline, keepaliveMarker) {
-					hasFlags = true
-				}
-			}
-		}
-	}
-
-	if !hasNetease {
+	if len(procs) == 0 {
 		// Not running at all, nothing to do
 		return false, nil
 	}
 
-	if hasFlags {
-		// Already running with debug + keepalive flags
-		return false, nil
+	// 商店版门禁（issue #212）必须在这里：先于下面的 hasFlags 早退与一切结束、拉起。放在 hasFlags 之后，带着
+	// 保活参数的商店版走不到它，也就给不出改用官网安装版的提示。读不到路径也拒绝，不再退回默认安装路径：
+	// 那个路径上的不一定是在运行的这一份，而 taskkill 照样会结束在运行的全部实例。
+	if err := gateAll(procs); err != nil {
+		return false, err
 	}
+
+	for _, p := range procs {
+		if strings.Contains(p.Cmdline, keepaliveMarker) {
+			// Already running with debug + keepalive flags
+			return false, nil
+		}
+	}
+
+	exePath := procs[0].ExePath // 门禁已确认每个都读得到、都不在 WindowsApps 下
 
 	// v2 检查必须在这里 —— 在 taskkill 之前、在上面 hasFlags 早退之后。
 	//
@@ -91,29 +131,22 @@ func EnsureDebugMode() (bool, error) {
 	//
 	// 放在 hasFlags 之后是为了省一次文件版本读取：已经带着我们的参数在跑的，必然是被我们
 	// 重启过的 v3（v2 不会走到那一步）。
-	if exePath != "" {
-		if v := ReadExeVersion(exePath); IsUnsupportedVersion(v) {
-			return false, &UnsupportedVersionError{Version: v, ExePath: exePath}
-		}
+	if v := ReadExeVersion(exePath); IsUnsupportedVersion(v) {
+		return false, &UnsupportedVersionError{Version: v, ExePath: exePath}
 	}
 
 	log.Warn("%s running without debug/keepalive flags; restarting...", TargetProcessName)
 
-	if exePath == "" {
-		// Fallback to standard path
-		exePath = `C:\Program Files\NetEase\CloudMusic\cloudmusic.exe`
-	}
-
 	// Kill all instances
-	log.Info("Terminating %d process(es)...", len(pidsToKill))
-	exec.Command("taskkill", "/F", "/IM", TargetProcessName).Run()
-	time.Sleep(2 * time.Second)
+	log.Info("Terminating %d process(es)...", len(procs))
+	killFn()
+	sleepFn(2 * time.Second)
 
 	// Restart with debug + keepalive flags.
 	// 经 launch.Detached 拉起，不直接 Start：直接启动的网易云是 PlayerCap 的子进程，按进程树结束 PlayerCap
 	// 的工具（OBS 的 Autostarter 插件）会把它一并结束（issue #127）。
 	log.Info("Restarting %s (%s)", exePath, strings.Join(LaunchFlags, " "))
-	detached, err := launch.Detached(exePath, LaunchFlags, "")
+	detached, err := detachFn(exePath, LaunchFlags, "")
 	if err != nil {
 		return false, i18n.Errorf("failed to restart process: %v", err)
 	}
@@ -122,6 +155,6 @@ func EnsureDebugMode() (bool, error) {
 	}
 
 	// Wait a few seconds for CEF to initialize
-	time.Sleep(3 * time.Second)
+	sleepFn(3 * time.Second)
 	return true, nil
 }

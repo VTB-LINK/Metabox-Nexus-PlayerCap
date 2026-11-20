@@ -122,9 +122,9 @@ var ErrPortNotReady = i18n.Sentinel("Spotify is running with the debug flag, but
 
 // scan 是一次进程扫描的结果。
 type scan struct {
-	PIDs    []int
-	MainPID int
-	ExePath string
+	// ExePaths 是每个 Spotify.exe 的映像路径，读不到为空串；个数即进程数。逐个记下，供门禁逐个核验（issue #212）。
+	ExePaths []string
+	MainPID  int
 	// HasDebugFlag / HasKeepalive 只看主进程的命令行。
 	HasDebugFlag bool
 	HasKeepalive bool
@@ -136,33 +136,25 @@ func hasToken(cmdline, flag string) bool {
 	return slices.Contains(strings.Fields(cmdline), flag)
 }
 
-// scanProcesses 枚举全部 Spotify.exe：主进程 = 命令行里**不含** `--type=` 的那个
-// （CEF 的 GPU/渲染/网络/存储/崩溃回收子进程都带 `--type=`）。
+// scanProcesses 枚举全部 Spotify.exe：按名字在进程快照里找（launch.Running），读不到映像路径的也在结果里、路径为空，
+// 由门禁拒绝。主进程 = 命令行里**不含** `--type=` 的那个（CEF 的 GPU/渲染/网络/存储/崩溃回收子进程都带 `--type=`）；
+// 命令行按进程号读，读不到的不当主进程。
 func scanProcesses() (scan, error) {
 	var sc scan
-	procs, err := process.Processes()
+	running, err := runningFn(TargetProcessName)
 	if err != nil {
 		return sc, i18n.Errorf("failed to list processes: %w", err)
 	}
-	for _, p := range procs {
-		name, err := p.Name()
-		if err != nil || !strings.EqualFold(name, TargetProcessName) {
-			continue
-		}
-		sc.PIDs = append(sc.PIDs, int(p.Pid))
-		if sc.ExePath == "" {
-			if ep, err := p.Exe(); err == nil && ep != "" {
-				sc.ExePath = ep
-			}
-		}
-		cmd, err := p.Cmdline()
+	for _, r := range running {
+		sc.ExePaths = append(sc.ExePaths, r.ExePath)
+		cmd, err := cmdlineFn(r.PID)
 		if err != nil {
 			continue
 		}
 		if strings.Contains(cmd, "--type=") {
 			continue
 		}
-		sc.MainPID = int(p.Pid)
+		sc.MainPID = int(r.PID)
 		// **标记必须是我们那一个端口，不能只匹配 flag 名**：Spotify 也可能被别的工具
 		// （或我们上一次探测）以 `--remote-debugging-port=9222` 启动 —— 只匹配名字会把它
 		// 判成「已带 flag」而转去等一个永远不会开的 9223，于是永远不修复。
@@ -178,12 +170,12 @@ func FindMainPID() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(sc.PIDs) == 0 {
+	if len(sc.ExePaths) == 0 {
 		return 0, ErrNotRunning
 	}
 	if sc.MainPID == 0 {
 		// 进程在跑、但取不到主进程的命令行（权限）：不猜，交给上层退避重试。
-		return 0, i18n.Errorf("Spotify main process not found among %d processes", len(sc.PIDs))
+		return 0, i18n.Errorf("Spotify main process not found among %d processes", len(sc.ExePaths))
 	}
 	return sc.MainPID, nil
 }
@@ -193,8 +185,19 @@ func DebugPortUp() bool {
 	return devtoolsUp(fmt.Sprintf("http://127.0.0.1:%d/json/version", DebugPort))
 }
 
+// cmdlineOf 按进程号读命令行。
+func cmdlineOf(pid uint32) (string, error) {
+	p, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return "", err
+	}
+	return p.Cmdline()
+}
+
 // 进程与端口操作经包级变量调用，测试替换它们以离线驱动 EnsureDebugMode 的决策，不碰真进程。
 var (
+	runningFn      = launch.Running
+	cmdlineFn      = cmdlineOf
 	scanFn         = scanProcesses
 	portUpFn       = DebugPortUp
 	supportsFlagFn = SupportsDebugFlag
@@ -231,6 +234,17 @@ const (
 	verdictKeep                        // 缺参数，但本次运行已重启过且实例可用 → 不再重启
 )
 
+// gateScan 对 sc 的每个 Spotify.exe 过 launch.Gate，任一映像路径读不到或在 WindowsApps 下即返回该错误
+// （issue #212）。killFn 以 taskkill /IM 按名字结束全部 Spotify.exe，只核验其中一个不能授权结束其余的。
+func gateScan(sc scan) error {
+	for _, p := range sc.ExePaths {
+		if err := launch.Gate(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // decideRestart 按主进程命令行、端口状态与「本次运行是否已重启过」判定下一步。
 //
 // 已重启过之后仍缺参数（启动器改写命令行等）时，只要实例还带调试口或端口已通，就不再杀：
@@ -266,14 +280,20 @@ func decideRestart(sc scan, portUp, restarted bool) verdict {
 //
 // 与 cloudmusic/watchdog 的差异：cloudmusic 只看保活标记、缺了每轮都杀，没有「只杀一次」的保护。
 //
-// 返回 nil 表示端口已就绪、可以 Connect。
+// 返回 nil 表示端口已就绪、可以 Connect。门禁不过（任一 Spotify.exe 的映像路径读不到或在 WindowsApps 下）时
+// 原样返回 launch 的错误，不杀、不拉起。
 func EnsureDebugMode() error {
 	sc, err := scanFn()
 	if err != nil {
 		return err
 	}
-	if len(sc.PIDs) == 0 {
+	if len(sc.ExePaths) == 0 {
 		return ErrNotRunning
+	}
+	// 商店版门禁（issue #212）必须在这里：先于 decideRestart 的一切判定，含「参数齐全且端口已通」等提前返回。
+	// 放在它们之后，带着参数或端口已通的商店版走不到门禁，也就给不出改用官网安装版的提示。
+	if err := gateScan(sc); err != nil {
+		return err
 	}
 	portUp := portUpFn()
 	switch decideRestart(sc, portUp, restartedThisRun.Load()) {
@@ -282,7 +302,7 @@ func EnsureDebugMode() error {
 	case verdictPortNotReady:
 		return ErrPortNotReady
 	case verdictNoMainPID:
-		return i18n.Errorf("Spotify main process not found among %d processes", len(sc.PIDs))
+		return i18n.Errorf("Spotify main process not found among %d processes", len(sc.ExePaths))
 	case verdictKeep:
 		if !keptMissingWarned.Swap(true) {
 			log.Warn("%s still lacks the debug or anti-throttling flags after our restart; not restarting it again during this run (progress may slow down while the window is minimized or covered)", TargetProcessName)
@@ -295,10 +315,8 @@ func EnsureDebugMode() error {
 
 	// —— 以下这条路径会杀掉用户正在用的 Spotify，故版本闸必须在 taskkill 之前（issue #40）——
 	// 放晚了就是「杀了主播的播放器，换来一个永远连不上的端口」。
-	if sc.ExePath == "" {
-		return i18n.Errorf("cannot locate Spotify.exe path; leaving the running processes untouched")
-	}
-	supported, err := supportsFlagFn(sc.ExePath)
+	exePath := sc.ExePaths[0] // 门禁已确认每个都读得到、都不在 WindowsApps 下
+	supported, err := supportsFlagFn(exePath)
 	if err != nil {
 		// 验不了就不动它。宁可这一轮没有歌词，也不白杀一次。
 		return i18n.Errorf("%w: %v", ErrVersionUnsupported, err)
@@ -321,8 +339,8 @@ func EnsureDebugMode() error {
 		return err
 	}
 
-	log.Info("Starting %s %s", sc.ExePath, strings.Join(LaunchFlags, " "))
-	if err := startFn(sc.ExePath, LaunchFlags); err != nil {
+	log.Info("Starting %s %s", exePath, strings.Join(LaunchFlags, " "))
+	if err := startFn(exePath, LaunchFlags); err != nil {
 		return i18n.Errorf("failed to start Spotify: %w", err)
 	}
 	deadline := time.Now().Add(portWait)
@@ -344,7 +362,7 @@ func waitForExit() error {
 		if err != nil {
 			return err
 		}
-		if len(sc.PIDs) == 0 {
+		if len(sc.ExePaths) == 0 {
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -404,10 +422,12 @@ func devtoolsUp(url string) bool {
 
 // CLIPath 返回 spotify_cli.exe 的路径：优先取运行中实例的同目录，其次 %APPDATA%\Spotify。
 func CLIPath() (string, error) {
-	if sc, err := scanProcesses(); err == nil && sc.ExePath != "" {
-		p := filepath.Join(filepath.Dir(sc.ExePath), cliExeName)
-		if fileExists(p) {
-			return p, nil
+	if sc, err := scanProcesses(); err == nil {
+		if i := slices.IndexFunc(sc.ExePaths, func(p string) bool { return p != "" }); i >= 0 {
+			p := filepath.Join(filepath.Dir(sc.ExePaths[i]), cliExeName)
+			if fileExists(p) {
+				return p, nil
+			}
 		}
 	}
 	if appData := os.Getenv("APPDATA"); appData != "" {

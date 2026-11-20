@@ -30,6 +30,7 @@ import (
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
+	"Metabox-Nexus-PlayerCap/player/launch"
 	"Metabox-Nexus-PlayerCap/player/spotify/cdp"
 	"Metabox-Nexus-PlayerCap/player/spotify/lyric"
 	"Metabox-Nexus-PlayerCap/player/spotify/watchdog"
@@ -80,8 +81,13 @@ func EffectivePollInterval(pollMs int) time.Duration {
 }
 
 // unsupportedRecheck 是判定「这一版 Spotify 不支持调试端口」之后的重探间隔。
-// 与 cloudmusic 同值同理由：装了什么版本近乎永久，但用户升级后应当自动恢复（不必重启服务）。
+// 与 cloudmusic 同值同理由：装了什么版本近乎永久，但用户升级后应当自动恢复（不必重启服务）。微软商店版同样按它
+// 重探（issue #212）。
 const unsupportedRecheck = 30 * time.Second
+
+// installerURL 是 Spotify 官网安装包的直链（2026-11-17 实测 200）。官网下载页在 Windows 上给的是微软商店的按钮，
+// 提示里直接给安装包，免得用户照着下载页又装回商店版。
+const installerURL = "https://download.scdn.co/SpotifySetup.exe"
 
 // coverBudget 是下载封面 base64 的时间预算（每次下载各一份）。标题已先发，封面慢一点无妨。
 const coverBudget = 5 * time.Second
@@ -210,6 +216,8 @@ func (p *SpotifyPlayer) Start() {
 	watchdog.PatchRegistryAutoStart()
 
 	unsupportedWarned := false
+	storeWarned := false // 微软商店版只警告一次，理由同版本不支持（issue #212）
+	exeUnknown := false  // 上一轮读不到安装路径（issue #212）：只警告一次，循环顶部声明的是这一条
 
 	for {
 		select {
@@ -218,11 +226,20 @@ func (p *SpotifyPlayer) Start() {
 		default:
 		}
 
-		// 每轮先声明「未连上」，避免上一场的状态留在缓存里（与 sodamusic 同形）。
-		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Spotify not running or not connected"), Reason: player.ReasonProcessNotRunning})
+		// 每轮先声明「未连上」，避免上一场的状态留在缓存里（与 sodamusic 同形）。读不到安装路径期间声明的是那一条，
+		// 不在两条之间每轮来回切换。
+		if exeUnknown {
+			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Spotify installation path (Spotify may be running as administrator)"), Reason: player.ReasonNoAdmin})
+		} else {
+			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Spotify not running or not connected"), Reason: player.ReasonProcessNotRunning})
+		}
 		p.Emit(player.EventClearSongData, nil)
 
 		err := watchdog.EnsureDebugMode()
+		var packaged *launch.PackagedError
+		if !errors.Is(err, launch.ErrExeUnknown) {
+			exeUnknown = false
+		}
 		switch {
 		case errors.Is(err, watchdog.ErrNotRunning):
 			// 未运行——用户可能稍后启动，静默等待重试（上面已报未启动态）。
@@ -243,6 +260,33 @@ func (p *SpotifyPlayer) Start() {
 				return
 			}
 			continue
+		case errors.As(err, &packaged):
+			// 微软商店版：watchdog 已在杀、拉起之前挡住（门禁）。形状同上面的版本不支持：只警告一次、
+			// standby + version_unsupported、按 unsupportedRecheck 重探，用户改装官网版后不必重启服务。
+			if !storeWarned {
+				storeWarned = true
+				log.Warn("Spotify is the Microsoft Store version (%s) and cannot be started with the debug flags; skipped Spotify lyric capture. To use it, uninstall it and install the official installer version: %s", packaged.ExePath, installerURL)
+				telemetry.ReportOnce("spotify.store_install", "Spotify 为微软商店版，无法带调试参数启动", nil, map[string]any{"exe_path": packaged.ExePath})
+			}
+			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
+				Status: "standby", Detail: i18n.T("Spotify Microsoft Store version unsupported (requires the official installer version)"), Reason: player.ReasonVersionUnsupported,
+			})
+			if p.sleepOrStop(unsupportedRecheck) {
+				return
+			}
+			continue
+		case errors.Is(err, launch.ErrExeUnknown):
+			// 有 Spotify.exe 在运行而读不到它的映像路径：无从确知不是商店版，watchdog 已拒绝杀、重启。
+			// 此前每 3 秒打一条 Error，改为只警告一次；状态由循环顶部声明。
+			if !exeUnknown {
+				exeUnknown = true
+				log.Warn("Cannot read the installation path of Spotify; it was not restarted automatically. Run Spotify with the same privileges as this program")
+				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Spotify installation path (Spotify may be running as administrator)"), Reason: player.ReasonNoAdmin})
+			}
+			if p.sleepOrStop(3 * time.Second) {
+				return
+			}
+			continue
 		case errors.Is(err, watchdog.ErrPortNotReady):
 			// 刚带 flag 启动 / 端口被别的程序占着：短退避重试。
 			if p.sleepOrStop(1 * time.Second) {
@@ -257,6 +301,7 @@ func (p *SpotifyPlayer) Start() {
 			continue
 		}
 		unsupportedWarned = false
+		storeWarned = false
 
 		client, err := cdp.Connect()
 		if err != nil {

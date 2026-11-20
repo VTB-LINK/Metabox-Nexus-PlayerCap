@@ -112,7 +112,13 @@ func systemCmd() string {
 //
 // 经 cmd.exe 中转之前先确认 exePath 是存在的普通文件：程序不存在时 start 弹出错误框并阻塞（开发机实测），
 // 是目录时 start 按关联打开它（推断，未实测）。
+//
+// 入口先过 Gate（issue #212）：exePath 为空或在 WindowsApps 下即返回 Gate 的错误，不启动任何进程。这只是兜底，
+// 挡不住拉起之前的结束进程：调用方须在结束、修补之前自行调用 Gate。
 func Detached(exePath string, args []string, dir string) (detached bool, err error) {
+	if err := Gate(exePath); err != nil {
+		return false, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), waitLimit)
 	defer cancel()
 	cmd, viaShell := command(ctx, exePath, args, dir)

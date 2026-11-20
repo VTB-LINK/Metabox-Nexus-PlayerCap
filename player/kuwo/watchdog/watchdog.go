@@ -24,6 +24,7 @@ import (
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/kuwo/cdp"
+	"Metabox-Nexus-PlayerCap/player/launch"
 )
 
 const TargetProcessName = "kwmusic.exe"
@@ -131,6 +132,12 @@ func (m *manager) ensure(ctx context.Context) error {
 	}
 	i, err := m.ops.scan(ctx)
 	if err != nil {
+		return err
+	}
+	// 商店版门禁（#212）：先于下面含 ready 在内的一切提前返回与结束、拉起。酷我按 PID 定向结束、已核对身份，
+	// verifyExecutable 也已因目录结构与指纹白名单挡住商店版；这里为与其余播放器统一，并让上层给出改用官网
+	// 安装版的提示。
+	if err := launch.Gate(i.Exe); err != nil {
 		return err
 	}
 	if err := m.ops.ready(ctx); err == nil {

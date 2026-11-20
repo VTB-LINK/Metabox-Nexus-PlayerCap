@@ -36,11 +36,6 @@ var p4LogMessages = map[string]string{
 	"Attached to AppleMusic.exe, monitoring playback state":                                             "已附加 AppleMusic.exe，开始监听播放状态",
 	"Codecave @ 0x%X, pointer @ 0x%X":                                                                   "Codecave @ 0x%X, 指针 @ 0x%X",
 	"GetPlayInfo failed: %v":                                                                            "GetPlayInfo 失败: %v",
-	"GitHub CDN download test failed, using China mirror":                                               "GitHub CDN 下载测试失败，使用国内镜像",
-	"GitHub CDN available (%.0f KB/s)":                                                                  "GitHub CDN 可用 (%.0f KB/s)",
-	"GitHub CDN returned %d, using China mirror":                                                        "GitHub CDN 返回 %d，使用国内镜像",
-	"GitHub CDN connection failed, using China mirror":                                                  "GitHub CDN 连接失败，使用国内镜像",
-	"GitHub CDN speed %.1f KB/s < 10 KB/s, using China mirror":                                          "GitHub CDN 速度 %.1f KB/s < 10 KB/s，使用国内镜像",
 	"KSongsLyric.dll base: 0x%08X (size: 0x%X)":                                                         "KSongsLyric.dll 基址: 0x%08X (大小: 0x%X)",
 	"WeSing window closed":                                                                              "K歌窗口已关闭",
 	"LyricHost instance: 0x%08X":                                                                        "LyricHost 实例: 0x%08X",
@@ -202,7 +197,6 @@ var p4LogMessages = map[string]string{
 	"Terminating KuGou process...":                                                    "正在终止酷狗进程...",
 	"Restarting %s (%s)":                                                              "正在重启 %s （%s）",
 	"SodaMusic renderer background throttling could not be disabled: after the window stays minimized, the progress source drops to 1/60Hz, so seek/pause may take up to 60s to be detected": "汽水渲染器的后台节流没能关掉：窗口最小化久了进度源会掉到 1/60Hz，seek/暂停最长 60s 后才被发现",
-	"Testing GitHub CDN download speed...":                                           "测试 GitHub CDN 下载速度...",
 	"clear active player: [%s] → (none)":                                             "清除活跃播放器: [%s] → (空)",
 	"Slider AOB hook injected successfully":                                          "滑块 AOB Hook 注入成功",
 	"Slider hook already active":                                                     "滑块 Hook 已激活",
@@ -439,4 +433,44 @@ var p4LogMessages = map[string]string{
 	"Lyrics changed in KuGou; reloaded (%s): %d lines; per-character: %s":                             "酷狗中的歌词已更换，重新加载(%s): %d 行；逐字：%s",
 	"KuGou has no lyrics for this local file; lyrics cleared":                                         "酷狗中这份本地文件没有歌词，已清空歌词",
 	"The previous session's local lyric reader has not exited; using online lyrics only this session": "上一个会话的本地歌词读取者尚未退出，本会话只在线取词",
+
+	// —— 商店版播放器的统一前置门禁：微软商店版与读不到安装路径（issue #212）——
+	"NetEase Cloud Music is the Microsoft Store version (%s) and cannot be started with the debug flags; skipped NetEase lyric capture and effect mirroring. To use them, uninstall it and install the official installer version: %s": "网易云音乐为微软商店版（%s），无法带调试参数启动，已跳过网易云取词与特效镜像；如需使用，请卸载后改用官网安装版：%s",
+	"Cannot read the installation path of NetEase Cloud Music; it was not restarted automatically. Run NetEase Cloud Music with the same privileges as this program":                                                                   "读不到网易云音乐的安装路径，未自动重启；请以与本程序相同的权限运行网易云音乐",
+	"Spotify is the Microsoft Store version (%s) and cannot be started with the debug flags; skipped Spotify lyric capture. To use it, uninstall it and install the official installer version: %s":                                    "Spotify 为微软商店版（%s），无法带调试参数启动，已跳过 Spotify 取词；如需使用，请卸载后改用官网安装版：%s",
+	"KuGou is the Microsoft Store version (%s) and cannot be patched; skipped KuGou lyric capture. To use it, uninstall it and install the official installer version: %s":                                                             "酷狗音乐为微软商店版（%s），无法修补，已跳过酷狗取词；如需使用，请卸载后改用官网安装版：%s",
+	"Cannot read the installation path of KuGou; auto-repair skipped. Run KuGou with the same privileges as this program":                                                                                                              "读不到酷狗音乐的安装路径，未自动修复；请以与本程序相同的权限运行酷狗音乐",
+	"Soda Music is the Microsoft Store version (%s) and its inspector cannot be opened; skipped Soda Music lyric capture. To use it, uninstall it and install the official installer version":                                          "汽水音乐为微软商店版（%s），无法开启调试接口，已跳过汽水取词；如需使用，请卸载后改用官网安装版",
+	"Cannot read the installation path of Soda Music; its inspector was not opened. Run Soda Music with the same privileges as this program":                                                                                           "读不到汽水音乐的安装路径，未开启调试接口；请以与本程序相同的权限运行汽水音乐",
+	"Cannot read the installation path of Spotify; it was not restarted automatically. Run Spotify with the same privileges as this program":                                                                                           "读不到 Spotify 的安装路径，未自动重启；请以与本程序相同的权限运行 Spotify",
+
+	// —— 自动更新的下载层：低速、时限、大小与落盘（issue #213）——
+	"too slow: %d KB in the last %d s":         "速度过慢：最近 %[2]d 秒仅收到 %[1]d KB",
+	"not finished within %d min":               "%d 分钟内未下载完",
+	"size mismatch: expected %d bytes, got %d": "大小不符：应为 %d 字节，实际 %d 字节",
+	"received more than the expected %d bytes": "收到的数据超过应有的 %d 字节",
+	"failed to flush file: %v":                 "写入磁盘失败：%v",
+	"failed to close file: %v":                 "关闭文件失败：%v",
+
+	// —— 自动更新的测速与换源（issue #213）——
+	"Testing download speed: %s": "测试下载速度：%s",
+	"%s: %d KB / %.1f s":         "%s：%d KB / %.1f s",
+	"%s: speed test failed: %v":  "%s：测速失败：%v",
+	"Using %s":                   "使用 %s 下载",
+	"Speed test failed on all sources, trying %s first": "所有来源测速均失败，先尝试 %s",
+	"Download from %s failed: %v, switching to %s":      "从 %s 下载失败：%v，改用 %s",
+	"No download source provided, continuing":           "网关未下发下载地址，继续运行",
+	"no download source provided":                       "网关未下发下载地址",
+
+	// —— 自动更新：同一安装目录的更新串行（issue #214）——
+	"Another instance is updating this program, waiting for it to finish...": "另一个本程序进程正在更新，等待其完成...",
+	"failed to acquire the update lock: %v":                                  "无法取得更新锁：%v",
+
+	// —— main：自动更新失败后按 R 重试（issue #216）——
+	"\nPress R to retry, or Enter to exit. You can also reopen this program later to retry.": "\n按 R 重试，按回车退出；也可以稍后重新打开本程序再试。",
+	"Retrying update...": "正在重试更新...",
+
+	// —— main：随包使用说明的中文名副本（issue #215），Detail 级 ——
+	"Copied %s to %s":             "Copied %s to %s",
+	"Failed to copy %s to %s: %v": "Failed to copy %s to %s: %v",
 }

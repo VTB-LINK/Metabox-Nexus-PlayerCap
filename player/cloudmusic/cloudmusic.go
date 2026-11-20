@@ -15,6 +15,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/cdp"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/lyric"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/watchdog"
+	"Metabox-Nexus-PlayerCap/player/launch"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
@@ -128,8 +129,12 @@ func snapshotMatchesCurrentSong(data *cdp.ExtractionData, songName, songArtist s
 
 // unsupportedRecheck 检测到不支持的网易云版本后，多久重新探一次。
 // 取大值是因为「装的是 v2」是个近乎永久的状态：既不该占 CPU 空转，也得给用户升级后
-// 自动恢复的机会（不必重启 PlayerCap）。
+// 自动恢复的机会（不必重启 PlayerCap）。微软商店版同样按它重探（issue #212）。
 const unsupportedRecheck = 30 * time.Second
+
+// installerURL 是网易云官网 PC 安装包的直链（302 到当前版本的安装包，2026-11-17 实测）。官网下载页在 Win10 上
+// 推荐的是微软商店版（UWP），提示里直接给安装包，免得用户照着下载页又装回商店版。
+const installerURL = "https://music.163.com/download/pc/latest"
 
 // EffectivePollInterval 返回配置轮询间隔为 pollMs 毫秒时网易云实际采用的间隔：低于 50ms 抬到 100ms，
 // 兼防 time.NewTicker(<=0) panic。轮询循环与 /service-status 的 config_effective 共用此函数，下限只在这里定义。
@@ -149,6 +154,8 @@ func (p *CloudMusicPlayer) Start() {
 	p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("NetEase Cloud Music not running"), Reason: player.ReasonProcessNotRunning})
 
 	warnedUnsupported := false // v2 警告只打一次（它是永久状态，每轮打就是新的刷屏）
+	warnedStore := false       // 微软商店版警告只打一次，理由同 v2（issue #212）
+	warnedExeUnknown := false  // 读不到安装路径的警告只打一次（issue #212）
 
 	for {
 		select {
@@ -196,6 +203,44 @@ func (p *CloudMusicPlayer) Start() {
 			continue
 		}
 		warnedUnsupported = false // 版本变了（升级/换装）→ 下次再是 v2 可以再警告一次
+		var packaged *launch.PackagedError
+		if errors.As(err, &packaged) {
+			// 微软商店版：watchdog 已在结束、拉起之前挡住（门禁），这里提示改用官网安装版、报状态、不往下连。
+			// 形状同上面的 v2：只警告一次、standby + version_unsupported、按 unsupportedRecheck 重查，
+			// 用户改装官网版后不必重启 PlayerCap。
+			if !warnedStore {
+				log.Warn("NetEase Cloud Music is the Microsoft Store version (%s) and cannot be started with the debug flags; skipped NetEase lyric capture and effect mirroring. To use them, uninstall it and install the official installer version: %s",
+					packaged.ExePath, installerURL)
+				// 给我们看的情报：有多少主播装的是商店版。去重不随状态重置，理由同 v2 那条。
+				telemetry.ReportOnce("cloudmusic.store_install",
+					"网易云音乐为微软商店版，无法带调试参数启动",
+					nil,
+					map[string]any{"exe_path": packaged.ExePath})
+				warnedStore = true
+			}
+			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
+				Status: "standby", Detail: i18n.T("NetEase Cloud Music Microsoft Store version unsupported (requires the official installer version)"), Reason: player.ReasonVersionUnsupported,
+			})
+			time.Sleep(unsupportedRecheck)
+			continue
+		}
+		warnedStore = false
+		if errors.Is(err, launch.ErrExeUnknown) {
+			// 有 cloudmusic.exe 在运行而读不到它的映像路径（通常是它以更高权限运行）：无从确知不是商店版，
+			// watchdog 已拒绝结束、重启。不往下连：特效与取词都以门禁通过为前提。
+			if !warnedExeUnknown {
+				log.Warn("Cannot read the installation path of NetEase Cloud Music; it was not restarted automatically. Run NetEase Cloud Music with the same privileges as this program")
+				warnedExeUnknown = true
+			}
+			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the NetEase Cloud Music installation path (NetEase Cloud Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if warnedExeUnknown {
+			// 路径读得到了，或网易云已退出：撤下「读不到安装路径」的状态，免得它一直留着。
+			warnedExeUnknown = false
+			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("NetEase Cloud Music not running"), Reason: player.ReasonProcessNotRunning})
+		}
 		if err != nil {
 			log.Error("watchdog error: %v", err)
 		}

@@ -65,6 +65,11 @@ func init() {
 		"kuwo: seek-lag: %s: %w":        "酷我：拖动偏差：%s：%w",
 		"kuwo pos: open process %d: %w": "酷我播放位置：打开进程 %d：%w",
 		"kuwo pos: read at 0x%X: %w":    "酷我播放位置：读取 0x%X：%w",
+		// 商店版门禁（issue #212）：状态文案（statusFor）与日志
+		"Kuwo Microsoft Store version unsupported (requires the official installer version)":                                                                                               "酷我微软商店版不支持（需官网安装版）",
+		"Cannot read the Kuwo installation path (Kuwo may be running as administrator)":                                                                                                    "读不到酷我的安装路径（酷我可能以管理员身份运行）",
+		"Kuwo is the Microsoft Store version (%s) and cannot be started with the debug flag; skipped Kuwo capture. To use it, uninstall it and install the official installer version: %s": "酷我为微软商店版（%s），无法带调试参数启动，已跳过酷我取词；如需使用，请卸载后改用官网安装版：%s",
+		"Cannot read the installation path of Kuwo; it was not restarted automatically. Run Kuwo with the same privileges as this program":                                                 "读不到酷我的安装路径，未自动重启；请以与本程序相同的权限运行酷我",
 	} {
 		chinese[key] = value
 	}

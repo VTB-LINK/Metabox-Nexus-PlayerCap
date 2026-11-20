@@ -41,6 +41,7 @@ func TestKillAndPatchRechecksInstall(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			stubGateRunning(t, nil) // 商店版门禁另见 storegate_test.go；这里不读本机的进程
 			var calls []string
 			locate := func() (string, string, error) {
 				calls = append(calls, "locate")
@@ -114,6 +115,7 @@ func TestKillAndPatchLocatesByRunningProcess(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			a, b := setup(t)
 			stubLocate(t, c.run(a, b), c.runErr, regA(a))
+			stubGateRunning(t, nil)
 			var calls []string
 			err := killAndPatch(filepath.Join(a, "KuGou.exe"), filepath.Join(a, "20.1.22.27795", "libcef.dll"), locateRunningInstall,
 				func() { calls = append(calls, "kill") },

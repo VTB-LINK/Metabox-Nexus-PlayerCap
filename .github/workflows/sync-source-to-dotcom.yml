@@ -62,11 +62,13 @@ jobs:
           echo "Exporting snapshot for tag ${TAG_NAME}..."
           git archive --format=tar "${TAG_NAME}" | tar -xf - -C "${SNAPSHOT_DIR}"
 
-          echo "Removing documents from the snapshot (keeping README.md, CONFIG.README.md, doc/title.png and doc/openapi.yaml)..."
+          echo "Removing documents from the snapshot (keeping README.md, CONFIG.README.md, doc/title.png, doc/openapi.yaml and doc/release/README.html)..."
           find "${SNAPSHOT_DIR}" -type f -name '*.md' ! -path "${SNAPSHOT_DIR}/README.md" ! -path "${SNAPSHOT_DIR}/CONFIG.README.md" -delete
           rm -rf "${SNAPSHOT_DIR}/agent-doc"
+          # doc/release/README.html 是随包使用说明，player/qqmusic 的版本清单门禁读它，镜像里须保留，否则从镜像检出后
+          # 该包的测试失败（#215）。它所在的目录也须排除：find -delete 删不掉非空目录，报错即令本步失败。
           if [ -d "${SNAPSHOT_DIR}/doc" ]; then
-            find "${SNAPSHOT_DIR}/doc" -mindepth 1 ! -path "${SNAPSHOT_DIR}/doc/title.png" ! -path "${SNAPSHOT_DIR}/doc/openapi.yaml" -delete
+            find "${SNAPSHOT_DIR}/doc" -mindepth 1 ! -path "${SNAPSHOT_DIR}/doc/title.png" ! -path "${SNAPSHOT_DIR}/doc/openapi.yaml" ! -path "${SNAPSHOT_DIR}/doc/release" ! -path "${SNAPSHOT_DIR}/doc/release/README.html" -delete
           fi
 
           echo "Cloning target repository main branch..."

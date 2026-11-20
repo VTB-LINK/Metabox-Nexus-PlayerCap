@@ -75,6 +75,35 @@ func TestDetachedDirectoryExe(t *testing.T) {
 	}
 }
 
+// TestDetachedRefusesGatedPaths：exePath 为空或在 WindowsApps 下时返回 Gate 的错误，不调用 cmd.exe（issue #212）。
+// 商店路径下放的是真实存在的假播放器：没有这道门，Detached 会照常经顶替的 cmd.exe 拉起它、留下记号。
+//
+// 防的缺陷与变异（实测变红）：去掉 Detached 入口的 Gate（商店路径留下记号；空路径报 exec 的错误而不是 ErrExeUnknown）；
+// Gate 挪到 command 与 os.Stat 之后（空路径走直接启动的分支，报 exec 的错误）。
+func TestDetachedRefusesGatedPaths(t *testing.T) {
+	store := fakePlayer(t, filepath.Join(t.TempDir(), "WindowsApps", "Pkg_1.0.0.0_x64__abc", "player.exe"))
+	cases := []struct {
+		name  string
+		exe   string
+		check func(error) bool
+	}{
+		{"商店路径", store, func(err error) bool { var pe *PackagedError; return errors.As(err, &pe) && pe.ExePath == store }},
+		{"空路径", "", func(err error) bool { return errors.Is(err, ErrExeUnknown) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rep := fakeShell(t, "marker")
+			detached, err := Detached(c.exe, []string{"--remote-debugging-port=9222"}, "")
+			if detached || !c.check(err) {
+				t.Errorf("Detached = (%v, %v)，期望 (false, Gate 的错误)", detached, err)
+			}
+			if _, err := os.Stat(rep); err == nil {
+				t.Error("门禁不过，却调用了 cmd.exe")
+			}
+		})
+	}
+}
+
 // TestDetachedShellTimeout：cmd.exe 超过 waitLimit 不退出时结束它并报错，Detached 不随它一直等。
 //
 // 防的缺陷与变异（实测变红）：cmd.exe 改用不带 ctx 的 exec.Command（Detached 一直等到顶替者 20 秒后自行退出，

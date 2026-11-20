@@ -12,7 +12,7 @@ package main
 //	   步骤级 env 与脚本（经 GITHUB_ENV）都不得再定义 PUBLISH。
 //	R2 environment 的表达式与判据一致：发布取 build-production，演练取 build-dev。
 //	R3 发布步骤（softprops 建 draft；脚本里调 gh release、generate-notes、Gitee API、sentry-cli 的
-//	   releases 与 deploys）的 if 恰为 env.PUBLISH == 'true'，且恰为已知的七步；sentry-cli 只经
+//	   releases 与 deploys）的 if 恰为 env.PUBLISH == 'true'，且恰为已知的八步；sentry-cli 只经
 //	   $env:SENTRY_CLI（Install sentry-cli 校验通过才写入的绝对路径）调用，不按名字取 PATH 里的（代码审第 1 轮）。
 //	R4 三个发布凭据只出现在步骤级 env，每处都写成只在判据为真时取值的形式。
 //
@@ -23,7 +23,7 @@ package main
 // 报出。另在工作区直接改 release.yml 实测过（TestReleaseWorkflowPublishGuards 均红，改回即绿）：
 // 删掉 Create Release Draft (本仓库) 的 if（R3）、判据去掉 event_name（R1）、Create Sentry release
 // 的凭据去掉门控（R4）、environment 写死为 build-production（R2）、删掉 Create Release (Gitee mirror)
-// 的 if（R3，#208）。
+// 的 if（R3，#208）、删掉 Prune old releases (Gitee mirror) 的 if（R3，#209）。
 
 import (
 	"fmt"
@@ -65,6 +65,7 @@ var knownPublishSteps = []string{
 	"Create Sentry release",
 	"Finalize Sentry release",
 	"Generate release notes (dotcom mirror)",
+	"Prune old releases (Gitee mirror)",
 }
 
 type workflowFile struct {
@@ -214,6 +215,7 @@ func TestReleaseWorkflowCatchesMutations(t *testing.T) {
 	text := readReleaseWorkflow(t)
 	const (
 		guardedGH     = "${{ env.PUBLISH == 'true' && secrets.GH_DOTCOM_TOKEN || '' }}"
+		guardedGitee  = "${{ env.PUBLISH == 'true' && secrets.GITEE_TOKEN || '' }}"
 		guardedSentry = "${{ env.PUBLISH == 'true' && secrets.SENTRY_AUTH_TOKEN || '' }}"
 	)
 	for _, m := range []struct {
@@ -257,15 +259,21 @@ func TestReleaseWorkflowCatchesMutations(t *testing.T) {
 			"            $path = Join-Path $PWD $target.Path\n",
 			"            $path = Join-Path $PWD $target.Path\n" +
 				"            Invoke-RestMethod -Uri 'https://gitee.com/api/v5/repos/VTB-LINK/Metabox-Nexus-PlayerCap/releases'\n"},
+		{"删掉 Prune old releases (Gitee mirror) 的 if", "R3",
+			"      - name: Prune old releases (Gitee mirror)\n        if: " + publishCondition + "\n",
+			"      - name: Prune old releases (Gitee mirror)\n"},
 		{"GH_TOKEN 挪回作业级 env", "R4",
 			"      SENTRY_ORG: kzmtech\n",
 			"      GH_TOKEN: ${{ secrets.GH_DOTCOM_TOKEN }}\n      SENTRY_ORG: kzmtech\n"},
 		{"Create Sentry release 的凭据去掉门控", "R4",
 			"      - name: Create Sentry release\n        if: " + publishCondition + "\n        continue-on-error: true\n        env:\n          SENTRY_AUTH_TOKEN: " + guardedSentry + "\n",
 			"      - name: Create Sentry release\n        if: " + publishCondition + "\n        continue-on-error: true\n        env:\n          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}\n"},
-		{"Gitee 令牌去掉门控", "R4",
-			"          GITEE_TOKEN: ${{ env.PUBLISH == 'true' && secrets.GITEE_TOKEN || '' }}\n",
-			"          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\n"},
+		{"Create Release (Gitee mirror) 的令牌去掉门控", "R4",
+			"      - name: Create Release (Gitee mirror)\n        if: " + publishCondition + "\n        env:\n          GITEE_TOKEN: " + guardedGitee + "\n",
+			"      - name: Create Release (Gitee mirror)\n        if: " + publishCondition + "\n        env:\n          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\n"},
+		{"Prune old releases (Gitee mirror) 的令牌去掉门控", "R4",
+			"      - name: Prune old releases (Gitee mirror)\n        if: " + publishCondition + "\n        continue-on-error: true\n        env:\n          GITEE_TOKEN: " + guardedGitee + "\n",
+			"      - name: Prune old releases (Gitee mirror)\n        if: " + publishCondition + "\n        continue-on-error: true\n        env:\n          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\n"},
 		{"门控里的判据写反", "R4",
 			"      - name: Generate release notes (dotcom mirror)\n        if: " + publishCondition + "\n        env:\n          GH_HOST: github.com\n          GH_TOKEN: " + guardedGH + "\n",
 			"      - name: Generate release notes (dotcom mirror)\n        if: " + publishCondition + "\n        env:\n          GH_HOST: github.com\n          GH_TOKEN: ${{ env.PUBLISH != 'false' && secrets.GH_DOTCOM_TOKEN || '' }}\n"},

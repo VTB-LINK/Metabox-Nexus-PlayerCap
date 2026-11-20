@@ -22,6 +22,7 @@ import (
 	"unsafe"
 
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player/launch"
 
 	"Metabox-Nexus-PlayerCap/i18n"
 	"github.com/shirou/gopsutil/v3/process"
@@ -90,13 +91,34 @@ func InspectorUp() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// gatePID 读 pid 的映像路径并过 launch.Gate（商店版门禁，issue #212）；读不到时按路径未知拒绝。
+func gatePID(pid int) error {
+	exe := ""
+	if p, err := process.NewProcess(int32(pid)); err == nil {
+		exe, _ = p.Exe()
+	}
+	return launch.Gate(exe)
+}
+
+// 门禁与 9229 的探测经包级变量调用，测试替换它们以离线驱动 EnsureInspector 与 activateInspector，不碰真进程。
+var (
+	gateFn = gatePID
+	upFn   = InspectorUp
+)
+
 // EnsureInspector 确保 pid 对应主进程的 Node inspector（9229）已开。
 //   - 已开（9229 可用）→ 直接返回 nil。
 //   - 未开 → 复刻 _debugProcess 激活，再轮询等它起来。
 //
 // 返回 nil 表示 9229 已就绪可连。任何一步失败都返回错误（不 panic），让上层降级重试。
+//
+// 商店版门禁（issue #212）在开头，先于「9229 已可用」的早退：门禁不过时原样返回它的错误，上层不连接、不注入，
+// 并给出改用官网安装版的提示。
 func EnsureInspector(pid int) error {
-	if InspectorUp() {
+	if err := gateFn(pid); err != nil {
+		return err
+	}
+	if upFn() {
 		return nil
 	}
 	if err := activateInspector(pid); err != nil {
@@ -105,7 +127,7 @@ func EnsureInspector(pid int) error {
 	// 激活是异步的（远程线程去拉起 I/O 线程），轮询等 9229 就绪。
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if InspectorUp() {
+		if upFn() {
 			return nil
 		}
 		time.Sleep(150 * time.Millisecond)
@@ -114,7 +136,12 @@ func EnsureInspector(pid int) error {
 }
 
 // activateInspector 复刻 process._debugProcess(pid) 的 Windows 机制。
+//
+// 开头自己再过一次商店版门禁（issue #212）：它是注入本体（OpenProcess + CreateRemoteThread），不靠调用方先核验。
 func activateInspector(pid int) error {
+	if err := gateFn(pid); err != nil {
+		return err
+	}
 	name := fmt.Sprintf("node-debug-handler-%d", pid)
 	namePtr, err := windows.UTF16PtrFromString(name)
 	if err != nil {

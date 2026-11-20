@@ -19,6 +19,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/kugou/cdp"
 	klyric "Metabox-Nexus-PlayerCap/player/kugou/lyric"
 	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
+	"Metabox-Nexus-PlayerCap/player/launch"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
@@ -214,8 +215,8 @@ const (
 const maxRunningInstallMisses = 5
 
 // classifyEnsureErr 决定 EnsurePatched 返回的错误怎么处置。err 不得为 nil（EnsurePatched 成功时不调用）；
-// ErrElevationFailed 不经本函数，由 Start 先行按退避处理。runningMisses 是酷狗在运行却找不到安装的连续轮数，
-// 含本轮。
+// ErrElevationFailed 与商店版门禁的两种错误（launch.PackagedError、launch.ErrExeUnknown，issue #212）不经本函数，
+// 由 Start 先行处理。runningMisses 是酷狗在运行却找不到安装的连续轮数，含本轮。
 //
 // 找不到安装：不在运行时等待重试——它可能装在注册表与常见路径之外，启动后 FindKuGouInstall 按运行中的进程
 // 定位（设计 §6.3）；在运行时同样等待重试，满 maxRunningInstallMisses 轮才停用。启动的是另一份安装
@@ -251,6 +252,17 @@ func (w *installWait) notify() bool {
 // reset 在找到安装（EnsurePatched 返回的不是 ErrInstallNotFound）后调用。
 func (w *installWait) reset() { w.logged = false }
 
+// ensurePatched 是 watchdog.EnsurePatched 的可替换 seam：仅供 Start 的离线测试注入桩（真实的会弹 UAC、结束酷狗）。
+// 生产恒为 watchdog.EnsurePatched，不导出、外部无法改动。
+var ensurePatched = watchdog.EnsurePatched
+
+// storeRecheck 是检测到微软商店版之后多久重查一次（issue #212）。与网易云、Spotify 的「版本不支持」同值：装的是
+// 商店版近乎永久，但用户改装官网版后应当自动恢复、不必重启 PlayerCap。是 var 只为让测试缩短它。
+var storeRecheck = 30 * time.Second
+
+// installerURL 是酷狗官网 PC 安装包的直链（302 到当前版本的安装包，2026-11-17 实测）。
+const installerURL = "https://download.kugou.com/download/kugou_pc"
+
 // sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
 // 退避最长 2min，不可打断的话会让退出卡住这么久。
 func (p *KuGouPlayer) sleepOrStop(d time.Duration) bool {
@@ -266,7 +278,9 @@ func (p *KuGouPlayer) sleepOrStop(d time.Duration) bool {
 func (p *KuGouPlayer) Start() {
 	var elevation elevationGate
 	var install installWait
-	runningMisses := 0 // 酷狗在运行却找不到安装的连续轮数，见 maxRunningInstallMisses
+	runningMisses := 0   // 酷狗在运行却找不到安装的连续轮数，见 maxRunningInstallMisses
+	storeWarned := false // 微软商店版只警告一次（issue #212）
+	exeUnknown := false  // 上一轮读不到运行中酷狗的安装路径（issue #212）：只警告一次，循环顶部声明的是这一条
 	for {
 		select {
 		case <-p.StopCh:
@@ -274,14 +288,26 @@ func (p *KuGouPlayer) Start() {
 		default:
 		}
 
-		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("KuGou not running or CDP not ready"), Reason: player.ReasonProcessNotRunning})
+		// 读不到安装路径期间声明的是那一条，不与「未启动」两条每轮来回切换。
+		if exeUnknown {
+			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the KuGou installation path (KuGou may be running as administrator)"), Reason: player.ReasonNoAdmin})
+		} else {
+			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("KuGou not running or CDP not ready"), Reason: player.ReasonProcessNotRunning})
+		}
 		p.Emit(player.EventClearSongData, nil)
 
 		// 自动检测并修复：若 libcef.dll 未 patch 则 kill → patch → 重启酷狗
-		err := watchdog.EnsurePatched(p.StopCh)
+		err := ensurePatched(p.StopCh)
 		if !errors.Is(err, watchdog.ErrInstallNotFound) {
 			install.reset() // 找到了安装（或 CDP 已可用）：下一次找不到时重新提示、重新计数
 			runningMisses = 0
+		}
+		var packaged *launch.PackagedError
+		if !errors.As(err, &packaged) {
+			storeWarned = false
+		}
+		if !errors.Is(err, launch.ErrExeUnknown) {
+			exeUnknown = false
 		}
 		// startLocal 只在本轮 EnsurePatched 返回 nil 时启用：返回其他错误而照常等 CDP 的会话不读本地歌词，
 		// 只在线取词（设计 §6.2「时机」）。读库之前读取者还要自行确认版本与补丁（watchdog.Confirm）。
@@ -291,6 +317,34 @@ func (p *KuGouPlayer) Start() {
 			case <-p.StopCh:
 				return
 			default:
+			}
+			if packaged != nil {
+				// 微软商店版：门禁已在提权、结束、修补、拉起之前挡住。不沿用下面「版本不支持即终态、退出循环」：
+				// 按 storeRecheck 重查、不退出，用户改装官网版后不必重启 PlayerCap 即可恢复。状态因此报 standby 而不是
+				// 终态的 error。不去 waitForCDP：门禁不过即不连接。
+				if !storeWarned {
+					storeWarned = true
+					log.Warn("KuGou is the Microsoft Store version (%s) and cannot be patched; skipped KuGou lyric capture. To use it, uninstall it and install the official installer version: %s", packaged.ExePath, installerURL)
+					telemetry.ReportOnce("kugou.store_install", "酷狗音乐为微软商店版，无法修补", nil, map[string]any{"exe_path": packaged.ExePath})
+				}
+				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("KuGou Microsoft Store version unsupported (requires the official installer version)"), Reason: player.ReasonVersionUnsupported})
+				if p.sleepOrStop(storeRecheck) {
+					return
+				}
+				continue
+			}
+			if errors.Is(err, launch.ErrExeUnknown) {
+				// 有 KuGou.exe 在运行而读不到它的映像路径：无从确知不是商店版，门禁已拒绝提权、结束、修补。
+				// 不去 waitForCDP，2 秒后重新走 EnsurePatched；状态由循环顶部声明。
+				if !exeUnknown {
+					exeUnknown = true
+					log.Warn("Cannot read the installation path of KuGou; auto-repair skipped. Run KuGou with the same privileges as this program")
+					p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the KuGou installation path (KuGou may be running as administrator)"), Reason: player.ReasonNoAdmin})
+				}
+				if p.sleepOrStop(2 * time.Second) {
+					return
+				}
+				continue
 			}
 			if errors.Is(err, watchdog.ErrElevationFailed) {
 				// 退避后重试；用尽即终态。直接 continue，不去 waitForCDP——没提权就没 patch，
@@ -351,6 +405,11 @@ func (p *KuGouPlayer) Start() {
 				return
 			default:
 			}
+			if errors.As(err, new(*launch.PackagedError)) || errors.Is(err, launch.ErrExeUnknown) {
+				// 等 CDP 期间运行中的酷狗没过商店版门禁：不打「CDP 未就绪」、不等 2 秒，回到循环顶部，由 EnsurePatched
+				// 开头的门禁报出同一错误，走上面商店版与路径未知的分支（警告、状态与重查间隔都在那里）。
+				continue
+			}
 			// CDP 等待超时（酷狗可能已退出），重新走 EnsurePatched 检测
 			log.Warn("CDP not ready; rechecking KuGou status...")
 			time.Sleep(2 * time.Second)
@@ -368,8 +427,18 @@ func (p *KuGouPlayer) Start() {
 	}
 }
 
+// connectCDP 与 gateRunning 是 waitForCDP 的可替换 seam：仅供离线测试注入桩（不连本机的 12233、不枚举本机进程）。
+// 生产恒为 cdp.Connect 与 watchdog.GateRunning，不导出。
+var (
+	connectCDP  = cdp.Connect
+	gateRunning = watchdog.GateRunning
+)
+
 // waitForCDP 轮询 CDP 端口直到酷狗响应，返回已连接的 client。
 // 若酷狗进程退出则立即返回错误；90s 超时作为兜底。
+//
+// 每次连接之前都对全部运行中的 KuGou.exe 过商店版门禁（issue #212）：等 CDP 最长 90 秒，其间用户启动的可能是商店版或
+// 读不到路径的实例。门禁不过即原样返回它的错误、不连接。
 func (p *KuGouPlayer) waitForCDP() (*cdp.Client, error) {
 	deadline := time.Now().Add(90 * time.Second)
 	nextLog := time.Now()
@@ -380,7 +449,10 @@ func (p *KuGouPlayer) waitForCDP() (*cdp.Client, error) {
 		default:
 		}
 
-		client, err := cdp.Connect()
+		if err := gateRunning(); err != nil {
+			return nil, err
+		}
+		client, err := connectCDP()
 		if err == nil {
 			return client, nil
 		}

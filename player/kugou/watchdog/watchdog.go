@@ -373,6 +373,34 @@ func compareVersion(a, b []uint64) int {
 	return 0
 }
 
+// gateRunningFn 核验全部运行中的 KuGou.exe（商店版门禁，issue #212）；测试替换。
+var gateRunningFn = func() error { return gateKuGou(snapshotProcs, imagePath) }
+
+// GateRunning 对全部运行中的 KuGou.exe 过商店版门禁（issue #212），供上层连接 CDP 之前核验：EnsurePatched 返回之后
+// 等 CDP 的那段时间里，用户启动的可能是商店版或读不到路径的实例。没有在运行的返回 nil。
+func GateRunning() error { return gateRunningFn() }
+
+// gateKuGou 在进程快照里找出全部 KuGou.exe（主进程与 CEF 子进程，映像名不分大小写），逐个读映像路径并过
+// launch.Gate：任一读不到或在 WindowsApps 下即返回该错误，没有在运行的返回 nil。killKuGou 以 taskkill /IM 按名字
+// 结束全部 KuGou.exe，只核验其中一个不能授权结束其余的（例如另一用户会话里的商店版）。快照取不到时按路径未知拒绝。
+// shortcut: 快照之后才退出的进程取不到路径，同样按路径未知拒绝；这一轮作罢、下一轮重来，不区分「已退出」与「无权」。
+func gateKuGou(snapshot func() ([]proc, error), imagePath func(uint32) (string, error)) error {
+	procs, err := snapshot()
+	if err != nil {
+		return i18n.Errorf("%w: take a process snapshot: %w", launch.ErrExeUnknown, err)
+	}
+	for _, p := range procs {
+		if !strings.EqualFold(p.Name, TargetProcessName) {
+			continue
+		}
+		exe, _ := imagePath(p.PID) // 读不到时为空串，门禁按路径未知拒绝
+		if err := launch.Gate(exe); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // killKuGou terminates all running KuGou.exe processes and waits for them to exit.
 func killKuGou() {
 	log.Info("Terminating KuGou process...")
@@ -1087,6 +1115,10 @@ func readyToKill(w kugouWait, helperRunning func() bool) error {
 // 关闭 helper（写 CANCEL，helper 不写 DLL）、稍后重试：预选是在酷狗没运行时按注册表做的，等到的只是「任意
 // KuGou.exe 出现」，主播打开的若是另一份安装，照旧修补就会结束它、给预选那份打补丁、再启动预选那份。
 // helper 的写入目标在弹 UAC 时已写进它的命令行，不能改，故不改用新定位的路径。
+//
+// kill 之前再对全部运行中的 KuGou.exe 过一次商店版门禁（issue #212，gateRunningFn）：EnsurePatched 开头核验之后，
+// 隔着 UAC 与等酷狗启动，运行中的可能已换成另一份安装；locate 只看主进程，kill 结束的是全部同名进程。门禁不过时
+// 原样返回它的错误，不结束、不触发。
 func killAndPatch(exePath, libcefPath string, locate func() (string, string, error), kill func(), trigger func() error) error {
 	exe, lc, err := locate()
 	if err != nil {
@@ -1096,12 +1128,25 @@ func killAndPatch(exePath, libcefPath string, locate func() (string, string, err
 	if !samePath(exe, exePath) || !samePath(lc, libcefPath) {
 		return i18n.Errorf("%w: started %s with %s; prepared %s with %s", ErrInstallChanged, exe, lc, exePath, libcefPath)
 	}
+	if err := gateRunningFn(); err != nil {
+		return err
+	}
 	log.Info("KuGou detected; stopping it and repairing the DLL...")
 	kill()
 	if err := trigger(); err != nil {
 		return i18n.Errorf("DLL patch failed: %w", err)
 	}
 	return nil
+}
+
+// awaitPatchedKuGou 是 DLL 已修补时的收尾：wait 等到酷狗启动之后（生产为 waitForKuGou(stopCh, nil)），对全部运行中的
+// KuGou.exe 再过一次商店版门禁（issue #212），门禁的错误原样返回。EnsurePatched 开头核验时酷狗可能还没运行（门禁放行），
+// 等来的可能是商店版或读不到路径的实例。
+func awaitPatchedKuGou(wait func() kugouWait) error {
+	if wait() == kugouWaitStopped {
+		return i18n.Errorf("stopped")
+	}
+	return gateRunningFn()
 }
 
 // samePath 报告两个路径 Clean 后是否相同（不分大小写）。
@@ -1121,7 +1166,15 @@ func samePath(a, b string) bool {
 //     c. Kill KuGou, trigger helper to patch (no second UAC)；helper 已退出时不结束酷狗，返回错误交上层重试；
 //     启动的不是预选的那份安装时同样不结束酷狗，返回 ErrInstallChanged（killAndPatch）
 //     d. Verify, re-launch KuGou
+//
+// 商店版门禁（issue #212）在开头，先于「CDP 已可用」的早退与一切提权、结束、修补、拉起：全部运行中的 KuGou.exe
+// 逐个核验，选定安装之后再核验预选的 exe（酷狗不在运行时它取自注册表或常见安装根，修补、拉起的都是它）；DLL 已修补、
+// 只等酷狗启动时，等到之后再核验一次（awaitPatchedKuGou），要修补时 killAndPatch 在结束之前再核验一次。门禁不过时原样
+// 返回它的错误。
 func EnsurePatched(stopCh <-chan struct{}) error {
+	if err := gateRunningFn(); err != nil {
+		return err
+	}
 	if isCDPAvailable() {
 		log.Detail("CDP already available; skipping patch check")
 		return nil
@@ -1129,6 +1182,9 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 
 	exePath, libcefPath, err := FindKuGouInstall()
 	if err != nil {
+		return err
+	}
+	if err := launch.Gate(exePath); err != nil {
 		return err
 	}
 	log.Info("KuGou install directory: %s", filepath.Dir(exePath))
@@ -1187,10 +1243,7 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 
 	if allPatched {
 		// DLL 已 patch，等待酷狗启动（仿网易云逻辑，不自动启动）
-		if waitForKuGou(stopCh, nil) == kugouWaitStopped {
-			return i18n.Errorf("stopped")
-		}
-		return nil
+		return awaitPatchedKuGou(func() kugouWait { return waitForKuGou(stopCh, nil) })
 	}
 
 	// DLL 未 patch：先弹 UAC 获取提权（helper 在后台等待触发指令）

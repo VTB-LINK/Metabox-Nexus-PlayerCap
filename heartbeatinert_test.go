@@ -38,7 +38,12 @@ var heartbeatFuncs = []string{"startDailyHeartbeat", "sendHeartbeat"}
 // 想办法绕过去，而不是理解它在拦什么。
 var forbiddenInHeartbeat = map[string]string{
 	"performUpdateAll":      "会下载并替换 exe",
-	"downloadFile":          "会往磁盘写文件",
+	"updateWithRetry":       "执行整个更新（performUpdateAll），失败后还会等用户选择是否重来",
+	"askUpdateRetry":        "会改控制台模式并阻塞等用户按键 —— 心跳在后台跑，没有人在等它",
+	"acquireUpdateLock":     "会在更新锁上阻塞，等另一个进程更新完毕",
+	"raceSources":           "会向两个下载来源同时请求附件（测速），只在准备下载时才需要",
+	"fetchAssets":           "会下载全部附件并写成 .new",
+	"receive":               "会往磁盘写文件",
 	"renameWithRetry":       "会替换正在运行的 exe",
 	"restartSelf":           "会重启进程 —— 直播进行到一半重启就是事故",
 	"relaunchSelf":          "会启动另一份自身并在它结束后退出本进程，restartSelf 即经它重启",
@@ -49,7 +54,6 @@ var forbiddenInHeartbeat = map[string]string{
 	"ForceRebuild":          "会把 config.yml 换成模板",
 	"restartForRebuild":     "重建 config.yml 之后的重启，即 restartSelf",
 	"decideUpdate":          "做「要不要更新」的决策 —— 心跳不该有决策",
-	"pickFastestCDNPrefix":  "只在准备下载时才需要测速",
 	"Exit":                  "os.Exit 会直接杀死进程",
 	"Fatal":                 "同上，log.Fatal 内部就是 os.Exit",
 	"Fatalf":                "同上",

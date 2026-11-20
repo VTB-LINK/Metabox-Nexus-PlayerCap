@@ -25,6 +25,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/park"
+	"Metabox-Nexus-PlayerCap/player/cloudmusic/watchdog"
 	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"github.com/gorilla/websocket"
@@ -358,8 +359,24 @@ func evalOnce(expr string) {
 	conn.ReadJSON(&discard)
 }
 
+// 商店版门禁、取调试端口地址与泊车经包级变量调用，测试替换它们以离线驱动 injectShim 与 doPark，不碰真进程、
+// 不连 9222、不移真窗口。
+var (
+	gateFn  = watchdog.GateRunning
+	wsURLFn = screencastWSURL
+	parkFn  = park.Park
+)
+
+// doPark 泊车之前过商店版门禁（issue #212）：泊车移的是网易云的主窗口，由 windowStateLoop 驱动、独立于取词循环。
+// 取词会话没连上时既不泊车也不枚举进程：此时没有特效镜像可保活，而 windowStateLoop 每 80ms 调一次，经不起每次
+// 枚举全部进程。
+// shortcut: 取词已连上而门禁不过（另有商店版或读不到路径的 cloudmusic.exe）时，最小化期间每 80ms 枚举一次；
+// 要省就缓存门禁结果。
 func (c *Capturer) doPark() {
-	if park.Park() {
+	if !c.netEaseUp() || gateFn() != nil {
+		return
+	}
+	if parkFn() {
 		atomic.StoreInt64(&c.parkedAtNano, time.Now().UnixNano())
 		// 冻结一小段：盖住「最小化动画 + park 过渡 + park 后特效冷渲染」这几帧，前端 hold 住最后干净帧
 		atomic.StoreInt64(&c.gateUntilNano, time.Now().Add(700*time.Millisecond).UnixNano())
@@ -460,43 +477,52 @@ func (c *Capturer) windowStateLoop() {
 // 关键：**不门控在取词 player 的 IsConnected**。player 要等 watchdog 重启 + 5s 才连上，那时页面早加载完、
 // 甚至已恢复了上一首歌（context 已建、来不及注入 shim）。故这里独立、尽早地直连 9222 注册 addScript，
 // 恢复「生命周期合并之前」的早注入时机。安静重试（不打日志、不刷屏）；连接断（网易云重启）后自动重注。
+//
+// 每一轮都在连接之前重新过商店版门禁（issue #212，见 injectShim）。
 func (c *Capturer) shimInjectLoop() {
 	defer telemetry.Guard()
 	for {
-		wsURL, err := screencastWSURL()
-		if err != nil {
-			time.Sleep(400 * time.Millisecond) // 网易云未起 → 安静快重试，争取赶在页面加载前注册
-			continue
+		time.Sleep(injectShim())
+	}
+}
+
+// injectShim 是 shimInjectLoop 的一轮：9222 可达且门禁通过时连接、注册 shim，阻塞读到连接断开；返回下一轮之前的
+// 等待。门禁在取调试端口地址之后、建立连接之前：网易云未运行时 9222 不通，这一轮在取地址处就结束，不必每 400ms
+// 枚举一次全部进程；门禁不过时不连接、不注入，按原有间隔重试。
+func injectShim() time.Duration {
+	wsURL, err := wsURLFn()
+	if err != nil {
+		return 400 * time.Millisecond // 网易云未起 → 安静快重试，争取赶在页面加载前注册
+	}
+	if gateFn() != nil {
+		return 400 * time.Millisecond
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return 400 * time.Millisecond
+	}
+	defer conn.Close()
+	id := 0
+	send := func(method string, params map[string]any) error {
+		id++
+		req := map[string]any{"id": id, "method": method}
+		if params != nil {
+			req["params"] = params
 		}
-		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-		if err != nil {
-			time.Sleep(400 * time.Millisecond)
-			continue
+		conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		return conn.WriteJSON(req)
+	}
+	// document-start 注册（addScript 跨页面加载/导航/SPA 路由存活）+ 对当前文档也 eval 一次兜底
+	send("Page.enable", nil)
+	send("Page.addScriptToEvaluateOnNewDocument", map[string]any{"source": glShimJS})
+	send("Runtime.evaluate", map[string]any{"expression": glShimJS})
+	log.Detail("Registered preserveDrawingBuffer shim early (document-start; avoids later reload)")
+	// 保持连接存活以维持 addScript 注册；阻塞读到连接断（网易云退出/重启）→ 重连后重注
+	conn.SetReadDeadline(time.Time{})
+	for {
+		if _, _, e := conn.ReadMessage(); e != nil {
+			return 300 * time.Millisecond
 		}
-		id := 0
-		send := func(method string, params map[string]any) error {
-			id++
-			req := map[string]any{"id": id, "method": method}
-			if params != nil {
-				req["params"] = params
-			}
-			conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
-			return conn.WriteJSON(req)
-		}
-		// document-start 注册（addScript 跨页面加载/导航/SPA 路由存活）+ 对当前文档也 eval 一次兜底
-		send("Page.enable", nil)
-		send("Page.addScriptToEvaluateOnNewDocument", map[string]any{"source": glShimJS})
-		send("Runtime.evaluate", map[string]any{"expression": glShimJS})
-		log.Detail("Registered preserveDrawingBuffer shim early (document-start; avoids later reload)")
-		// 保持连接存活以维持 addScript 注册；阻塞读到连接断（网易云退出/重启）→ 重连后重注
-		conn.SetReadDeadline(time.Time{})
-		for {
-			if _, _, e := conn.ReadMessage(); e != nil {
-				break
-			}
-		}
-		conn.Close()
-		time.Sleep(300 * time.Millisecond)
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/player/launch"
+
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -46,7 +48,7 @@ func TestLaunchFlagsCarryDebugAndKeepalive(t *testing.T) {
 
 func TestDecideRestart(t *testing.T) {
 	main := func(debug, keep bool) scan {
-		return scan{PIDs: []int{1, 2}, MainPID: 1, ExePath: spotifyExe, HasDebugFlag: debug, HasKeepalive: keep}
+		return scan{ExePaths: []string{spotifyExe, spotifyExe}, MainPID: 1, HasDebugFlag: debug, HasKeepalive: keep}
 	}
 	cases := []struct {
 		name      string
@@ -64,9 +66,9 @@ func TestDecideRestart(t *testing.T) {
 		{"keepalive only, port up", main(false, true), true, false, verdictRestart},
 		{"no flags (incl. 9222), port down", main(false, false), false, false, verdictRestart},
 		{"no flags, port up", main(false, false), true, false, verdictRestart},
-		{"cmdline unreadable, port up", scan{PIDs: []int{1}}, true, false, verdictReady},
-		{"cmdline unreadable, port down", scan{PIDs: []int{1}}, false, false, verdictNoMainPID},
-		{"cmdline unreadable, port down, restarted", scan{PIDs: []int{1}}, false, true, verdictNoMainPID},
+		{"cmdline unreadable, port up", scan{ExePaths: []string{spotifyExe}}, true, false, verdictReady},
+		{"cmdline unreadable, port down", scan{ExePaths: []string{spotifyExe}}, false, false, verdictNoMainPID},
+		{"cmdline unreadable, port down, restarted", scan{ExePaths: []string{spotifyExe}}, false, true, verdictNoMainPID},
 		{"restarted, debug only, port up", main(true, false), true, true, verdictKeep},
 		{"restarted, debug only, port down", main(true, false), false, true, verdictKeep},
 		{"restarted, keepalive only, port up", main(false, true), true, true, verdictKeep},
@@ -140,7 +142,7 @@ func (f *fakeEnv) install(t *testing.T) {
 }
 
 func spotifyScan(debug, keep bool) scan {
-	return scan{PIDs: []int{10, 11}, MainPID: 10, ExePath: spotifyExe, HasDebugFlag: debug, HasKeepalive: keep}
+	return scan{ExePaths: []string{spotifyExe, spotifyExe}, MainPID: 10, HasDebugFlag: debug, HasKeepalive: keep}
 }
 
 func TestEnsureDebugModeDebugOnlyPortUpRestartsWithLaunchFlags(t *testing.T) {
@@ -180,12 +182,12 @@ func TestEnsureDebugModeNoKill(t *testing.T) {
 		{name: "both flags, port down", f: fakeEnv{scans: []scan{spotifyScan(true, true)}, supported: true}, wantErr: ErrPortNotReady},
 		{name: "not running", f: fakeEnv{scans: []scan{{}}, supported: true}, wantErr: ErrNotRunning},
 		{name: "scan fails", f: fakeEnv{scanErr: errors.New("boom"), supported: true}, anyErr: true},
-		{name: "cmdline unreadable, port up", f: fakeEnv{scans: []scan{{PIDs: []int{1}, ExePath: spotifyExe}}, portUp: true, supported: true}},
-		{name: "cmdline unreadable, port down", f: fakeEnv{scans: []scan{{PIDs: []int{1}, ExePath: spotifyExe}}, supported: true}, anyErr: true},
+		{name: "cmdline unreadable, port up", f: fakeEnv{scans: []scan{{ExePaths: []string{spotifyExe}}}, portUp: true, supported: true}},
+		{name: "cmdline unreadable, port down", f: fakeEnv{scans: []scan{{ExePaths: []string{spotifyExe}}}, supported: true}, anyErr: true},
 		{name: "debug only, version unsupported", f: fakeEnv{scans: []scan{spotifyScan(true, false)}, portUp: true, supported: false}, wantErr: ErrVersionUnsupported},
 		{name: "no flags, version check fails", f: fakeEnv{scans: []scan{spotifyScan(false, false)}, supported: true, supportsErr: errors.New("cannot read")}, wantErr: ErrVersionUnsupported},
 		{name: "debug 9222 only, version unsupported", f: fakeEnv{scans: []scan{spotifyScan(false, false)}, supported: false}, wantErr: ErrVersionUnsupported},
-		{name: "no exe path", f: fakeEnv{scans: []scan{{PIDs: []int{1}, MainPID: 1, HasDebugFlag: true}}, portUp: true, supported: true}, anyErr: true},
+		{name: "no exe path", f: fakeEnv{scans: []scan{{ExePaths: []string{""}, MainPID: 1, HasDebugFlag: true}}, portUp: true, supported: true}, wantErr: launch.ErrExeUnknown},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -211,6 +213,146 @@ func TestEnsureDebugModeNoKill(t *testing.T) {
 			}
 			if restartedThisRun.Load() {
 				t.Error("restartedThisRun set without a restart")
+			}
+		})
+	}
+}
+
+// TestEnsureDebugModeStoreGate 钉住商店版门禁（issue #212）：全部 Spotify.exe 逐个核验，任一映像路径在 WindowsApps 下
+// 或读不到即返回门禁的错误、不杀、不拉起，且门禁先于 decideRestart 的一切判定（参数齐全且端口已通、本次运行已重启过
+// 而仍缺参数、端口未起、主进程命令行读不到）。第一例全部为官网路径，照常重启，是其余各例「不杀」的对照。
+//
+// 防的缺陷与变异（均实测变红）：去掉门禁；只核验第一个进程；门禁挪到 decideRestart 之后（端口已通、只杀一次、
+// 端口未起、命令行读不到各例）；门禁挪到 killFn 之后。scanProcesses 逐个记路径要真进程，不在本用例内。
+func TestEnsureDebugModeStoreGate(t *testing.T) {
+	const storeExe = `C:\Program Files\WindowsApps\SpotifyAB.SpotifyMusic_1.2.3.0_x64__zpdnekdrzrea0\Spotify.exe`
+	withPaths := func(sc scan, paths ...string) scan { sc.ExePaths = paths; return sc }
+	cases := []struct {
+		name      string
+		sc        scan
+		portUp    bool
+		restarted bool
+		want      error // nil 表示照常重启
+	}{
+		{"全部为官网路径：照常重启", spotifyScan(false, false), false, false, nil},
+		{"主进程为商店路径", withPaths(spotifyScan(false, false), storeExe, spotifyExe), false, false, &launch.PackagedError{}},
+		{"子进程之一为商店路径", withPaths(spotifyScan(false, false), spotifyExe, storeExe), false, false, &launch.PackagedError{}},
+		{"其中一个路径读不到", withPaths(spotifyScan(false, false), spotifyExe, ""), false, false, launch.ErrExeUnknown},
+		{"商店版、参数齐全且端口已通", withPaths(spotifyScan(true, true), storeExe), true, false, &launch.PackagedError{}},
+		{"商店版、参数齐全而端口未起", withPaths(spotifyScan(true, true), storeExe), false, false, &launch.PackagedError{}},
+		{"商店版、本次运行已重启过而仍缺参数", withPaths(spotifyScan(true, false), storeExe), true, true, &launch.PackagedError{}},
+		{"商店版、主进程命令行读不到且端口已通", scan{ExePaths: []string{storeExe}}, true, false, &launch.PackagedError{}},
+		{"读不到路径、参数齐全且端口已通", withPaths(spotifyScan(true, true), ""), true, false, launch.ErrExeUnknown},
+		{"读不到路径、主进程命令行也读不到", scan{ExePaths: []string{""}}, false, false, launch.ErrExeUnknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeEnv{scans: []scan{c.sc}, portUp: c.portUp, supported: true, exitAfter: true, startPortUp: true, afterStart: spotifyScan(true, true)}
+			f.install(t)
+			restartedThisRun.Store(c.restarted)
+			err := EnsureDebugMode()
+			if c.want == nil {
+				if err != nil || f.kills != 1 || f.starts != 1 {
+					t.Fatalf("err=%v kills=%d starts=%d，期望照常重启（nil、1、1）", err, f.kills, f.starts)
+				}
+				return
+			}
+			var pe *launch.PackagedError
+			if _, packaged := c.want.(*launch.PackagedError); packaged {
+				if !errors.As(err, &pe) || pe.ExePath != storeExe {
+					t.Errorf("err = %v，期望 *PackagedError（%s）", err, storeExe)
+				}
+			} else if !errors.Is(err, c.want) {
+				t.Errorf("err = %v，期望 %v", err, c.want)
+			}
+			if f.kills != 0 || f.starts != 0 {
+				t.Errorf("kills=%d starts=%d，期望不杀、不拉起", f.kills, f.starts)
+			}
+		})
+	}
+}
+
+// TestScanKeepsUnreadableProcesses 从扫描层（不只是替换扫描结果）钉住：读不到映像路径的 Spotify.exe 也在扫描结果里，
+// 由门禁按路径未知拒绝，不杀、不拉起。旧扫描按 gopsutil 的进程名枚举，名字取自映像路径，这样的进程不在结果里：另有
+// 可读的实例时只核验它就放行 taskkill，未核验的那个照样被结束；全部读不到时被当成未运行。进程快照、命令行、端口、
+// 杀与拉起都是桩，第一例照常重启，是对照。
+//
+// 防的缺陷与变异（均实测变红）：扫描跳过路径为空的进程；按别的映像名查快照；快照出错时当作未运行。
+func TestScanKeepsUnreadableProcesses(t *testing.T) {
+	const (
+		mainPID  uint32 = 0x7FFFFFF0
+		childPID uint32 = 0x7FFFFFF4
+		storeExe        = `C:\Program Files\WindowsApps\SpotifyAB.SpotifyMusic_1.2.3.0_x64__zpdnekdrzrea0\Spotify.exe`
+	)
+	cmdlines := map[uint32]string{mainPID: `"` + spotifyExe + `"`, childPID: `"` + spotifyExe + `" --type=renderer`}
+	boom := errors.New("snapshot failed")
+	cases := []struct {
+		name    string
+		running []launch.Proc
+		runErr  error
+		want    string // "restart" / "unknown" / "packaged" / "notrunning" / "error"
+	}{
+		{"对照：主进程与子进程都可读、缺参数，照常重启", []launch.Proc{{PID: mainPID, ExePath: spotifyExe}, {PID: childPID, ExePath: spotifyExe}}, nil, "restart"},
+		{"可读的主进程之外有一个读不到的子进程", []launch.Proc{{PID: mainPID, ExePath: spotifyExe}, {PID: childPID}}, nil, "unknown"},
+		{"读不到的在前", []launch.Proc{{PID: childPID}, {PID: mainPID, ExePath: spotifyExe}}, nil, "unknown"},
+		{"只有一个读不到的：不是未运行", []launch.Proc{{PID: childPID}}, nil, "unknown"},
+		{"全部读不到", []launch.Proc{{PID: mainPID}, {PID: childPID}}, nil, "unknown"},
+		{"子进程之一是商店版", []launch.Proc{{PID: mainPID, ExePath: spotifyExe}, {PID: childPID, ExePath: storeExe}}, nil, "packaged"},
+		{"未运行", nil, nil, "notrunning"},
+		{"快照出错", nil, boom, "error"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeEnv{supported: true, startPortUp: true}
+			f.install(t)
+			oldRun, oldCmd := runningFn, cmdlineFn
+			t.Cleanup(func() { runningFn, cmdlineFn = oldRun, oldCmd })
+			scanFn = scanProcesses
+			var asked string
+			runningFn = func(name string) ([]launch.Proc, error) {
+				asked = name
+				if f.kills > 0 && f.starts == 0 {
+					return nil, nil // 杀掉之后、拉起之前：进程已退干净
+				}
+				return c.running, c.runErr
+			}
+			cmdlineFn = func(pid uint32) (string, error) {
+				if s, ok := cmdlines[pid]; ok {
+					return s, nil
+				}
+				return "", errors.New("no such process")
+			}
+
+			err := EnsureDebugMode()
+			if asked != TargetProcessName {
+				t.Errorf("快照按 %q 查，期望 %q", asked, TargetProcessName)
+			}
+			var pe *launch.PackagedError
+			switch c.want {
+			case "restart":
+				if err != nil || f.kills != 1 || f.starts != 1 {
+					t.Errorf("err=%v kills=%d starts=%d，期望照常重启", err, f.kills, f.starts)
+				}
+				return
+			case "unknown":
+				if !errors.Is(err, launch.ErrExeUnknown) {
+					t.Errorf("err = %v，期望 launch.ErrExeUnknown", err)
+				}
+			case "packaged":
+				if !errors.As(err, &pe) || pe.ExePath != storeExe {
+					t.Errorf("err = %v，期望 *PackagedError（%s）", err, storeExe)
+				}
+			case "notrunning":
+				if !errors.Is(err, ErrNotRunning) {
+					t.Errorf("err = %v，期望 ErrNotRunning", err)
+				}
+			case "error":
+				if !errors.Is(err, boom) {
+					t.Errorf("err = %v，期望快照的错误", err)
+				}
+			}
+			if f.kills != 0 || f.starts != 0 {
+				t.Errorf("kills=%d starts=%d，期望不杀、不拉起", f.kills, f.starts)
 			}
 		})
 	}

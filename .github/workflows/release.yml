@@ -46,6 +46,8 @@ jobs:
       DOTCOM_GITHUB_BASE: https://github.com
       GITEE_OWNER: VTB-LINK
       GITEE_REPO_NAME: Metabox-Nexus-PlayerCap
+      # Gitee 镜像保留的发行版个数，见 Prune old releases (Gitee mirror)。
+      GITEE_KEEP_RELEASES: 7
       HTML_FILE_NAME: lyric_display.html
 
       # gh 与 sentry-cli 钉死版本，每次下载后按 SHA-256 校验，不依赖 runner 镜像预装。SHA-256 的出处：
@@ -213,6 +215,14 @@ jobs:
           Copy-Item -LiteralPath $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html', 'effect_page.html', 'doc/API_RESPONSE_EXAMPLES.md' -Destination $PACKAGE_DIR
           Copy-Item -LiteralPath 'README.md' -Destination $PACKAGE_DIR -ErrorAction SilentlyContinue
 
+          # 随包使用说明（#215）：中英合一的 doc/release/README.html。先复制到工作目录，与 exe、html 一样供
+          # dotcom 压缩包与三处发行版附件按文件名取用。
+          Copy-Item -LiteralPath 'doc/release/README.html' -Destination 'README.html'
+          Copy-Item -LiteralPath 'README.html' -Destination $PACKAGE_DIR
+          # 使用说明.html 是它的逐字节副本：给看不懂英文的主播一个中文文件名，页面按文件名含「使用说明」默认显示中文。
+          # 只进压缩包、不作发行版附件：附件不能用中文名（实测 GitHub 把 使用说明.txt 改成 default.txt，Gitee 成乱码）。
+          Copy-Item -LiteralPath 'README.html' -Destination "${PACKAGE_DIR}/使用说明.html"
+
           Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE_DIR=${PACKAGE_DIR}" -Encoding utf8
 
       - name: Create compressed archive
@@ -222,11 +232,12 @@ jobs:
 
           # 本仓库发布用压缩包：压缩目录下的各文件而非目录本身，zip 内不含目录层级。
           Compress-Archive -Path "${env:PACKAGE_DIR}/*" -DestinationPath $ARCHIVE_NAME
-          # github.com 发布用压缩包（仅 exe + html；4.0 起不含 effect_page.html，见 issue #63）。
-          # 以文件为输入，条目都在根下。
-          Compress-Archive -LiteralPath $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html' -DestinationPath $env:DOTCOM_ARCHIVE_NAME -Force
+          # github.com 发布用压缩包：exe、html 与两份使用说明（4.0 起不含 effect_page.html，见 issue #63；
+          # 使用说明见 Prepare files for packaging，#215）。以文件为输入，条目都在根下。
+          Compress-Archive -LiteralPath $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html', 'README.html', "${env:PACKAGE_DIR}/使用说明.html" -DestinationPath $env:DOTCOM_ARCHIVE_NAME -Force
 
-          # 列出两个包的条目，作为演练与首发的证据。
+          # 列出两个包的条目，作为演练与首发的证据；两份使用说明缺一即失败。按名字在进程内比对，
+          # 不依赖日志能否正确显示中文文件名。
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           foreach ($name in $ARCHIVE_NAME, $env:DOTCOM_ARCHIVE_NAME) {
             $path = (Resolve-Path -LiteralPath $name).Path
@@ -234,8 +245,15 @@ jobs:
             try {
               Write-Output "${name}: $((Get-Item -LiteralPath $path).Length) bytes, $($archive.Entries.Count) entries"
               $archive.Entries | ForEach-Object { Write-Output "  $($_.FullName) $($_.Length)" }
+              $entries = @($archive.Entries.FullName)
             } finally {
               $archive.Dispose()
+            }
+            foreach ($doc in 'README.html', '使用说明.html') {
+              if ($entries -cnotcontains $doc) {
+                Write-Output "::error::${name} does not contain ${doc}"
+                exit 1
+              }
             }
           }
 
@@ -248,9 +266,11 @@ jobs:
           name: ${{ env.TAG_NAME }}
           draft: true
           generate_release_notes: true
+          # 使用说明只附 README.html：附件不能用中文名，使用说明.html 只在压缩包里（#215）。
           files: |
             ${{ env.OUTPUT_NAME }}-V${{ env.VERSION }}.zip
             ${{ env.OUTPUT_NAME }}.exe
+            README.html
             # ${{ env.OUTPUT_NAME }}-V${{ env.VERSION }}.exe
 
       - name: Generate release notes (dotcom mirror)
@@ -304,8 +324,9 @@ jobs:
               '| 文件 | 最新版 | 当前版本 |'
               '| --- | --- | --- |'
             )
-            foreach ($file in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html') {
-              $lines += "| ${file} | [下载]($($target.Latest)/${file}) | [下载]($($target.Download)/${tag}/${file}) |"
+            # 与两个镜像的发行版附件一一对应。
+            foreach ($file in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html', 'README.html') {
+              $lines +="| ${file} | [下载]($($target.Latest)/${file}) | [下载]($($target.Download)/${tag}/${file}) |"
             }
             # 问题反馈在 GitHub，两份都指向它。
             $lines += @(
@@ -377,8 +398,8 @@ jobs:
           Write-Output "Gitee release ${env:TAG_NAME}: id $($release.id)"
 
           # 与 dotcom draft 的附件相同。
-          foreach ($f in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html') {
-            $asset = Invoke-RestMethod -Method Post -Uri "${api}/$($release.id)/attach_files" -Headers $auth -Form @{
+          foreach ($f in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html', 'README.html') {
+            $asset =Invoke-RestMethod -Method Post -Uri "${api}/$($release.id)/attach_files" -Headers $auth -Form @{
               file = Get-Item -LiteralPath $f
             }
             if ($asset.name -cne $f) {
@@ -395,13 +416,59 @@ jobs:
           GH_TOKEN: ${{ env.PUBLISH == 'true' && secrets.GH_DOTCOM_TOKEN || '' }}
         run: |
           # 镜像仓库标题默认与 tag_name 一致；需要强制回退时，在 GitHub Release 页面手动追加 -force
-          # 创建 Release Draft 并上传 zip + 独立文件（含特效页 effect_display.html）
-          gh release create $env:TAG_NAME $env:DOTCOM_ARCHIVE_NAME $env:EXE_NAME $env:HTML_FILE_NAME lyric_page.html effect_display.html `
+          # 创建 Release Draft 并上传 zip + 独立文件（含特效页 effect_display.html 与使用说明 README.html）
+          gh release create $env:TAG_NAME $env:DOTCOM_ARCHIVE_NAME $env:EXE_NAME $env:HTML_FILE_NAME lyric_page.html effect_display.html README.html `
             --repo "${env:DOTCOM_OWNER}/${env:DOTCOM_REPO_NAME}" `
             --title $env:TAG_NAME `
             --draft `
             --notes-file combined-release-notes.md
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      # Gitee 镜像只保留最近 GITEE_KEEP_RELEASES 个发行版：Gitee 附件合计上限 1GB，每个发行版约 25MB。
+      # 客户端只下载网关指向的版本；历史版本在 dotcom 都在，回退所需的旧版本可从 dotcom 补传。
+      # 不能只留 1 个：此时 dotcom 仍是草稿，网关指向的上一个版本须仍在 Gitee 上。同理，预发布不在这里删，
+      # 正式版发布后删除全部预发布时，Gitee 上的一并手动删除（§12）。
+      # 放在 dotcom draft 之后且 continue-on-error：此时两边发行版都已建出，清理失败若使作业失败，重跑会因
+      # 同名发行版已存在而失败；额度离上限尚远，漏清一次无碍。
+      - name: Prune old releases (Gitee mirror)
+        if: env.PUBLISH == 'true'
+        continue-on-error: true
+        env:
+          GITEE_TOKEN: ${{ env.PUBLISH == 'true' && secrets.GITEE_TOKEN || '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:GITEE_TOKEN) {
+            Write-Output '::error::GITEE_TOKEN is not set.'
+            exit 1
+          }
+          $api = "https://gitee.com/api/v5/repos/${env:GITEE_OWNER}/${env:GITEE_REPO_NAME}/releases"
+          $auth = @{ Authorization = "token ${env:GITEE_TOKEN}" }
+          $keep = [int]$env:GITEE_KEEP_RELEASES
+
+          # Invoke-RestMethod 把返回的数组作为一个对象输出到管道，故先存入变量再展开。
+          # 按 created_at 自行从新到旧排序，不依赖 direction 参数。
+          $list = Invoke-RestMethod -Uri "${api}?per_page=100&direction=desc" -Headers $auth
+          $releases = @($list | Sort-Object { [datetimeoffset]$_.created_at } -Descending)
+          if ($releases.Count -le $keep) {
+            Write-Output "Gitee has $($releases.Count) releases, keeping up to ${keep}; nothing to delete."
+            exit 0
+          }
+
+          # 先逐个删附件、再删发行版：删除发行版时附件是否随之释放额度未核实。tag 与源码不动。
+          foreach ($r in ($releases | Select-Object -Skip $keep)) {
+            # 本次建的发行版无论排第几都不删。
+            if ($r.tag_name -ceq $env:TAG_NAME) {
+              Write-Output "Kept $($r.tag_name): created by this run."
+              continue
+            }
+            $files = Invoke-RestMethod -Uri "${api}/$($r.id)/attach_files?per_page=100" -Headers $auth
+            foreach ($f in $files) {
+              Invoke-RestMethod -Method Delete -Uri "${api}/$($r.id)/attach_files/$($f.id)" -Headers $auth | Out-Null
+              Write-Output "Deleted $($r.tag_name)/$($f.name) ($($f.size) bytes)"
+            }
+            Invoke-RestMethod -Method Delete -Uri "${api}/$($r.id)" -Headers $auth | Out-Null
+            Write-Output "Deleted release $($r.tag_name) (id $($r.id))"
+          }
 
       # 放在全部 release draft 之后：artifact 都发出去了，这个 Sentry release 才对应得上真实
       # 可下载的版本。

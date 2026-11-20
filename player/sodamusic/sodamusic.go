@@ -21,6 +21,7 @@ import (
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/krc"
+	"Metabox-Nexus-PlayerCap/player/launch"
 	"Metabox-Nexus-PlayerCap/player/sodamusic/cdp"
 	"Metabox-Nexus-PlayerCap/player/sodamusic/watchdog"
 	"Metabox-Nexus-PlayerCap/telemetry"
@@ -133,11 +134,17 @@ func (p *SodaMusicPlayer) sleepOrStop(d time.Duration) bool {
 	}
 }
 
+// storeRecheck 是检测到微软商店版之后多久重查一次（issue #212）。与网易云、Spotify 的「版本不支持」同值：装的是
+// 商店版近乎永久，但用户改装官网版后应当自动恢复、不必重启 PlayerCap。
+const storeRecheck = 30 * time.Second
+
 // Start 启动汽水音乐轮询循环（阻塞，须在 goroutine 中调用）。
 func (p *SodaMusicPlayer) Start() {
 	// releasedPID / releasedAt：最近一次因察觉退出而释放会话的主进程与时刻（见 reattachCooldown）。
 	var releasedPID int
 	var releasedAt time.Time
+	storeWarned := false // 微软商店版只警告一次（issue #212）
+	exeUnknown := false  // 上一轮读不到汽水的安装路径（issue #212）：只警告一次，循环顶部声明的是这一条
 	for {
 		select {
 		case <-p.StopCh:
@@ -145,19 +152,55 @@ func (p *SodaMusicPlayer) Start() {
 		default:
 		}
 
-		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Soda Music not running or not connected"), Reason: player.ReasonProcessNotRunning})
+		// 读不到安装路径期间声明的是那一条，不与「未启动」两条每轮来回切换。
+		if exeUnknown {
+			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Soda Music installation path (Soda Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
+		} else {
+			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Soda Music not running or not connected"), Reason: player.ReasonProcessNotRunning})
+		}
 		p.Emit(player.EventClearSongData, nil)
 
 		pid, err := findMainPID()
 		if err != nil || (pid == releasedPID && time.Since(releasedAt) < reattachCooldown) {
 			// 未运行——用户可能稍后启动，静默等待重试。刚释放的那个主进程正在退出，冷却期内同样等待。
+			storeWarned, exeUnknown = false, false
 			if p.sleepOrStop(3 * time.Second) {
 				return
 			}
 			continue
 		}
 
-		if err := ensureInspector(pid); err != nil {
+		err = ensureInspector(pid)
+		var packaged *launch.PackagedError
+		if errors.As(err, &packaged) {
+			// 微软商店版：门禁已在开 inspector（注入）之前挡住。只警告一次、standby + version_unsupported、
+			// 按 storeRecheck 重查，用户改装官网版后不必重启 PlayerCap。不连接。
+			if !storeWarned {
+				storeWarned = true
+				log.Warn("Soda Music is the Microsoft Store version (%s) and its inspector cannot be opened; skipped Soda Music lyric capture. To use it, uninstall it and install the official installer version", packaged.ExePath)
+				telemetry.ReportOnce("sodamusic.store_install", "汽水音乐为微软商店版，无法开启调试接口", nil, map[string]any{"exe_path": packaged.ExePath})
+			}
+			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("Soda Music Microsoft Store version unsupported (requires the official installer version)"), Reason: player.ReasonVersionUnsupported})
+			if p.sleepOrStop(storeRecheck) {
+				return
+			}
+			continue
+		}
+		storeWarned = false
+		if errors.Is(err, launch.ErrExeUnknown) {
+			// 汽水在运行而读不到它的映像路径：无从确知不是商店版，门禁已拒绝注入。不连接；状态由循环顶部声明。
+			if !exeUnknown {
+				exeUnknown = true
+				log.Warn("Cannot read the installation path of Soda Music; its inspector was not opened. Run Soda Music with the same privileges as this program")
+				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Soda Music installation path (Soda Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
+			}
+			if p.sleepOrStop(3 * time.Second) {
+				return
+			}
+			continue
+		}
+		exeUnknown = false
+		if err != nil {
 			log.Warn("failed to open SodaMusic inspector: %v", err)
 			if p.sleepOrStop(3 * time.Second) {
 				return

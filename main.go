@@ -21,9 +21,8 @@ import (
 	"Metabox-Nexus-PlayerCap/server"
 	"Metabox-Nexus-PlayerCap/taskbar"
 	"Metabox-Nexus-PlayerCap/telemetry"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -455,14 +454,10 @@ type releaseInfo struct {
 	Name    string `json:"name"`
 	// ConfigForceUpdate 是强制重建 config.yml 的门槛：带 v 前缀的版本号，低于它的配置须按模板重建。
 	// 缺失、为空串或不是合法版本号即不强制。只在启动时的版本检查里读（rebuildConfigIfForced）。
-	ConfigForceUpdate string `json:"config_force_update"`
-	GlobalCDN         string `json:"global_cdn_download_url_prefix"`
-	ChinaCDN          string `json:"china_cdn_download_url_prefix"`
-	Assets            []struct {
-		Name   string `json:"name"`
-		Size   int64  `json:"size"`
-		Digest string `json:"digest"`
-	} `json:"assets"`
+	ConfigForceUpdate string        `json:"config_force_update"`
+	GlobalCDN         string        `json:"global_cdn_download_url_prefix"`
+	ChinaCDN          string        `json:"china_cdn_download_url_prefix"`
+	Assets            []updateAsset `json:"assets"`
 }
 
 // checkAndUpdate 做启动时的版本检查：取得网关的响应，先按 config_force_update 判定是否重建 config.yml
@@ -480,6 +475,9 @@ func checkAndUpdate(cfg *config.Config) {
 	}
 
 	cleanupOldExe()
+	if exePath, err := os.Executable(); err == nil {
+		syncChineseReadme(filepath.Dir(exePath))
+	}
 	mainLog.Info("Checking for version updates...")
 
 	req, err := newVersionCheckRequest(clientid.PingStart)
@@ -560,6 +558,11 @@ func updateIfNeeded(release releaseInfo) {
 		mainLog.Warn("No available update files found, continuing")
 		return
 	}
+	sources := updateSources(release.GlobalCDN, release.ChinaCDN)
+	if len(sources) == 0 {
+		mainLog.Warn("No download source provided, continuing")
+		return
+	}
 
 	fmt.Println()
 	fmt.Println("╔═════════════════════════════════════════════════════════╗")
@@ -569,41 +572,50 @@ func updateIfNeeded(release releaseInfo) {
 	fmt.Println("╚═════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	sortedAssets := make([]struct {
-		Name   string `json:"name"`
-		Size   int64  `json:"size"`
-		Digest string `json:"digest"`
-	}, 0, len(release.Assets))
-	var exeTestFile string
+	// exe 排在最前：测速用第一个文件，放置时也先替换 exe。
+	sortedAssets := make([]updateAsset, 0, len(release.Assets))
 	for _, a := range release.Assets {
 		if strings.HasSuffix(strings.ToLower(a.Name), ".exe") {
-			sortedAssets = append([]struct {
-				Name   string `json:"name"`
-				Size   int64  `json:"size"`
-				Digest string `json:"digest"`
-			}{a}, sortedAssets...)
-			exeTestFile = a.Name
+			sortedAssets = append([]updateAsset{a}, sortedAssets...)
 		} else {
 			sortedAssets = append(sortedAssets, a)
 		}
 	}
-	if exeTestFile == "" {
-		exeTestFile = sortedAssets[0].Name
-	}
 
-	cdnPrefix := pickFastestCDNPrefix(release.GlobalCDN, release.ChinaCDN, release.TagName, exeTestFile)
+	// 确定要下载后再探测终端（老 conhost 会锁定当前 OS 线程并建立 COM）；须在测速之前：测速胜者直接进入
+	// 下载、刷新任务栏进度。
+	taskbar.Init()
 
-	taskbar.Init() // 确定要下载后再探测终端；老 conhost 会锁定当前 OS 线程并建立 COM
-
-	if err := performUpdateAll(cdnPrefix, release.TagName, sortedAssets); err != nil {
-		taskbar.Error()
-		// 与下载取同一个来源：测速时连得上 GitHub 就给 GitHub 的页面，否则给国内镜像的。
-		manualURL := releasePageURL(cdnPrefix, release.TagName)
-		mainLog.Error("Auto-update failed: %v", err)
-		mainLog.Warn("Current version is outdated, please download the latest version manually:")
-		mainLog.Warn("%s", manualURL)
-		fmt.Println(i18n.T("\nPress Enter to exit..."))
-		fmt.Scanln()
+	err = updateWithRetry(
+		func() ([]updateSource, error) { return performUpdateAll(sources, release.TagName, sortedAssets) },
+		func(tried []updateSource, err error) {
+			taskbar.Error()
+			mainLog.Error("Auto-update failed: %v", err)
+			mainLog.Warn("Current version is outdated, please download the latest version manually:")
+			// 列下载阶段请求过的来源的页面，按请求顺序；一个都没请求过（下载开始前即失败）时列全部来源。
+			if len(tried) == 0 {
+				tried = sources
+			}
+			for _, src := range tried {
+				mainLog.Warn("%s", releasePageURL(src.Prefix, release.TagName))
+			}
+		},
+		func() bool {
+			if !askUpdateRetry() {
+				return false
+			}
+			mainLog.Info("Retrying update...")
+			taskbar.Progress(0) // 任务栏从失败的红色回到普通进度
+			return true
+		},
+	)
+	if err != nil {
+		// 下载阶段的失败已在 askUpdateRetry 里选择了退出；放置阶段的失败不询问，照旧等回车。
+		var pe *placeError
+		if errors.As(err, &pe) {
+			fmt.Println(i18n.T("\nPress Enter to exit..."))
+			fmt.Scanln()
+		}
 		os.Exit(1)
 	}
 
@@ -719,101 +731,87 @@ func sendHeartbeat() {
 	mainLog.Detail("Online heartbeat sent")
 }
 
-func performUpdateAll(cdnPrefix, tagName string, assets []struct {
-	Name   string `json:"name"`
-	Size   int64  `json:"size"`
-	Digest string `json:"digest"`
-}) error {
+// placeError 标记放置阶段（改名备份、替换、覆盖）的失败。此时可能已替换了部分文件，且是本地错误，重来多半
+// 无效，不提供重试（设计 §4.9）。
+type placeError struct{ err error }
+
+func (e *placeError) Error() string { return e.err.Error() }
+func (e *placeError) Unwrap() error { return e.err }
+
+// updateWithRetry 执行 perform；失败时先 report（报错误与页面），下载阶段的失败（非 *placeError）且 ask 返回 true
+// 时重来，否则返回该错误。成功返回 nil。设计 §4.9（#216）。
+//
+// 每次重来都是完整的一遍 perform：重新测速、重新允许一次换源。不自动重来，由用户选择。
+func updateWithRetry(perform func() ([]updateSource, error), report func([]updateSource, error), ask func() bool) error {
+	for {
+		tried, err := perform()
+		if err == nil {
+			return nil
+		}
+		report(tried, err)
+		var pe *placeError
+		if errors.As(err, &pe) || !ask() {
+			return err
+		}
+	}
+}
+
+// performUpdateAll 分两段更新（设计 §4.7，#214）：先由 fetchAssets 把全部附件下载为 exe 目录下的 .new 并核对，
+// 全部成功后再按 assets 的顺序逐个放置。下载阶段的错误原样返回，放置阶段的错误包成 *placeError；放置失败时
+// 删除尚未放置的 .new，已放置的不回滚。tried 见 fetchAssets。
+func performUpdateAll(sources []updateSource, tagName string, assets []updateAsset) (tried []updateSource, err error) {
 	exePath, err := os.Executable()
 	if err != nil {
-		return i18n.Errorf("failed to get program path: %v", err)
+		return nil, i18n.Errorf("failed to get program path: %v", err)
 	}
 	exeDir := filepath.Dir(exePath)
 	exeBase := filepath.Base(exePath)
-	client := &http.Client{Timeout: 5 * time.Minute}
 
+	// 同一安装目录的更新串行（acquireUpdateLock）。锁覆盖下载与放置两段、返回时释放：失败后的询问与 restartSelf
+	// 都在锁外，一个进程停在提示上不会卡住另一个。取不到锁即不更新，不碰任何 .new；这属下载阶段的失败，可按 R 重试。
+	release, err := acquireUpdateLock(exeDir)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	tmpPaths, tried, err := fetchAssets(updateHTTPClient(), updateFetchParams, sources, tagName, assets, exeDir)
+	if err != nil {
+		return tried, err
+	}
+
+	placed := 0
+	defer func() {
+		for _, p := range tmpPaths[placed:] {
+			os.Remove(p)
+		}
+	}()
 	for i, asset := range assets {
-		downloadURL := cdnPrefix + tagName + "/" + asset.Name
+		tmpPath := tmpPaths[i]
 		targetPath := filepath.Join(exeDir, asset.Name)
 		isExe := strings.EqualFold(asset.Name, exeBase) ||
 			strings.HasSuffix(strings.ToLower(asset.Name), ".exe")
 
-		mainLog.Info("[%d/%d] %s", i+1, len(assets), asset.Name)
-		mainLog.Info("Downloading: %s", downloadURL)
-
-		tmpPath := targetPath + ".new"
-		if err := downloadFile(client, downloadURL, tmpPath, asset.Size, asset.Digest); err != nil {
-			return i18n.Errorf("failed to download %s: %v", asset.Name, err)
-		}
-
 		if isExe {
 			oldPath := updateBackupPath(exePath)
 			if err := os.Rename(exePath, oldPath); err != nil {
-				os.Remove(tmpPath)
-				return i18n.Errorf("failed to replace %s (rename): %v", asset.Name, err)
+				return tried, &placeError{i18n.Errorf("failed to replace %s (rename): %v", asset.Name, err)}
 			}
 			if err := renameWithRetry(tmpPath, exePath); err != nil {
 				os.Rename(oldPath, exePath)
-				return i18n.Errorf("failed to replace %s: %v", asset.Name, err)
+				return tried, &placeError{i18n.Errorf("failed to replace %s: %v", asset.Name, err)}
 			}
 			mainLog.Success("Replaced: %s", asset.Name)
 		} else {
 			os.Remove(targetPath)
 			if err := renameWithRetry(tmpPath, targetPath); err != nil {
-				os.Remove(tmpPath)
-				return i18n.Errorf("failed to place %s: %v", asset.Name, err)
+				return tried, &placeError{i18n.Errorf("failed to place %s: %v", asset.Name, err)}
 			}
 			mainLog.Success("Updated: %s", asset.Name)
 		}
+		placed++
 	}
-	return nil
-}
-
-func downloadFile(client *http.Client, url, destPath string, expectedSize int64, expectedDigest string) error {
-	resp, err := client.Get(url)
-	if err != nil {
-		return i18n.Errorf("connection failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return i18n.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	totalSize := resp.ContentLength
-	if totalSize <= 0 {
-		totalSize = expectedSize
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return i18n.Errorf("failed to create file: %v", err)
-	}
-
-	hasher := sha256.New()
-	pr := &progressWriter{total: totalSize}
-	if totalSize > 0 {
-		taskbar.Progress(0) // 每个文件从 0 重新起跑（文件数不固定，逐个跑满进度条）
-	}
-	written, err := io.Copy(out, io.TeeReader(resp.Body, io.MultiWriter(hasher, pr)))
-	out.Sync()
-	out.Close()
-	if err != nil {
-		os.Remove(destPath)
-		return i18n.Errorf("download interrupted: %v", err)
-	}
-
-	if expectedDigest != "" {
-		actualHash := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
-		if actualHash != expectedDigest {
-			os.Remove(destPath)
-			return i18n.Errorf("SHA256 verification failed: expected %s, got %s", expectedDigest, actualHash)
-		}
-		mainLog.Success("SHA256 verification succeeded")
-	}
-
-	mainLog.Success("Download complete (%.1f MB)", float64(written)/1024/1024)
-	return nil
+	return tried, nil
 }
 
 func renameWithRetry(src, dst string) error {
@@ -829,10 +827,13 @@ func renameWithRetry(src, dst string) error {
 	return err
 }
 
+// progressWriter 以 \r 原地刷新下载进度，不换行。
 type progressWriter struct {
+	out     io.Writer
 	total   int64
 	written int64
 	lastPct int
+	printed bool // 当前行是进度行，尚未换行
 }
 
 func (pw *progressWriter) Write(p []byte) (int, error) {
@@ -841,13 +842,22 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	if pw.total > 0 {
 		pct := int(pw.written * 100 / pw.total)
 		if pct != pw.lastPct {
-			fmt.Printf(i18n.T("\r[*] Download: %d%% (%.1f/%.1f MB)"), pct,
+			fmt.Fprintf(pw.out, i18n.T("\r[*] Download: %d%% (%.1f/%.1f MB)"), pct,
 				float64(pw.written)/1024/1024, float64(pw.total)/1024/1024)
 			taskbar.Progress(pct)
 			pw.lastPct = pct
+			pw.printed = true
 		}
 	}
 	return n, nil
+}
+
+// endLine 在打印过进度之后换行，使随后的日志不接在进度行末尾。
+func (pw *progressWriter) endLine() {
+	if pw.printed {
+		fmt.Fprintln(pw.out)
+		pw.printed = false
+	}
 }
 
 // cleanupOldExe 删除以前的更新留下的旧 exe（范围见 removeUpdateBackups），失败不报。
@@ -1030,44 +1040,6 @@ func releasePageURL(downloadPrefix, tagName string) string {
 		return downloadPrefix + tagName + "/"
 	}
 	return base + "/releases/tag/" + tagName
-}
-
-func pickFastestCDNPrefix(globalPrefix, chinaPrefix, tagName, testFile string) string {
-	globalURL := globalPrefix + tagName + "/" + testFile
-
-	mainLog.Info("Testing GitHub CDN download speed...")
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	start := time.Now()
-	resp, err := client.Get(globalURL)
-	if err != nil {
-		mainLog.Info("GitHub CDN connection failed, using China mirror")
-		return chinaPrefix
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		mainLog.Info("GitHub CDN returned %d, using China mirror", resp.StatusCode)
-		return chinaPrefix
-	}
-
-	buf := make([]byte, 32*1024)
-	n, err := io.ReadAtLeast(resp.Body, buf, 1024)
-	elapsed := time.Since(start).Seconds()
-
-	if err != nil || elapsed == 0 {
-		mainLog.Info("GitHub CDN download test failed, using China mirror")
-		return chinaPrefix
-	}
-
-	speedKBs := float64(n) / elapsed / 1024
-	if speedKBs < 10 {
-		mainLog.Info("GitHub CDN speed %.1f KB/s < 10 KB/s, using China mirror", speedKBs)
-		return chinaPrefix
-	}
-
-	mainLog.Info("GitHub CDN available (%.0f KB/s)", speedKBs)
-	return globalPrefix
 }
 
 const (

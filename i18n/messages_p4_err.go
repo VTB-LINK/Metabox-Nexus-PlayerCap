@@ -40,7 +40,7 @@ var p4ErrMessages = map[string]string{
 	"post-patch verification read failed (rollback attempted): %w":                                                  "patch 后校验读取失败（已尝试回滚）: %w",
 	"post-patch read verification failed: %w":                                                                       "patch 后读取验证失败: %w",
 	"patch timed out (no result within 30s)":                                                                        "patch 超时（30s 内未收到结果）",
-	"failed to download %s: %v":                                                                                     "下载 %s 失败: %v",
+	"failed to download %s: %w":                                                                                     "下载 %s 失败：%w",
 	"download interrupted: %v":                                                                                      "下载中断: %v",
 	"session already closed":                                                                                        "会话已关闭",
 	"failed to write CDP request: %w":                                                                               "写 CDP 请求失败: %w",
@@ -263,7 +263,6 @@ var p4ErrMessages = map[string]string{
 	"search API parse error: %v":                    "搜索 API 解析失败: %v",
 	"no results for '%s'":                           "'%s' 没有搜索结果",
 	"no duration match for '%s' within ±5%% (%dms)": "'%s' 的搜索结果里没有时长在 ±5%% 以内的（目标 %dms）",
-	"failed to list processes: %v":                  "列举进程失败: %v",
 	"failed to restart process: %v":                 "重启进程失败: %v",
 
 	// —— kugou：CDP、歌词与曲库接口、watchdog 的补丁读写（issue #144）——
@@ -399,4 +398,7 @@ var p4ErrMessages = map[string]string{
 	// —— player/kugou/assoc：后台读取者的停用原因（issue #205）——
 	"%w; gave up after %d attempts":                "%w；尝试 %d 次后放弃",
 	"internal error in the local lyric reader: %v": "本地歌词读取者内部错误：%v",
+	// —— player/launch：商店版播放器的统一前置门禁（issue #212）——
+	"the player's executable path could not be read":         "读不到播放器的映像路径",
+	"%s is under WindowsApps (Microsoft Store installation)": "%s 位于 WindowsApps 下（微软商店版）",
 }

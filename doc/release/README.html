@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PlayerCap 使用说明</title>
+<link rel="icon" type="image/svg+xml" href='data:image/svg+xml,%3C?xml version="1.0" encoding="UTF-8"?%3E%3Csvg id="_%E5%9B%BE%E5%B1%82_2" data-name="%E5%9B%BE%E5%B1%82 2" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 196.37 196.37"%3E%3Cdefs%3E%3Cstyle%3E .cls-1 { fill: %23282828; } .cls-2 { clip-path: url(%23clippath); } %3C/style%3E%3CclipPath id="clippath"%3E%3Cpath class="cls-1" d="m107.59,64.1v-5.01c0-1.08-.74-2.03-1.79-2.3l-70.87-17.93c-2.65-.67-4.14,2.93-1.8,4.33l48.21,28.77c.54.32,1.19.42,1.81.26l22.66-5.84c1.05-.27,1.78-1.21,1.78-2.29Zm6.85-10.34l19.8,5.01c.38.1.79.1,1.17,0l41.47-10.69c2.04-.53,2.43-3.25.62-4.33L116.24,7.19c-1.58-.94-3.58.2-3.58,2.04v42.25c0,1.09.74,2.03,1.79,2.3Zm67.78,32.85l-41.8,47.45c-.98,1.11-.71,2.84.56,3.6l41.8,24.94c1.58.94,3.58-.2,3.58-2.04v-72.39c0-2.18-2.7-3.21-4.15-1.57Zm-18.9,6.79l-44.85,26.76c-1.54.92-1.54,3.15,0,4.07l13.95,8.32c.98.58,2.24.39,2.99-.47l30.9-35.08c1.79-2.03-.67-4.99-2.99-3.6Zm-35.06,42.56l-19.44-11.6c-.09-.06-.18-.12-.26-.19-.1-.08-.17-.13-.23-.19-.09-.09-.16-.18-.23-.28l-.17-.24c-.07-.11-.12-.24-.16-.36-.04-.08-.07-.16-.09-.24-.06-.21-.09-.44-.09-.66v-47.98c0-1.55-1.46-2.68-2.96-2.29l-18.51,4.77c-1.05.27-1.78,1.21-1.78,2.29v104.82c0,2.18,2.7,3.21,4.15,1.57l40.34-45.81c.98-1.11.71-2.84-.56-3.6Zm49.25,29.39l-40.68-24.28c-.98-.59-2.24-.39-2.99.47l-39.59,44.96c-1.54,1.75.11,4.44,2.37,3.86l80.28-20.69c2.04-.53,2.43-3.25.62-4.33Zm5.9-113.74l-29.35,7.57c-2.38.61-2.37,3.99.01,4.59l29.35,7.42c1.5.38,2.95-.75,2.95-2.3v-14.99c0-1.55-1.46-2.68-2.96-2.29Zm-75.81-2.63V6.91c0-1.55-1.46-2.68-2.96-2.29L22.26,25.86c-2.38.61-2.37,3.99.01,4.59l82.37,20.83c1.5.38,2.95-.75,2.95-2.3Zm8.02,14.88l6.15-1.58c.75-.19.75-1.26,0-1.45l-6.16-1.56c-1.5-.38-2.95.75-2.95,2.3s1.46,2.68,2.96,2.29Zm.62,51.74l61.21-36.52c1.81-1.08,1.41-3.82-.63-4.33l-41.38-10.46c-.38-.1-.79-.1-1.17,0l-19.82,5.11c-1.05.27-1.78,1.21-1.78,2.29v41.87c0,1.84,2,2.98,3.58,2.04Z"/%3E%3C/clipPath%3E%3C/defs%3E%3Cg id="_%E5%9B%BE%E5%B1%82_1-2" data-name="%E5%9B%BE%E5%B1%82 1"%3E%3Cg%3E%3Cpath class="cls-1" d="m107.59,64.1v-5.01c0-1.08-.74-2.03-1.79-2.3l-70.87-17.93c-2.65-.67-4.14,2.93-1.8,4.33l48.21,28.77c.54.32,1.19.42,1.81.26l22.66-5.84c1.05-.27,1.78-1.21,1.78-2.29Zm6.85-10.34l19.8,5.01c.38.1.79.1,1.17,0l41.47-10.69c2.04-.53,2.43-3.25.62-4.33L116.24,7.19c-1.58-.94-3.58.2-3.58,2.04v42.25c0,1.09.74,2.03,1.79,2.3Zm67.78,32.85l-41.8,47.45c-.98,1.11-.71,2.84.56,3.6l41.8,24.94c1.58.94,3.58-.2,3.58-2.04v-72.39c0-2.18-2.7-3.21-4.15-1.57Zm-18.9,6.79l-44.85,26.76c-1.54.92-1.54,3.15,0,4.07l13.95,8.32c.98.58,2.24.39,2.99-.47l30.9-35.08c1.79-2.03-.67-4.99-2.99-3.6Zm-35.06,42.56l-19.44-11.6c-.09-.06-.18-.12-.26-.19-.1-.08-.17-.13-.23-.19-.09-.09-.16-.18-.23-.28l-.17-.24c-.07-.11-.12-.24-.16-.36-.04-.08-.07-.16-.09-.24-.06-.21-.09-.44-.09-.66v-47.98c0-1.55-1.46-2.68-2.96-2.29l-18.51,4.77c-1.05.27-1.78,1.21-1.78,2.29v104.82c0,2.18,2.7,3.21,4.15,1.57l40.34-45.81c.98-1.11.71-2.84-.56-3.6Zm49.25,29.39l-40.68-24.28c-.98-.59-2.24-.39-2.99.47l-39.59,44.96c-1.54,1.75.11,4.44,2.37,3.86l80.28-20.69c2.04-.53,2.43-3.25.62-4.33Zm5.9-113.74l-29.35,7.57c-2.38.61-2.37,3.99.01,4.59l29.35,7.42c1.5.38,2.95-.75,2.95-2.3v-14.99c0-1.55-1.46-2.68-2.96-2.29Zm-75.81-2.63V6.91c0-1.55-1.46-2.68-2.96-2.29L22.26,25.86c-2.38.61-2.37,3.99.01,4.59l82.37,20.83c1.5.38,2.95-.75,2.95-2.3Zm8.02,14.88l6.15-1.58c.75-.19.75-1.26,0-1.45l-6.16-1.56c-1.5-.38-2.95.75-2.95,2.3s1.46,2.68,2.96,2.29Zm.62,51.74l61.21-36.52c1.81-1.08,1.41-3.82-.63-4.33l-41.38-10.46c-.38-.1-.79-.1-1.17,0l-19.82,5.11c-1.05.27-1.78,1.21-1.78,2.29v41.87c0,1.84,2,2.98,3.58,2.04Z"/%3E%3Cg class="cls-2"%3E%3Crect class="cls-1" width="196.37" height="196.37" transform="translate(196.37 196.37) rotate(180)"/%3E%3C/g%3E%3C/g%3E%3Cpath class="cls-1" d="m78.12,75.95L9.17,34.8c-1.58-.94-3.58.2-3.58,2.03v110.19c0,.83.44,1.61,1.16,2.03l68.96,41.15c1.58.94,3.58-.2,3.58-2.03v-110.19c0-.83-.44-1.61-1.16-2.03Z"/%3E%3C/g%3E%3C/svg%3E' media="(prefers-color-scheme: light)">
+<link rel="icon" type="image/svg+xml" href='data:image/svg+xml,%3C?xml version="1.0" encoding="UTF-8"?%3E%3Csvg id="_%E5%9B%BE%E5%B1%82_2" data-name="%E5%9B%BE%E5%B1%82 2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180.79 186"%3E%3Cdefs%3E%3Cstyle%3E .cls-1 { fill: %23fff; } %3C/style%3E%3C/defs%3E%3Cg id="_%E5%9B%BE%E5%B1%82_1-2" data-name="%E5%9B%BE%E5%B1%82 1"%3E%3Cg%3E%3Cpath class="cls-1" d="m77.58,67.7l22.66-5.84c1.05-.27,1.78-1.21,1.78-2.29v-5.01c0-1.08-.74-2.03-1.79-2.3L29.35,34.33c-2.65-.67-4.14,2.93-1.8,4.33l48.22,28.77c.54.32,1.19.42,1.81.26Z"/%3E%3Cpath class="cls-1" d="m107.07,4.68v42.25c0,1.09.74,2.03,1.79,2.3l19.8,5.01c.38.1.79.1,1.17,0l41.47-10.69c2.04-.53,2.43-3.25.62-4.33L110.66,2.64c-1.58-.94-3.58.2-3.58,2.04Z"/%3E%3Cpath class="cls-1" d="m180.79,156.03v-72.39c0-2.18-2.7-3.21-4.15-1.57l-41.8,47.45c-.98,1.11-.71,2.84.56,3.6l41.8,24.94c1.58.94,3.58-.2,3.58-2.04Z"/%3E%3Cpath class="cls-1" d="m112.89,119.7l13.95,8.32c.98.58,2.24.39,2.99-.47l30.9-35.08c1.79-2.03-.67-4.99-2.99-3.6l-44.85,26.76c-1.54.92-1.54,3.15,0,4.07Z"/%3E%3Cpath class="cls-1" d="m103.24,119.83c-.09-.06-.18-.12-.26-.19-.1-.08-.17-.13-.23-.19-.09-.09-.16-.18-.23-.28l-.17-.24c-.07-.11-.12-.24-.16-.36-.04-.08-.07-.16-.09-.24-.06-.21-.09-.44-.09-.66v-47.98c0-1.55-1.46-2.68-2.96-2.29l-18.51,4.77c-1.05.27-1.78,1.21-1.78,2.29v104.82c0,2.18,2.7,3.21,4.15,1.57l40.34-45.81c.98-1.11.71-2.84-.56-3.6l-19.44-11.6Z"/%3E%3Cpath class="cls-1" d="m171.93,160.82l-40.68-24.28c-.98-.59-2.24-.39-2.99.47l-39.59,44.96c-1.54,1.75.11,4.44,2.37,3.86l80.28-20.69c2.04-.53,2.43-3.25.62-4.33Z"/%3E%3Cpath class="cls-1" d="m180.79,64.36v-14.99c0-1.55-1.46-2.68-2.96-2.29l-29.35,7.57c-2.38.61-2.37,3.99.01,4.59l29.35,7.42c1.5.38,2.95-.75,2.95-2.3Z"/%3E%3Cpath class="cls-1" d="m102.01,44.45V2.37c0-1.55-1.46-2.68-2.96-2.29L16.68,21.32c-2.38.61-2.37,3.99.01,4.59l82.37,20.83c1.5.38,2.95-.75,2.95-2.3Z"/%3E%3Cpath class="cls-1" d="m107.07,57.03h0c0,1.55,1.46,2.68,2.96,2.29l6.15-1.58c.75-.19.75-1.26,0-1.45l-6.16-1.56c-1.5-.38-2.95.75-2.95,2.3Z"/%3E%3Cpath class="cls-1" d="m128.67,59.75l-19.82,5.11c-1.05.27-1.78,1.21-1.78,2.29v41.87c0,1.84,2,2.98,3.58,2.04l61.21-36.52c1.81-1.08,1.41-3.82-.63-4.33l-41.38-10.46c-.38-.1-.79-.1-1.17,0Z"/%3E%3Cpath class="cls-1" d="m72.54,71.41L3.58,30.25c-1.58-.94-3.58.2-3.58,2.03v110.19c0,.83.44,1.61,1.16,2.03l68.96,41.15c1.58.94,3.58-.2,3.58-2.03v-110.19c0-.83-.44-1.61-1.16-2.03Z"/%3E%3C/g%3E%3C/g%3E%3C/svg%3E' media="(prefers-color-scheme: dark)">
+<style>
+:root{color-scheme:light dark;--bg:#F2EFE9;--panel:#FFFFFF;--ink:#111111;--sub:#5E5A53;--line:#111111;--faint:#D9D5CC;--accent:#DA291C;--logo:#282828;
+font-family:system-ui,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;font-size:14px;line-height:1.5;background:var(--bg);color:var(--ink)}
+@media (prefers-color-scheme:dark){:root{--bg:#1B1B1C;--panel:#242425;--ink:#E4E1DA;--sub:#A2A2A4;--line:#545457;--faint:#343436;--logo:#FFFFFF}}
+:root[lang="en"] [data-lang="zh"],:root:not([lang="en"]) [data-lang="en"]{display:none}
+*{box-sizing:border-box}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+body{margin:0}
+header{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:12px;height:65px;padding:0 32px;border-bottom:1px solid var(--line);background:var(--bg);white-space:nowrap}
+.brand{display:flex;flex:1;align-items:center;gap:12px;min-width:0;color:inherit;text-decoration:none}
+.logo{display:block;flex:none;color:var(--logo)}
+.brand-title{display:flex;flex-direction:column;min-width:0;font-weight:700;line-height:1.25}
+.brand-title>span{overflow:hidden;text-overflow:ellipsis}
+.brand-sub{color:var(--sub);font-size:12px;font-weight:400}
+.menu{position:relative}
+.pop-btn{display:inline-flex;align-items:center;gap:10px;height:36px;padding:0 12px;border:1px solid var(--line);background:none;color:inherit;font:inherit;font-size:12px;cursor:pointer}
+.pop-chev{flex:none}
+[aria-expanded="true"]>.pop-chev{transform:rotate(180deg)}
+.pop-panel{position:absolute;top:calc(100% + 4px);right:0;display:flex;flex-direction:column;padding:8px 0;border:1px solid var(--line);background:var(--panel);font-size:12px}
+.pop-panel[hidden]{display:none}
+.radio{display:flex;align-items:center;gap:10px;height:30px;padding:0 16px;white-space:nowrap;cursor:pointer;outline:none}
+.radio:hover,.radio:focus-visible{background:var(--bg)}
+.dot{flex:none;width:16px;height:16px;border:1px solid var(--sub);border-radius:50%}
+[aria-checked="true"]>.dot{border-color:var(--accent);background:radial-gradient(circle,var(--accent) 0 4px,transparent 4.5px)}
+main{max-width:960px;margin:0 auto;padding:24px 32px 64px}
+h1{margin:16px 0 8px;font-size:24px;line-height:1.3}
+h2{margin:40px 0 12px;padding-top:12px;border-top:1px solid var(--line);font-size:18px}
+h3,summary{margin:24px 0 8px;font-size:15px;font-weight:600}
+summary{cursor:pointer}
+summary:hover{text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:2px}
+p,ul,ol,dl{margin:6px 0}
+li+li{margin-top:2px}
+dt{margin-top:12px;font-weight:600}
+dd{margin:4px 0 0 20px}
+a{color:inherit;text-decoration-color:var(--accent);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+code{padding:0 4px;border:1px solid var(--faint);background:var(--panel);font-family:Consolas,"Microsoft YaHei",monospace;font-size:13px}
+.sub{color:var(--sub)}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;background:var(--panel)}
+th,td{padding:6px 8px;border:1px solid var(--line);text-align:center}
+th{font-size:12px;font-weight:600}
+tbody th{text-align:left;white-space:nowrap}
+#qq-versions{display:flex;flex-wrap:wrap;gap:6px;padding:0;list-style:none}
+#qq-versions li{margin:0;padding:2px 8px;border:1px solid var(--line);background:var(--panel);font-family:Consolas,monospace}
+@media (max-width:600px){header{padding:0 16px}main{padding:16px}}
+</style>
+<script>
+(function(){
+  var KEY='playercap-readme-lang',NAMES={zh:'简体中文',en:'English'},root=document.documentElement,lang=null;
+  try{lang=localStorage.getItem(KEY)}catch(e){}
+  if(!NAMES[lang]){
+    var path='';
+    try{path=decodeURIComponent(location.pathname)}catch(e){}
+    var nav=(navigator.languages&&navigator.languages[0])||navigator.language||'';
+    lang=path.indexOf('使用说明')>=0||/^zh/i.test(nav)?'zh':'en';
+  }
+  function apply(){
+    root.lang=lang==='en'?'en':'zh-CN';
+    document.title=lang==='en'?'PlayerCap User Guide':'PlayerCap 使用说明';
+  }
+  apply();
+  document.addEventListener('DOMContentLoaded',function(){
+    var btn=document.getElementById('lang-btn'),menu=document.getElementById('lang-menu'),items=[].slice.call(menu.children);
+    function sync(){
+      document.getElementById('lang-name').textContent=NAMES[lang];
+      items.forEach(function(it){it.setAttribute('aria-checked',String(it.dataset.value===lang))});
+    }
+    function open(){
+      menu.hidden=false;btn.setAttribute('aria-expanded','true');
+      items.filter(function(it){return it.dataset.value===lang})[0].focus();
+    }
+    function close(refocus){
+      if(menu.hidden)return;
+      menu.hidden=true;btn.setAttribute('aria-expanded','false');
+      if(refocus)btn.focus();
+    }
+    function pick(it){
+      lang=it.dataset.value;apply();sync();close(true);
+      try{localStorage.setItem(KEY,lang)}catch(e){}
+    }
+    btn.onclick=function(){menu.hidden?open():close(false)};
+    btn.onkeydown=function(e){if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();open()}};
+    menu.onclick=function(e){var it=e.target.closest('[role="menuitemradio"]');if(it)pick(it)};
+    menu.onkeydown=function(e){
+      var i=items.indexOf(document.activeElement);
+      if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();items[(i+(e.key==='ArrowDown'?1:items.length-1))%items.length].focus()}
+      else if(e.key==='Enter'||e.key===' '){e.preventDefault();if(i>=0)pick(items[i])}
+      else if(e.key==='Escape'){close(true)}
+      else if(e.key==='Tab'){close(false)}
+    };
+    document.addEventListener('click',function(e){if(!btn.parentNode.contains(e.target))close(false)});
+    sync();
+  });
+})();
+</script>
+</head>
+<body>
+<header>
+<a class="brand" href="#top" aria-label="VTB-TOOLS Metabox Nexus PlayerCap">
+<svg class="logo" width="28" height="28" viewBox="0 0 196.37 196.37" fill="currentColor" aria-hidden="true"><path d="m107.59,64.1v-5.01c0-1.08-.74-2.03-1.79-2.3l-70.87-17.93c-2.65-.67-4.14,2.93-1.8,4.33l48.21,28.77c.54.32,1.19.42,1.81.26l22.66-5.84c1.05-.27,1.78-1.21,1.78-2.29Zm6.85-10.34l19.8,5.01c.38.1.79.1,1.17,0l41.47-10.69c2.04-.53,2.43-3.25.62-4.33L116.24,7.19c-1.58-.94-3.58.2-3.58,2.04v42.25c0,1.09.74,2.03,1.79,2.3Zm67.78,32.85l-41.8,47.45c-.98,1.11-.71,2.84.56,3.6l41.8,24.94c1.58.94,3.58-.2,3.58-2.04v-72.39c0-2.18-2.7-3.21-4.15-1.57Zm-18.9,6.79l-44.85,26.76c-1.54.92-1.54,3.15,0,4.07l13.95,8.32c.98.58,2.24.39,2.99-.47l30.9-35.08c1.79-2.03-.67-4.99-2.99-3.6Zm-35.06,42.56l-19.44-11.6c-.09-.06-.18-.12-.26-.19-.1-.08-.17-.13-.23-.19-.09-.09-.16-.18-.23-.28l-.17-.24c-.07-.11-.12-.24-.16-.36-.04-.08-.07-.16-.09-.24-.06-.21-.09-.44-.09-.66v-47.98c0-1.55-1.46-2.68-2.96-2.29l-18.51,4.77c-1.05.27-1.78,1.21-1.78,2.29v104.82c0,2.18,2.7,3.21,4.15,1.57l40.34-45.81c.98-1.11.71-2.84-.56-3.6Zm49.25,29.39l-40.68-24.28c-.98-.59-2.24-.39-2.99.47l-39.59,44.96c-1.54,1.75.11,4.44,2.37,3.86l80.28-20.69c2.04-.53,2.43-3.25.62-4.33Zm5.9-113.74l-29.35,7.57c-2.38.61-2.37,3.99.01,4.59l29.35,7.42c1.5.38,2.95-.75,2.95-2.3v-14.99c0-1.55-1.46-2.68-2.96-2.29Zm-75.81-2.63V6.91c0-1.55-1.46-2.68-2.96-2.29L22.26,25.86c-2.38.61-2.37,3.99.01,4.59l82.37,20.83c1.5.38,2.95-.75,2.95-2.3Zm8.02,14.88l6.15-1.58c.75-.19.75-1.26,0-1.45l-6.16-1.56c-1.5-.38-2.95.75-2.95,2.3s1.46,2.68,2.96,2.29Zm.62,51.74l61.21-36.52c1.81-1.08,1.41-3.82-.63-4.33l-41.38-10.46c-.38-.1-.79-.1-1.17,0l-19.82,5.11c-1.05.27-1.78,1.21-1.78,2.29v41.87c0,1.84,2,2.98,3.58,2.04Z"/><path d="m78.12,75.95L9.17,34.8c-1.58-.94-3.58.2-3.58,2.03v110.19c0,.83.44,1.61,1.16,2.03l68.96,41.15c1.58.94,3.58-.2,3.58-2.03v-110.19c0-.83-.44-1.61-1.16-2.03Z"/></svg>
+<div class="brand-title"><span><span data-lang="zh">Nexus PlayerCap 使用说明</span><span data-lang="en">Nexus PlayerCap User Guide</span></span><span class="brand-sub">By VTB-TOOLS Metabox</span></div>
+</a>
+<div class="menu">
+<button id="lang-btn" class="pop-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="lang-menu" aria-label="语言 / Language" title="语言 / Language">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3.5 4 3.5 14 0 18M12 3c-3.5 4-3.5 14 0 18"/></svg>
+<span id="lang-name">简体中文</span>
+<svg class="pop-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+</button>
+<div id="lang-menu" class="pop-panel" role="menu" aria-label="语言 / Language" hidden>
+<div class="radio" role="menuitemradio" aria-checked="true" tabindex="-1" data-value="zh" lang="zh-CN"><span class="dot"></span>简体中文</div>
+<div class="radio" role="menuitemradio" aria-checked="false" tabindex="-1" data-value="en" lang="en"><span class="dot"></span>English</div>
+</div>
+</div>
+</header>
+<main>
+
+<section id="top">
+<div data-lang="zh">
+<h1>VTB-TOOLS Metabox Nexus PlayerCap 使用说明</h1>
+<p>本程序从本机运行的音乐播放器读取当前播放的歌词、歌曲信息与音频波形，并可镜像网易云音乐的「特效歌词」画面，供 OBS 中的歌词页面等使用。</p>
+<ol>
+<li><a href="#requirements">系统要求</a></li>
+<li><a href="#start">开始使用</a></li>
+<li><a href="#versions">支持的播放器与版本</a></li>
+<li><a href="#capabilities">各播放器的支持情况</a></li>
+<li><a href="#faq">常见问题</a></li>
+<li><a href="#downloads">下载地址</a></li>
+</ol>
+</div>
+<div data-lang="en">
+<h1>VTB-TOOLS Metabox Nexus PlayerCap User Guide</h1>
+<p>This program reads the lyrics, song information and audio waveform of the track currently playing in music players on this PC, and can mirror the "lyric effects" view of NetEase Cloud Music, for use by lyric pages in OBS and similar tools.</p>
+<ol>
+<li><a href="#requirements">System requirements</a></li>
+<li><a href="#start">Getting started</a></li>
+<li><a href="#versions">Supported players and versions</a></li>
+<li><a href="#capabilities">What each player provides</a></li>
+<li><a href="#faq">FAQ</a></li>
+<li><a href="#downloads">Downloads</a></li>
+</ol>
+</div>
+</section>
+
+<section id="requirements">
+<div data-lang="zh">
+<h2>一、系统要求</h2>
+<ul>
+<li>Windows 10 或 Windows 11，64 位。</li>
+<li>音频波形需要 Windows 10 2004 版（内部版本 19041）及以上。更低版本的系统上歌词功能不受影响，但不提供音频波形。</li>
+</ul>
+</div>
+<div data-lang="en">
+<h2>1. System requirements</h2>
+<ul>
+<li>Windows 10 or Windows 11, 64-bit.</li>
+<li>The audio waveform requires Windows 10 version 2004 (build 19041) or later. On older systems lyrics are unaffected, but the audio waveform is not available.</li>
+</ul>
+</div>
+</section>
+
+<section id="start">
+<div data-lang="zh">
+<h2>二、开始使用</h2>
+<ol>
+<li>以管理员身份运行 <code>Metabox-Nexus-PlayerCap.exe</code>。读取播放器的内存需要管理员权限。</li>
+<li>启动播放器并正常播放。播放器的启动先后不限，本程序会自动连接；播放器退出后，本程序等待其重新启动。</li>
+<li>打开在线编辑器 <a href="https://playercap.cfg.vtb.tools/">https://playercap.cfg.vtb.tools/</a>，OBS 页面的设置由此开始。<br>在线编辑器可查看本程序的运行状态，为歌词、歌名/歌手、封面、波形、卡片、播放器等页面调整样式，并复制 OBS 浏览器源地址，填入 OBS 的浏览器源。</li>
+<li>随包附带的以下三个 html 文件用于跳转到线上页面，使用时需要联网：
+<ul>
+<li><code>lyric_page.html</code>：不带参数打开时进入在线编辑器；带参数时跳转到线上 v3 的同名页面。</li>
+<li><code>lyric_display.html</code>：歌词显示页，跳转到线上 v3 的同名页面。</li>
+<li><code>effect_display.html</code>：网易云音乐特效歌词镜像的显示页，跳转到线上 v3 的同名页面。</li>
+</ul>
+线上 v3 是 3.x 版页面的冻结副本，参数与 3.x 相同，地址中的参数原样传递。<br>OBS 的浏览器源既可指向这三个本地文件，也可直接填写线上地址。<br><code>README.html</code> 与 <code>使用说明.html</code> 即本说明，两者内容相同，无需联网即可打开。</li>
+<li>本程序默认在 8765 端口提供服务。</li>
+<li>首次运行时，本程序在其所在文件夹生成设置文件 <code>config.yml</code>，可用记事本打开修改。<br>各项含义见文件中的注释；修改后须重新启动本程序方可生效。</li>
+</ol>
+</div>
+<div data-lang="en">
+<h2>2. Getting started</h2>
+<ol>
+<li>Run <code>Metabox-Nexus-PlayerCap.exe</code> as administrator. Reading the players' memory requires administrator rights.</li>
+<li>Start the player and play music as usual. The player may be started before or after this program; this program connects to it automatically and, after the player exits, waits for it to be started again.</li>
+<li>Open the online editor at <a href="https://playercap.cfg.vtb.tools/">https://playercap.cfg.vtb.tools/</a>, the starting point for setting up OBS pages.<br>The editor shows this program's status, lets you adjust the style of pages such as lyrics, title/artist, cover, waveform, card and player, and provides an OBS browser source URL to copy into an OBS browser source.</li>
+<li>These three bundled HTML files redirect to online pages, so they need an internet connection:
+<ul>
+<li><code>lyric_page.html</code>: opened without parameters, it opens the online editor; with parameters, it redirects to the page of the same name in the online v3.</li>
+<li><code>lyric_display.html</code>: the lyric display page; redirects to the page of the same name in the online v3.</li>
+<li><code>effect_display.html</code>: the display page of the NetEase Cloud Music lyric effects mirror; redirects to the page of the same name in the online v3.</li>
+</ul>
+The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as 3.x, and the parameters in the address are passed on unchanged.<br>An OBS browser source can point to these three local files, or to the online address directly.<br><code>README.html</code> and <code>使用说明.html</code> are this guide; both have the same content and open without an internet connection.</li>
+<li>This program serves on port 8765 by default.</li>
+<li>On first run, this program creates a settings file, <code>config.yml</code>, in its folder. You can edit it with Notepad.<br>Each setting is explained in the comments in the file (written in Chinese); restart this program for changes to take effect.</li>
+</ol>
+</div>
+</section>
+
+<section id="versions">
+<div data-lang="zh">
+<h2>三、支持的播放器与版本</h2>
+<p class="sub">「版本不限定」指程序未对版本作判断，不代表所有版本均经过测试。</p>
+<ul>
+<li>全民K歌：版本不限定。</li>
+<li>网易云音乐：3.x 及以上的官网安装版。不支持低于 3 的版本与微软商店版。</li>
+<li>QQ 音乐：只支持下方列出的已收录版本，按版本号的前两段对照。
+<ul>
+<li>遇到未收录的版本时，本程序按最接近的已收录版本推测，读取结果可能有误。</li>
+<li>无法读取版本号时，按最新的已收录版本推测。</li>
+</ul>
+</li>
+<li>酷狗音乐：20.1.22.27795 及以上（64 位）。不支持 10.x。</li>
+<li>汽水音乐：版本不限定。</li>
+<li>Apple Music：版本不限定。</li>
+<li>Spotify：版本不限定（实测 1.3.6.1921），须为官网安装版，不支持微软商店版。</li>
+<li>酷我音乐：9.6.0.0（渠道后缀不限，实测 W1、UG1），须为官网安装版，不支持微软商店版。官网下载页 <a href="https://www.kuwo.cn/down">https://www.kuwo.cn/down</a> 现提供的即为 9.6.0.0。</li>
+</ul>
+</div>
+<div data-lang="en">
+<h2>3. Supported players and versions</h2>
+<p class="sub">"Any version" means this program does not check the version; it does not mean every version has been tested.</p>
+<ul>
+<li>WeSing (全民K歌): any version.</li>
+<li>NetEase Cloud Music (网易云音乐): 3.x or later, official installer version. Versions below 3 and the Microsoft Store version are not supported.</li>
+<li>QQ Music (QQ音乐): only the versions listed below, matched by the first two parts of the version number.
+<ul>
+<li>For an unlisted version, this program falls back to the closest listed version, and the data read may be incorrect.</li>
+<li>If the version number cannot be read, it falls back to the newest listed version.</li>
+</ul>
+</li>
+<li>KuGou Music (酷狗音乐): 20.1.22.27795 or later (64-bit). 10.x is not supported.</li>
+<li>Soda Music (汽水音乐): any version.</li>
+<li>Apple Music: any version.</li>
+<li>Spotify: any version (tested with 1.3.6.1921); official installer version only, the Microsoft Store version is not supported.</li>
+<li>Kuwo Music (酷我音乐): 9.6.0.0 (any channel suffix; tested with W1 and UG1); official installer version only, the Microsoft Store version is not supported. The official download page <a href="https://www.kuwo.cn/down">https://www.kuwo.cn/down</a> currently provides 9.6.0.0.</li>
+</ul>
+</div>
+<h3><span data-lang="zh">QQ 音乐已收录的版本</span><span data-lang="en">Supported QQ Music versions</span></h3>
+<ul id="qq-versions">
+<li>20.05</li>
+<li>21.81</li>
+<li>22.16</li>
+<li>22.22</li>
+<li>22.31</li>
+<li>22.41</li>
+<li>22.52</li>
+<li>22.60</li>
+<li>22.71</li>
+<li>22.76</li>
+<li>22.81</li>
+<li>22.82</li>
+</ul>
+</section>
+
+<section id="capabilities">
+<div data-lang="zh">
+<h2>四、各播放器的支持情况</h2>
+<p>「支持」指本程序能够获取；某首歌是否有逐字、翻译、音译歌词，还取决于平台是否提供。</p>
+<p>「本地文件」指播放本机音频文件时能否获取歌词。</p>
+<p>✔ 支持　⚠ 部分支持　🚫 不支持</p>
+</div>
+<div data-lang="en">
+<h2>4. What each player provides</h2>
+<p>"Supported" means this program can obtain it; whether a particular song has word-by-word lyrics, a translation or a romanization still depends on the platform.</p>
+<p>"Local files" means whether lyrics are available when the player plays an audio file stored on this PC.</p>
+<p>✔ supported · ⚠ partly supported · 🚫 not supported</p>
+</div>
+<div class="wrap">
+<table>
+<thead>
+<tr>
+<th><span data-lang="zh">播放器</span><span data-lang="en">Player</span></th>
+<th><span data-lang="zh">逐字歌词</span><span data-lang="en">Word-by-word lyrics</span></th>
+<th><span data-lang="zh">逐行歌词</span><span data-lang="en">Line-by-line lyrics</span></th>
+<th><span data-lang="zh">翻译歌词</span><span data-lang="en">Translation</span></th>
+<th><span data-lang="zh">音译歌词</span><span data-lang="en">Romanization</span></th>
+<th><span data-lang="zh">歌名</span><span data-lang="en">Title</span></th>
+<th><span data-lang="zh">歌手</span><span data-lang="en">Artist</span></th>
+<th><span data-lang="zh">封面</span><span data-lang="en">Cover</span></th>
+<th><span data-lang="zh">播放状态</span><span data-lang="en">Playback state</span></th>
+<th><span data-lang="zh">进度与跳转</span><span data-lang="en">Position and seeking</span></th>
+<th><span data-lang="zh">音频波形</span><span data-lang="en">Audio waveform</span></th>
+<th><span data-lang="zh">本地文件</span><span data-lang="en">Local files</span></th>
+</tr>
+</thead>
+<tbody>
+<tr><th><span data-lang="zh">全民K歌</span><span data-lang="en">WeSing</span></th><td>✔</td><td>✔</td><td>🚫</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
+<tr><th><span data-lang="zh">网易云音乐</span><span data-lang="en">NetEase Cloud Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
+<tr><th><span data-lang="zh">QQ 音乐</span><span data-lang="en">QQ Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
+<tr><th><span data-lang="zh">酷狗音乐</span><span data-lang="en">KuGou Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>⚠</td></tr>
+<tr><th><span data-lang="zh">汽水音乐</span><span data-lang="en">Soda Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>⚠</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
+<tr><th>Apple Music</th><td>⚠</td><td>⚠</td><td>⚠</td><td>🚫</td><td>✔</td><td>✔</td><td>⚠</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
+<tr><th>Spotify</th><td>🚫</td><td>✔</td><td>🚫</td><td>🚫</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
+<tr><th><span data-lang="zh">酷我音乐</span><span data-lang="en">Kuwo Music</span></th><td>⚠</td><td>✔</td><td>⚠</td><td>🚫</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>⚠</td><td>✔</td><td>🚫</td></tr>
+</tbody>
+</table>
+</div>
+<div data-lang="zh">
+<details>
+<summary>⚠ 与 🚫 各项的原因</summary>
+<p>本地文件标 🚫 的播放器暂不支持该项，下文不再逐一列出。</p>
+<dl>
+<dt>全民K歌</dt>
+<dd>翻译歌词 🚫：平台不提供翻译歌词。</dd>
+<dt>网易云音乐</dt>
+<dd>逐字音译仅在一字一音的歌曲（如粤语歌）上提供。</dd>
+<dd>此外可镜像网易云音乐的「特效歌词」画面，清晰度取决于网易云音乐窗口的尺寸，窗口越大越清晰。</dd>
+<dt>酷狗音乐</dt>
+<dd>本地文件 ⚠：歌词与酷狗保持一致，按以下顺序获取：
+<ol>
+<li>在酷狗中手动关联的歌词；</li>
+<li>酷狗自动匹配的歌词；</li>
+<li>以上均无时按文件名搜索，可能无法搜到，或结果不准确。</li>
+</ol>
+</dd>
+<dt>汽水音乐</dt>
+<dd>音译歌词 ⚠：平台不提供音译，本程序借用酷狗音乐的音译，按歌名与时长匹配补充。不保证每首歌都有，也不保证准确。</dd>
+<dt>Apple Music</dt>
+<dd>逐字、逐行与翻译歌词 ⚠：
+<ul>
+<li>须保持 Apple Music 的歌词面板处于打开状态。面板关闭时 Apple Music 不加载歌词，打开面板后即可获取。</li>
+<li>换歌后歌词可能延迟数秒出现，少数情况下无法获取或与歌曲不匹配。</li>
+<li>逐字歌词仅限平台提供逐字的歌曲。</li>
+</ul>
+</dd>
+<dd>音译歌词 🚫：平台不提供音译。</dd>
+<dd>封面 ⚠：可获取封面图片，但不提供封面网址；换歌时封面可能稍有延迟。</dd>
+<dt>Spotify</dt>
+<dd>逐字歌词 🚫：平台仅提供逐行歌词。</dd>
+<dd>翻译与音译歌词 🚫：平台不提供。</dd>
+<dd>须带调试端口等启动参数运行，详见<a href="#faq">常见问题</a>「本程序为何会重启网易云音乐、Spotify、酷我音乐」。</dd>
+<dt>酷我音乐</dt>
+<dd>逐字歌词 ⚠：仅限带有效逐字时间的歌曲，其余为逐行。</dd>
+<dd>翻译歌词 ⚠：仅支持经实测的一种双语歌词格式，其他格式无法获取翻译。</dd>
+<dd>音译歌词 🚫：目前不提供。</dd>
+<dd>进度与跳转 ⚠：播放位置读取自酷我的内存，无法读取时本程序将酷我整体视为等待状态。</dd>
+</dl>
+</details>
+</div>
+<div data-lang="en">
+<details>
+<summary>Why some items are ⚠ or 🚫</summary>
+<p>Players marked 🚫 for local files do not support them yet; they are not repeated below.</p>
+<dl>
+<dt>WeSing</dt>
+<dd>Translation 🚫: the platform has no translated lyrics.</dd>
+<dt>NetEase Cloud Music</dt>
+<dd>Word-by-word romanization is only available for songs with one syllable per character (such as Cantonese songs).</dd>
+<dd>It can also mirror the NetEase Cloud Music "lyric effects" view. The sharpness depends on the size of the NetEase Cloud Music window: the larger the window, the sharper the image.</dd>
+<dt>KuGou Music</dt>
+<dd>Local files ⚠: the lyrics follow KuGou, taken in this order:
+<ol>
+<li>the lyrics you linked manually in KuGou;</li>
+<li>the lyrics KuGou matched automatically;</li>
+<li>if there are none, a search by file name, which may find nothing or the wrong lyrics.</li>
+</ol>
+</dd>
+<dt>Soda Music</dt>
+<dd>Romanization ⚠: the platform has none; this program borrows KuGou Music's romanization, matched by title and duration. Coverage and accuracy are not guaranteed.</dd>
+<dt>Apple Music</dt>
+<dd>Word-by-word lyrics, line-by-line lyrics and translation ⚠:
+<ul>
+<li>Keep the Apple Music lyrics panel open. Apple Music does not load lyrics while the panel is closed; they appear once it is opened.</li>
+<li>After a song change, lyrics may take a few seconds to appear, and occasionally they are missing or belong to another song.</li>
+<li>Word-by-word lyrics are only available for songs the platform provides them for.</li>
+</ul>
+</dd>
+<dd>Romanization 🚫: the platform has none.</dd>
+<dd>Cover ⚠: the cover image is available, but not a cover URL; after a song change the cover may appear a little later.</dd>
+<dt>Spotify</dt>
+<dd>Word-by-word lyrics 🚫: the platform only provides line-by-line lyrics.</dd>
+<dd>Translation and romanization 🚫: the platform has none.</dd>
+<dd>Spotify has to run with the debug port and related launch options; see "Why does this program restart NetEase Cloud Music, Spotify or Kuwo Music?" in the <a href="#faq">FAQ</a>.</dd>
+<dt>Kuwo Music</dt>
+<dd>Word-by-word lyrics ⚠: only for songs with valid per-word timing; other songs fall back to line-by-line.</dd>
+<dd>Translation ⚠: only the one bilingual lyric format that has been tested; other formats give no translation.</dd>
+<dd>Romanization 🚫: not provided at present.</dd>
+<dd>Position and seeking ⚠: the position is read from Kuwo's memory; when it cannot be read, this program treats Kuwo as being in the waiting state.</dd>
+</dl>
+</details>
+</div>
+</section>
+
+<section id="faq">
+<div data-lang="zh">
+<h2>五、常见问题</h2>
+
+<h3>自动更新失败时如何处理？</h3>
+<p>本程序启动时检查新版本并自动更新：</p>
+<ul>
+<li>先测速，选择较快的下载线路；</li>
+<li>下载过慢或出错时，自动切换线路。</li>
+</ul>
+<p>若仍失败，请依次尝试：</p>
+<ol>
+<li>按窗口中的提示按 R 键重试。</li>
+<li>稍后重新启动本程序。</li>
+<li>从<a href="#downloads">发行版页面</a>手动下载：关闭本程序，下载最新版的 <code>Metabox-Nexus-PlayerCap.zip</code>（或单独的 <code>Metabox-Nexus-PlayerCap.exe</code>），解压后覆盖原有文件。</li>
+</ol>
+<p>压缩包中不含 <code>config.yml</code>，原有设置不受影响。</p>
+
+<h3>部分歌曲为何没有逐字、翻译或音译歌词？</h3>
+<p>这取决于音乐平台是否为该歌曲提供；平台未提供的，本程序无法获取。</p>
+<p>各播放器自身的限制见<a href="#capabilities">各播放器的支持情况</a>。</p>
+<p>逐字音译的提供情况：</p>
+<ul>
+<li>全民K歌、QQ 音乐、酷狗音乐、汽水音乐提供；</li>
+<li>网易云音乐仅在一字一音的歌曲（如粤语歌）上提供；</li>
+<li>Apple Music、Spotify、酷我音乐不提供。</li>
+</ul>
+
+<h3>播放本机音乐文件时应使用哪个播放器？</h3>
+<p>仅酷狗音乐部分支持，歌词与酷狗保持一致，按以下顺序获取：</p>
+<ol>
+<li>在酷狗中手动关联的歌词；</li>
+<li>酷狗自动匹配的歌词；</li>
+<li>以上均无时按文件名搜索，可能无法搜到，或结果不准确。</li>
+</ol>
+<p>其他播放器播放本地文件时无法获取歌词。</p>
+
+<h3>为何不支持微软商店版的播放器？如何处理？</h3>
+<p>网易云音乐、Spotify、酷我音乐须由本程序带调试参数重新启动方可取词，微软商店版无法以这种方式启动。</p>
+<p>检测到商店版时，本程序跳过该播放器，并在窗口中提示改用官网安装版。</p>
+<p>处理方法：</p>
+<ol>
+<li>卸载商店版。</li>
+<li>安装官网安装版：
+<ul>
+<li>网易云音乐：<a href="https://music.163.com/download/pc/latest">https://music.163.com/download/pc/latest</a></li>
+<li>Spotify：<a href="https://download.scdn.co/SpotifySetup.exe">https://download.scdn.co/SpotifySetup.exe</a></li>
+<li>酷我音乐：<a href="https://www.kuwo.cn/down">https://www.kuwo.cn/down</a>（官网下载页）</li>
+</ul>
+</li>
+<li>安装完成后无需重启本程序，稍候即会自动连接。</li>
+</ol>
+<p>Apple Music 仅有微软商店版；本程序只读取其内存，不会重启该播放器，因此不受影响。</p>
+
+<h3>本程序为何会重启网易云音乐、Spotify、酷我音乐？</h3>
+<p>本程序通过这几个播放器的调试端口取词，而调试端口只能在播放器启动时通过启动参数开启。</p>
+<p>检测到播放器未带所需参数运行时，本程序会将其关闭并带参数重新启动，正在播放的歌曲会中断。</p>
+<p>此后若用户自行关闭播放器并以常规方式重新打开，本程序会再次执行上述操作。</p>
+<ul>
+<li>网易云音乐、Spotify：若已设置开机自启，本程序会将参数补入自启项，此后经开机自启启动的播放器无需再重启。</li>
+<li>酷我音乐：仅已验证的渠道版本（W1、UG1）会被自动重启；其他渠道版本须由用户自行以启动参数 <code>--remote-debugging-port=9224</code> 启动酷我。</li>
+</ul>
+<p>酷狗音乐首次接入时，本程序会修补酷狗的文件以开启调试端口，可能弹出管理员授权提示（UAC）并重启酷狗。</p>
+<p>对于未适配的酷狗版本，本程序不会强行修改。</p>
+
+<h3>Apple Music 无歌词时如何处理？</h3>
+<p>须保持 Apple Music 的歌词面板处于打开状态。</p>
+<p>面板关闭时 Apple Music 不加载歌词，打开面板后即可获取。</p>
+<p>换歌后歌词可能延迟数秒出现。</p>
+
+<h3>任务管理器中为何有两个本程序的进程？</h3>
+<p>以下两种情况会多出一个进程：</p>
+<ul>
+<li>有页面使用音频波形时，本程序会另启动一个自身的子进程以捕获声音。该进程不弹出授权提示，无需也不应手动启动；波形连接全部断开或本程序退出后自动结束。</li>
+<li>程序文件名不是 <code>Metabox-Nexus-PlayerCap.exe</code> 时，本程序会将自身复制为该文件名后启动。此时以及自动更新完成后，最初启动的进程将保留至本程序退出。</li>
+</ul>
+
+<h3>音频波形无变化时如何排查？</h3>
+<ul>
+<li>系统须为 Windows 10 2004 版（内部版本 19041）及以上。</li>
+<li>播放器的声音输出设为 ASIO 或 WASAPI 独占模式时，声音绕过系统混音，本程序无法捕获。</li>
+</ul>
+
+<h3>歌词早于或晚于歌声时如何调整？</h3>
+<p>在 <code>config.yml</code> 中调整歌词延迟，单位为毫秒，正值延后，负值提前。</p>
+<ul>
+<li>各播放器优先使用自己的 <code>&lt;名字&gt;-offset</code>，未设置时使用全局的 <code>offset</code>。</li>
+<li>自动生成的 <code>config.yml</code> 已为多个播放器设定了各自的值，调整时应修改对应播放器的项，例如网易云音乐的 <code>cloudmusicv3-offset</code>。</li>
+</ul>
+<p>修改后重新启动本程序。</p>
+<p>各播放器在设置中的名称：全民K歌 <code>wesing</code>、网易云音乐 <code>cloudmusicv3</code>、QQ 音乐 <code>qqmusic</code>、酷狗音乐 <code>kugou</code>、汽水音乐 <code>sodamusic</code>、Apple Music <code>applemusic</code>、Spotify <code>spotify</code>、酷我音乐 <code>kuwo</code>。</p>
+
+<h3>同时运行多个播放器时显示哪一个？</h3>
+<p>默认优先显示全民K歌（设置项 <code>prior-player</code>）：</p>
+<ul>
+<li>全民K歌播放时，始终显示全民K歌；</li>
+<li>全民K歌暂停超过 15 秒（设置项 <code>prior-player-expire</code>）或停止播放后，切换为其他播放器。</li>
+</ul>
+
+<h3>升级后设置为何发生变化？</h3>
+<p>新版本可能自动换算或重建 <code>config.yml</code>。</p>
+<p>原文件会在同一文件夹中保留一份备份，文件名以 <code>config.backup-</code> 开头。</p>
+<p>重建时，需要重新填写的设置会列在本程序的窗口中。</p>
+</div>
+<div data-lang="en">
+<h2>5. FAQ</h2>
+
+<h3>Automatic update failed. What should I do?</h3>
+<p>At startup this program checks for a new version and updates itself:</p>
+<ul>
+<li>it first tests download speed to pick the faster route;</li>
+<li>if the download is too slow or fails, it switches to another route.</li>
+</ul>
+<p>If it still fails, try these in order:</p>
+<ol>
+<li>Press R to retry when the window prompts you.</li>
+<li>Restart this program later.</li>
+<li>Download it manually from a <a href="#downloads">release page</a>: close this program, download the latest <code>Metabox-Nexus-PlayerCap.zip</code> (or <code>Metabox-Nexus-PlayerCap.exe</code> on its own), and extract it over the existing files.</li>
+</ol>
+<p>The zip does not contain <code>config.yml</code>, so your settings are kept.</p>
+
+<h3>Why do some songs have no word-by-word lyrics, translation or romanization?</h3>
+<p>It depends on whether the music platform provides them for that song; what the platform does not provide, this program cannot obtain.</p>
+<p>For the limits of each player, see <a href="#capabilities">What each player provides</a>.</p>
+<p>Word-by-word romanization:</p>
+<ul>
+<li>provided by WeSing, QQ Music, KuGou Music and Soda Music;</li>
+<li>NetEase Cloud Music has it only for songs with one syllable per character (such as Cantonese songs);</li>
+<li>Apple Music, Spotify and Kuwo Music do not have it.</li>
+</ul>
+
+<h3>Which player should I use for local music files?</h3>
+<p>Only KuGou Music, and only partly. The lyrics follow KuGou, taken in this order:</p>
+<ol>
+<li>the lyrics you linked manually in KuGou;</li>
+<li>the lyrics KuGou matched automatically;</li>
+<li>if there are none, a search by file name, which may find nothing or the wrong lyrics.</li>
+</ol>
+<p>Other players provide no lyrics for local files.</p>
+
+<h3>Why is the Microsoft Store version of a player not supported, and what can I do?</h3>
+<p>NetEase Cloud Music, Spotify and Kuwo Music have to be restarted by this program with debug options before lyrics can be read, which is not possible with the Microsoft Store version.</p>
+<p>When it finds a Store version, this program skips it and shows a message in its window suggesting the official installer version.</p>
+<p>What to do:</p>
+<ol>
+<li>Uninstall the Store version.</li>
+<li>Install the official installer version:
+<ul>
+<li>NetEase Cloud Music: <a href="https://music.163.com/download/pc/latest">https://music.163.com/download/pc/latest</a></li>
+<li>Spotify: <a href="https://download.scdn.co/SpotifySetup.exe">https://download.scdn.co/SpotifySetup.exe</a></li>
+<li>Kuwo Music: <a href="https://www.kuwo.cn/down">https://www.kuwo.cn/down</a> (official download page)</li>
+</ul>
+</li>
+<li>You do not need to restart this program afterwards; it connects automatically after a short while.</li>
+</ol>
+<p>Apple Music only exists as a Microsoft Store app; this program only reads from it and never restarts it, so it is not affected.</p>
+
+<h3>Why does this program restart NetEase Cloud Music, Spotify or Kuwo Music?</h3>
+<p>This program reads lyrics from these players through their debug port, which can only be opened with launch options when the player starts.</p>
+<p>When it finds one of them running without the required options, this program closes it and opens it again with the options, which interrupts the song that is playing.</p>
+<p>If the player is later closed and reopened without these options, the same restart is performed again.</p>
+<ul>
+<li>NetEase Cloud Music and Spotify: if the player is set to start with Windows, this program adds the options to that startup entry, so the player no longer needs a restart when it starts that way.</li>
+<li>Kuwo Music: only the verified channel builds (W1, UG1) are restarted automatically; other builds must be started by yourself with the launch option <code>--remote-debugging-port=9224</code>.</li>
+</ul>
+<p>When KuGou Music is connected for the first time, this program patches a KuGou file to open its debug port; this may show an administrator prompt (UAC) and restarts KuGou.</p>
+<p>KuGou versions that have not been adapted are never modified.</p>
+
+<h3>Apple Music shows no lyrics.</h3>
+<p>Keep the Apple Music lyrics panel open.</p>
+<p>Apple Music does not load lyrics while the panel is closed; they appear once it is opened.</p>
+<p>After a song change, lyrics may take a few seconds to appear.</p>
+
+<h3>Why are there two processes of this program in Task Manager?</h3>
+<p>There is one more process in either of these cases:</p>
+<ul>
+<li>When a page uses the audio waveform, this program starts a child process of itself to capture the sound. It does not show any prompt and should not be started manually; it exits when all waveform connections close or this program exits.</li>
+<li>If the program file is not named <code>Metabox-Nexus-PlayerCap.exe</code>, this program copies itself to that name and starts the copy. In that case, and after an automatic update, the process started first stays until this program exits.</li>
+</ul>
+
+<h3>The audio waveform does not move.</h3>
+<ul>
+<li>Windows must be Windows 10 version 2004 (build 19041) or later.</li>
+<li>If the player outputs through ASIO or WASAPI exclusive mode, the sound bypasses the Windows mixer and this program cannot capture it.</li>
+</ul>
+
+<h3>The lyrics are ahead of or behind the singing.</h3>
+<p>Adjust the lyric delay in <code>config.yml</code>, in milliseconds: positive values delay the lyrics, negative values bring them forward.</p>
+<ul>
+<li>Each player first uses its own <code>&lt;name&gt;-offset</code> and falls back to the global <code>offset</code> when that is not set.</li>
+<li>The generated <code>config.yml</code> already sets values for several players, so change the entry for the player in question, for example <code>cloudmusicv3-offset</code> for NetEase Cloud Music.</li>
+</ul>
+<p>Restart this program afterwards.</p>
+<p>Player names in the settings: WeSing <code>wesing</code>, NetEase Cloud Music <code>cloudmusicv3</code>, QQ Music <code>qqmusic</code>, KuGou Music <code>kugou</code>, Soda Music <code>sodamusic</code>, Apple Music <code>applemusic</code>, Spotify <code>spotify</code>, Kuwo Music <code>kuwo</code>.</p>
+
+<h3>Several players are open. Which one is shown?</h3>
+<p>By default WeSing has priority (setting <code>prior-player</code>):</p>
+<ul>
+<li>while WeSing is playing, it is always shown;</li>
+<li>after it has been paused for more than 15 seconds (setting <code>prior-player-expire</code>) or stops playing, another player takes over.</li>
+</ul>
+
+<h3>My settings changed after an upgrade.</h3>
+<p>A new version may convert or rebuild <code>config.yml</code> automatically.</p>
+<p>The original file is kept as a backup in the same folder; its name starts with <code>config.backup-</code>.</p>
+<p>When the file is rebuilt, the settings you need to fill in again are listed in this program's window.</p>
+</div>
+</section>
+
+<section id="downloads">
+<div data-lang="zh"><h2>六、下载地址</h2><p>最新版与历史版本：</p></div>
+<div data-lang="en"><h2>6. Downloads</h2><p>Latest and earlier versions:</p></div>
+<ul>
+<li>GitHub: <a href="https://github.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases">https://github.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases</a></li>
+<li>Gitee: <a href="https://gitee.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases">https://gitee.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases</a></li>
+</ul>
+</section>
+
+</main>
+</body>
+</html>
