@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -133,6 +134,50 @@ type dllOffsets struct {
 	// SongIDDurCheckOff：稳定 songID 所在「播放会话」结构自带的时长字段偏移（相对 Struct1，
 	// 0=不校验）。与 DurationOff 的显示时长交叉核对，确认该 songID 已同步到当前歌（v22.41）。
 	SongIDDurCheckOff uintptr
+
+	// PlayState：QQ 自己的播放状态字段（#172）。零值即本版本未收录，按进度停走判暂停。只在版本号精确匹配时读
+	// （playStateAddr）。填之前须过 doc/design/qqmusic-start-stall-design.md §6.8 的核实清单：运行时的交叉核对
+	// 发现不了「卡在在播值而每次暂停都短」，那份清单是唯一的保证。
+	PlayState playStateSpec
+
+	// SongRecord：本版本核实过 QQ 内存里当前歌曲记录的格式（#218，设计 §2.2、§6.4 第 4 步）：专辑、歌手、歌名、网址、参数直接
+	// 相接的 UTF-8 记录，以 Struct1 的专辑、歌手、歌名拼出的前缀找得到。读取者据此认出 QQ 查关联所用的条目；为假时有候选的
+	// 在线歌曲一律按无条目。只在版本号精确匹配时读（songRecordEnabled）。打开的依据是真值补测（QQ 显示所用的键与记录网址的
+	// 键一致），见设计 §6.4 第 4 步「版本」。
+	SongRecord bool
+}
+
+// playStateSpec 描述一个版本的播放状态字段（#172）。零值即本版本未收录、不读。
+type playStateSpec struct {
+	Off     uintptr  // QQMusic.dll 内偏移，指向一个 DWORD；0 = 未收录
+	Paused  []uint32 // 暂停取值
+	Playing []uint32 // 在播取值
+	Loading []uint32 // 载入取值：按停走判定，停走自进入载入值的那一拍起量（judgeTick）
+	// Opening 是 Loading 里「已要求开播」的取值（#243）：读到它的拍不按停走判暂停，停走自其后第一拍非开播的载入值起量。
+	// A 类的 3：录像里只在换歌与按播放时出现，前一取值为在播或 2、后一取值为在播或 2，未见接暂停值；22.26 有一段出声后
+	// 停在 3 达 48 s。
+	Opening  []uint32
+	MinPause time.Duration // 去抖：读到暂停值须持续不少于它才判暂停
+	// LoadingMinGap 是载入值的采样门槛 G（#218，doc/design/qqmusic-lyric-association-design.md §6.5 第 5 步）：换歌认领时，
+	// 轮询间隔与窗口里相邻两次播放状态读数的间隔都小于它，「没见到载入值」才算「同一次播放被 QQ 改名」的证据。常量；未经
+	// 设计 §10 第 26 项实测核定的版本为 0，即不作改名证据。只为实测核定过的版本填值，不从别的版本借用；改它是单独的小提交，送审。
+	// 22.82 已核定（rc.14 验收，32 次换歌，作废 3 次）：最短载入 Lᵢ 20 ms，算得 10 ms，不大于轮询下限 10 ms，任何配置下证据都
+	// 不成立，与 0 等效，维持 0。
+	LoadingMinGap time.Duration
+}
+
+// classify 按本版本的取值集合给一次读数分类：在 Paused 里为暂停，在 Playing 里为在播，在 Loading 里为载入，其余为
+// 未知。读失败（PlayStateOK 为假）不经这里，由 judgeTick 直接按未知处理。
+func (s playStateSpec) classify(raw uint32) playState {
+	switch {
+	case slices.Contains(s.Paused, raw):
+		return statePaused
+	case slices.Contains(s.Playing, raw):
+		return statePlaying
+	case slices.Contains(s.Loading, raw):
+		return stateLoading
+	}
+	return stateUnknown
 }
 
 // knownVersions 版本偏移表
@@ -158,6 +203,14 @@ var knownVersions = map[string]dllOffsets{
 		SongMidParamsOff:  0xAC, // 备选: "0=<songMid>&2=..."
 		UseWideStrings:    true,
 		DurationInSeconds: true,
+		// 播放状态（#172）：tools/qqstateprobe 实测（2026-11-22，录像 qq172-2005.bin，420 s，2101 拍；构建目录未记录，
+		// 探针只记 major.minor）。QQMusic.dll+0xAF35B0（.data+0x245B0；镜像 0xB63514 逐拍相同，不用），0 在播、1 暂停；
+		// 静态可写节里没有 22.82 那种 2/3/4 的枚举。核实清单（设计 §6.8）：第 1 项 21.7、33.7、44.5 s 三次暂停与恢复；
+		// 第 3 项拖动松手前读数停 1.4 s（109.1、117.3 s）期间为 0；第 4 项换歌后立刻暂停（74.7、90.9 s）为 1；第 5 项
+		// 全程只取 0、1；第 2 项 4 次换歌中 51.7 s 那次在换歌那一拍闪 1，前后两拍为 0，闪烁短于 400 ms（取样上界），
+		// MinPause 取 300 ms（盖住一拍取样下看到的长度，300～400 ms 的闪烁盖不住，设计 §6.1）；第 6 项（重启 QQ 后
+		// 同一 RVA）未做。在播值是 0，偏移失效时最常读到的就是它，读失败必须报告（readPlayState）。
+		PlayState: playStateSpec{Off: 0xAF35B0, Paused: []uint32{1}, Playing: []uint32{0}, MinPause: 300 * time.Millisecond},
 	},
 	"21.81": {
 		// CE Lua 逆向 v21.81（32-bit x86）
@@ -186,6 +239,24 @@ var knownVersions = map[string]dllOffsets{
 		SongIDOff:    0x60,
 		DurationOff:  0x68,
 		ProgressOff:  0x6C,
+		// 播放状态（#172、#222）：tools/qqstateprobe 实测（2026-11-22，录像 qq172-2216.bin，420 s，2101 拍；重启 QQ 后
+		// qq172-2216-restart.bin，150 s，751 拍；2026-11-23 真值补测 qq172-2216-gt.bin，383 s，1914 拍；构建目录未记录，
+		// 探针只记 major.minor）。QQMusic.dll+0xC87CF0（.data+0x9CCF0，即 Struct1+0x70、SongIDOff+0x10），A 类字段，DWORD：
+		// 0 暂停、1 在播、2 未开播或换歌开始、3 换歌载入中；静态可写节里没有 22.52、22.82 那种 2、3、4 的枚举。核实清单
+		// （设计 §6.8）：第 1 项 81.7→87.5 s、97.7→104.1 s 等暂停与恢复，暂停中的补写（变 0 之后 0.2～0.6 s，至多一次）期间
+		// 为 0；第 2 项换歌（116.1、127.1、138.3、156.7 s）不出现 0，过渡为 3（156.7 s 那次先 2 一拍、再 3 三拍，上界 1.0 s，
+		// 落在 #96 的等待里），随后为 1；第 3 项换歌、拖动（179.9、191.5 s）、恢复之后读数停走期间为 1，按拍量最长 1.2 s；
+		// 第 4 项换歌后立刻暂停（138.9、158.3 s）为 0，含补写；第 5 项三份录像只取 0～3。第 6 项部分：三份录像跨三个进程、
+		// 两次开机（QQMusic.dll 基址 0x618E0000、0x5E4A0000），同一 RVA 的未开播、暂停与恢复、换歌语义不变；缺重启后换歌
+		// 立即暂停，待真机验收。换歌不出现暂停值，MinPause 为 0。QQ 载入上次的歌而未开播时一直为 2，开播即变 1；2、3 归
+		// 载入、不算在播（设计 §6.1）：按在播的话认领后 3 s 触发交叉核对甲，整个连接退回停走判定。暂停值是 0：偏移失效读到
+		// 0 时判暂停，由交叉核对乙发现。补写早于 1 s，暂停值又常与最后一次前进同拍出现，交叉核对乙的余量见设计 §6.3。
+		// 同步翻转的 0/1 字段 0xC85F14（1 暂停）未开播时为 0，与在播分不开，不用。
+		PlayState: playStateSpec{Off: 0xC87CF0, Paused: []uint32{0}, Playing: []uint32{1}, Loading: []uint32{2, 3}, Opening: []uint32{3}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测（设计 §6.4 第 4 步「版本」），专辑页、最近播放、搜索结果、最近播放四个入口下
+		// QQ 显示所用的键与记录网址的键 4/4 一致，前缀每次命中 1 处，.wma 之后为 0=。Struct1 为窄字符串，前缀按 readSongPrefix
+		// 的窄字符一支读；专辑、歌手的偏移未逐段核对，待真机（设计 §10 第 12 项）。
+		SongRecord: true,
 	},
 	"22.22": {
 		Struct1:      0xC95EA0,
@@ -198,10 +269,57 @@ var knownVersions = map[string]dllOffsets{
 		SongIDOff:    0xE0,
 		DurationOff:  0xE8,
 		ProgressOff:  0xEC,
+		// 播放状态（#172、#222）：tools/qqstateprobe 实测（2026-11-22，录像 qq172-2222.bin，420 s，2101 拍；重启 QQ 后
+		// qq172-2222-restart.bin，146 s，729 拍；2026-11-23 真值补测 qq172-2222-gt.bin，355 s，1775 拍；构建目录未记录）。
+		// QQMusic.dll+0xC95F90（.data+0x9CF90，即 Struct1+0xF0、SongIDOff+0x10；与 22.16 的 Struct1+0x70 是同一字段，显示
+		// 结构体整体后移 0x80），A 类字段，DWORD：0 暂停、1 在播、2 未开播或换歌开始、3 换歌载入中；静态可写节里没有 2、3、4
+		// 的枚举。核实清单（设计 §6.8）：第 1 项 39.3→45.5 s、51.1→55.5 s 等暂停与恢复，暂停中的补写（变 0 之后 0.2～0.8 s，
+		// 至多一次）期间为 0；第 2 项换歌（60.3、71.7、84.1、100.5 s）不出现 0，过渡为 2、3 至多三拍（上界 0.8 s），随后为 1；
+		// 第 3 项换歌、拖动（120.3、130.1、151.7 s）、恢复之后读数停走期间为 1，按拍量最长 1.2 s；第 4 项换歌后立刻暂停
+		// （85.7、101.3 s）为 0，含补写；第 5 项三份录像只取 0～3。第 6 项部分：三份录像的 QQMusic.dll 基址各不相同
+		// （0x610F0000、0x618D0000、0x5E490000），同一 RVA 的未开播、暂停与恢复、换歌语义不变；缺重启后换歌立即暂停，待
+		// 真机验收。MinPause、载入的归类、暂停值为 0 的后果与交叉核对乙的余量同 22.16。同步翻转的 0/1 字段 0xC95B84
+		// （1 暂停）在 60.3 s 换歌时闪 1、未开播时为 0，不用。
+		PlayState: playStateSpec{Off: 0xC95F90, Paused: []uint32{0}, Playing: []uint32{1}, Loading: []uint32{2, 3}, Opening: []uint32{3}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测（设计 §6.4 第 4 步「版本」），专辑页、最近播放、搜索结果、最近播放四个入口下
+		// QQ 显示所用的键与记录网址的键 4/4 一致，前缀每次命中 1 处，.wma 之后为 0=。Struct1 为窄字符串，前缀按 readSongPrefix
+		// 的窄字符一支读；专辑、歌手的偏移未逐段核对，待真机（设计 §10 第 12 项）。
+		SongRecord: true,
+	},
+	"22.26": {
+		// qqprobe 实测（32-bit x86，2026-11-23，构建目录 TOOLS\QQMusic-v22.26-Modified\QQMusic：QQMusic.exe 签名有效，
+		// QQMusic.dll 被改过，本机没有官方构建）：「君の知らない物語 (Inst.) / supercell」命中宽字符显示对象（UTF-16 歌名
+		// 94 处、GBK 0 处），读回专辑「君の知らない物語」，时长 340400ms；会话 songID=268359544 精确命中、自带时长与显示时长
+		// 一致，2026-11-24 经单曲详情接口核对为该曲（songmid 000JptHs40Om4N）。字段布局同 22.31+。按修改版收录：官方构建的
+		// 静态数据 RVA 推断与修改版相同、未核对（项目负责人 2026-11-24 定，#232；设计 §1.3「22.26 的构建」、§10）。
+		Struct1:           0xC281E8,
+		NameOff:           0x00,
+		SingerOff:         0x04,
+		AlbumOff:          0x08,
+		ProgressOff:       0x0C,
+		DurationOff:       0x10,
+		SongIDOff:         0x71DA8,
+		SongIDDurCheckOff: 0x71DB0,
+		UseWideStrings:    true,
+		SongMidFromHeap:   true,
+		// 播放状态（#172、#222）：tools/qqstateprobe（加了本版偏移的副本）实测（2026-11-23，录像 qq172-2226.bin，493 s，
+		// 2467 拍；重启 QQ 后 qq172-2226-restart.bin，108 s，542 拍）。QQMusic.dll+0xC99FA0（.data+0x9CFA0，即 Struct1+0x71DB8、
+		// SongIDOff+0x10），A 类字段，DWORD：0 暂停、1 在播、2 未开播或换歌开始、3 载入；静态可写节里没有 2、3、4 的枚举。
+		// 核实清单（设计 §6.8）：第 1 项 14.9→25.5 s、41.7→51.1 s 等暂停与恢复，补写期间为 0；第 2 项「下一首」（69.3、83.1、
+		// 101.5、127.1 s）、四个入口与单曲循环放完（230.3、468.3 s）不出现 0，过渡为 2、3 至多两拍；第 3 项起步停顿为 1（偶尔
+		// 夹一拍 3，如 274.3、318.5、335.5 s）；第 4 项换歌后立刻暂停（102.1、127.5 s）为 0；第 5 项两份录像只取 0～3。第 6 项
+		// 部分：重启录像（同一次开机，基址相同）里同一 RVA 的未开播、暂停与恢复、换歌语义不变；缺重启后换歌立即暂停，待真机
+		// 验收。换歌不出现暂停值，MinPause 为 0。QQ 载入上次的歌而未开播时一直为 2，开播先 3 一拍再变 1；2、3 归载入、不算
+		// 在播（设计 §6.1）。暂停值是 0：偏移失效读到 0 时判暂停，由交叉核对乙发现。暂停中拖动 QQ 随即起播，读数跳转比
+		// 标志变 1 早 0.4 s。
+		PlayState: playStateSpec{Off: 0xC99FA0, Paused: []uint32{0}, Playing: []uint32{1}, Loading: []uint32{2, 3}, Opening: []uint32{3}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测，专辑页（id 键，QQ 显示 id 键条目）、最近播放两次与搜索结果（mid 键，QQ
+		// 显示 mid 键条目）四个入口下记录网址的键与 QQ 所用的键 4/4 一致，前缀各命中 1 处，.wma 之后为 0=。
+		SongRecord: true,
 	},
 	"22.31": {
 		// CE 实测（32-bit x86，2026-07-18）：与 22.41 同一套宽字符模型（UTF-16 WCHAR* 指针，
-		// 非 22.22 的窄 SSO——宽字符切换发生在 22.22→22.31 之间）。now-playing 显示对象布局
+		// 非 22.22 的窄 SSO——宽字符切换发生在 22.22→22.26 之间）。now-playing 显示对象布局
 		// 与 22.41 逐字段一致，仅基址不同：+0x00 Name*、+0x04 Singer*、+0x08 Album*、
 		// +0x0C 进度ms（实测亚秒高分辨率 → 无需 FastTimer）、+0x10 时长ms。
 		// 上报 songid 恒 0；真数字 songID 同样在「播放会话」结构里（87/95 签名后第 8 字节），
@@ -218,6 +336,20 @@ var knownVersions = map[string]dllOffsets{
 		SongIDDurCheckOff: 0x71FE0,
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
+		// 播放状态（#172、#222）：tools/qqstateprobe 实测（2026-11-23，录像 qq172-2231.bin，321 s，1604 拍；真值补测
+		// qq172-2231-gt.bin，307 s，1534 拍；重启 QQ 后 qq172-2231-restart.bin，100 s，500 拍；构建目录未记录）。
+		// QQMusic.dll+0xCA52C0（.data+0x9D2C0，即 Struct1+0x71FE8、SongIDOff+0x10），A 类字段，DWORD：0 暂停、1 在播、2 未开播
+		// 或换歌开始、3 载入；静态可写节里没有 2、3、4 的枚举。核实清单（设计 §6.8）：第 1 项 58.5→67.5 s、82.5→91.1 s 等暂停
+		// 与恢复，补写期间为 0；第 2 项换歌（105.1、119.7、133.5、158.5 s）不出现 0，过渡为 3 至多两拍（上界 0.6 s）；第 3 项
+		// 起步停顿为 1（145.3、300.9 s 各夹一拍 3），自锚点按拍量最长 2.0 s（105.1→107.1 s）；第 4 项换歌后立刻暂停（133.9、
+		// 158.9 s）为 0；第 5 项三份录像只取 0～3。第 6 项部分：重启录像（同一次开机，基址相同）里同一 RVA 的未开播、暂停与
+		// 恢复、换歌语义不变；缺重启后换歌立即暂停，待真机验收。换歌不出现暂停值，MinPause 为 0。QQ 载入上次的歌而未开播时
+		// 一直为 2，开播先 3 一两拍再变 1；2、3 归载入、不算在播（设计 §6.1）：按在播的话认领后 3 s 触发交叉核对甲。暂停值
+		// 是 0：偏移失效读到 0 时判暂停，由交叉核对乙发现。
+		PlayState: playStateSpec{Off: 0xCA52C0, Paused: []uint32{0}, Playing: []uint32{1}, Loading: []uint32{2, 3}, Opening: []uint32{3}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测（设计 §6.4 第 4 步「版本」），专辑页、最近播放、搜索结果、最近播放四个入口下
+		// QQ 显示所用的键与记录网址的键 4/4 一致，前缀每次命中 1～2 处、同一网址，.wma 之后为 0=。
+		SongRecord: true,
 	},
 	"22.41": {
 		// CE 实测（32-bit x86）：结构体由窄 SSO 改为 UTF-16 WCHAR* 指针。
@@ -241,6 +373,16 @@ var knownVersions = map[string]dllOffsets{
 		SongIDDurCheckOff: 0x722F0, // → QQMusic.dll+0xCB2838，同结构自带时长，用于同步性核对
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
+		// 播放状态（#172、#222）：tools/qqstateprobe 实测（2026-11-23，录像 qq172-2241.bin，304 s，1519 拍；真值补测
+		// qq172-2241-gt.bin，306 s，1531 拍；重启 QQ 后 qq172-2241-restart.bin，96 s，482 拍；构建目录未记录）。
+		// QQMusic.dll+0xCB2840（.data+0x9D840，即 Struct1+0x722F8、SongIDOff+0x10），A 类字段，取值、MinPause 与载入的归类
+		// 同 22.31；静态可写节里没有 2、3、4 的枚举。核实清单（设计 §6.8）：第 1 项 58.7→66.7 s、80.9→89.7 s 等暂停与恢复，
+		// 补写期间为 0；第 2 项换歌（103.9、118.3、132.9、159.5 s，132.9 s 为占位串拍、取 2）不出现 0；第 3 项起步停顿为 1；
+		// 第 4 项换歌后立刻暂停（133.5、159.9 s）为 0；第 5 项三份录像只取 0～3。第 6 项部分，同 22.31。
+		PlayState: playStateSpec{Off: 0xCB2840, Paused: []uint32{0}, Playing: []uint32{1}, Loading: []uint32{2, 3}, Opening: []uint32{3}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测（设计 §6.4 第 4 步「版本」），专辑页、最近播放、搜索结果、最近播放四个入口下
+		// QQ 显示所用的键与记录网址的键 4/4 一致，前缀每次命中 1～2 处、同一网址，.wma 之后为 0=。
+		SongRecord: true,
 	},
 	"22.52": {
 		// CE 实测（32-bit x86，2026-08-13）：字段布局与 22.41 一致，仅静态地址迁移。
@@ -254,6 +396,14 @@ var knownVersions = map[string]dllOffsets{
 		SongIDDurCheckOff: 0x726C8,
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
+		// 播放状态（#172）：tools/qqstateprobe 实测（2026-11-22，录像 qq172-2252.bin，420 s，2101 拍；构建目录未记录）。
+		// QQMusic.dll+0xCC91C0（.data+0x9C1C0），与 22.82 的 0xD3BBA8 同语义的枚举：3 播放、4 暂停、2 换歌载入中。
+		// 核实清单（设计 §6.8）：第 1 项九段暂停与恢复（如 29.7→34.1 s、135.1→142.1 s），暂停中的补写期间为 4；
+		// 第 2 项五次换歌读到新歌名那一拍为 2、0.2 s 后回 3，不出现 4（210.3 s 一次按拍没读到 2，全程为 3）；第 3 项
+		// 换歌、拖动（117.7、126.3 s）、恢复之后读数停走期间为 3；第 4 项换歌后立刻暂停（83.7、99.7 s）为 4；第 5 项
+		// 全程只取 2、3、4。换歌不闪暂停值，MinPause 为 0。第 6 项（重启 QQ 后同一 RVA）未做。2 同 22.82 归载入（设计
+		// §6.1）：同语义的枚举，QQ 启动后未开播时的取值未测，推断同为 2。
+		PlayState: playStateSpec{Off: 0xCC91C0, Paused: []uint32{4}, Playing: []uint32{3}, Loading: []uint32{2}},
 	},
 	"22.60": {
 		// qqprobe 实测（32-bit x86，2026-09-01，构建 22.60.02.13.33）：字段布局与 22.41/22.52
@@ -270,6 +420,19 @@ var knownVersions = map[string]dllOffsets{
 		SongIDDurCheckOff: 0x726F8,
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
+		// 播放状态（#172、#222）：tools/qqstateprobe 实测（2026-11-23，录像 qq172-2260.bin，285 s，1423 拍；真值补测
+		// qq172-2260-gt.bin，273 s，1363 拍；重启 QQ 后 qq172-2260-restart.bin，79 s，395 拍；构建目录未记录）。
+		// QQMusic.dll+0xCDE1B0（.data+0x9C1B0，即 Struct1+0x70610），E 类字段，与 22.82 的 0xD3BBA8 同语义的枚举：3 在播、
+		// 4 暂停、2 换歌载入中或未开播。核实清单（设计 §6.8）：第 1 项 50.7→58.1 s、71.3→78.9 s 等暂停与恢复，补写期间为 4；
+		// 第 2 项换歌（92.3、104.9、118.1、142.7 s）为 2 至多两拍、随后为 3，不出现 4；第 3 项起步停顿为 3；第 4 项换歌后立刻
+		// 暂停（118.5、143.1 s）为 4；第 5 项主录像与重启录像只取 2～4，补测录像（其间没有暂停）只取 2、3。第 6 项部分：重启
+		// 录像（同一次开机，基址相同）里同一 RVA 的未开播、暂停与恢复、换歌语义不变；缺重启后换歌立即暂停，待真机验收。换歌
+		// 不出现暂停值，MinPause 为 0。QQ 载入上次的歌而未开播时一直为 2，开播即变 3；2 归载入、不算在播（同 22.82，设计
+		// §6.1）。另有 A 类字段 0xCE02A0（SongIDOff+0x10），暂停段与本字段逐拍相同，换歌与开播时多闪 3，不用。
+		PlayState: playStateSpec{Off: 0xCDE1B0, Paused: []uint32{4}, Playing: []uint32{3}, Loading: []uint32{2}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测（设计 §6.4 第 4 步「版本」），专辑页、最近播放、搜索结果、最近播放四个入口下
+		// QQ 显示所用的键与记录网址的键 4/4 一致，前缀每次命中 1 处，.wma 之后为 0=。
+		SongRecord: true,
 	},
 	"22.71": {
 		// qqprobe 实测（32-bit x86，2026-09-29，构建目录 QQMusic2271.18.13.18）：
@@ -284,6 +447,16 @@ var knownVersions = map[string]dllOffsets{
 		SongIDDurCheckOff: 0x73C18,
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
+		// 播放状态（#172、#222）：tools/qqstateprobe 实测（2026-11-23，录像 qq172-2271.bin，284 s，1421 拍；真值补测
+		// qq172-2271-gt.bin，201 s，1007 拍；重启 QQ 后 qq172-2271-restart.bin，71 s，357 拍；构建目录未记录）。
+		// QQMusic.dll+0xCEC400（.data+0x9C400，即 Struct1+0x70710），E 类字段，取值、MinPause 与载入的归类同 22.60。核实清单
+		// （设计 §6.8）：第 1 项 51.9→59.7 s、73.1→80.7 s 等暂停与恢复，补写期间为 4；第 2 项换歌（94.9、107.3、120.9、
+		// 147.1 s）为 2、随后为 3，不出现 4；第 3 项起步停顿为 3；第 4 项换歌后立刻暂停（121.5、147.5 s）为 4；第 5 项只取
+		// 2～4。第 6 项部分，同 22.60。另有 A 类字段 0xCEF910（SongIDOff+0x10），换歌与开播时多闪 3，不用。
+		PlayState: playStateSpec{Off: 0xCEC400, Paused: []uint32{4}, Playing: []uint32{3}, Loading: []uint32{2}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测（设计 §6.4 第 4 步「版本」），专辑页、最近播放、搜索结果、最近播放四个入口下
+		// QQ 显示所用的键与记录网址的键 4/4 一致，前缀每次命中 1 处，.wma 之后为 0=。
+		SongRecord: true,
 	},
 	"22.76": {
 		// qqprobe 实测（32-bit x86，2026-10-14，构建目录 QQMusic2276.00.18.59）：
@@ -299,6 +472,16 @@ var knownVersions = map[string]dllOffsets{
 		SongIDDurCheckOff: 0x73C18,
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
+		// 播放状态（#172、#222）：tools/qqstateprobe 实测（2026-11-23，录像 qq172-2276.bin，322 s，1609 拍；真值补测
+		// qq172-2276-gt.bin，225 s，1124 拍；重启 QQ 后 qq172-2276-restart.bin，63 s，316 拍；构建目录未记录）。
+		// QQMusic.dll+0xCEE400（.data+0x9C400，即 Struct1+0x70710），E 类字段，取值、MinPause 与载入的归类同 22.60。核实清单
+		// （设计 §6.8）：第 1 项 50.7→79.7 s、101.1→111.1 s 等暂停与恢复，补写期间为 4；第 2 项换歌（125.9、138.1、151.5、
+		// 178.1 s）为 2 至多两拍、随后为 3，不出现 4；第 3 项起步停顿为 3；第 4 项换歌后立刻暂停（151.9、178.5 s）为 4；第 5 项
+		// 只取 2～4。第 6 项部分，同 22.60。另有 A 类字段 0xCF1910（SongIDOff+0x10），换歌与开播时多闪 3，不用。
+		PlayState: playStateSpec{Off: 0xCEE400, Paused: []uint32{4}, Playing: []uint32{3}, Loading: []uint32{2}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测（设计 §6.4 第 4 步「版本」），专辑页、最近播放、搜索结果、最近播放四个入口下
+		// QQ 显示所用的键与记录网址的键 4/4 一致，前缀每次命中 1 处，.wma 之后为 0=。
+		SongRecord: true,
 	},
 	"22.81": {
 		// qqprobe 实测（32-bit x86，2026-11-10，构建目录 QQMusic2281.02.26.01）：
@@ -315,6 +498,16 @@ var knownVersions = map[string]dllOffsets{
 		SongIDDurCheckOff: 0x73F28,
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
+		// 播放状态（#172、#222）：tools/qqstateprobe 实测（2026-11-23，录像 qq172-2281.bin，301 s，1503 拍；真值补测
+		// qq172-2281-gt.bin，220 s，1099 拍；重启 QQ 后 qq172-2281-restart.bin，64 s，320 拍；构建目录未记录）。
+		// QQMusic.dll+0xD3BBC0（.data+0x9CBC0，即 Struct1+0x70738），E 类字段，取值、MinPause 与载入的归类同 22.60。核实清单
+		// （设计 §6.8）：第 1 项 60.7→69.3 s、84.1→92.5 s 等暂停与恢复，补写期间为 4；第 2 项换歌（107.1、120.1、133.5、
+		// 160.9 s）为 2、随后为 3，不出现 4；第 3 项起步停顿为 3；第 4 项换歌后立刻暂停（133.9、161.5 s）为 4；第 5 项只取
+		// 2～4。第 6 项部分，同 22.60。另有 A 类字段 0xD3F3B8（SongIDOff+0x10），换歌与开播时多闪 3，不用。
+		PlayState: playStateSpec{Off: 0xD3BBC0, Paused: []uint32{4}, Playing: []uint32{3}, Loading: []uint32{2}},
+		// 当前歌曲记录（#218）：2026-11-23 真值补测（设计 §6.4 第 4 步「版本」），专辑页、最近播放、搜索结果、最近播放四个入口下
+		// QQ 显示所用的键与记录网址的键 4/4 一致，前缀每次命中 1～2 处、同一网址，.wma 之后为 0=。
+		SongRecord: true,
 	},
 	"22.82": {
 		// qqprobe 实测（32-bit x86，2026-11-16，构建目录 QQMusic2282.03.58.27）：
@@ -331,6 +524,20 @@ var knownVersions = map[string]dllOffsets{
 		SongIDDurCheckOff: 0x73F30,
 		UseWideStrings:    true,
 		SongMidFromHeap:   true,
+		// 播放状态（#172）：tools/qqstateprobe 实测（2026-11-22，录像 qq172-r1.bin，420 s，2084 拍；该次的构建目录
+		// 未记录，上面 11-16 的构建目录不一定是同一个）。QQMusic.dll+0xD3BBA8（.data+0x9CBA8），DWORD：3 播放、4 暂停、
+		// 2 换歌载入中。核实清单（设计 §6.8）：第 1 项 2.5→7.7 s、12.9→18.5 s 两次暂停与恢复，暂停中的补写期间为 4；
+		// 第 2 项换歌（29.3、40.7、189.9 s）读到新歌名那一拍为 2、随后为 3，不出现 4；第 3 项换歌、拖动（130.5、137.9、
+		// 146.5 s）、恢复之后读数停走期间为 3；第 4 项换歌后立刻暂停（52.1、69.7、87.5 s）为 4，含 +766 ms 的补写；
+		// 第 5 项全程只取 2、3、4。换歌不闪暂停值，MinPause 为 0。第 6 项见真机验收另录的 qq2282-restart.bin（2026-11-22，
+		// 设计 §1.3「QQ 启动后未开播」）：重启 QQ 后同一 RVA 取值语义不变；QQ 载入上次的歌而未开播时一直为 2，读数不动，
+		// 开播即变 3。2 因此归载入、不算在播（设计 §6.1）：按在播的话认领后 3 s 触发交叉核对甲，整个连接退回停走判定；
+		// 载入按停走判定，停走自进入 2 的那一拍起量，换歌那一拍 0.2～0.4 s 的 2 不会判暂停。
+		PlayState: playStateSpec{Off: 0xD3BBA8, Paused: []uint32{4}, Playing: []uint32{3}, Loading: []uint32{2}},
+		// 当前歌曲记录（#218）：2026-11-22 真机只读扫描（设计 §2.2，#218 评论 7465），专辑页与最近播放两种入口下，Struct1 的
+		// 专辑、歌手、歌名（+0x08、+0x04、+0x00 的 UTF-16 指针）拼成的前缀在全部可读内存里都只命中当前那条，命中都在
+		// MEM_PRIVATE、PAGE_READWRITE 的区域。
+		SongRecord: true,
 	},
 }
 
@@ -356,7 +563,7 @@ func parseVer(s string) (int, bool) {
 // 读宽指针立刻乱码。按距离取最近至少让这种版本落到 22.41、字符串模型跟得上。
 //
 // 但这是启发式，不是保证：版本号距离 ≠ 结构距离。22.16→22.22 字段偏移整个搬家（Name
-// 0x00→0x80）、22.22→22.31 窄转宽，正好落在两代之间的未知版本仍是赌，且跨字符串模型
+// 0x00→0x80）、22.22→22.26 窄转宽，正好落在两代之间的未知版本仍是赌，且跨字符串模型
 // 切换点会赌错。所以走这条路径必须上报读到的歌名样本（见 ReadAllMetadata），让野外数据
 // 判断赌对没有、哪些版本需要补表。
 //
@@ -707,6 +914,37 @@ func (m *QQMusicMem) Offsets() dllOffsets {
 	return m.offsets
 }
 
+// playStateAddr 返回播放状态字段的绝对地址（#172）。本版本未收录（PlayState.Off 为 0），或按版本号距离借用了
+// 别的版本的偏移表、读不到版本号而借用最新版本的（fallbackTo 非空）时为 0，即不读：借用偏移表时歌名赌对了，
+// 状态偏移照样可能错，而错读状态比错读歌名难察觉。
+func (m *QQMusicMem) playStateAddr() uintptr {
+	if m.offsets.PlayState.Off == 0 || m.fallbackTo != "" {
+		return 0
+	}
+	return m.qqmusicDllBase + m.offsets.PlayState.Off
+}
+
+// songRecordEnabled 报告本会话是否读 QQ 内存里的当前歌曲记录（#218，设计 §6.4 第 4 步「版本」）：只在该版本核实过记录格式
+// （SongRecord）、且版本号精确匹配时读；按距离借用偏移表、读不到版本号而借用最新版本的（fallbackTo 非空）时不读，
+// 同 playStateAddr。
+func (m *QQMusicMem) songRecordEnabled() bool { return m.offsets.SongRecord && m.fallbackTo == "" }
+
+// readPlayState 读播放状态字段（#172）。地址为 0 时返回 (0, false)；ReadProcessMemory 失败或读到的不足 4 字节
+// 时同样返回 (0, false)。不能沿用 ReadUint32：它失败时返回 0，而 0 是 20.05 的在播取值。
+func (m *QQMusicMem) readPlayState() (uint32, bool) {
+	addr := m.playStateAddr()
+	if addr == 0 {
+		return 0, false
+	}
+	var val uint32
+	var n uintptr
+	r, _, _ := procReadProcessMemory.Call(m.hProcess, addr, uintptr(unsafe.Pointer(&val)), 4, uintptr(unsafe.Pointer(&n)))
+	if r == 0 || n != 4 {
+		return 0, false
+	}
+	return val, true
+}
+
 func (m *QQMusicMem) ReadUint32(addr uintptr) uint32 {
 	var val uint32
 	var bytesRead uintptr
@@ -997,13 +1235,15 @@ func (m *QQMusicMem) InjectProgressAOB() error {
 }
 
 type SongMetadata struct {
-	Name       string
-	Singer     string
-	SongID     uint32
-	SongMid    string // QQ Music 字母数字 MID（v20.05 从 URL 参数解析，其他版本空）
-	ProgressMs uint32
-	DurationMs uint32
-	SliderVal  uint32
+	Name        string
+	Singer      string
+	SongID      uint32
+	SongMid     string // QQ Music 字母数字 MID（v20.05 从 URL 参数解析，其他版本空）
+	ProgressMs  uint32
+	DurationMs  uint32
+	SliderVal   uint32
+	PlayState   uint32 // 播放状态字段的原始取值（#172），PlayStateOK 为假时无意义
+	PlayStateOK bool   // 读了且读成功；未收录、借用偏移表或读失败时为假
 }
 
 // ssoFromBuf 从 24 字节的 MSVC 32-bit std::string 快照里解出字符串。
@@ -1397,6 +1637,7 @@ func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 	}
 	meta.DurationMs = duration
 	meta.ProgressMs = progress
+	stateRaw, stateOK := m.readPlayState()
 
 	// v20.05 songMid 提取（两路，优先用流 URL）
 	// 路径1: struct1+StreamURLOff → WCHAR* → "http://.../00281PXu4DHKNp.wma"
@@ -1474,12 +1715,14 @@ func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
 	}
 
 	return &SongMetadata{
-		Name:       name,
-		Singer:     singer,
-		SongID:     songId,
-		SongMid:    meta.SongMid,
-		ProgressMs: progress,
-		DurationMs: duration,
-		SliderVal:  sliderVal,
+		Name:        name,
+		Singer:      singer,
+		SongID:      songId,
+		SongMid:     meta.SongMid,
+		ProgressMs:  progress,
+		DurationMs:  duration,
+		SliderVal:   sliderVal,
+		PlayState:   stateRaw,
+		PlayStateOK: stateOK,
 	}, nil
 }

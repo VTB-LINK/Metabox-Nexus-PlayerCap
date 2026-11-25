@@ -168,7 +168,7 @@ paths:
                         cloudmusicv3-poll: 30
                         cloudmusicv3-idle-hide: 0
                         cloudmusicv3-audio-normalize: true
-                        qqmusic-offset: -400
+                        qqmusic-offset: -100
                         qqmusic-poll: 30
                         qqmusic-idle-hide: 0
                         qqmusic-audio-normalize: true
@@ -180,7 +180,7 @@ paths:
                         sodamusic-poll: 30
                         sodamusic-idle-hide: 0
                         sodamusic-audio-normalize: true
-                        applemusic-offset: -400
+                        applemusic-offset: -900
                         applemusic-poll: 30
                         applemusic-idle-hide: 0
                         applemusic-audio-normalize: true
@@ -212,7 +212,7 @@ paths:
                         cloudmusicv3-poll: 100
                         cloudmusicv3-idle-hide: 0
                         cloudmusicv3-audio-normalize: true
-                        qqmusic-offset: -400
+                        qqmusic-offset: -100
                         qqmusic-poll: 30
                         qqmusic-idle-hide: 0
                         qqmusic-audio-normalize: true
@@ -224,7 +224,7 @@ paths:
                         sodamusic-poll: 200
                         sodamusic-idle-hide: 0
                         sodamusic-audio-normalize: true
-                        applemusic-offset: -400
+                        applemusic-offset: -900
                         applemusic-poll: 50
                         applemusic-idle-hide: 0
                         applemusic-audio-normalize: true
@@ -491,7 +491,7 @@ paths:
         **`text` 不保证为空**：cloudmusicv3 与 kugou 对纯音乐返回一行「纯音乐，请欣赏」，服务端已把 `index` 归一为 `-1`，但该提示语原样保留在 `text` 里；qqmusic 的 API 返回零行、以及 sodamusic 的平台未给出 KRC（`lyrics.type` 非 `krc` 或内容为空）、以及 applemusic 扫不到该曲 TTML（纯音乐、歌词未就绪，或 Apple Music 的歌词面板没有打开：面板关着时它不加载歌词）、以及 spotify 的 color-lyrics 返回零行、以及 kuwo 取词有结论而没有歌词行（只有酷我的提示语、或一行歌名行加提示语的也算，提示语不保留）时，`text` 为 `""`。提示语归一逻辑在 cloudmusicv3 / kugou / sodamusic / applemusic / spotify 生效（qqmusic 不做此归一），只是尚未观测到汽水 / Apple Music / Spotify 发出这一行。
         wesing 不发 `index: -1`：读不到歌词时不宣告这首歌，首行之前不发 `lyric_update`。
         判断有无歌词一律用 `index !== -1`，不要看 `text`。
-        对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达：applemusic、spotify 与 kuwo 换歌时先发空的 `all_lyrics`，确定没有歌词后才发 `index: -1`。
+        对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达：applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 `index: -1`。
         客户端利用 `msg.data.index === -1` 识别纯音乐，而非依赖 `msg.data.text`。
       responses:
         "200":
@@ -921,6 +921,7 @@ paths:
         ```json
         {"type":"playback_pause","player":"wesing","data":{"position":215.74998,"progress":0.75473773}}
         ```
+        qqmusic 在已暂停时拖动进度条、而读到的 QQ 音乐播放状态仍为暂停时，在新位置补发一条（这一拍不发 `playback_resume`），不伴随 `status_update`；QQ 音乐随后开始播放时照常发 `playback_resume`。
 
         ---
 
@@ -1700,6 +1701,17 @@ webhooks:
                     title: "SUBURBIA - Troye Sivan"
                     cover: "http://img1.kwcdn.kuwo.cn/star/albumcover/500/s4s58/46/1137963837.jpg"
                     cover_base64: "data:image/jpeg;base64,/9j/2wCEAAMCAgMC..."
+              spotify:
+                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 151956）。换歌时先发一条 cover 有值、cover_base64 为空串的（同一首歌 ms 151246），封面下载并缩放后补发这一条（710 毫秒后），两条的 cover 相同。cover_base64 已截断。
+                value:
+                  type: song_info_update
+                  player: spotify
+                  data:
+                    name: "Eclipse"
+                    singer: "Billyrrom"
+                    title: "Eclipse - Billyrrom"
+                    cover: "https://i.scdn.co/image/ab67616d0000e1a358e20b29dd6ef6af28346d86"
+                    cover_base64: "data:image/jpeg;base64,/9j/2wCEAAMCAgMC..."
       responses:
         "200":
           description: 事件已接收
@@ -1714,7 +1726,7 @@ webhooks:
 
         **`index: -1` 纯音乐说明：**
         当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`、`roma_text: ""`，而 **`progress` 照常反映播放进度**；`text` 不保证为空（cloudmusicv3 / kugou 保留平台提示语「纯音乐，请欣赏」，qqmusic / sodamusic 为 `""`；applemusic 未配到 TTML 时为 `""`，配到的 TTML 只有这一行提示语时保留它，按代码，未在真机见过；spotify 的 color-lyrics 返回零行时为 `""`，提示语归一逻辑同样生效；kuwo 为 `""`，在取词有结论之后发出）。wesing 不发 `index: -1`。
-        对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达：applemusic、spotify 与 kuwo 换歌时先发空的 `all_lyrics`，确定没有歌词后才发 `index: -1`。
+        对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达：applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 `index: -1`。
         客户端利用 `msg.data.index === -1` 识别纯音乐。
       requestBody:
         required: true
@@ -1871,6 +1883,22 @@ webhooks:
                         - { timestamp: 120.092, play_time: 119.712006, duration: 0.21, text: "…" }
                         - { timestamp: 120.302, play_time: 119.922005, duration: 0.326, text: "…" }
                     roma_text_detailed: {}
+              有歌词时（spotify，逐行）:
+                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 160318）。歌词正文从略——text 写作「…」。spotify 只有逐行歌词，sub_text、roma_text 为空串，text_detailed、roma_text_detailed 为 {}，都是原值。录制时 offset 为 -200ms。
+                value:
+                  type: lyric_update
+                  player: spotify
+                  data:
+                    index: 0
+                    text: "…"
+                    sub_text: ""
+                    roma_text: ""
+                    timestamp: 9.76
+                    play_time: 9.56
+                    position: 9.635532
+                    progress: 0.04426873
+                    text_detailed: {}
+                    roma_text_detailed: {}
               无可用歌词（applemusic）:
                 summary: applemusic（真实录音，2026-11-13）。宣告新歌 14.9 秒后（整曲位置 15.1 秒处）仍没找到歌词才发，text 为空串；宣告时已先发过一条 count 为 0 的 all_lyrics。
                 value:
@@ -1887,6 +1915,22 @@ webhooks:
                     progress: 0.06940273
                     text_detailed: {}
                     roma_text_detailed: {}
+              无可用歌词（spotify）:
+                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 252148）。平台对这首歌答复 HTTP 404，宣告新歌 1.0 秒后、取词结束时发出，text 为空串；宣告时已先发过一条 count 为 0 的 all_lyrics。
+                value:
+                  type: lyric_update
+                  player: spotify
+                  data:
+                    index: -1
+                    text: ""
+                    sub_text: ""
+                    roma_text: ""
+                    timestamp: 0
+                    play_time: 0
+                    position: 1.3471224
+                    progress: 0.0039283526
+                    text_detailed: {}
+                    roma_text_detailed: {}
       responses:
         "200":
           description: 事件已接收
@@ -1898,7 +1942,7 @@ webhooks:
       operationId: onAllLyrics
       description: |
         新歌曲开始播放时推送完整歌词列表。连接建立时，若已有缓存则补发一次，否则不发。
-        同一首歌也可能再推一次：qqmusic 换歌时歌曲 ID 尚未就绪、先推了一条空歌词的，8 秒内补取到歌词时；kuwo 换歌时先推一条空歌词的，取到歌词时，以及时长或歌名、歌手变化时；sodamusic 时长晚到或音译补齐时、wesing 宣告的总时长被纠正时（播放中核实之后，最早约开播 6 秒，每首至多一次）、applemusic 歌词晚到时（换歌后头 3 秒约每 0.4 秒、到 15 秒约每 1.2 秒找一次，之后退避到最长 60 秒一次）、spotify 歌词取到时（换歌时不等取词、先推一条空歌词的；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止）、kugou 从酷狗读到这首歌的歌词与已推的不同时（换歌后 300 毫秒内没读到、先推了在线取词结果的；或播放中酷狗换了这首歌的歌词：手动关联、或首次播放时酷狗稍后写入歌词缓存；或换歌时沿用了同名上一首的歌词、随后确认酷狗里这份本地文件没有歌词，补发一条空歌词，并发一条 `index:-1` 的 `lyric_update`），各补发一条完整的 `all_lyrics`，前端以最新一条覆盖即可。
+        同一首歌也可能再推一次：qqmusic 换歌时歌曲 ID 尚未就绪、先推了一条空歌词的，补取到歌词时（播放中补取 8 秒；8 秒用尽时已暂停的，恢复播放后再补取 8 秒）或播放本地文件、取到其关联的歌词时，播放的本地文件被 QQ 音乐匹配成在线歌曲之后，认出 QQ 音乐仍在放关联表里的这个文件、晚于在线取词到达时，在 QQ 音乐里改了这首歌的歌词关联或时间偏移时，QQ 音乐写完这首歌的歌词缓存时，开播几秒内认出 QQ 音乐所用的关联与先前不同时，从另一个入口重开同一首、所用的关联随之改变时，以及换歌时 QQ 音乐所用的歌词（关联或它自己的歌词缓存）晚于在线取词到达的；kuwo 换歌时先推一条空歌词的，取到歌词时，以及时长或歌名、歌手变化时；sodamusic 时长晚到或音译补齐时、wesing 宣告的总时长被纠正时（播放中核实之后，最早约开播 6 秒，每首至多一次）、applemusic 歌词晚到时（换歌后头 3 秒约每 0.4 秒、到 15 秒约每 1.2 秒找一次，之后退避到最长 60 秒一次）、spotify 歌词取到时（换歌时不等取词、先推一条空歌词的；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止）、kugou 从酷狗读到这首歌的歌词与已推的不同时（换歌后 300 毫秒内没读到、先推了在线取词结果的；或播放中酷狗换了这首歌的歌词：手动关联、或首次播放时酷狗稍后写入歌词缓存；或换歌时沿用了同名上一首的歌词、随后确认酷狗里这份本地文件没有歌词，补发一条空歌词，并发一条 `index:-1` 的 `lyric_update`），各补发一条完整的 `all_lyrics`，前端以最新一条覆盖即可。
       requestBody:
         required: true
         content:
@@ -2111,6 +2155,20 @@ webhooks:
                             - { timestamp: 119.908, play_time: 119.528, duration: 0.184, text: "…" }
                             - { timestamp: 120.092, play_time: 119.712006, duration: 0.21, text: "…" }
                         roma_text_detailed: {}
+              有歌词时（spotify，逐行）:
+                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 152645）。lyrics 实际 30 行（此处留 2），歌词正文从略——text 写作「…」。30 行的 sub_text、roma_text 都为空串，text_detailed、roma_text_detailed 都为 {}，都是原值。这是换歌之后补发的那一条——宣告时依次发出 status_update（playing）、一条 count 为 0 的 all_lyrics（ms 151239）与 cover_base64 为空串的 song_info_update（ms 151246），约 1.4 秒后取到歌词补发这一条。position 是补发那一刻的实时位置。
+                value:
+                  type: all_lyrics
+                  player: spotify
+                  data:
+                    title: "Eclipse - Billyrrom"
+                    duration: 217.66
+                    position: 2.036037
+                    progress: 0.009354208
+                    count: 30
+                    lyrics:
+                      - { index: 0, timestamp: 9.76, play_time: 9.56, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
+                      - { index: 1, timestamp: 19.795, play_time: 19.595, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
               平台没有歌词（kugou 纯音乐）:
                 summary: kugou（真实录音，2026-11-13）。data 不是空对象——count 为 0、lyrics 为空数组，title / duration 照常有值。同一毫秒紧跟一条 index 为 -1、text 为「纯音乐，请欣赏」的 lyric_update。
                 value:
@@ -2133,6 +2191,18 @@ webhooks:
                     duration: 217
                     position: 0.154428
                     progress: 0.0007116498
+                    count: 0
+                    lyrics: []
+              平台没有歌词（spotify）:
+                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 251148）。换歌时不等取词，先发这条空的；平台对这首歌答复 HTTP 404，1.0 秒后发 index 为 -1 的 lyric_update，之后不再补取。
+                value:
+                  type: all_lyrics
+                  player: spotify
+                  data:
+                    title: "1000年前 - VIDEOTAPEMUSIC"
+                    duration: 342.923
+                    position: 0.33759075
+                    progress: 0.0009844506
                     count: 0
                     lyrics: []
       responses:
@@ -2177,7 +2247,8 @@ webhooks:
       summary: 暂停播放事件
       operationId: onPlaybackPause
       description: |
-        播放暂停时发送。`data.position` 为暂停时刻的整曲播放位置（秒），`data.progress` 为对应进度。前端收到后应停止时间插值。
+        播放暂停时发送。`data.position` 为暂停时刻的整曲播放位置（秒），`data.progress` 为对应进度。qqmusic 在已暂停时拖动进度条、
+        而读到的 QQ 音乐播放状态仍为暂停时，在新位置补发一条（这一拍不发 `playback_resume`），不伴随 `status_update`。前端收到后应停止时间插值。
       requestBody:
         required: true
         content:
@@ -2210,6 +2281,14 @@ webhooks:
                   data:
                     position: 12.48
                     progress: 0.05402597
+              spotify:
+                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 148314）。5 毫秒后发 status_update（paused）。
+                value:
+                  type: playback_pause
+                  player: spotify
+                  data:
+                    position: 68.491
+                    progress: 0.20178002
       responses:
         "200":
           description: 事件已接收
@@ -2225,6 +2304,7 @@ webhooks:
         一次拖动可能收到两条）；kuwo、qqmusic 拖到开头 1 秒以内或单曲循环回到开头时，跳转那一条分别约晚 0.3 秒、0.4 秒；
         后两种的 `position` 可能小于上一次的值。
         wesing 的跳转在位置比上一拍回退 2 秒以上、或比按墙钟推算的位置超前 2 秒以上时发，约 2 秒以内的跳转不发；比 2 秒略长、不到约 2 秒加一个轮询间隔的，发不发取决于跳转发生的时刻；连续几次跳转或缓慢拖动进度条，若每两次读数之间的跳变都不到门槛，一条都不发。
+        spotify 的跳转只在播放中判，页面读数比按上一次读数外推的位置超前 1.5 秒以上、或落后 1 秒以上时发；暂停中拖动不发，恢复播放时照常发一条。
         因此本事件不保证与 `playback_pause` 成对出现。前端收到后应以 `position` 为锚点重新开始插值。
       requestBody:
         required: true
@@ -2282,6 +2362,30 @@ webhooks:
                   data:
                     position: 116.778
                     progress: 0.5011931
+              从暂停恢复（spotify）:
+                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 102933）。连上 Spotify 时它处于暂停（宣告的 all_lyrics 与 lyric_update 的 position 为 215.512），开始播放后发这一条，1 毫秒后发 status_update（playing）。这一条的 position 比暂停时的位置小 1 秒；下一条带位置的事件（ms 105261 的 lyric_update，position 为 217.8673）与从 215.512 起推算的位置相符，其间没有另发 playback_resume。
+                value:
+                  type: playback_resume
+                  player: spotify
+                  data:
+                    position: 214.512
+                    progress: 0.6319697
+              前跳（spotify）:
+                summary: spotify（同一次录音 ms 164164）。位置从约 13.5 秒跳到 46.40 秒，之前没有配对的 playback_pause；3 毫秒后重发跳转后所在的行（第 5 行的 lyric_update）。
+                value:
+                  type: playback_resume
+                  player: spotify
+                  data:
+                    position: 46.395958
+                    progress: 0.21315794
+              回跳（spotify）:
+                summary: spotify（同一次录音 ms 141945）。位置从约 254.3 秒回到 61.61 秒，2 毫秒后重发所在的行（第 0 行）。
+                value:
+                  type: playback_resume
+                  player: spotify
+                  data:
+                    position: 61.60895
+                    progress: 0.18150495
       responses:
         "200":
           description: 事件已接收
@@ -2566,7 +2670,7 @@ components:
             qqmusic-offset:
               type: integer
               description: qqmusic 歌词延迟（毫秒），方向同 offset
-              example: -400
+              example: -100
             qqmusic-poll:
               type: integer
               description: qqmusic 轮询间隔（毫秒）
@@ -2614,7 +2718,7 @@ components:
             applemusic-offset:
               type: integer
               description: applemusic 歌词延迟（毫秒），方向同 offset
-              example: -400
+              example: -900
             applemusic-poll:
               type: integer
               description: applemusic 轮询间隔（毫秒）
@@ -2868,7 +2972,7 @@ components:
           type: integer
           description: |
             歌词行号。
-            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 与 `roma_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出），而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 与 sodamusic 为 `""`；applemusic 未配到 TTML 时为 `""`，配到的 TTML 只有这一行提示语时保留它，按代码，未在真机见过；spotify 的 color-lyrics 返回零行时为 `""`，提示语归一逻辑同样生效；kuwo 为 `""`，在取词有结论之后发出）。wesing 不发 `-1`。对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达（applemusic、spotify 与 kuwo 换歌时先发空的 `all_lyrics`，确定没有歌词后才发 -1）。
+            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 与 `roma_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出），而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 与 sodamusic 为 `""`；applemusic 未配到 TTML 时为 `""`，配到的 TTML 只有这一行提示语时保留它，按代码，未在真机见过；spotify 的 color-lyrics 返回零行时为 `""`，提示语归一逻辑同样生效；kuwo 为 `""`，在取词有结论之后发出）。wesing 不发 `-1`。对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达（applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 -1）。
             客户端用 `msg.data.index === -1` 判断有无歌词，不要依赖 `msg.data.text` 是否为空。
           example: 1
         text:

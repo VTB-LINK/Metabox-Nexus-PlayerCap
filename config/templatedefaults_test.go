@@ -26,8 +26,16 @@ func TestTemplateMatchesDefaultConfig(t *testing.T) {
 	}
 }
 
+// retunedTemplateOffsets 是 2026-11-23 按真机重新调定的模板 offset，不再是 3.x 模板取值的相反数。
+// 3.x 的旧配置迁移时照旧取反（保留用户原来的观感），新取值由 4.0.0 的强制重建带到老用户。
+var retunedTemplateOffsets = map[string]int{
+	"qqmusic-offset":    -100,
+	"applemusic-offset": -900,
+}
+
 // TestTemplateOffsetsNegateLegacyValues 钉住 offset 改为延迟语义（issue #54）之后模板里各 offset 的取值：
-// 都是 3.x 模板取值（提前量）的相反数，同一份歌词的观感不变。下表左列照 v3.3.4 的模板抄录。
+// 未重新调过的都是 3.x 模板取值（提前量）的相反数，同一份歌词的观感不变。下表左列照 v3.3.4 的模板抄录。
+// qqmusic、applemusic 于 2026-11-23 按真机重新调过，不再是 3.x 取值的相反数，另表钉住。
 // 全局 offset 另由上一条与 DefaultConfig() 对齐；各播放器的键不在那一条之内（本测试二进制不注册播放器），
 // 这里直接读模板的解析结果。
 //
@@ -37,10 +45,8 @@ func TestTemplateOffsetsNegateLegacyValues(t *testing.T) {
 	legacy := map[string]int{
 		"offset":              200,
 		"cloudmusicv3-offset": 500,
-		"qqmusic-offset":      400,
 		"kugou-offset":        430,
 		"sodamusic-offset":    340,
-		"applemusic-offset":   400,
 	}
 	var m map[string]interface{}
 	if err := yaml.Unmarshal([]byte(defaultConfigContent), &m); err != nil {
@@ -49,6 +55,11 @@ func TestTemplateOffsetsNegateLegacyValues(t *testing.T) {
 	for key, old := range legacy {
 		if got, ok := m[key].(int); !ok || got != -old {
 			t.Errorf("模板的 %s = %v，期望 %d（3.x 模板取值 %d 的相反数）", key, m[key], -old, old)
+		}
+	}
+	for key, want := range retunedTemplateOffsets {
+		if got, ok := m[key].(int); !ok || got != want {
+			t.Errorf("模板的 %s = %v，期望 %d（2026-11-23 重新调定）", key, m[key], want)
 		}
 	}
 	// wesing-offset 在模板里是注释掉的示例，取值 0，不进解析结果。

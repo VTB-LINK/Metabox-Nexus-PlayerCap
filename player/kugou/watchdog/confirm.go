@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"Metabox-Nexus-PlayerCap/i18n"
+	"Metabox-Nexus-PlayerCap/player/restartmgr"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -64,7 +65,7 @@ var realConfirmDeps = confirmDeps{
 	imagePath:   imagePath,
 	readVersion: readExeVersion,
 	checkPatch:  CheckPatchStatus,
-	holders:     rmHolders,
+	holders:     restartmgr.HoldersOf,
 	regAppData:  regAppDataPath,
 	appData:     func() string { return os.Getenv("APPDATA") },
 	readFile:    readShared,

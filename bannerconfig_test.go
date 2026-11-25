@@ -143,7 +143,7 @@ func stockEchoConfig() config.Config {
 	cfg := defaultEchoConfig()
 	markExplicit(&cfg, "addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide",
 		"audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "cloudmusicv3-effect-strategy")
-	for name, offset := range map[string]int{"cloudmusicv3": -500, "qqmusic": -400, "kugou": -430, "sodamusic": -340, "applemusic": -400} {
+	for name, offset := range map[string]int{"cloudmusicv3": -500, "qqmusic": -100, "kugou": -430, "sodamusic": -340, "applemusic": -900} {
 		cfg.Players[name].Offset = intPtr(offset)
 		markExplicit(&cfg, name+"-offset")
 	}
@@ -207,10 +207,10 @@ func TestBannerGolden(t *testing.T) {
    音频波形帧率: *audio-frame-rate=25fps
    播放器: wesing (offset=-200ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: cloudmusicv3 (*offset=-500ms poll=30ms → 100ms idle-hide=0s audio-normalize=true *effect-strategy=fadeout)
-   播放器: qqmusic (*offset=-400ms poll=30ms idle-hide=0s audio-normalize=true)
+   播放器: qqmusic (*offset=-100ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: kugou (*offset=-430ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: sodamusic (*offset=-340ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
-   播放器: applemusic (*offset=-400ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
+   播放器: applemusic (*offset=-900ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    播放器: spotify (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b
 `},

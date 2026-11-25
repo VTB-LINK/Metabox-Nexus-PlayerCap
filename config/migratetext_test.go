@@ -246,9 +246,13 @@ func TestRewriteTextMigratesShippedV3Config(t *testing.T) {
 		t.Errorf("迁移结果与预期不同\n得：\n%s\n期望：\n%s", got, want)
 	}
 
-	// 各 offset 与 4.0 模板取值相同（wesing 在两边都是注释掉的 0）。
+	// 各 offset 与 4.0 模板取值相同（wesing 在两边都是注释掉的 0）；重新调定过的键除外，它们按取反迁移、
+	// 新取值由强制重建带到（retunedTemplateOffsets）。
 	tmpl := parseYAML(t, templateContent("v4.0.0"))
 	for _, key := range offsetKeys(realPlayers) {
+		if _, retuned := retunedTemplateOffsets[key]; retuned {
+			continue
+		}
 		if _, inOld := m[key]; inOld && next[key] != tmpl[key] {
 			t.Errorf("%s 迁移后 = %v，4.0 模板为 %v", key, next[key], tmpl[key])
 		}

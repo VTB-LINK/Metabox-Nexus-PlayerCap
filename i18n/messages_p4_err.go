@@ -401,4 +401,38 @@ var p4ErrMessages = map[string]string{
 	// —— player/launch：商店版播放器的统一前置门禁（issue #212）——
 	"the player's executable path could not be read":         "读不到播放器的映像路径",
 	"%s is under WindowsApps (Microsoft Store installation)": "%s 位于 WindowsApps 下（微软商店版）",
+	// —— player/qqmusic/assoc：QQ 音乐关联表、歌词索引与配置的解密与解析（issue #218）——
+	"QQ Music data file is malformed":                       "QQ 音乐的数据文件结构不合规",
+	"%w: length %d is below 16 or not a multiple of 8":      "%w：长度 %d 小于 16 或不是 8 的倍数",
+	"%w: the last 7 bytes are not zero":                     "%w：末尾 7 字节不全为 0",
+	"%w: padding of %d bytes exceeds the %d-byte plaintext": "%w：填充 %d 字节超出了 %d 字节的明文",
+	"%w: UTF-16 byte length %d is odd":                      "%w：UTF-16 字节数 %d 为奇数",
+	"%w: unpaired UTF-16 surrogate at byte %d":              "%w：第 %d 字节处的 UTF-16 代理项不成对",
+	"%w: no root element":                                   "%w：没有根元素",
+	"%w: root element is <%s>, expected <%s>":               "%w：根元素是 <%s>，应为 <%s>",
+	"%w: more than %d entries":                              "%w：条目超过 %d 条",
+	"%w: attribute %s is longer than %d bytes":              "%w：属性 %s 超过 %d 字节",
+	"%w: no CachePath.ini setting":                          "%w：没有 CachePath.ini 设置",
+	"%w: cache path is not absolute":                        "%w：缓存目录不是绝对路径",
+	// —— player/qqmusic/assoc：本地文件认定（issue #218）——
+	"several candidate files are open in QQ Music; cannot tell which one is playing": "QQ 音乐打开了多个候选文件，无法确定正在播放哪一个",
+	// —— player/qqmusic：关联歌词文件的读取与解析（issue #218）——
+	"lyric file is missing":                     "歌词文件读不到",
+	"lyric file is unusable":                    "歌词文件不可用",
+	"%w: path is not absolute":                  "%w：路径不是绝对路径",
+	"%w: no timed lyric lines":                  "%w：没有带时间戳的歌词行",
+	"%w: more than %d lines":                    "%w：超过 %d 行",
+	"QRC body length %d is not a multiple of 8": "QRC 正文长度 %d 不是 8 的倍数",
+	"%d and %d lines exceed the merge limit":    "%d 行与 %d 行超出合并规模上限",
+	"%w: more than %d per-character units":      "%w：逐字超过 %d 个",
+	"copying it to the lyric lines exceeds %d per-character units or %d bytes of text": "复制给各行歌词将超过 %d 个逐字或 %d 字节文本",
+	"%w: unchanged since it was found unusable":                                        "%w：判为不可用之后没有变化",
+	// —— player/qqmusic：歌词关联的后台读取者与 songmid 换算（issue #218）——
+	"the QQ Music configuration directory is unknown":    "QQ 音乐的配置目录未知",
+	"the lyric association table is not supported: %w":   "歌词关联表不受支持：%w",
+	"internal error in the lyric association reader: %v": "歌词关联读取者内部错误：%v",
+	"songmid %s not found (code %d)":                     "查不到 songmid %s（code %d）",
+	// —— player/qqmusic：编号补全的兜底请求（issue #218）——
+	"song detail for songid %d did not confirm the songid (%s)": "歌曲详情未核实 songid %d（%s）",
+	"malformed songmid %q": "songmid %q 的形式不对",
 }

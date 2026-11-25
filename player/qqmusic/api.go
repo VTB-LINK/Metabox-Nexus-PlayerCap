@@ -133,16 +133,25 @@ func mergeTrans(lines []lyricLine, transLRC string) {
 		return
 	}
 	transLines, _, _ := parseLRC(transLRC, 0)
-	if len(transLines) == 0 {
+	mergeTransLines(lines, transLines)
+}
+
+// mergeTransLines 是 mergeTrans 解析之后的部分（配对与丢弃，见 mergeTrans），也供已解析好的翻译行
+// （关联的本地歌词文件）直接使用。
+func mergeTransLines(lines, trans []lyricLine) {
+	if len(lines) == 0 || len(trans) == 0 {
 		return
 	}
-	for i, j := range alignByTime(lines, transLines, transToleranceMs) {
-		if j < 0 || transIsDroppable(transLines[j].Text) {
+	for i, j := range alignByTime(lines, trans, transToleranceMs) {
+		if j < 0 || transIsDroppable(trans[j].Text) {
 			continue
 		}
-		lines[i].SubText = transLines[j].Text
+		lines[i].SubText = trans[j].Text
 	}
 }
+
+// onAlignByTime 在 alignByTime 每次调用时调用，供测试计数；出货代码中为空操作。
+var onAlignByTime = func() {}
 
 // alignByTime 把 trans 的行按行序一对一配到 lines 上，返回 match：match[i] 是 lines[i]
 // 配上的 trans 下标，-1 = 不配。
@@ -172,6 +181,7 @@ func mergeTrans(lines []lyricLine, transLRC string) {
 // 最优解，固定顺序让结果确定。表大小 (len(lines)+1)×(len(trans)+1)，一首百行量级，
 // 每次取词只跑一次。
 func alignByTime(lines, trans []lyricLine, tolMs int) []int {
+	onAlignByTime()
 	type score struct{ pairs, cost int }
 	better := func(a, b score) bool {
 		return a.pairs > b.pairs || a.pairs == b.pairs && a.cost < b.cost
@@ -579,10 +589,35 @@ func mergeRoma(lines []lyricLine, romaLRC string) {
 		return
 	}
 	romaLines, _, _ := parseLRC(romaLRC, 0)
-	if len(romaLines) == 0 {
+	mergeRomaLines(lines, romaLines)
+}
+
+// mergeRomaLines 是 mergeRoma 解析之后的部分（就近匹配，见 mergeRoma）。
+func mergeRomaLines(lines, romaLines []lyricLine) {
+	if len(lines) == 0 || len(romaLines) == 0 {
 		return
 	}
+	assignRoma(lines, romaLines, romaMatches(lines, romaLines))
+}
+
+// assignRoma 按 match（见 romaMatches）把配上的音译行写进各行的 RomaText 与 RomaDetailed。每写一行，
+// BuildRomaDetailed 都另行分配一份逐字切片。
+func assignRoma(lines, romaLines []lyricLine, match []int) {
+	for i, j := range match {
+		if j < 0 {
+			continue
+		}
+		lines[i].RomaText = romaLines[j].Text
+		lines[i].RomaDetailed = player.BuildRomaDetailed(romaLines[j].Detailed, romaLines[j].Text)
+	}
+}
+
+// romaMatches 返回 lines 各行配上的音译行下标：容差内时间最近的那条，-1 为不配（容差内没有，或最近的那条是
+// 占位与声明）。同一行音译可以配给不止一行。
+func romaMatches(lines, romaLines []lyricLine) []int {
+	match := make([]int, len(lines))
 	for i := range lines {
+		match[i] = -1
 		lineMs := int(lines[i].Time*1000 + 0.5)
 		best := -1
 		bestDiff := romaToleranceMs + 1
@@ -600,12 +635,11 @@ func mergeRoma(lines []lyricLine, romaLRC string) {
 		// 复用 transIsDroppable：`//` 不发音占位对两条轨同样适用；QQ 的版权/来源文案是中文，
 		// 音译轨是罗马音（拉丁/拼音）几乎不可能命中那几个词根，套上零误伤、还多一层防护
 		// （万一 QQ 也往 roma 轨塞声明）。
-		if best < 0 || transIsDroppable(romaLines[best].Text) {
-			continue
+		if best >= 0 && !transIsDroppable(romaLines[best].Text) {
+			match[i] = best
 		}
-		lines[i].RomaText = romaLines[best].Text
-		lines[i].RomaDetailed = player.BuildRomaDetailed(romaLines[best].Detailed, romaLines[best].Text)
 	}
+	return match
 }
 
 // attachRoma 解密并合并音译歌词。音译与主歌词同一次响应返回，共用 crypt 标志。
@@ -655,10 +689,39 @@ func attachRoma(lines []lyricLine, rawRoma string, crypt int) {
 	log.Detail("attachRoma: %d/%d lines have roma_text", withRoma, len(lines))
 }
 
+// parseLRC 解析在线取词的歌词：逐行解析（见 scanLRC），一行都没解析出时把不带时间戳的文本行按时长均分。
 func parseLRC(lrc string, durationMs uint32) ([]lyricLine, string, string) {
-	var lines []lyricLine
-	var rawTextLines []string
-	var songName, singer string
+	lines, songName, singer, rawTextLines := scanLRC(lrc, 0)
+
+	// Fallback: distribute plain text evenly across duration
+	if len(lines) == 0 && len(rawTextLines) > 0 {
+		intervalSec := float32(4.0)
+		if durationMs > 0 && len(rawTextLines) > 0 {
+			intervalSec = (float32(durationMs) / 1000.0) / float32(len(rawTextLines))
+		}
+		for i, text := range rawTextLines {
+			if text != "" {
+				lines = append(lines, lyricLine{
+					Index: len(lines),
+					Time:  float32(i) * intervalSec,
+					Text:  text,
+				})
+			}
+		}
+	}
+	return lines, songName, singer
+}
+
+// parseLRCLines 是 parseLRC 去掉均分兜底的部分，供关联的本地歌词文件用（设计 §6.6 第 3 步）：本地文件可能是任意内容，
+// 均分会把乱码或纯文本当成歌词发出。解析出 maxLocalLines+1 行即停，超限的输入不整份展开，由调用方判为不可用。
+func parseLRCLines(lrc string) ([]lyricLine, string, string) {
+	lines, songName, singer, _ := scanLRC(lrc, maxLocalLines+1)
+	return lines, songName, singer
+}
+
+// scanLRC 逐行解析歌词，认普通 LRC 的 [分:秒.百分秒] 与 QRC 的 [起始,时长] 两种行，取 [ti:]、[ar:] 为歌名与歌手；
+// rawTextLines 为不以「[」开头、不带时间戳的文本行，供 parseLRC 的均分兜底。limit 大于 0 时解析出 limit 行即停。
+func scanLRC(lrc string, limit int) (lines []lyricLine, songName, singer string, rawTextLines []string) {
 	// 分钟位用 \d+ 而非 \d{2}：写死两位时，时长超 99 分钟的音频（长混音 / DJ 串烧 /
 	// 有声书类）行首是 [100:05.00]，整行匹配不上 → 被静默丢弃。秒与毫秒保持原样
 	// （\d{2} 与 \d{2,3}，后者兼容三位毫秒）。
@@ -669,6 +732,9 @@ func parseLRC(lrc string, durationMs uint32) ([]lyricLine, string, string) {
 	arRe := regexp.MustCompile(`\[ar:(.*?)\]`)
 
 	for _, line := range strings.Split(lrc, "\n") {
+		if limit > 0 && len(lines) >= limit {
+			break
+		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -745,24 +811,7 @@ func parseLRC(lrc string, durationMs uint32) ([]lyricLine, string, string) {
 			rawTextLines = append(rawTextLines, line)
 		}
 	}
-
-	// Fallback: distribute plain text evenly across duration
-	if len(lines) == 0 && len(rawTextLines) > 0 {
-		intervalSec := float32(4.0)
-		if durationMs > 0 && len(rawTextLines) > 0 {
-			intervalSec = (float32(durationMs) / 1000.0) / float32(len(rawTextLines))
-		}
-		for i, text := range rawTextLines {
-			if text != "" {
-				lines = append(lines, lyricLine{
-					Index: len(lines),
-					Time:  float32(i) * intervalSec,
-					Text:  text,
-				})
-			}
-		}
-	}
-	return lines, songName, singer
+	return lines, songName, singer, rawTextLines
 }
 
 // songDetailResponse holds the relevant fields from get_song_detail_yqq
@@ -781,19 +830,23 @@ type songDetailResponse struct {
 					Pmid string `json:"pmid"`
 					Name string `json:"name"`
 				} `json:"singer"`
-				Mid  string `json:"mid"`
-				Name string `json:"name"`
+				// 数字 songid，供核验（2026-11-23 以真实响应核实字段名）。保留 JSON 原文、核验时才解析（detailFromTrack）：
+				// 写法异常的 id 只使核验不过，不让整份响应解不开而连带丢掉封面。
+				ID   json.RawMessage `json:"id"`
+				Mid  string          `json:"mid"`
+				Name string          `json:"name"`
 			} `json:"track_info"`
 		} `json:"data"`
 	} `json:"req_0"`
 }
 
 // fetchCoverURLBySongMid 通过 songMid 获取封面 URL（v20.05 使用）
-// 使用 fcg_play_single_song.fcg?songmid=<MID> 获取 album mid 后构建封面 URL
-func fetchCoverURLBySongMid(songMid string) string {
+// 使用 fcg_play_single_song.fcg?songmid=<MID> 获取 album mid 后构建封面 URL。
+// 另从同一响应经 detailFromSingle 核验并交出 songid（设计 §6.4 第 2 步）；封面的取用不看核验结果。
+func fetchCoverURLBySongMid(songMid string) (string, songDetail) {
 	resp, err := httpClient.Get("https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid=" + songMid + "&g_tk=5381&format=json")
 	if err != nil {
-		return ""
+		return "", songDetail{state: detailFailed}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -801,6 +854,7 @@ func fetchCoverURLBySongMid(songMid string) string {
 	var result struct {
 		Code int `json:"code"`
 		Data []struct {
+			singleSong
 			Album struct {
 				Mid  string `json:"mid"`
 				Pmid string `json:"pmid"`
@@ -812,32 +866,72 @@ func fetchCoverURLBySongMid(songMid string) string {
 			} `json:"singer"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil || result.Code != 0 || len(result.Data) == 0 {
-		return ""
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", songDetail{state: detailFailed}
+	}
+	songs := make([]singleSong, len(result.Data))
+	for i, d := range result.Data {
+		songs[i] = d.singleSong
+	}
+	detail := detailFromSingle(songMid, result.Code, songs)
+	if result.Code != 0 || len(result.Data) == 0 {
+		return "", detail
 	}
 	track := result.Data[0]
 	if mid := track.Album.Mid; mid != "" {
 		url := buildCoverURL("T002", mid, 800)
 		log.Detail("Cover (MID album): %s → %s", track.Album.Name, url)
-		return url
+		return url, detail
 	}
 	for _, s := range track.Singer {
 		if mid := s.Mid; mid != "" {
 			url := buildCoverURL("T001", mid, 800)
 			log.Detail("Cover (MID singer): %s → %s", s.Name, url)
-			return url
+			return url, detail
 		}
 	}
-	return ""
+	return "", detail
 }
 
-// fetchCoverURL gets the album cover URL for a song using QQ Music's native API.
-// When songMid is non-empty (v20.05), uses fcg_play_single_song.fcg instead.
-// Returns the cover URL (800x800) or empty string on failure.
-func fetchCoverURL(songID uint32, songMid string) string {
-	if songMid != "" {
-		return fetchCoverURLBySongMid(songMid)
+// fetchSongIDByMid 按 songmid 查数字 songid（单曲接口 fcg_play_single_song.fcg，设计 §6.4 第 2 步），供歌词关联的读取者
+// 补全编号的兜底请求。经 detailFromSingle 核验：只认 mid 与所查相同（区分大小写）、id 非 0 的那一首；查无此歌
+// （data 为空）、code 非 0 都报错。mid 须只含 ASCII 字母与数字（同 assoc.IsSongMid），直接拼进查询串。
+func fetchSongIDByMid(mid string) (uint32, error) {
+	resp, err := httpClient.Get("https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid=" + mid + "&g_tk=5381&format=json")
+	if err != nil {
+		return 0, i18n.Errorf("http request: %w", err)
 	}
+	defer resp.Body.Close()
+	var result struct {
+		Code int          `json:"code"`
+		Data []singleSong `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return 0, i18n.Errorf("json parse: %w", err)
+	}
+	if d := detailFromSingle(mid, result.Code, result.Data); d.state == detailGot {
+		return d.songID, nil
+	}
+	return 0, i18n.Errorf("songmid %s not found (code %d)", mid, result.Code)
+}
+
+// fetchSongMidByID 按 songid 查 songmid：与 fetchCoverURL 同一请求（get_song_detail_yqq），经 detailFromTrack 核验，
+// 不是已得即报错。供读取者在会话的封面请求已失败时兜底（设计 §6.4 第 2 步「兜底」）。
+func fetchSongMidByID(songID uint32) (string, error) {
+	detail, err := fetchSongDetail(songID)
+	if err != nil {
+		return "", err
+	}
+	track := detail.Req0.Data.TrackInfo
+	d := detailFromTrack(songID, detail.Req0.Code, track.ID, track.Mid)
+	if d.state != detailGot {
+		return "", i18n.Errorf("song detail for songid %d did not confirm the songid (%s)", songID, d.seen)
+	}
+	return d.songMid, nil
+}
+
+// fetchSongDetail 按 songid 请求 get_song_detail_yqq 并解析响应；请求失败、JSON 解不开报错，code 由调用方判。
+func fetchSongDetail(songID uint32) (*songDetailResponse, error) {
 	payload := map[string]interface{}{
 		"comm": map[string]interface{}{
 			"ct": 19,
@@ -855,45 +949,63 @@ func fetchCoverURL(songID uint32, songMid string) string {
 	jsonPayload, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", "https://u.y.qq.com/cgi-bin/musicu.fcg", bytes.NewReader(jsonPayload))
 	if err != nil {
-		return ""
+		return nil, i18n.Errorf("http request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "QQMusic/2216 CFNetwork/1.0 Darwin/23.0.0")
 
-	client := httpClient
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return ""
+		return nil, i18n.Errorf("http request: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
 	var detail songDetailResponse
-	if err := json.Unmarshal(body, &detail); err != nil || detail.Req0.Code != 0 {
-		return ""
+	if err := json.Unmarshal(body, &detail); err != nil {
+		return nil, i18n.Errorf("json parse: %w", err)
 	}
+	return &detail, nil
+}
 
+// fetchCoverURL gets the album cover URL for a song using QQ Music's native API.
+// When songMid is non-empty (v20.05), uses fcg_play_single_song.fcg instead.
+// Returns the cover URL (800x800) or empty string on failure, and the other id taken from the same response and
+// verified against the queried one (detailFromTrack / detailFromSingle, design §6.4 step 2). The cover does not
+// depend on the verification.
+func fetchCoverURL(songID uint32, songMid string) (string, songDetail) {
+	if songMid != "" {
+		return fetchCoverURLBySongMid(songMid)
+	}
+	detail, err := fetchSongDetail(songID)
+	if err != nil {
+		return "", songDetail{state: detailFailed}
+	}
 	track := detail.Req0.Data.TrackInfo
+	verified := detailFromTrack(songID, detail.Req0.Code, track.ID, track.Mid)
+	if detail.Req0.Code != 0 {
+		return "", verified
+	}
 
 	// Priority: album cover → first singer cover
 	if mid := track.Album.Mid; mid != "" {
 		url := buildCoverURL("T002", mid, 800)
 		log.Detail("Cover (album): %s → %s", track.Album.Name, url)
-		return url
+		return url, verified
 	}
 	if mid := track.Album.Pmid; mid != "" {
 		url := buildCoverURL("T002", mid, 800)
 		log.Detail("Cover (album pmid): %s", url)
-		return url
+		return url, verified
 	}
 	for _, s := range track.Singer {
 		if mid := s.Mid; mid != "" {
 			url := buildCoverURL("T001", mid, 800)
 			log.Detail("Cover (singer): %s → %s", s.Name, url)
-			return url
+			return url, verified
 		}
 	}
-	return ""
+	return "", verified
 }
 
 // buildCoverURL constructs a QQ Music CDN cover URL.

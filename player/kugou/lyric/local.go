@@ -8,13 +8,9 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"unicode/utf8"
-
-	"golang.org/x/text/encoding/simplifiedchinese"
-	"golang.org/x/text/encoding/unicode"
-	"golang.org/x/text/transform"
 
 	"Metabox-Nexus-PlayerCap/i18n"
+	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/krc"
 )
 
@@ -37,7 +33,7 @@ var onBoundedLRCLine = func() {}
 
 // ParseLocal 解析本地歌词文件的全部字节，按内容判读、不看扩展名：
 //   - 以 krc1 开头：DecryptKRC 后按 KRC 明文解析。
-//   - 其余解码为文本（见 decodeLocalText），先按 KRC 明文解析，零行再按 LRC 解析。
+//   - 其余解码为文本（见 player.DecodeLyricFileText），先按 KRC 明文解析，零行再按 LRC 解析。
 //
 // 文件超过 MaxLocalFileBytes、KRC 明文或解析结果超限时返回 ErrLyricTooLarge。解不出行（含 krc1
 // 解密失败）时返回 nil, nil。
@@ -55,7 +51,7 @@ func ParseLocal(b []byte) ([]Line, error) {
 		}
 		return parseKRCBounded(plain)
 	}
-	text, err := decodeLocalText(b)
+	text, err := player.DecodeLyricFileText(b)
 	if err != nil {
 		return nil, nil
 	}
@@ -63,18 +59,6 @@ func ParseLocal(b []byte) ([]Line, error) {
 		return lines, err
 	}
 	return parseLRCBounded(text)
-}
-
-// decodeLocalText 把歌词文件的字节解码为 UTF-8 文本：带 UTF-8、UTF-16LE、UTF-16BE 的 BOM 时按 BOM
-// 解码并去掉 BOM；无 BOM 时合法 UTF-8 原样使用，否则按 GB18030（GBK 的超集）解码。无 BOM 的
-// UTF-16 不猜。
-func decodeLocalText(b []byte) (string, error) {
-	var fallback transform.Transformer = transform.Nop
-	if !utf8.Valid(b) {
-		fallback = simplifiedchinese.GB18030.NewDecoder()
-	}
-	out, _, err := transform.Bytes(unicode.BOMOverride(fallback), b)
-	return string(out), err
 }
 
 // parseKRCBounded 按 KRC 明文解析：行数与逐字总数在解析中由 krc.ParsePlainKRCBounded 限住，展开

@@ -134,6 +134,8 @@ tbody th{text-align:left;white-space:nowrap}
 <li><a href="#capabilities">各播放器的支持情况</a></li>
 <li><a href="#faq">常见问题</a></li>
 <li><a href="#downloads">下载地址</a></li>
+<li><a href="#api">接口文档</a></li>
+<li><a href="#config">如何修改配置与使用命令行参数</a></li>
 </ol>
 </div>
 <div data-lang="en">
@@ -146,6 +148,8 @@ tbody th{text-align:left;white-space:nowrap}
 <li><a href="#capabilities">What each player provides</a></li>
 <li><a href="#faq">FAQ</a></li>
 <li><a href="#downloads">Downloads</a></li>
+<li><a href="#api">API documentation</a></li>
+<li><a href="#config">Changing settings and using command-line options</a></li>
 </ol>
 </div>
 </section>
@@ -182,7 +186,7 @@ tbody th{text-align:left;white-space:nowrap}
 </ul>
 线上 v3 是 3.x 版页面的冻结副本，参数与 3.x 相同，地址中的参数原样传递。<br>OBS 的浏览器源既可指向这三个本地文件，也可直接填写线上地址。<br><code>README.html</code> 与 <code>使用说明.html</code> 即本说明，两者内容相同，无需联网即可打开。</li>
 <li>本程序默认在 8765 端口提供服务。</li>
-<li>首次运行时，本程序在其所在文件夹生成设置文件 <code>config.yml</code>，可用记事本打开修改。<br>各项含义见文件中的注释；修改后须重新启动本程序方可生效。</li>
+<li>首次运行时，本程序在其所在文件夹生成设置文件 <code>config.yml</code>，可用记事本打开修改。<br>各项含义见文件中的注释；修改后须重新启动本程序方可生效。修改方法见<a href="#config">如何修改配置与使用命令行参数</a>。</li>
 </ol>
 </div>
 <div data-lang="en">
@@ -199,7 +203,7 @@ tbody th{text-align:left;white-space:nowrap}
 </ul>
 The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as 3.x, and the parameters in the address are passed on unchanged.<br>An OBS browser source can point to these three local files, or to the online address directly.<br><code>README.html</code> and <code>使用说明.html</code> are this guide; both have the same content and open without an internet connection.</li>
 <li>This program serves on port 8765 by default.</li>
-<li>On first run, this program creates a settings file, <code>config.yml</code>, in its folder. You can edit it with Notepad.<br>Each setting is explained in the comments in the file (written in Chinese); restart this program for changes to take effect.</li>
+<li>On first run, this program creates a settings file, <code>config.yml</code>, in its folder. You can edit it with Notepad.<br>Each setting is explained in the comments in the file (written in Chinese); restart this program for changes to take effect. See <a href="#config">Changing settings and using command-line options</a>.</li>
 </ol>
 </div>
 </section>
@@ -220,7 +224,7 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <li>酷狗音乐：20.1.22.27795 及以上（64 位）。不支持 10.x。</li>
 <li>汽水音乐：版本不限定。</li>
 <li>Apple Music：版本不限定。</li>
-<li>Spotify：版本不限定（实测 1.3.6.1921），须为官网安装版，不支持微软商店版。</li>
+<li>Spotify：版本不限定（实测 1.3.6.1921、1.3.10.2586），须为官网安装版，不支持微软商店版。</li>
 <li>酷我音乐：9.6.0.0（渠道后缀不限，实测 W1、UG1），须为官网安装版，不支持微软商店版。官网下载页 <a href="https://www.kuwo.cn/down">https://www.kuwo.cn/down</a> 现提供的即为 9.6.0.0。</li>
 </ul>
 </div>
@@ -239,7 +243,7 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <li>KuGou Music (酷狗音乐): 20.1.22.27795 or later (64-bit). 10.x is not supported.</li>
 <li>Soda Music (汽水音乐): any version.</li>
 <li>Apple Music: any version.</li>
-<li>Spotify: any version (tested with 1.3.6.1921); official installer version only, the Microsoft Store version is not supported.</li>
+<li>Spotify: any version (tested with 1.3.6.1921 and 1.3.10.2586); official installer version only, the Microsoft Store version is not supported.</li>
 <li>Kuwo Music (酷我音乐): 9.6.0.0 (any channel suffix; tested with W1 and UG1); official installer version only, the Microsoft Store version is not supported. The official download page <a href="https://www.kuwo.cn/down">https://www.kuwo.cn/down</a> currently provides 9.6.0.0.</li>
 </ul>
 </div>
@@ -249,6 +253,7 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <li>21.81</li>
 <li>22.16</li>
 <li>22.22</li>
+<li>22.26</li>
 <li>22.31</li>
 <li>22.41</li>
 <li>22.52</li>
@@ -294,7 +299,7 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <tbody>
 <tr><th><span data-lang="zh">全民K歌</span><span data-lang="en">WeSing</span></th><td>✔</td><td>✔</td><td>🚫</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
 <tr><th><span data-lang="zh">网易云音乐</span><span data-lang="en">NetEase Cloud Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
-<tr><th><span data-lang="zh">QQ 音乐</span><span data-lang="en">QQ Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
+<tr><th><span data-lang="zh">QQ 音乐</span><span data-lang="en">QQ Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>⚠</td></tr>
 <tr><th><span data-lang="zh">酷狗音乐</span><span data-lang="en">KuGou Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>⚠</td></tr>
 <tr><th><span data-lang="zh">汽水音乐</span><span data-lang="en">Soda Music</span></th><td>✔</td><td>✔</td><td>✔</td><td>⚠</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
 <tr><th>Apple Music</th><td>⚠</td><td>⚠</td><td>⚠</td><td>🚫</td><td>✔</td><td>✔</td><td>⚠</td><td>✔</td><td>✔</td><td>✔</td><td>🚫</td></tr>
@@ -313,6 +318,9 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <dt>网易云音乐</dt>
 <dd>逐字音译仅在一字一音的歌曲（如粤语歌）上提供。</dd>
 <dd>此外可镜像网易云音乐的「特效歌词」画面，清晰度取决于网易云音乐窗口的尺寸，窗口越大越清晰。</dd>
+<dt>QQ 音乐</dt>
+<dd>本地文件 ⚠：歌词与 QQ 音乐中的关联保持一致，取在 QQ 音乐中手动关联或由 QQ 音乐自动匹配的歌词；没有关联的本地文件无法获取歌词。QQ 音乐将本地文件匹配为在线歌曲时，歌词同样与该文件的关联保持一致（首次播放该曲、QQ 音乐改名之后的一段除外）。</dd>
+<dd>在线歌曲：在 QQ 音乐中改过歌词（关联本地歌词，或在「搜索歌词」中选定一份）的，歌词与 QQ 音乐显示的一致；仅在 22.16、22.22、22.26、22.31、22.41、22.60、22.71、22.76、22.81、22.82 上生效。</dd>
 <dt>酷狗音乐</dt>
 <dd>本地文件 ⚠：歌词与酷狗保持一致，按以下顺序获取：
 <ol>
@@ -355,6 +363,9 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <dt>NetEase Cloud Music</dt>
 <dd>Word-by-word romanization is only available for songs with one syllable per character (such as Cantonese songs).</dd>
 <dd>It can also mirror the NetEase Cloud Music "lyric effects" view. The sharpness depends on the size of the NetEase Cloud Music window: the larger the window, the sharper the image.</dd>
+<dt>QQ Music</dt>
+<dd>Local files ⚠: the lyrics follow the lyric link in QQ Music, whether you linked them manually or QQ Music matched them automatically. A local file with no linked lyrics has no lyrics. When QQ Music matches a local file to an online song, the lyrics still follow that file's link (except on the first play of the song and for a while after QQ Music renames it).</dd>
+<dd>Online songs: for a song whose lyrics you changed in QQ Music (by linking local lyrics, or by picking one in "Search lyrics"), the lyrics match what QQ Music shows. This works only on versions 22.16, 22.22, 22.26, 22.31, 22.41, 22.60, 22.71, 22.76, 22.81 and 22.82.</dd>
 <dt>KuGou Music</dt>
 <dd>Local files ⚠: the lyrics follow KuGou, taken in this order:
 <ol>
@@ -418,12 +429,14 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 </ul>
 
 <h3>播放本机音乐文件时应使用哪个播放器？</h3>
-<p>仅酷狗音乐部分支持，歌词与酷狗保持一致，按以下顺序获取：</p>
+<p>酷狗音乐与 QQ 音乐部分支持。</p>
+<p>酷狗音乐：歌词与酷狗保持一致，按以下顺序获取：</p>
 <ol>
 <li>在酷狗中手动关联的歌词；</li>
 <li>酷狗自动匹配的歌词；</li>
 <li>以上均无时按文件名搜索，可能无法搜到，或结果不准确。</li>
 </ol>
+<p>QQ 音乐：歌词与 QQ 音乐中的关联保持一致，取在 QQ 音乐中手动关联或由 QQ 音乐自动匹配的歌词；没有关联的本地文件无法获取歌词。QQ 音乐将本地文件匹配为在线歌曲时，歌词同样与该文件的关联保持一致（首次播放该曲、QQ 音乐改名之后的一段除外）。</p>
 <p>其他播放器播放本地文件时无法获取歌词。</p>
 
 <h3>为何不支持微软商店版的播放器？如何处理？</h3>
@@ -487,6 +500,12 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <li>全民K歌播放时，始终显示全民K歌；</li>
 <li>全民K歌暂停超过 15 秒（设置项 <code>prior-player-expire</code>）或停止播放后，切换为其他播放器。</li>
 </ul>
+<p>修改方法：在 <code>config.yml</code> 中修改以下两项，保存后重新启动本程序。</p>
+<ul>
+<li><code>prior-player</code>：优先播放器，每行一个，写作 <code>- 名字</code>。文件中已列出其余播放器并以 <code>#</code> 注释，删去行首的 <code># </code> 即加入，在行首加上 <code># </code> 即去除。全部注释掉时不起作用，仍优先全民K歌；不设优先播放器须写作 <code>prior-player: []</code>。</li>
+<li><code>prior-player-expire</code>：暂停多少秒后切换，例如改为 <code>30</code>。不要设为 <code>0</code>：这会关闭全部等待时限，暂停的播放器将一直占用显示。</li>
+</ul>
+<p>各播放器的名字见上一问。详细说明见<a href="#config">如何修改配置与使用命令行参数</a>。</p>
 
 <h3>升级后设置为何发生变化？</h3>
 <p>新版本可能自动换算或重建 <code>config.yml</code>。</p>
@@ -521,12 +540,14 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 </ul>
 
 <h3>Which player should I use for local music files?</h3>
-<p>Only KuGou Music, and only partly. The lyrics follow KuGou, taken in this order:</p>
+<p>KuGou Music and QQ Music, both only partly.</p>
+<p>KuGou Music: the lyrics follow KuGou, taken in this order:</p>
 <ol>
 <li>the lyrics you linked manually in KuGou;</li>
 <li>the lyrics KuGou matched automatically;</li>
 <li>if there are none, a search by file name, which may find nothing or the wrong lyrics.</li>
 </ol>
+<p>QQ Music: the lyrics follow the lyric link in QQ Music, whether you linked them manually or QQ Music matched them automatically. A local file with no linked lyrics has no lyrics. When QQ Music matches a local file to an online song, the lyrics still follow that file's link (except on the first play of the song and for a while after QQ Music renames it).</p>
 <p>Other players provide no lyrics for local files.</p>
 
 <h3>Why is the Microsoft Store version of a player not supported, and what can I do?</h3>
@@ -590,6 +611,12 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <li>while WeSing is playing, it is always shown;</li>
 <li>after it has been paused for more than 15 seconds (setting <code>prior-player-expire</code>) or stops playing, another player takes over.</li>
 </ul>
+<p>To change this, edit these two settings in <code>config.yml</code>, save, and restart this program.</p>
+<ul>
+<li><code>prior-player</code>: the priority players, one per line, written as <code>- name</code>. The other players are already listed in the file and commented out with <code>#</code>; delete the leading <code># </code> to add a player, or put <code># </code> in front of a line to remove it. Commenting out every line has no effect, and WeSing keeps priority; for no priority player, write <code>prior-player: []</code>.</li>
+<li><code>prior-player-expire</code>: how many seconds of pause before switching, for example <code>30</code>. Do not set it to <code>0</code>: that turns off every waiting limit, and a paused player keeps the display indefinitely.</li>
+</ul>
+<p>The player names are listed in the previous question. For details, see <a href="#config">Changing settings and using command-line options</a>.</p>
 
 <h3>My settings changed after an upgrade.</h3>
 <p>A new version may convert or rebuild <code>config.yml</code> automatically.</p>
@@ -602,9 +629,81 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <div data-lang="zh"><h2>六、下载地址</h2><p>最新版与历史版本：</p></div>
 <div data-lang="en"><h2>6. Downloads</h2><p>Latest and earlier versions:</p></div>
 <ul>
-<li>GitHub: <a href="https://github.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases">https://github.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases</a></li>
-<li>Gitee: <a href="https://gitee.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases">https://gitee.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases</a></li>
+<li><span data-lang="zh">Gitee（国内）：</span><span data-lang="en">Gitee (China): </span><a href="https://gitee.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases">https://gitee.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases</a></li>
+<li><span data-lang="zh">GitHub（全球）：</span><span data-lang="en">GitHub (global): </span><a href="https://github.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases">https://github.com/VTB-LINK/Metabox-Nexus-PlayerCap/releases</a></li>
 </ul>
+</section>
+
+<section id="api">
+<div data-lang="zh">
+<h2>七、接口文档</h2>
+<p>供 OBS 歌词页面等对接的接口（各事件类型、字段与示例）见在线 API 文档：<a href="https://playercap.nexus.metabox.apifox.vtb.link/">https://playercap.nexus.metabox.apifox.vtb.link/</a></p>
+</div>
+<div data-lang="en">
+<h2>7. API documentation</h2>
+<p>The interfaces used by lyric pages in OBS and similar tools (event types, fields and examples) are described in the online API documentation (in Chinese): <a href="https://playercap.nexus.metabox.apifox.vtb.link/">https://playercap.nexus.metabox.apifox.vtb.link/</a></p>
+</div>
+</section>
+
+<section id="config">
+<div data-lang="zh">
+<h2>八、如何修改配置与使用命令行参数</h2>
+<p>设置有两种写法：写在 <code>config.yml</code> 中，或在启动本程序时以命令行参数给出。两处都写了的，以命令行参数为准；都没写的，使用内置默认值。</p>
+<details>
+<summary>修改配置</summary>
+<ul>
+<li>位置：本程序所在文件夹中的 <code>config.yml</code>，首次运行时自动生成。本程序窗口顶部「配置文件」一行显示实际读取的文件。</li>
+<li>打开方式：用记事本打开，修改后保存。</li>
+<li>写法：每项一行，写作 <code>名字: 值</code>，冒号后留一个空格。行首带 <code>#</code> 的是注释，不生效；删去行首的 <code># </code> 即启用该行。</li>
+<li>分区：文件前半部分是全局设置，如 <code>addr</code>（监听地址）、<code>offset</code>（歌词延迟）、<code>prior-player</code>（优先播放器）；后半部分按播放器分段，设置项以播放器的名字开头，如 <code>kugou-offset</code>。其中 <code>名字-offset</code>、<code>名字-poll</code>、<code>名字-idle-hide</code>、<code>名字-audio-normalize</code> 没有写或已注释掉时，分别使用全局的 <code>offset</code>、<code>poll</code>、<code>per-player-idle-hide</code>、<code>audio-normalize</code>。</li>
+<li>生效：保存后须重新启动本程序。</li>
+<li>升级时 <code>config.yml</code> 可能被自动换算或重建，见<a href="#faq">常见问题</a>「升级后设置为何发生变化？」。</li>
+</ul>
+</details>
+<details>
+<summary>使用命令行参数</summary>
+<ul>
+<li>参数的名字与 <code>config.yml</code> 中的设置项相同，前面加 <code>-</code>，如 <code>-offset</code>、<code>-kugou-offset</code>。在命令提示符中运行 <code>Metabox-Nexus-PlayerCap.exe -h</code> 可列出全部参数。</li>
+<li>写作 <code>-参数 值</code> 或 <code>-参数=值</code>，如 <code>-poll 50</code>；负值照写，如 <code>-offset -200</code> 或 <code>-offset=-200</code>。</li>
+<li>开关类参数（<code>-audio-normalize</code>、<code>-名字-audio-normalize</code>）只写参数名即为开，写作 <code>-参数 false</code> 或 <code>-参数=false</code> 为关。</li>
+<li>优先播放器写作以逗号分隔的列表，如 <code>-prior-player wesing,kugou</code>；写作 <code>-prior-player ""</code> 为不设优先播放器。</li>
+<li>参数名写错，或有不属于任何参数的词（如漏了横线的 <code>offset -200</code>）时，本程序报错并列出全部参数后退出，不会忽略。</li>
+<li>4.0 起 offset 的方向与 3.x 相反。升级时 <code>config.yml</code> 中的值会自动换算，写在快捷方式或脚本中的 <code>-offset</code>、<code>-名字-offset</code> 不会换算，须自行改为相反数。</li>
+</ul>
+<p>在快捷方式中添加参数：右键单击本程序的快捷方式，选择「属性」，在「目标」一栏的程序路径之后加一个空格，再写参数，例如：</p>
+<p><code>"C:\PlayerCap\Metabox-Nexus-PlayerCap.exe" -offset -300 -prior-player kugou</code></p>
+<p>由 OBS 的自启插件等其他程序启动本程序时，若该程序可设置启动参数，写法相同。</p>
+</details>
+</div>
+<div data-lang="en">
+<h2>8. Changing settings and using command-line options</h2>
+<p>A setting can be written in <code>config.yml</code>, or given as a command-line option when this program starts. If both are given, the command-line option wins; if neither is, the built-in default is used.</p>
+<details>
+<summary>Changing settings</summary>
+<ul>
+<li>Location: <code>config.yml</code> in this program's folder, created on first run. The "Config file" line (配置文件 in Chinese) at the top of this program's window shows the file actually read.</li>
+<li>Opening: open it with Notepad, edit, and save.</li>
+<li>Format: one setting per line, written as <code>name: value</code> with a space after the colon. Lines starting with <code>#</code> are comments and have no effect; delete the leading <code># </code> to enable a line.</li>
+<li>Sections: the first part of the file holds the global settings, such as <code>addr</code> (listen address), <code>offset</code> (lyric delay) and <code>prior-player</code> (priority players); the rest is grouped by player, with each setting starting with the player's name, such as <code>kugou-offset</code>. When <code>name-offset</code>, <code>name-poll</code>, <code>name-idle-hide</code> or <code>name-audio-normalize</code> is missing or commented out, the global <code>offset</code>, <code>poll</code>, <code>per-player-idle-hide</code> or <code>audio-normalize</code> is used respectively.</li>
+<li>Applying: restart this program after saving.</li>
+<li>An upgrade may convert or rebuild <code>config.yml</code> automatically; see "My settings changed after an upgrade." in the <a href="#faq">FAQ</a>.</li>
+</ul>
+</details>
+<details>
+<summary>Using command-line options</summary>
+<ul>
+<li>Options have the same names as the settings in <code>config.yml</code>, preceded by <code>-</code>, such as <code>-offset</code> and <code>-kugou-offset</code>. Run <code>Metabox-Nexus-PlayerCap.exe -h</code> in Command Prompt to list all options.</li>
+<li>Write <code>-option value</code> or <code>-option=value</code>, such as <code>-poll 50</code>; negative values are written as they are, such as <code>-offset -200</code> or <code>-offset=-200</code>.</li>
+<li>Switches (<code>-audio-normalize</code>, <code>-name-audio-normalize</code>) are turned on by the option name alone, and off by <code>-option false</code> or <code>-option=false</code>.</li>
+<li>Priority players are a comma-separated list, such as <code>-prior-player wesing,kugou</code>; <code>-prior-player ""</code> means no priority player.</li>
+<li>If an option name is misspelled, or a word is not part of any option (such as <code>offset -200</code> without the dash), this program reports it, lists all options and exits; nothing is silently ignored.</li>
+<li>From 4.0 on, offset works in the opposite direction to 3.x. On upgrade the values in <code>config.yml</code> are converted automatically, but <code>-offset</code> and <code>-name-offset</code> written in a shortcut or script are not; change their sign yourself.</li>
+</ul>
+<p>To add options to a shortcut: right-click the shortcut to this program, choose "Properties", and in the "Target" box add a space after the program path, then the options, for example:</p>
+<p><code>"C:\PlayerCap\Metabox-Nexus-PlayerCap.exe" -offset -300 -prior-player kugou</code></p>
+<p>When this program is started by another program, such as an OBS autostart plugin, use the same format if that program lets you set launch options.</p>
+</details>
+</div>
 </section>
 
 </main>

@@ -1,6 +1,8 @@
 package qqmusic
 
 import (
+	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -111,27 +113,96 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	var lastLineIdx int = -1
 	var currentDurationSec float32 = 0
 	var isPaused bool = false
-	var resume resumeGate // 已判暂停时的恢复判定，见 resumeGate
-	var hold switchHold   // 换歌前进度归零的暂扣，见 switchHold
+	var judge judgeState // 暂停与恢复判定的跨拍状态（#172），见 judgeTick
+	var hold switchHold  // 换歌前进度归零的暂扣，见 switchHold
 	var currentTitle string
+	var currentName, currentSinger string // 认领时发出的歌名与歌手，补取沿用（#228）
 
 	// 换歌后歌词补取：songID/songMid 落位可能滞后于显示结构体几秒（v22.41 实测），换歌那帧
 	// 常取不到歌词。认领并发标题后，在窗口内持续重试，ID 一落位就补上，避免整首空白。
 	var lyricsPending bool
-	var pendingDeadline time.Time
-	var lastRetry time.Time // 补取尝试的节流锚点（含 FindSongMid 全内存扫描与 fetchLRC 网络请求）
-	var retryCount int      // 本首歌已做的补取尝试次数（用于「多次未果才打日志」）
-	const lyricRetryWindow = 8 * time.Second
-	const lyricRetryInterval = 500 * time.Millisecond
+	var backfill backfillWindow  // 补取的窗口与重试节流（#227）：截止与节流只在它里面比较
+	var retryCount int           // 本首歌已做的补取尝试次数（用于「多次未果才打日志」）
 	const lyricRetryLogAfter = 4 // 重试满这么多次仍未就绪才打一行 Detail（快速落位则完全静默）
 
 	// 快速计时器锚点 + 本地时钟插值
 	var anchorProgressMs uint32 = 0
 	var anchorTime time.Time
 	var lastMemProgress uint32 = 0
-	const pauseTimeoutSec = 1.0
+
+	// 歌词关联（#218，设计 §6.8）：读取者 goroutine 承担读文件、解密、Restart Manager 查询与读 QQ 内存里的当前歌曲记录，
+	// 本循环只经 Submit 写入当前歌曲、经 takeResult 非阻塞地取结果。会话的每条退出路径都取消它。读记录用的
+	// 只读句柄在这里（本 goroutine，hProcess 尚未被 CheckValid 改动）由 newRecordSource 复制，交读取者退出时关闭。上一个读取者
+	// 尚未退出时 reader 为 nil（该句柄当即关闭）：Submit 什么也不做，Results 为 nil 通道、永远取不到，行为同未接入。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reader, _ := startAssocReader(ctx, defaultAssocDeps(mem.pid, mem.Version(), newRecordSource(mem)))
+	var lyricSt lyricState  // 本首的在线原始行与采纳的期望状态，代次（gen，reopen）与 assocKey 的相同
+	var assocKey songKey    // 最近写给读取者的当前歌曲
+	var repausePending bool // 暂停中补发的 playback_pause（随歌词、暂停中跳转）入队失败，仍在暂停中时每拍再试；恢复与换歌时清掉
+	var repausePos float32  // 那条 playback_pause 的位置：它所跟随的 all_lyrics 的位置，或跳转的落点；再试时不变
+
+	// showLyrics 换上歌词状态机给出的行并发出（设计 §6.8「应用期望状态」第 3 步），补取块与每拍的结果共用；行为空即无歌词。
+	// 每次都重置 lastLineIdx：服务端收到 all_lyrics 即清空缓存的当前行，nextLine 只在行号变大时宣告，不重置则仍落在同一行时
+	// 当前行不再宣告。位置由读数 baseSec 与其时刻 at 经 LivePosition 推算。
+	// 在线歌词还在补取而要显示的为空（换歌拍取词失败后读取者给出「在线」），没有结论，不发 index:-1（下游读作没有歌词）：
+	// 显示本就为空时什么也不发，补取成功或超时同现状；否则只发空的 all_lyrics 清掉显示，同换歌拍编号未落位。
+	// 已判暂停时随后在同一位置 pos（暂停中即读数本身）补发 playback_pause：前端收到 all_lyrics 即开始插值，须再冻结。这是暂停中
+	// 补发（#172，doc/design/qqmusic-start-stall-design.md §6.2 末）的唯一一处，补取与播放中换词都经这里；它紧跟在发出之后，
+	// 早于调用方其后的同步请求（补取块的取封面地址）。不取锚点：暂停后 QQ 补写一次进度的那一拍，补取重读到的是新读数而锚点
+	// 还是旧的，按锚点冻结会把前端拉回一步，与本拍稍后落下的锚点不一致。入队失败由 repausePending 记下、按同一位置每拍再试
+	// （同 kuwo 的 resendPauseIfPending）：这条丢了，前端到恢复为止一直按 all_lyrics 往前插值（lyric_update 只校正锚点、不冻结）。
+	showLyrics := func(lines []lyricLine, baseSec float32, at time.Time) {
+		undecided := lyricsUndecided(lines, lyricsPending, lyricSt.source())
+		if undecided && len(currentLyrics) == 0 {
+			return
+		}
+		currentLyrics = lines
+		lastLineIdx = -1
+		pos := player.LivePosition(baseSec, at, time.Now(), !isPaused, currentDurationSec)
+		prog := player.ClampProgress(pos, currentDurationSec)
+		if len(lines) == 0 && !undecided {
+			p.emitNoLyrics(currentTitle, currentDurationSec, pos, prog)
+		} else {
+			items := toLyricLines(lines, offsetSec) // 没有结论时为空切片：count:0 的 all_lyrics，不带 index:-1
+			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
+				Title: currentTitle, Duration: currentDurationSec, Position: pos, Progress: prog,
+				Count: len(items), Lyrics: items,
+			})
+		}
+		if isPaused {
+			repausePos = pos
+			repausePending = !p.emitFrozenPause(repausePos, currentDurationSec)
+		}
+	}
+
+	// reopenSong 写入同一首重开（设计 §6.8「重开」）：reopen 加一，歌词状态只换代次（不 reset，在线原始行与已接受的结果保留，
+	// 新代次的结果按「播放中」应用），写给读取者重读当前歌曲记录；gen 不变。只做加锁赋值与非阻塞唤醒，不等待。调用处有四处，
+	// 条件都出自同一拍的 loadUsable，每拍至多一处写入：载入值由无到有（byLoading，每拍开头的首读、换歌认领与补取之后的重读
+	// 各一处），或载入信号不可用时暂扣放行按回跳补发。
+	reopenSong := func(byLoading bool) {
+		assocKey.reopen++
+		lyricSt.reopened(assocKey.reopen)
+		reader.Submit(assocKey)
+		if byLoading {
+			log.Detail("Same song reopened (QQ Music entered loading)")
+		} else {
+			log.Detail("Same song reopened (progress returned to the start)")
+		}
+	}
+
+	// noteDetail 在两处 fetchCoverURL 之后打会话一侧的「核验不过」Detail（设计 §6.9，条件见 unconfirmedDetail：收到了响应而核验
+	// 不过才打，请求失败不打），每首至多一条（detailNoted 换歌清掉）。封面的取用照现状，不看核验结果。
+	var detailNoted bool
+	noteDetail := func(queriedID uint32, queriedMid string, d songDetail) {
+		if q, ok := unconfirmedDetail(assocKey, queriedID, queriedMid, d); ok && !detailNoted {
+			detailNoted = true
+			log.Detail("QQ Music song detail did not confirm the queried ID %s (response: %s)", q, d.seen)
+		}
+	}
 
 	pollInterval := EffectivePollInterval(p.pollMs)
+	loadOpen := newLoadEdge(pollInterval) // 载入值由无到有的察觉（#218 同一首重开）、改名证据与载入段的记录，见 loadEdge
 
 	for {
 		select {
@@ -148,6 +219,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 
 		meta, err := mem.ReadAllMetadata()
 		if err != nil {
+			loadOpen.missed() // 这一拍没有读到播放状态：改名证据不成立（设计 §6.8「改名证据」）
 			continue
 		}
 		// sampleTime 是 meta（含进度读数）的读取时刻。落锚、seek 检测与停滞判定都按它计时，不取用到读数时
@@ -155,6 +227,20 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		// 计时器走没走并不知道——把它算进停滞时长会误判暂停，把取词前的读数配到取词后的时刻上会让位置落后。
 		// 取词返回后会重读一次进度，读到同一首歌时 meta.ProgressMs 与它一起换成新读数。
 		sampleTime := time.Now()
+
+		// --- 同一首重开（#218，设计 §6.8「重开」）---
+		// QQ 从另一入口重开同一首时歌名不变，换歌检测看不出，而它查关联所用的键可能随之改变。本会话载入信号可用（loadUsable，
+		// 每拍开头算一次）时，载入值由无到有、本拍歌名等于已认领的、编号已知即写入重开；不可用时改由变化分支里暂扣放行按回跳补发的
+		// 那一支写入。载入值以 judgeTick 所用的 classify 判定：每拍以首读 step，在换歌检测与暂扣之前（暂扣中的拍、等进度与等
+		// songMid 的拍不调用 judgeTick，重开时进度归零触发的暂扣可能整段盖住载入值）；换歌认领与补取两处取词之后被采用的重读也
+		// step（载入值可能只出现在取词期间），按同样的条件写入。四处写入的条件都出自同一个 loadUsable，载入支与暂扣支互斥，
+		// reopenedThisTick 保证每拍至多写入一次。三处 step 都传该次读数的时刻，供改名证据的窗口与载入段的记录（第 5 版）。
+		loadUsable := mem.Offsets().PlayState.loadingUsable(judge.bad, pollInterval)
+		reopenedThisTick := false
+		if edge := loadOpen.step(mem.Offsets().PlayState, meta.PlayState, meta.PlayStateOK, sampleTime); !reopenedThisTick && reopenByLoading(loadUsable, edge, meta.Name, lastName, assocKey.hasIDs()) {
+			reopenedThisTick = true
+			reopenSong(true)
+		}
 
 		// --- 切歌检测 ---
 		// 用前缀挡掉 QQ 空闲/过渡态漏进 Name 字段的窗口标题串（"QQ音乐"、"QQ音乐 听我想听" 等）——
@@ -203,14 +289,32 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			anchorTime = sampleTime
 			lastMemProgress = meta.ProgressMs
 			isPaused = false
-			resume.reset()
+			repausePending = false
+			judge.resume.reset()
 			lyricsPending = false // 默认这一首已了结；仅下面取词失败时重新 arm
+			detailNoted = false
 
 			log.Info("♪ song: %s - %s", meta.Name, meta.Singer)
+
+			// 写给歌词关联的读取者，不等待（设计 §6.8「换歌拍」）：gen 加一；excludeLocal 是上一首最终采纳的本地文件（须在 reset
+			// 之前取），有「同一次播放被 QQ 改名」的证据时为空（第 5 版，设计 §6.5 第 5 步、§6.8「改名证据」）：证据出自本拍的
+			// loadUsable 与 loadOpen 自上一次认领以来记下的窗口，claim 求值并清零窗口，每次认领恰一次；补取块的 gen 加一与重开
+			// 不碰它。v20.05 的结构体 songID 是伪值，只认 songMid（同补取块）。
+			sid := meta.SongID
+			if usesSongMid {
+				sid = 0
+			}
+			prevLocal := lyricSt.localPath()
+			renamed := loadOpen.claim(loadUsable, mem.Offsets().PlayState, pollInterval)
+			logRenameEvidence(prevLocal, renamed)
+			assocKey = songKey{gen: assocKey.gen + 1, songID: sid, songMid: meta.SongMid, name: meta.Name, excludeLocal: excludeFor(prevLocal, renamed)}
+			lyricSt.reset(assocKey.gen)
+			reader.Submit(assocKey)
 
 			cookie := mem.FindCookie()
 			var lrcName, lrcSinger string
 			var coverURL string
+			var det songDetail // 封面请求带回的详情结果（设计 §6.4 第 2 步「交接」）
 
 			if midUnavailable || (meta.SongID == 0 && meta.SongMid == "") {
 				// songID/mid 尚未落位（v20.05 等 URL 参数；v22.41 等会话结构+堆上报）——不拿空/伪
@@ -222,17 +326,44 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				// （如播放本地文件）时，整首都在滚上一首。v20.05 的 midWait 路径在开始等待时清过，
 				// songID 读到 0 的各版只经过这里。补取成功后由补取块写入新歌词。
 				currentLyrics = nil
+				// 显示的即是「无」，登记为已给出：读取者随后给出的「无」（本地文件未认定）不再重发。那会多发一条 index:-1，
+				// 而编号还在补取，并非确定没有歌词。本地文件的歌词到达照常发出。
+				lyricSt.refresh(assocKey.hasIDs(), offsetSec)
 			} else {
 				currentLyrics, lrcName, lrcSinger, err = fetchLRC(meta.SongID, meta.SongMid, cookie, meta.DurationMs)
-				applyDetailedOffset(currentLyrics, offsetSec)
-				coverURL = fetchCoverURL(meta.SongID, meta.SongMid)
+				// 封面请求带回的详情结果随当前歌曲交给读取者，不等待（设计 §6.8「换歌拍」）：所查编号等于 assocKey 里的才写（v20.05 的 sid
+				// 为 0 而所查为 meta.SongID，对不上即不写）。只是加锁赋值与非阻塞唤醒。
+				coverURL, det = fetchCoverURL(meta.SongID, meta.SongMid)
+				if k, ok := applyDetail(assocKey, meta.SongID, meta.SongMid, det); ok {
+					assocKey = k
+					reader.Submit(assocKey)
+				}
+				noteDetail(meta.SongID, meta.SongMid, det)
 				// 取词与取封面地址是阻塞的网络请求，返回时本轮的进度读数已过时：其间可能暂停、恢复或拖动过。
 				// 再读一次，读到的仍是这首歌就把它当作本轮的读数——进度与 sampleTime 成对替换；下面随歌词
 				// 发出的位置、本轮其后的锚点更新、seek 检测与暂停检测都基于它。读不到、读到的已不是这首歌、或读数
-				// 落回开头附近而会触发暂扣（取词期间换歌归零，#202），则沿用取词前的读数，留给下一轮。
+				// 落回开头附近而会触发暂扣（取词期间换歌归零，#202），则沿用取词前的读数，留给下一轮。播放状态字段随读数
+				// 一起换（#172）：本拍的判定用与读数同一时刻的标志。重读交给 loadOpen，由无到有即按载入支写入（#218，同补取块那一处）：
+				// 认领拍首读不是载入值、重读才见到，即认领之后开始了一次新的载入，多半是取词期间从另一入口重开（换歌时的载入值可能
+				// 早于歌名变化一拍出现，那时首读已是载入值，step 已记下）。QQ 若先换歌名、后开始载入，新歌在这里多写一次重开：读取者
+				// 多扫一轮，此前给出的关联结果因代次不符被拒，关联歌词晚这一轮出现，最终显示相同。
 				if fresh, rerr := mem.ReadAllMetadata(); rereadSameSong(fresh, rerr, lastName, lastMemProgress) {
 					sampleTime = time.Now()
 					meta.ProgressMs = fresh.ProgressMs
+					meta.PlayState, meta.PlayStateOK = fresh.PlayState, fresh.PlayStateOK
+					if edge := loadOpen.step(mem.Offsets().PlayState, meta.PlayState, meta.PlayStateOK, sampleTime); !reopenedThisTick && reopenByLoading(loadUsable, edge, meta.Name, lastName, assocKey.hasIDs()) {
+						reopenedThisTick = true
+						reopenSong(true)
+					}
+				}
+				// 取到的是在线原始行（未套 offset），交给歌词状态机换成要显示的那份：按在线、偏移 0 折算即现状；读取者已给出本首的
+				// 期望状态（通常在取词返回之前）即按它，如换成关联的歌词。歌名、歌手仍取取词返回的，不取关联歌词的标签。
+				if err == nil {
+					lyricSt.setOnlineRaw(currentLyrics)
+					currentLyrics, _ = lyricSt.refresh(assocKey.hasIDs(), offsetSec)
+					if lines, changed := takeResult(&lyricSt, reader.Results(), assocKey.hasIDs(), offsetSec); changed {
+						currentLyrics = lines
+					}
 				}
 			}
 
@@ -245,6 +376,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 
 			title := meta.Name + " - " + meta.Singer
 			currentTitle = title
+			currentName, currentSinger = meta.Name, meta.Singer
 			currentDurationSec = float32(meta.DurationMs) / 1000.0
 
 			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: title})
@@ -269,10 +401,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 					Progress: progress,
 					Lyrics:   []player.LyricLine{}, Count: 0,
 				})
-				// songID/songMid 尚未落位（换歌瞬间常见）→ arm 补取，别永久放弃整首
+				// songID/songMid 尚未落位（换歌瞬间常见）→ arm 补取，别永久放弃整首；下一拍即首次补取
 				lyricsPending = true
-				pendingDeadline = time.Now().Add(lyricRetryWindow)
-				lastRetry = time.Time{} // 允许下一 tick 立即首次补取
+				backfill.arm(time.Now())
 			} else if len(currentLyrics) == 0 {
 				// 纯音乐：API 成功但无歌词行
 				log.Info("Detected instrumental/no lyrics; clearing lyrics; per-word: %s", detailedFlag(currentLyrics))
@@ -323,12 +454,30 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		// 窗口内持续重试：ID 一落位就补上完整歌词（中途替换 all_lyrics），窗口用尽才收场。
 		// 暂扣放行的那一拍不补取（#202）：取词与取封面地址是阻塞的联网请求（各 10s 超时），排在变化分支之前，
 		// 放行拍若补取，补发的跳转要等它们返回，推迟会超出约 0.4s 加一拍的上限。补取顺延到下一拍，重试节流照旧。
+		// 窗口与节流只在 backfill.next 里判（#227）：窗口内到了间隔才重试；窗口用尽时已判暂停则保持，恢复时重设窗口（见下面
+		// 判恢复处）：QQ 启动后载入上次的歌而未开播时 ID 不落位，开播才落位，按墙钟用尽即放弃的话这首歌整首没有歌词与封面；
+		// 暂停不限时长，用尽后不在暂停中每 500 ms 做一次堆扫描（FindSongMid）。未判暂停时用尽即放弃。其余结果本拍不做。
 		if lyricsPending && !released && meta.Name == lastName && meta.Name != "" {
-			if time.Now().After(pendingDeadline) {
+			// 窗口用尽（放弃与保持两支）而本 gen 的详情结果仍为尚无，记为已失败并写入，交读取者兜底（设计 §6.8「补取块」）：补取只在取词
+			// 成功之后请求封面，取词一直失败时本 gen 没有封面请求。保持期间每拍都进 backfillHold，只在由尚无改为已失败的那一拍写入。
+			switch backfill.next(time.Now(), isPaused) {
+			case backfillGiveUp:
 				lyricsPending = false
-				log.Warn("Lyric backfill timed out (%v); continuing without lyrics (local file playback?)", lyricRetryWindow)
-			} else if time.Since(lastRetry) >= lyricRetryInterval {
-				lastRetry = time.Now()
+				if k, ok := exhaustDetail(assocKey); ok {
+					assocKey = k
+					reader.Submit(assocKey)
+				}
+				if lyricSt.source() == srcLocal { // 已显示本地文件关联的歌词：「可能是本地文件」已成立，不是故障
+					log.Detail("Lyric backfill timed out (%v); keeping the lyrics associated with the local file", lyricRetryWindow)
+				} else {
+					log.Warn("Lyric backfill timed out (%v); continuing without lyrics (local file playback?)", lyricRetryWindow)
+				}
+			case backfillHold:
+				if k, ok := exhaustDetail(assocKey); ok {
+					assocKey = k
+					reader.Submit(assocKey)
+				}
+			case backfillRetry:
 				retryCount++
 				sid, smid := meta.SongID, meta.SongMid
 				if mem.Offsets().SongMidParamsOff != 0 {
@@ -339,48 +488,73 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 					smid = mem.FindSongMid(meta.DurationMs)
 				}
 				if sid != 0 || smid != "" {
+					if !assocKey.hasIDs() {
+						// 编号由缺到有：gen 加一、reopen 归零，按在线歌曲重新写给读取者，不等待（设计 §6.8「补取块」）。此前按本地
+						// 文件采纳的歌词随下面的在线取词或新 gen 的期望状态替换。详情结果清为尚无（设计 §6.4 第 2 步「交接」）：编号缺位时
+						// 窗口用尽记下的已失败不带进新 gen，否则读取者不等这次的封面请求就兜底，多查一次。
+						assocKey.gen++
+						assocKey.reopen = 0
+						assocKey.songID, assocKey.songMid = sid, smid
+						assocKey.detail = songDetail{}
+						lyricSt.reset(assocKey.gen)
+						reader.Submit(assocKey)
+					}
 					cookie := mem.FindCookie()
-					lines, lrcName, lrcSinger, ferr := fetchLRC(sid, smid, cookie, meta.DurationMs)
+					lines, _, _, ferr := fetchLRC(sid, smid, cookie, meta.DurationMs)
 					// 同换歌分支：取词返回后再读一次进度，当作本轮的读数。这里不能改用锚点与 isPaused 推算：
 					// 本块在本轮的锚点更新与暂停检测之前，它们还是上一轮的，本轮刚恢复或拖动过时位置会取到旧值。
 					// 下面的 fetchCoverURL 仍会阻塞，本轮其后的判定按 sampleTime 计，不受它影响。
-					// 重读落回开头附近而会触发暂扣时不采用（#202）。
+					// 重读落回开头附近而会触发暂扣时不采用（#202）。播放状态字段随读数一起换（#172）。取词期间 QQ 从另一入口重开同一首时，
+					// 载入值可能只出现在这次重读里：交给 loadOpen，由无到有即按载入支写入（#218，条件同每拍开头与换歌认领那两处）。
 					if fresh, rerr := mem.ReadAllMetadata(); rereadSameSong(fresh, rerr, lastName, lastMemProgress) {
 						sampleTime = time.Now()
 						meta.ProgressMs = fresh.ProgressMs
+						meta.PlayState, meta.PlayStateOK = fresh.PlayState, fresh.PlayStateOK
+						if edge := loadOpen.step(mem.Offsets().PlayState, meta.PlayState, meta.PlayStateOK, sampleTime); !reopenedThisTick && reopenByLoading(loadUsable, edge, meta.Name, lastName, assocKey.hasIDs()) {
+							reopenedThisTick = true
+							reopenSong(true)
+						}
 					}
 					if ferr == nil {
-						applyDetailedOffset(lines, offsetSec)
 						lyricsPending = false
-						currentLyrics = lines
-						lastLineIdx = -1
-						name, singer := meta.Name, meta.Singer
-						if lrcName != "" {
-							name = lrcName
-						}
-						if lrcSinger != "" {
-							singer = lrcSinger
-						}
-						title := name + " - " + singer
-						currentTitle = title
+						// 歌名、歌手与标题沿用认领时发出的，不用接口返回的改写（#228）：接口的写法常与 QQ 显示的不同（副标题、
+						// 空格、译名），前端按歌名与歌手判同一首歌，改写即被当成又换了一首。
+						name, singer, title := currentName, currentSinger, currentTitle
 						currentDurationSec = float32(meta.DurationMs) / 1000.0
+						p.Emit(player.EventSongInfoUpdate, &player.SongInfo{Name: name, Singer: singer, Title: title})
+						// 歌词经状态机（同换歌拍）：在线原始行未套 offset；按已接受或刚取到的期望状态折算。显示的那份不变（如已采纳
+						// 关联的歌词）时仍以它重发：时长按本拍读数重算，服务端缓存的 all_lyrics 要跟上（标题沿用认领时的，#228）。由此
+						// 每次补取成功都发一次，同接入关联之前。
+						lyricSt.setOnlineRaw(lines)
+						shown, changed := lyricSt.refresh(assocKey.hasIDs(), offsetSec)
+						if l, ok := takeResult(&lyricSt, reader.Results(), assocKey.hasIDs(), offsetSec); ok {
+							shown, changed = l, true
+						}
+						if !changed {
+							shown = currentLyrics
+						}
+						if len(shown) == 0 {
+							log.Info("Detected instrumental/no lyrics; clearing lyrics; per-word: %s", detailedFlag(shown))
+						} else {
+							log.Info("Lyrics loaded (backfill): %d lines; per-word: %s", len(shown), detailedFlag(shown))
+						}
 						// 位置取本轮的读数：重读成功时即刚读到的进度；没有重读到则是取词前的读数，上一轮未判
 						// 暂停时按经过的时间推算。
-						psec := player.LivePosition(float32(meta.ProgressMs)/1000.0, sampleTime, time.Now(), !isPaused, currentDurationSec)
-						prog := player.ClampProgress(psec, currentDurationSec)
-						p.Emit(player.EventSongInfoUpdate, &player.SongInfo{Name: name, Singer: singer, Title: title})
-						if len(lines) == 0 {
-							log.Info("Detected instrumental/no lyrics; clearing lyrics; per-word: %s", detailedFlag(lines))
-							p.emitNoLyrics(title, currentDurationSec, psec, prog)
-						} else {
-							log.Info("Lyrics loaded (backfill): %d lines; per-word: %s", len(lines), detailedFlag(lines))
-							items := toLyricLines(lines, offsetSec)
-							p.Emit(player.EventAllLyrics, &player.AllLyricsData{
-								Title: title, Duration: currentDurationSec, Position: psec, Progress: prog,
-								Count: len(items), Lyrics: items,
-							})
+						showLyrics(shown, float32(meta.ProgressMs)/1000.0, sampleTime)
+						// 同换歌分支写入详情结果：补取之前已失败（封面请求失败或窗口曾用尽）、这次核验通过即改为已得。本拍所查的编号可以与
+						// assocKey 的不同（assocKey 只在编号缺位时更新，如先由 FindSongMid 得到 songmid 而取词失败、之后 songid 落位），
+						// applyDetail 以核验结果衔接；衔接不上时详情结果仍为尚无，而补取已结束、不再请求封面，即记为已失败并写入，交读取者以
+						// assocKey 已知的编号兜底（设计 §6.4 第 2 步「交接」）。
+						coverURL, det := fetchCoverURL(sid, smid)
+						if k, ok := applyDetail(assocKey, sid, smid, det); ok {
+							assocKey = k
+							reader.Submit(assocKey)
 						}
-						coverURL := fetchCoverURL(sid, smid)
+						if k, ok := exhaustDetail(assocKey); ok {
+							assocKey = k
+							reader.Submit(assocKey)
+						}
+						noteDetail(sid, smid, det)
 						coverGen := p.NewSongGen()
 						go func(gen uint64, url, nm, sg, t string) {
 							defer telemetry.Guard()
@@ -404,12 +578,14 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		}
 
 		// --- 快速计时器锚点更新 + seek 检测 ---
+		// 本拍的变化（changed、seek、step）交给其后的暂停与恢复判定；seek 这一拍已发的 playback_resume 记在 resumeEmitted。
+		var changed, seek, resumeEmitted bool
+		var step int64
 		if meta.ProgressMs != lastMemProgress {
 			// Seek 检测：进度大幅跳变（> 2s 超出正常播放推进）视为跳转
 			// 暂扣放行的那一拍（#202）：读数低于暂扣前的读数即按回跳补发，不再比较 2s 门槛；不低于（从原处接着走，
 			// 或向前跳）交给下面的前跳判据，接着走不发事件。lastMemProgress 在暂扣期间没动，仍是暂扣前的读数。
 			seekDetected := released && meta.ProgressMs < lastMemProgress
-			resumeEmitted := false
 			if lastMemProgress > 0 {
 				// 回跳：进度回退超过 2s
 				if seekBack(lastMemProgress, meta.ProgressMs) {
@@ -428,46 +604,106 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			}
 			if seekDetected {
 				lastLineIdx = -1 // 重置歌词行号
-				posSec := float32(meta.ProgressMs) / 1000.0
-				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
-					Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
-				})
-				resumeEmitted = true
-			}
-
-			// 已判暂停时，非 seek 的变化先过 resumeGate：暂停后的补写只重锚、不判恢复。
-			if isPaused {
-				step := int64(meta.ProgressMs) - int64(lastMemProgress)
-				if seekDetected || resume.observe(step, sampleTime, pauseTimeoutSec*time.Second) {
-					isPaused = false
-					resume.reset()
-					if !resumeEmitted {
-						posSec := float32(meta.ProgressMs) / 1000.0
-						p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
-							Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
-						})
-					}
-					p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
-					log.Info("resumed @ %.2fs", float32(meta.ProgressMs)/1000.0)
-				} else {
-					log.Detail("progress moved %+dms while paused; resume not yet confirmed", step)
+				// 载入信号不可用时，暂扣放行按回跳补发（回到开头 1 秒以内、暂扣期间没有换歌）即按同一首重开写入（#218，
+				// 设计 §6.8「重开」）。
+				if !reopenedThisTick && !loadUsable && released && meta.ProgressMs < lastMemProgress && assocKey.hasIDs() {
+					reopenedThisTick = true
+					reopenSong(false)
+				}
+				// 跳转之前已判暂停的，由判定决定发恢复（v.resume，位置为锚点即落点）还是在落点补发暂停（v.pausedSeek，
+				// 设计 §6.7 第 7 条）。
+				if !isPaused {
+					posSec := float32(meta.ProgressMs) / 1000.0
+					p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
+						Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
+					})
+					resumeEmitted = true
 				}
 			}
+			changed, seek, step = true, seekDetected, int64(meta.ProgressMs)-int64(lastMemProgress)
 			anchorProgressMs = meta.ProgressMs
 			anchorTime = sampleTime
 			lastMemProgress = meta.ProgressMs
 		}
 
-		// 暂停检测：快速计时器停滞超过阈值。停滞时长量到本轮读数的时刻（见 sampleTime），不量到当前时刻。
-		if sampleTime.Sub(anchorTime).Seconds() > pauseTimeoutSec && !isPaused && lastName != "" {
+		// --- 暂停与恢复判定（#172）---
+		// 判定、去抖与两条交叉核对都在 judgeTick 里（回放夹具调用同一个函数）；这里只准备入参、按出参发事件与改锚点。
+		// 停走时长量到本轮读数的时刻（见 sampleTime），不量到当前时刻。judge 是循环外声明的跨拍状态，必须用 = 写回：
+		// 写成 := 会在循环体里新建一个同名变量遮蔽它，去抖、交叉核对乙与 resumeGate 都无法跨拍累计。
+		var v verdict
+		judge, v = judgeTick(judge, judgeIn{spec: mem.Offsets().PlayState, raw: meta.PlayState, rawOK: meta.PlayStateOK,
+			poll: pollInterval, paused: isPaused, claimed: lastName != "", changed: changed, seek: seek, step: step,
+			idle: sampleTime.Sub(anchorTime), now: sampleTime})
+		if v.tripped != "" {
+			// 交叉核对触发（每会话至多一次）：本次连接其后按停走判定。日志不落盘，野外只有上报能看出哪个版本的偏移不对。
+			off, ms := mem.Offsets().PlayState.Off, sampleTime.Sub(anchorTime).Milliseconds()
+			if v.tripped == "stalled" {
+				log.Warn("QQ Music reports playing (QQMusic.dll+0x%X is %d) but progress has not changed for %dms; play state no longer used for this connection, pausing on progress stall instead",
+					off, meta.PlayState, ms)
+			} else {
+				ms = sampleTime.Sub(judge.movedAt).Milliseconds() // 乙：本段暂停中两次变化的间隔，movedAt 是前一次的时刻
+				log.Warn("QQ Music reports paused (QQMusic.dll+0x%X is %d) but progress changed twice within %dms; play state no longer used for this connection, pausing on progress stall instead",
+					off, meta.PlayState, ms)
+			}
+			telemetry.ReportOnce("qqmusic.play_state_mismatch",
+				"QQ 音乐播放状态与进度矛盾，本次连接改按进度停走判暂停（附哪一条核对、取值与时长，供核对该版本的偏移）",
+				map[string]string{"qqmusic.version": mem.Version()},
+				map[string]any{"check": v.tripped, "value": meta.PlayState, "ms": ms})
+		}
+		if v.flash > 0 {
+			// 供真机核对去抖时长的余量（20.05 换歌那一拍的暂停值闪烁）。时长是上界，按拍取样可能大于去抖时长。
+			log.Detail("QQ Music play state held its paused value for at most %dms (debounce %dms); not judged as a pause",
+				v.flash.Milliseconds(), v.flashLimit.Milliseconds())
+		}
+		if v.resume {
+			// 由标志判恢复时读数多半还没动（恢复之后停 0.6～1.2 s），不重锚 anchorTime 的话插值会把整段暂停的时长加进位置。
+			// 位置取锚点：暂停中最后一次读数（含补写）；暂停中跳转而判恢复的，即变化分支刚落的落点。
+			isPaused = false
+			repausePending = false
+			anchorTime = sampleTime
+			posSec := float32(anchorProgressMs) / 1000.0
+			if !resumeEmitted {
+				p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{
+					Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
+				})
+			}
+			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: currentTitle})
+			log.Info("resumed @ %.2fs", posSec)
+			if lyricsPending {
+				// 补取窗口重设（#227）：窗口在暂停中用尽时补取保持未了结，ID 要开播才落位；下一拍即重试。
+				backfill.arm(sampleTime)
+			}
+		} else if isPaused && changed && !seek && v.st == stateUnknown {
+			log.Detail("progress moved %+dms while paused; resume not yet confirmed", step)
+		}
+		if v.pause {
+			// 位置取锚点（最后一次读数）；跳转之前未判暂停而本拍标志为暂停时（如 #202 放行拍），排在 seek 的 playback_resume 之后。
 			isPaused = true
-			resume.reset()
 			posSec := float32(anchorProgressMs) / 1000.0
 			p.Emit(player.EventPlaybackPause, &player.PlaybackTimeInfo{
 				Position: posSec, Progress: player.ClampProgress(posSec, currentDurationSec),
 			})
 			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "paused", Detail: currentTitle})
-			log.Info("paused @ %.2fs", float32(anchorProgressMs)/1000.0)
+			log.Info("paused @ %.2fs", posSec)
+		}
+		if v.pausedSeek {
+			// 暂停中跳转而 QQ 仍报暂停：前端停在落点；状态未变，不发 status_update。入队失败由下面的再试接手。
+			repausePos = float32(anchorProgressMs) / 1000.0
+			repausePending = !p.emitFrozenPause(repausePos, currentDurationSec)
+		}
+
+		// 暂停中补发的 playback_pause 入队失败（通道满）时，仍在暂停中就按原位置每拍再试，直到入队。
+		if repausePending && isPaused {
+			repausePending = !p.emitFrozenPause(repausePos, currentDurationSec)
+		}
+
+		// --- 歌词关联的结果（设计 §6.8「播放中」）---
+		// 已认领时每拍非阻塞地取至多一条，有变化即换词；不联网、不读文件，撤销关联后退回的在线歌词用本首保存的在线原始行。
+		// 位置取锚点插值，与下面的行匹配同口径；行号随之重置，本拍即宣告当前行。
+		if lastName != "" {
+			if lines, changed := takeResult(&lyricSt, reader.Results(), assocKey.hasIDs(), offsetSec); changed {
+				showLyrics(lines, float32(anchorProgressMs)/1000.0, anchorTime)
+			}
 		}
 
 		// --- 本地时钟插值 ---
@@ -475,9 +711,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		progressSec := player.LivePosition(float32(anchorProgressMs)/1000.0, anchorTime, time.Now(), !isPaused, float32(meta.DurationMs)/1000.0)
 		matchTime := player.LyricMatchTime(progressSec, offsetSec)
 
-		// 歌词行匹配。行号只往前走，除非刚换歌、跳转或换了歌词（lastLineIdx 置 -1）：暂停要等计时器停滞
-		// pauseTimeoutSec 才判得出，其间插值照走、可能推过下一行的开头，判出暂停时位置退回锚点，按它匹配会
-		// 补发上一行、恢复后再推回来（issue #96）。不足 2s 的回跳不判 seek，同样只重锚、不回退行号。
+		// 歌词行匹配。行号只往前走，除非刚换歌、跳转或换了歌词（lastLineIdx 置 -1）：标志未知时暂停要等计时器停滞
+		// pauseTimeout 才判得出（有播放状态字段时也要晚到标志翻转那一拍），其间插值照走、可能推过下一行的开头，判出暂停时
+		// 位置退回锚点，按它匹配会补发上一行、恢复后再推回来（issue #96）。不足 2s 的回跳不判 seek，同样只重锚、不回退行号。
 		if trueIdx, ok := nextLine(currentLyrics, matchTime, lastLineIdx); ok {
 			lastLineIdx = trueIdx
 			line := currentLyrics[trueIdx]
@@ -489,7 +725,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		}
 
 		// 位置采样（见 BaseEmitter.EmitPositionSample）：已认领歌曲且未判暂停时按固定间隔报一次，校准
-		// 服务端缓存里的位置——不足 pauseTimeoutSec 的停顿与 2s 以内的跳变只重锚、不发事件，无歌词的歌
+		// 服务端缓存里的位置——不判暂停的停顿与 2s 以内的跳变只重锚、不发事件，无歌词的歌
 		// 又没有歌词行可推。传 progressSec，与上面 lyric_update 的 position 同一个量；offset 只进了
 		// matchTime，这里不带。
 		if lastName != "" && !isPaused {
@@ -509,6 +745,37 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 // 归零由下一拍的暂扣判定处理。
 func rereadSameSong(fresh *SongMetadata, err error, name string, prevMs uint32) bool {
 	return err == nil && fresh != nil && name != "" && fresh.Name == name && !startsHold(prevMs, fresh.ProgressMs)
+}
+
+// takeResult 非阻塞地从读取者的结果通道取至多一条，交给 st.apply（设计 §6.8）；没有结果、results 为 nil（没有读取者）、
+// 结果过时或为未知、指纹不变时 changed 为假。换歌拍、补取块与每拍都经它取结果，轮询线程上对结果通道的接收只在这里
+// （assocwiring_test.go 守）。来源因此变化时打一条 Info。
+func takeResult(st *lyricState, results <-chan assocResult, songHasIDs bool, offsetSec float32) (lines []lyricLine, changed bool) {
+	select {
+	case res := <-results:
+		prev := st.source()
+		if lines, changed = st.apply(res, songHasIDs, offsetSec); changed && st.source() != prev {
+			log.Info("Lyrics source changed to %s: %d lines", st.source(), len(lines))
+		}
+	default:
+	}
+	return lines, changed
+}
+
+// lyricsUndecided 报告要显示的 lines 是否还没有结论：行为空、编号补取未完（pending）、来源为在线，即换歌拍取词失败、
+// 在线原始行还没取到。此时不发 index:-1（下游读作没有歌词），补取成功后再发歌词，超时同现状。
+func lyricsUndecided(lines []lyricLine, pending bool, src lyricSource) bool {
+	return len(lines) == 0 && pending && src == srcOnline
+}
+
+// emitFrozenPause 在 posSec 发 playback_pause，返回是否入队（通道满时不阻塞，返回假）。runSession 在已判暂停时随
+// all_lyrics 之后发它，posSec 取那条 all_lyrics 的位置；暂停中跳转而 QQ 仍报暂停时也发它，posSec 取落点。入队失败由调用方
+// 记下、每拍再试，所以用 TryEmit 而不是会静默丢弃的 Emit。暂停中补发只经它，调用处有三处：showLyrics 的补发、暂停中跳转
+// （if v.pausedSeek）与入队失败的再试（playstate_test.go 的接线门禁 d、g、m 守）。
+func (p *QQMusicPlayer) emitFrozenPause(posSec, durationSec float32) bool {
+	return p.TryEmit(player.EventPlaybackPause, &player.PlaybackTimeInfo{
+		Position: posSec, Progress: player.ClampProgress(posSec, durationSec),
+	})
 }
 
 // switchStartBandMs、switchConfirmAfter 管换歌前进度归零的暂扣（#202，doc/design/qqmusic-switch-zero-design.md
@@ -595,6 +862,252 @@ func (g *resumeGate) observe(step int64, now time.Time, window time.Duration) bo
 
 func (g *resumeGate) reset() { g.pendingAt = time.Time{} }
 
+// --- 暂停与恢复判定（#172，doc/design/qqmusic-start-stall-design.md §6）---
+//
+// QQ 音乐在换歌、拖动、单曲循环回到开头与恢复播放之后，进度读数先停约 1～2 s 才走，其间 QQ 自己的播放状态一直是
+// 在播（2026-11-22 qqstateprobe 实测：22.82 停走最长按拍量 1.4 s，22.52 1.6 s，20.05 1.4 s；2026-11-23 第 5 轮另录的
+// 9 个版本最长 2.0 s，其中 A 类版本偶尔夹一拍载入值）；按停走 1 s 判暂停会在用户没有暂停时多出一对暂停与恢复。
+// 收录了播放状态字段（knownVersions 的 PlayState）、版本号精确匹配、实际轮询间隔不超过 1 s 的会话改按 QQ 的播放状态判；
+// 其余情形（未收录、借用偏移表、读失败、取值不在集合里、交叉核对判为不可信、轮询超过 1 s）按停走 1 s 判暂停、经
+// resumeGate 判恢复，逐事件同修复之前。判定、去抖与两条交叉核对只在 judgeTick 里写，runSession 与回放夹具都只调用它
+// （runSession 的接线由 playstate_test.go 的源码扫描守）。
+
+// playState 是一拍采用的播放状态（#172）。
+type playState uint8
+
+const (
+	stateUnknown  playState = iota // 不用标志，按停走判定
+	statePlaying                   // 在播值
+	statePaused                    // 暂停值，已满去抖
+	stateSettling                  // 暂停值，未满去抖：本拍不判暂停、不判恢复（seek 除外），不按停走判，不做核对
+	stateLoading                   // 载入值（classify 的结果）：judgeTick 随即改按未知，停走自进入载入值的那一拍起量
+)
+
+const (
+	// pauseTimeout：标志未知时，停走严格超过它判暂停（修复之前的 pauseTimeoutSec）；也是 resumeGate 的确认窗口。
+	pauseTimeout = time.Second
+	// playStateStallLimit：交叉核对甲的门槛。标志报在播而读数停走严格超过它，判本会话标志不可信。实测标志为在播时
+	// 停走最长按拍量 2.0 s、实际至多约 2.2 s（12 个版本的录像），22.81 录音锚点到首步最长 2072 ms，留 0.8 s 以上；与
+	// applemusic 的 startPauseThreshold 同值。标志正常时它不是暂停判定的宽限，只在偏移出错或 QQ 报在播而真停走时起作用。
+	playStateStallLimit = 3 * time.Second
+)
+
+// judgeState 是判定跨拍保留的状态（runSession 的局部变量，本会话内有效，QQ 重启或本服务重连即重置）。
+type judgeState struct {
+	bad           bool       // 本会话已判标志不可信（§6.3）
+	movedAt       time.Time  // 交叉核对乙：本段暂停中上一次非 seek 变化的读数时刻
+	pausedSince   time.Time  // 去抖：连续读到暂停值的第一拍的读数时刻，零值为没有
+	confirmed     bool       // 去抖：这一段暂停值已满 MinPause
+	flashFrom     time.Time  // 去抖诊断：这一段暂停值开始时的 lastPlayingAt，零值为之前没有读到过在播值
+	lastPlayingAt time.Time  // 最近一次读到在播值（分类之后 st 为在播）的读数时刻，零值为没有
+	loadingSince  time.Time  // 连续读到载入值的第一拍的读数时刻，零值为没有
+	resume        resumeGate // #171：标志未知的拍判恢复用
+}
+
+// judgeIn 是一拍的入参，由调用方在变化分支（seek 检测与重锚）之后准备。
+type judgeIn struct {
+	spec    playStateSpec // 本版本的字段描述（mem.Offsets().PlayState）
+	raw     uint32        // 本拍标志原始取值（meta.PlayState，重读被采用时已换）
+	rawOK   bool          // meta.PlayStateOK：读了且读成功
+	poll    time.Duration // 实际轮询间隔（pollInterval）
+	paused  bool          // 本拍判定之前是否已判暂停（isPaused）
+	claimed bool          // lastName != ""
+	changed bool          // 本拍读数与上一次不同
+	seek    bool          // 变化分支判出 seek
+	step    int64         // 本拍读数减上一次读数（ms，有符号）
+	idle    time.Duration // sampleTime − anchorTime，在变化分支重锚之后量（读数变了即为 0）
+	now     time.Time     // sampleTime
+}
+
+// verdict 是一拍的出参。
+type verdict struct {
+	st         playState     // 本拍采用的状态（日志用）
+	resume     bool          // 判恢复
+	pause      bool          // 判暂停
+	pausedSeek bool          // 已判暂停、本拍判出 seek、状态为暂停（已满去抖）：不判恢复也不判暂停，runSession 在落点补发 playback_pause（不发 status_update）
+	tripped    string        // 本拍触发的交叉核对："stalled"（甲）、"moved"（乙），没有为空
+	flash      time.Duration // 一段未满去抖就结束的暂停值的持续时长上界（Detail 用），没有为 0；可能大于 flashLimit
+	flashLimit time.Duration // flash 非 0 时为本版本的去抖时长（Detail 用：runSession 不读 MinPause）
+}
+
+// judgeTick 判一拍的暂停与恢复（§6.2）。
+//
+//   - 状态：本会话未判不可信、读成功、实际轮询间隔不超过 1 s 时按取值分类，否则为未知。
+//   - 载入（各版 Loading 里的取值：E 类的 2，A 类的 2、3；换歌载入中，QQ 启动后未开播时一直是 2）：按未知判，判暂停
+//     用的停走取自锚点与自进入载入值的那一拍两者的较短者；resumeGate 照旧，不做甲、乙。只自锚点量的话，起步停顿中又
+//     换歌（占位串那一拍 0→0 不暂扣、不认领、不重锚）会把上一首的停顿算进来而误判；按在播的话，QQ 启动后未开播 3 s
+//     即触发甲（设计 §6.1）。开播值（Opening，A 类的 3）每拍重新起量，即读到它的拍不按停走判暂停（#243）。
+//   - 去抖：暂停值自读到它的那一拍起持续不少于 MinPause 才算暂停，未满为待定；恢复不去抖（录像只见过换歌时闪暂停值）。
+//     未满就结束的一段报出持续时长的上界 flash：自这一段之前最近一次读到在播值的拍，到结束这一段的在播值的拍；两端
+//     任一不是有效的在播读数（会话里此前没读到过在播值、以读失败或取值集合以外的值结束）时不报，判定照旧。
+//   - 交叉核对乙（报暂停却在走）：已判暂停、状态为暂停时，读数的非 seek 变化距本段暂停中上一次这样的变化不超过
+//     movedWindow，判不可信。真暂停中三份录像与 #171 的采样都至多补写一次。
+//   - 交叉核对甲（报在播却停走）：本拍之前未判暂停、状态为在播、已认领，停走严格超过 playStateStallLimit，判不可信。
+//   - 暂停中跳转（第 5 轮，设计 §6.7 第 7 条）：已判暂停、seek、状态为暂停时不判恢复也不判暂停，出参 pausedSeek；本段暂停
+//     自跳转起重新计，清 movedAt 与 resumeGate 的待确认。
+//   - 判恢复：已判暂停时，seek（暂停中跳转除外）、状态为在播、或状态未知而 resumeGate 确认（同 #171）。
+//   - 判暂停：未判暂停（含本拍刚判恢复）、已认领时，状态为暂停，或状态未知而停走严格超过 pauseTimeout（同修复之前；
+//     载入的停走见上）。
+//
+// 触发核对的那一拍状态即改为未知：甲那一拍停走已超过 1 s，当拍判暂停；乙那一拍经 resumeGate。
+func judgeTick(s judgeState, in judgeIn) (judgeState, verdict) {
+	var v verdict
+	if !s.bad && in.rawOK && in.poll <= time.Second {
+		v.st = in.spec.classify(in.raw)
+	}
+	// 载入：其后各处按未知；只有判暂停用的停走改量（idle），resumeGate、甲与乙不涉及
+	idle := in.idle
+	if v.st == stateLoading {
+		// 开播值（#243）每拍重新起量：本拍停走为 0，其后转为别的载入值时自最后一拍开播值起量
+		if s.loadingSince.IsZero() || slices.Contains(in.spec.Opening, in.raw) {
+			s.loadingSince = in.now
+		}
+		v.st, idle = stateUnknown, min(idle, in.now.Sub(s.loadingSince))
+	} else {
+		s.loadingSince = time.Time{}
+	}
+	// 去抖：暂停值须持续不少于 MinPause；未满为待定，本拍不判暂停也不判恢复（seek 除外），不做核对
+	if v.st == statePaused {
+		if s.pausedSince.IsZero() {
+			// 暂停值出现在最近一次读到在播值之后：持续时长的上界自那一拍起算。读失败、取值集合以外的拍不算（暂停值可能
+			// 早于它们出现）；中间有不调判定函数的拍（#202 暂扣、#96 与 midWait 等待）时那一拍更早，上界只会放宽。
+			s.pausedSince, s.flashFrom = in.now, s.lastPlayingAt
+		}
+		if in.now.Sub(s.pausedSince) >= in.spec.MinPause {
+			s.confirmed = true
+		} else {
+			v.st = stateSettling
+		}
+	} else if !s.pausedSince.IsZero() {
+		// 只在这一段以在播值结束、且开始之前读到过在播值时报：以读失败或未知值结束的，暂停值何时结束不知道。
+		if !s.confirmed && v.st == statePlaying && !s.flashFrom.IsZero() {
+			v.flash, v.flashLimit = in.now.Sub(s.flashFrom), in.spec.MinPause
+		}
+		s.pausedSince, s.confirmed = time.Time{}, false
+	}
+	if v.st == statePlaying {
+		s.lastPlayingAt = in.now
+	}
+	// 乙：报暂停却在走
+	if v.st == statePaused && in.paused && in.changed && !in.seek {
+		if !s.movedAt.IsZero() && in.now.Sub(s.movedAt) <= movedWindow(in.poll) {
+			s.bad, v.tripped, v.st = true, "moved", stateUnknown
+		} else {
+			s.movedAt = in.now
+		}
+	}
+	paused := in.paused
+	if paused && in.seek && v.st == statePaused {
+		// 暂停中跳转而 QQ 仍报暂停（读数先跳、标志后变，或拖动后不起播）：不判恢复，落点由补发的 playback_pause 带出；
+		// 本段暂停自跳转起重新计：清 movedAt（乙）与 resumeGate 的待确认，同原先「判恢复、随即再判暂停」两处各清一次的
+		// 效果。不清后者时，跳转前一次标志未知的小步与跳转后又一次凑成两次而误判恢复（设计 §6.7 第 7 条，§7.2 J25）
+		v.pausedSeek = true
+		s.movedAt = time.Time{}
+		s.resume.reset()
+	} else if paused && (in.changed && (in.seek || v.st == stateUnknown && s.resume.observe(in.step, in.now, pauseTimeout)) ||
+		v.st == statePlaying) {
+		v.resume, paused = true, false
+		s.resume.reset()
+	}
+	// 甲：报在播却停走。本拍之前已判暂停的不量：由标志判恢复时锚点随即重置
+	if v.st == statePlaying && !in.paused && in.claimed && in.idle > playStateStallLimit {
+		s.bad, v.tripped, v.st = true, "stalled", stateUnknown
+	}
+	if !paused && in.claimed && (v.st == statePaused || v.st == stateUnknown && idle > pauseTimeout) {
+		v.pause = true
+		s.resume.reset()
+		s.movedAt = time.Time{}
+	}
+	return s, v
+}
+
+// loadingUsable 报告本会话的载入信号是否可用（#218，设计 §6.8「重开」）：本版本的播放状态有载入取值、本会话未判标志不可信
+// （bad 即 judgeState.bad）、实际轮询间隔不超过 1 s。可用时同一首重开以载入值由无到有为信号（loadEdge、reopenByLoading），
+// 否则以暂扣放行按回跳补发为信号；runSession 每拍开头算一次，四处写入的条件都出自它。
+func (s playStateSpec) loadingUsable(bad bool, poll time.Duration) bool {
+	return len(s.Loading) > 0 && !bad && poll <= time.Second
+}
+
+// loadEdge 记播放状态的载入值（#218，设计 §6.8「重开」「改名证据」「载入段的记录」），runSession 的局部变量，由 newLoadEdge
+// 建出：察觉载入值由无到有（同一首重开）；另记自上一次换歌认领以来的窗口（改名证据，claim 求值并清零）与每段载入值的四个时刻
+// （段结束时经 onSegment 报出）。窗口与载入段的其余方法在 loadwindow.go。只做内存比较。
+type loadEdge struct {
+	loading   bool              // 上一次读数为载入值（重开的由无到有，读失败按非载入）
+	poll      time.Duration     // 会话的轮询间隔：载入段的采样缺口为相邻读成的读数相隔超过 2×poll
+	onSegment func(loadSegment) // 载入段结束时调用；nil 即不报
+	// 改名证据的窗口（自上一次换歌认领以来，claim 清零）：见到载入边沿、有读不成的拍、相邻读数相隔不小于门槛 G
+	sawEdge, sawFail, sawGap bool
+	maxGap                   time.Duration
+	lastAt                   time.Time // 上一次读成的播放状态读数的时刻；跨认领保留
+	// 载入段
+	inSeg               bool
+	seg                 loadSegment
+	preAt               time.Time // 最近一个读成的非载入样本
+	failSince, gapSince bool      // 自上一个读成的样本以来有读失败、有采样缺口
+}
+
+// step 在每拍读到元数据之后以首读调用一次（暂扣中的拍、等进度与等 songMid 的拍也调用），取词之后的重读被采用时再以重读调用，
+// at 为该次读数的时刻（首读为 sampleTime，重读为重读之后的 sampleTime）：这次读数是否为载入值经 judgeTick 所用的 classify
+// 判定，读失败（rawOK 为假）按非载入值；返回是否由非载入值变为载入值。
+// 另记改名证据的窗口与载入段（设计 §6.8「改名证据」「载入段的记录」）：返回真即见到载入边沿；读失败记一次读不成，不改 lastAt、
+// 不动载入段（状态未知，不算非载入样本，不结束一段）；读成时量与上一次读成的读数的间隔（不小于门槛 G 即采样缺口，超过两倍轮询
+// 间隔记进载入段），再按本次是否为载入值开段、续段或结束一段。
+func (e *loadEdge) step(spec playStateSpec, raw uint32, rawOK bool, at time.Time) bool {
+	loading := rawOK && spec.classify(raw) == stateLoading
+	edge := loading && !e.loading
+	e.loading = loading
+	if edge {
+		e.sawEdge = true
+	}
+	if !rawOK {
+		e.sawFail, e.failSince = true, true
+		return edge
+	}
+	if !e.lastAt.IsZero() {
+		d := at.Sub(e.lastAt)
+		e.maxGap = max(e.maxGap, d)
+		if spec.LoadingMinGap > 0 && d >= spec.LoadingMinGap {
+			e.sawGap = true
+		}
+		if e.poll > 0 && d > 2*e.poll {
+			e.gapSince = true
+		}
+	}
+	e.lastAt = at
+	switch {
+	case loading && !e.inSeg: // 开段：段前的读失败与缺口落在 t₀～t₁ 之间
+		e.inSeg = true
+		e.seg = loadSegment{pre: e.preAt, first: at, last: at, fail: e.failSince, gap: e.gapSince}
+	case loading: // 续段：其间的读失败与缺口落在 t₁～t₂ 之间
+		e.seg.failInside = e.seg.failInside || e.failSince
+		e.seg.gapInside = e.seg.gapInside || e.gapSince
+		e.seg.last = at
+	case e.inSeg: // 段结束：落在 t₂～t₃ 之间
+		e.seg.post = at
+		e.seg.fail = e.seg.fail || e.failSince
+		e.seg.gap = e.seg.gap || e.gapSince
+		if e.onSegment != nil {
+			e.onSegment(e.seg)
+		}
+		e.inSeg = false
+		e.preAt = at
+	default:
+		e.preAt = at
+	}
+	e.failSince, e.gapSince = false, false
+	return edge
+}
+
+// reopenByLoading 判本拍是否按载入值写入同一首重开（#218，设计 §6.8「重开」）：载入信号可用、载入值由无到有、已认领、本拍
+// 读到的歌名等于已认领的（不是换歌、等进度、等 songMid 或占位串的拍）、编号已知（本地文件不读当前歌曲记录）。
+func reopenByLoading(usable, edge bool, name, lastName string, hasIDs bool) bool {
+	return usable && edge && lastName != "" && name == lastName && hasIDs
+}
+
+// movedWindow 是交叉核对乙的窗口：1 s 与两倍轮询间隔的较大者（§6.3）。要盖住稳定播放中相邻两次读到的变化（默认轮询
+// 下至多约 0.6～0.8 s，有一拍延迟时到两倍轮询）；轮询超过 1 s 时窗口会盖过暂停中补写的间隔，那时不用标志。
+func movedWindow(poll time.Duration) time.Duration { return max(time.Second, 2*poll) }
+
 // shouldDeferForSongMid 判断本次换歌是否**可能**需要等 songMid 就绪。
 //
 // usesSongMid 表示「本版本靠 songMid 取词」：v20.05（偏移表填了 SongMidParamsOff，从 URL
@@ -639,6 +1152,52 @@ func (g *midWaitGate) wait(songName string, now time.Time, window time.Duration)
 
 // reset 在 songMid 就绪（或放弃等待）后清空，使下一首歌重新开窗。
 func (g *midWaitGate) reset() { g.name = "" }
+
+// lyricRetryWindow、lyricRetryInterval 是换歌后歌词补取的窗口与重试间隔：认领时歌曲 ID 未落位即开窗，窗口内每
+// lyricRetryInterval 重试一次（重试含 FindSongMid 全内存扫描与 fetchLRC 网络请求）。
+const (
+	lyricRetryWindow   = 8 * time.Second
+	lyricRetryInterval = 500 * time.Millisecond
+)
+
+// backfillWindow 是换歌后歌词补取的窗口与重试节流（#227，doc/design/qqmusic-start-stall-design.md §6.10），runSession 的
+// 局部变量。截止与节流的比较只在 next 里：只把窗口判断写成纯函数的话，调用方在「保持」时照样会进重试分支。
+type backfillWindow struct {
+	deadline  time.Time // 窗口截止
+	lastRetry time.Time // 上一次重试的时刻，零值为还没有
+}
+
+// backfillStep 是 next 对本拍的裁定。
+type backfillStep uint8
+
+const (
+	backfillWait   backfillStep = iota // 窗口内、未到重试间隔：本拍不做
+	backfillRetry                      // 窗口内、已到重试间隔：本拍重试（next 已记下 lastRetry）
+	backfillHold                       // 窗口已用尽、已判暂停：不重试、不放弃
+	backfillGiveUp                     // 窗口已用尽、未判暂停：放弃
+)
+
+// arm 开（或重开）窗口：截止为 now + lyricRetryWindow，清掉 lastRetry，下一次 next 即可重试。认领时歌曲 ID 未落位、
+// 以及补取未了结而判恢复时调用（#227：QQ 启动后载入上次的歌而未开播，ID 要开播才落位）。
+func (w *backfillWindow) arm(now time.Time) {
+	*w = backfillWindow{deadline: now.Add(lyricRetryWindow)}
+}
+
+// next 裁定本拍的补取：now 不晚于截止（含端点）时，距上一次重试不少于 lyricRetryInterval 即重试并记下 now，否则等；
+// 晚于截止时，paused（本拍判定之前的 isPaused）为真即保持，为假即放弃。窗口内暂停中照样重试：换歌后立刻暂停时 ID 在
+// 换歌之后 1.1～3.1 s 落位（2026-11-22 真机 8 次），暂停中补到歌词与封面是一直有的行为；只在用尽之后才看是否暂停。
+func (w *backfillWindow) next(now time.Time, paused bool) backfillStep {
+	switch {
+	case now.After(w.deadline) && paused:
+		return backfillHold
+	case now.After(w.deadline):
+		return backfillGiveUp
+	case now.Sub(w.lastRetry) < lyricRetryInterval: // 零值的 lastRetry 相距极远，首次即满足
+		return backfillWait
+	}
+	w.lastRetry = now
+	return backfillRetry
+}
 
 // progressSettleWindow 是换歌后等进度从上一首换过来的时间上界。取值未经真机测量：录音只说明进度落后于
 // 歌名不超过一次取词加一拍。真机上若换歌常等满这个时长、或等满之后读到的仍是上一首的进度，按实测调整。

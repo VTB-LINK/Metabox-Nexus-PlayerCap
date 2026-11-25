@@ -16,11 +16,11 @@
 |--------|--------|----------|------|
 | 全民K歌 | `wesing` | 进程内存读取 | 未限定 |
 | 网易云音乐 | `cloudmusicv3` | CDP 远程调试 | 3.x 及以上，官网安装版；不支持微软商店版 |
-| QQ 音乐 | `qqmusic` | 进程内存读取 + AOB Hook 注入 | `22.16` ～ `22.82`（收录 10 个版本，另有 `20.05`、`21.81`） |
+| QQ 音乐 | `qqmusic` | 进程内存读取 | `22.16` ～ `22.82`（收录 11 个版本，另有 `20.05`、`21.81`） |
 | 酷狗音乐 | `kugou` | CDP 远程调试 | `20.1.22.27795` 及以上（x64架构） |
 | 汽水音乐 | `sodamusic` | CDP 远程调试 | 未限定 |
 | Apple Music | `applemusic` | 进程内存读取 | 未限定 |
-| Spotify | `spotify` | CDP 远程调试（页面 DOM + 官方 CLI） | 未限定（实测 `1.3.6.1921`），官网安装版；不支持微软商店版 |
+| Spotify | `spotify` | CDP 远程调试（页面 DOM + 官方 CLI） | 未限定（实测 `1.3.6.1921`、`1.3.10.2586`），官网安装版；不支持微软商店版 |
 | 酷我音乐 | `kuwo` | CDP 远程调试 + 进程内存读取 | `9.6.0.0`（渠道后缀不限，实测 `W1`、`UG1`），官网安装版；不支持微软商店版 |
 
 <details>
@@ -42,7 +42,7 @@
 |--------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | 全民K歌 `wesing` | ✔ | ✔ | 🚫 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | 🚫 |
 | 网易云音乐 `cloudmusicv3` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | 🚫 |
-| QQ 音乐 `qqmusic` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | 🚫 |
+| QQ 音乐 `qqmusic` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ⚠ |
 | 酷狗音乐 `kugou` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ⚠ |
 | 汽水音乐 `sodamusic` | ✔ | ✔ | ✔ | ⚠ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | 🚫 |
 | Apple Music `applemusic` | ⚠ | ⚠ | ⚠ | 🚫 | ✔ | ✔ | ⚠ | ✔ | ✔ | ✔ | 🚫 |
@@ -64,6 +64,11 @@
 **网易云音乐 `cloudmusicv3`**
 
 - 逐字音译只有一字一音的歌（如粤语歌）才有：平台的音译只有逐行的，没有字级时间。带逐字歌词的行里，每个字各是一个逐字单元、音节数与汉字数相等时，把音节按顺序配上各个字的时间。日文、韩文歌整首为 `{}`，中英混排等对不上的行为 `{}`。
+
+**QQ 音乐 `qqmusic`**
+
+- 本地文件 `⚠`：歌词跟随 QQ 音乐里的关联，用 QQ 音乐里手动关联的、或 QQ 音乐自动匹配到的那份；没有关联的本地文件没有歌词。QQ 音乐把本地文件匹配成在线歌曲时，歌词同样跟随这个文件的关联（首次播放这首、QQ 音乐改名之后的那段除外）。
+- 在线歌曲：在 QQ 音乐里改过歌词（关联本地歌词，或在「搜索歌词」里选了一份）的，歌词与 QQ 音乐显示的一致；只在 `22.16`、`22.22`、`22.26`、`22.31`、`22.41`、`22.60`、`22.71`、`22.76`、`22.81`、`22.82` 上生效。
 
 **酷狗音乐 `kugou`**
 
@@ -246,10 +251,10 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
    音频波形帧率: *audio-frame-rate=25fps
    播放器: wesing (offset=-200ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: cloudmusicv3 (*offset=-500ms poll=30ms → 100ms idle-hide=0s audio-normalize=true *effect-strategy=fadeout)
-   播放器: qqmusic (*offset=-400ms poll=30ms idle-hide=0s audio-normalize=true)
+   播放器: qqmusic (*offset=-100ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: kugou (*offset=-430ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: sodamusic (*offset=-340ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
-   播放器: applemusic (*offset=-400ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
+   播放器: applemusic (*offset=-900ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    播放器: spotify (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    播放器: kuwo (*offset=-300ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b

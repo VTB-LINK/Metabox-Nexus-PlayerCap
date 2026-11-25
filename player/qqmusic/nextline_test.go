@@ -3,7 +3,7 @@ package qqmusic
 // 本文件测 nextLine（歌词行匹配：行号只往前走，lastLineIdx 为 -1 时不限），并经 sessionreplay_test.go
 // 的复述回放 issue #96 的暂停序列与它的反例。
 //
-// qqmusic 判暂停要等计时器停滞 pauseTimeoutSec，其间插值照走、可能推过下一行的开头；判出暂停时位置
+// qqmusic 判暂停要等计时器停滞 pauseTimeout（没有播放状态字段时，#172），其间插值照走、可能推过下一行的开头；判出暂停时位置
 // 退回锚点。旧写法（行号与上一次不同即发）按退回的位置补发上一行，恢复后再推回来。
 //
 // 变异均在本 worktree 里用编辑注入、跑完即还原，结果记在各用例的注释里（均实测）。

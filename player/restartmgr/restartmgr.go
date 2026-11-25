@@ -1,6 +1,8 @@
-package watchdog
+// Package restartmgr 经 Restart Manager 只读地查询打开给定文件的进程。
+package restartmgr
 
 import (
+	"errors"
 	"syscall"
 	"unsafe"
 
@@ -37,9 +39,22 @@ type rmProcessInfo struct {
 	Restartable      int32
 }
 
-// rmHolders 经 Restart Manager 查询打开 path 的进程，返回其 PID（可能为空）。只查询：不调用 RmShutdown、
-// RmRestart，不影响任何进程；会话在返回前结束。
-func rmHolders(path string) ([]uint32, error) {
+// Holders 在一个 Restart Manager 会话里注册 paths 的全部文件，返回打开其中任一文件的进程的 PID（可能为空）。
+// paths 为空时返回 nil, nil，不开会话。只查询：不调用 RmShutdown、RmRestart，不影响任何进程；会话在返回前
+// 结束。错误包装 RM 返回的 syscall.Errno，可用 IsFatal 分类。
+func Holders(paths ...string) ([]uint32, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	files := make([]*uint16, len(paths))
+	for i, path := range paths {
+		p, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return nil, err
+		}
+		files[i] = p
+	}
+
 	var session uint32
 	var key [rmSessionKeyLen + 1]uint16
 	if r, _, _ := procRmStartSession.Call(uintptr(unsafe.Pointer(&session)), 0, uintptr(unsafe.Pointer(&key[0]))); r != 0 {
@@ -47,12 +62,7 @@ func rmHolders(path string) ([]uint32, error) {
 	}
 	defer procRmEndSession.Call(uintptr(session))
 
-	p, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	files := []*uint16{p}
-	if r, _, _ := procRmRegisterResources.Call(uintptr(session), 1, uintptr(unsafe.Pointer(&files[0])), 0, 0, 0, 0); r != 0 {
+	if r, _, _ := procRmRegisterResources.Call(uintptr(session), uintptr(len(files)), uintptr(unsafe.Pointer(&files[0])), 0, 0, 0, 0); r != 0 {
 		return nil, i18n.Errorf("RmRegisterResources failed: %w", syscall.Errno(r))
 	}
 
@@ -78,4 +88,16 @@ func rmHolders(path string) ([]uint32, error) {
 		}
 		infos = make([]rmProcessInfo, needed)
 	}
+}
+
+// HoldersOf 即 Holders(path)，供只查一个文件的调用方（如酷狗确认闸门的 holders 字段）。
+func HoldersOf(path string) ([]uint32, error) { return Holders(path) }
+
+// IsFatal 报告 err 是否为重试无益的 Restart Manager 错误：ERROR_SEM_TIMEOUT（拿不到注册表互斥体）、
+// ERROR_WRITE_FAULT（RM 读写注册表失败）、ERROR_MAX_SESSIONS_REACHED（本用户会话的 RM 会话已满）。
+// 按 errors.Is 判断，经 %w 包装的同样认得。
+func IsFatal(err error) bool {
+	return errors.Is(err, windows.ERROR_SEM_TIMEOUT) ||
+		errors.Is(err, windows.ERROR_WRITE_FAULT) ||
+		errors.Is(err, windows.ERROR_MAX_SESSIONS_REACHED)
 }

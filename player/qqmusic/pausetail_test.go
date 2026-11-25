@@ -9,7 +9,8 @@ package qqmusic
 // 变异自证（均实测）：回放夹具改回旧规则，TestReplayPauseTailMeasured 三例与 TestReplayPauseTailCases 七例全红，
 // 除「补写之后 1s 内采到小步」一例是恢复位置落在补写读数上之外，得到的序列都含「pause resume pause」；observe 的 `step >= resumeStepMs` 改成 `>`，「首步恰为 500」红；窗口
 // 判据 `<=` 改成 `<`，「恰 1s」红。runSession 在判出暂停或认领新歌时不清空待确认，全包仍绿：等价变异——
-// 待确认时刻不晚于最后一次变化，新的暂停要再停满 pauseTimeoutSec 才判出，其后的变化必已过窗。
+// 待确认时刻不晚于最后一次变化，新的暂停要再停满 pauseTimeout 才判出，其后的变化必已过窗。（#172 起 resumeGate 移进
+// judgeState，判出暂停与认领新歌时的清空在 judgeTick 与认领处。）
 
 import (
 	"testing"

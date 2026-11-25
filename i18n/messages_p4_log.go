@@ -473,4 +473,90 @@ var p4LogMessages = map[string]string{
 	// —— main：随包使用说明的中文名副本（issue #215），Detail 级 ——
 	"Copied %s to %s":             "Copied %s to %s",
 	"Failed to copy %s to %s: %v": "Failed to copy %s to %s: %v",
+
+	// —— qqmusic：按 QQ 音乐的播放状态字段判暂停与恢复（issue #172）——
+	"QQ Music reports playing (QQMusic.dll+0x%X is %d) but progress has not changed for %dms; play state no longer used for this connection, pausing on progress stall instead": "QQ 音乐报告在播（QQMusic.dll+0x%X 处为 %d），进度却 %dms 未变；本次连接不再采用播放状态，改按进度停走判暂停",
+	"QQ Music reports paused (QQMusic.dll+0x%X is %d) but progress changed twice within %dms; play state no longer used for this connection, pausing on progress stall instead": "QQ 音乐报告暂停（QQMusic.dll+0x%X 处为 %d），进度却在 %dms 内变了两次；本次连接不再采用播放状态，改按进度停走判暂停",
+	"QQ Music play state held its paused value for at most %dms (debounce %dms); not judged as a pause":                                                                         "QQ 音乐播放状态的暂停值至多持续了 %dms（去抖 %dms），未判暂停",
+
+	// —— player/qqmusic：关联歌词的翻译、音译只跳过该轨（issue #218）——
+	"Skipped the %s track of the associated lyrics: %v": "关联歌词的%s轨已跳过：%v",
+	"translation":  "翻译", // 由调用方 i18n.T 后注入上一条日志
+	"romanization": "音译",
+
+	// —— player/qqmusic：歌词关联的后台读取者（issue #218）——
+	"The previous session's lyric association reader has not exited; QQ Music lyric associations are not followed this session":                      "上一个会话的歌词关联读取者尚未退出，本会话不跟随 QQ 音乐的歌词关联",
+	"QQ Music lyric association enabled (lyric directory %s)":                                                                                        "QQ 音乐歌词关联已启用（歌词目录 %s）",
+	"QQ Music lyric association disabled: %v":                                                                                                        "QQ 音乐歌词关联已停用：%v",
+	"Cannot read the QQ Music cache directory setting; using the default %s: %v":                                                                     "读不出 QQ 音乐的缓存目录设置，改用默认的 %s：%v",
+	"Parsed the QQ Music lyric association table: %d entries, %d bytes in %v":                                                                        "已解析 QQ 音乐歌词关联表：%d 条，%d 字节，用时 %v",
+	"Reading the QQ Music lyric association table failed; will retry: %v":                                                                            "读取 QQ 音乐歌词关联表失败，稍后重试：%v",
+	"Reading the QQ Music lyric index failed; translation and romanization will be retried: %v":                                                      "读取 QQ 音乐歌词索引失败，翻译与音译稍后重试：%v",
+	"Cannot use the associated lyrics: %v":                                                                                                           "无法使用关联的歌词：%v",
+	"Over 256 local files in the QQ Music lyric association table and the song name does not narrow them to 1-256; not identifying the playing file": "QQ 音乐歌词关联表里的本地文件超过 256 个，按歌名筛不到 1～256 个，本次不认定正在播放的文件",
+	"Cannot identify the local file QQ Music is playing: %v":                                                                                         "无法认定 QQ 音乐正在播放的本地文件：%v",
+	"Restart Manager failed; not identifying the local file QQ Music is playing for this session: %v":                                                "Restart Manager 查询失败，本会话不再认定 QQ 音乐正在播放的本地文件：%v",
+
+	// 本地文件认定不论有无在线编号，认定时记下有无编号与被 QQ 打开的候选数（issue #218 第 5 版）
+	"Identified the local file QQ Music is playing: %s (the song has online IDs; %d candidates open in QQ Music)":    "认定 QQ 音乐正在放的本地文件：%s（这首有在线编号；被 QQ 音乐打开的候选 %d 个）",
+	"Identified the local file QQ Music is playing: %s (the song has no online IDs; %d candidates open in QQ Music)": "认定 QQ 音乐正在放的本地文件：%s（这首没有在线编号；被 QQ 音乐打开的候选 %d 个）",
+
+	// —— player/qqmusic：歌词来源名，lyricSource.String 在源头 i18n.T 后注入日志（issue #218）——
+	"QQ Music online lyrics":          "QQ 音乐在线歌词",
+	"QQ Music association":            "QQ 音乐关联",
+	"QQ Music local file association": "QQ 音乐本地文件关联",
+	"none":                            "无",
+
+	// —— player/qqmusic：runSession 接入歌词关联（issue #218）——
+	"Lyrics source changed to %s: %d lines":                                            "歌词来源改为「%s」：%d 行",
+	"Lyric backfill timed out (%v); keeping the lyrics associated with the local file": "歌词补取超时（%v），保留本地文件关联的歌词",
+	"Same song reopened (QQ Music entered loading)":                                    "同一首重开（QQ 音乐进入载入）",
+	"Same song reopened (progress returned to the start)":                              "同一首重开（进度回到开头）",
+
+	// 换歌认领时的改名证据与每段载入值的记录（issue #218 第 5 版），Detail 级
+	"Song changed; keeping the previous local file as a candidate (same playback renamed by QQ Music); longest gap between play-state reads %v": "换歌：上一首的本地文件留作候选（同一次播放被 QQ 音乐改名）；播放状态相邻读数最长相隔 %v",
+	"Song changed; excluding the previous local file: %s; longest gap between play-state reads %v":                                              "换歌：排除上一首的本地文件：%s；播放状态相邻读数最长相隔 %v",
+	"QQ Music loading segment: non-loading %s, loading %s to %s, non-loading %s; at least %s, at most %s%s":                                     "QQ 音乐载入段：非载入 %s，载入 %s 至 %s，非载入 %s；至少 %s，至多 %s%s",
+	// 由调用方 i18n.T 后注入上面几条日志：改名证据不成立的原因、不可用的上下界与载入段的标记
+	"loading signal unusable":                                     "载入信号不可用",
+	"no loading sample threshold for this QQ Music version":       "本版本的载入门槛为 0",
+	"poll interval not shorter than the loading sample threshold": "轮询间隔不小于载入门槛",
+	"loading state seen":                                          "见到载入值",
+	"unreadable play state":                                       "有读不成的播放状态",
+	"sampling gap":                                                "有采样缺口",
+	"unavailable":                                                 "不可用",
+	"; unreadable play state between the loading samples":         "；首末载入样本之间有读不成的播放状态",
+	"; sampling gap between the loading samples":                  "；首末载入样本之间有采样缺口",
+	"; unreadable play state next to the segment":                 "；段前后有读不成的播放状态",
+	"; sampling gap next to the segment":                          "；段前后有采样缺口",
+
+	// —— player/qqmusic：会话一侧的封面响应编号核验不过（issue #218）——
+	"QQ Music song detail did not confirm the queried ID %s (response: %s)": "QQ 音乐的歌曲详情未核实所查编号 %s（响应：%s）",
+
+	// —— player/qqmusic：读 QQ 内存里的当前歌曲记录认键（issue #218）——
+	"QQ Music %s: the current song record format is not verified; lyric associations of online songs are not followed this session": "QQ 音乐 %s 未核实当前歌曲记录的格式，本会话不跟随在线歌曲的歌词关联",
+	"Cannot duplicate a read-only handle to QQ Music; lyric associations of online songs are not followed this session: %v":         "无法复制 QQ 音乐的只读句柄，本会话不跟随在线歌曲的歌词关联：%v",
+	"Cannot read the album, singer and title of the current song from QQ Music memory":                                              "读不出 QQ 音乐内存里当前歌曲的专辑、歌手与歌名",
+	"The scan for the current QQ Music song record was incomplete (%s, %d failed chunks); read %.1f MiB in %v":                      "QQ 音乐当前歌曲记录的扫描不完整（%s，%d 块读取失败）；读取 %.1f MiB，用时 %v",
+	"Identified the current QQ Music song record: %s (%d qualified, %d voided, %d malformed hits); read %.1f MiB in %v":             "认出 QQ 音乐当前歌曲的记录：%s（合格 %d 处、作废 %d 处、截取不合 %d 处）；读取 %.1f MiB，用时 %v",
+	"Cannot identify the current QQ Music song record: %s (%d qualified, %d voided, %d malformed hits)":                             "认不出 QQ 音乐当前歌曲的记录：%s（合格 %d 处、作废 %d 处、截取不合 %d 处）",
+	"A rescan changed the current QQ Music song record from %s to %s":                                                               "复扫使 QQ 音乐当前歌曲的记录由 %s 改为 %s",
+	"Completing the other ID of the current QQ Music song failed; will retry: %v":                                                   "补全 QQ 音乐当前歌曲的另一个编号失败，稍后重试：%v",
+
+	// 认出时按 id 键优先放下了合格的 mid 键网址，另记放下的种数（issue #218 第 5 版）
+	"Identified the current QQ Music song record: %s (%d qualified, %d voided, %d malformed hits; %d mid-key URLs set aside for the id key); read %.1f MiB in %v": "认出 QQ 音乐当前歌曲的记录：%s（合格 %d 处、作废 %d 处、截取不合 %d 处；按 id 键优先放下 mid 键网址 %d 种）；读取 %.1f MiB，用时 %v",
+	// 由调用方 i18n.T 后注入上面几条日志：当前歌曲记录的结论名（assoc.RecordVerdict.String）与扫描不完整的原因
+	"not read":                   "未读出",
+	"found":                      "认出",
+	"not found":                  "找不到",
+	"ambiguous":                  "不唯一",
+	"pending song ID completion": "待补全编号",
+	"incomplete scan":            "扫描不完整",
+	"read limit reached":         "到了读取上限",
+	"chunk reads failed":         "有块读取失败",
+	"memory region query failed or did not advance": "内存区域查询失败或不前进",
+
+	// —— player/qqmusic：封面响应里核验不过的编号（songDetail.seen），在源头 i18n.T 后注入日志与错误（issue #218）——
+	"track id %s, mid %q, code %d": "track_info 的 id %s、mid %q，code %d",
+	"%d songs %v, code %d":         "%d 首 %v，code %d",
 }

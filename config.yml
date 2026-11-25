@@ -59,7 +59,7 @@ cloudmusicv3-offset: -500
 cloudmusicv3-effect-strategy: fadeout # 特效最小化策略：park 自动屏外渲染保活 / fadeout 自动淡出
 
 # QQ 音乐 配置
-qqmusic-offset: -400
+qqmusic-offset: -100
 # qqmusic-poll: 50
 # qqmusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # qqmusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
@@ -77,7 +77,7 @@ sodamusic-offset: -340
 # sodamusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
 # Apple Music 配置
-applemusic-offset: -400
+applemusic-offset: -900
 # applemusic-poll: 50     # 低于 50 会被静默抬到 50
 # applemusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # applemusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
