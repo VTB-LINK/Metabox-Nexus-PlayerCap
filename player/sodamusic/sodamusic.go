@@ -95,18 +95,13 @@ const exitFailGrace = 10 * time.Second
 // 汽水还在，冷却期满照常重连。
 const reattachCooldown = 15 * time.Second
 
-// noSongTolerance：已宣告过歌曲后，取到的播放态连续没有歌曲（mediaId 与歌名都为空）满这么久，才清空歌曲数据并报
-// waiting_song（issue #193）。其间保留上一首，不发它的位置与状态事件；已在下载的封面照常补给这一首（它仍是对外显示的
-// 那首），清空时取消。新歌到来即按换歌直接替换。
-//
-// 取 kuwo 的值（#182：酷我换歌时网页桥报告没有歌曲，实测 0.57s、1.10s）。汽水换歌时是否也有这样一刻未实测：已知的
-// 换歌过渡是 mediaId 先变、歌名晚到（见换歌分支），不走这里。真机未覆盖：汽水会自动填充播放列表，正常操作碰不到
-// 没有歌曲；本条只有离线用例（nosong_test.go）。
-const noSongTolerance = 2 * time.Second
-
-// noSongStatus 是读到没有歌曲时报的状态。
-func noSongStatus() *player.StatusInfo {
-	return &player.StatusInfo{Status: "waiting_song", Detail: i18n.T("Soda Music has no current song"), Reason: player.ReasonNoSong}
+// sodaDetails 是汽水在「没在读歌」时各种情形的 detail。
+func sodaDetails() player.ProcessDetails {
+	return player.ProcessDetails{
+		NotRunning:   i18n.T("Soda Music not running"),
+		Exited:       i18n.T("Soda Music has exited"),
+		Disconnected: i18n.T("Soda Music CDP disconnected"),
+	}
 }
 
 // extractSource 是 Start / runSession 用到的 CDP 客户端方法。生产恒为 *cdp.Client，测试注入按脚本返回的桩。
@@ -121,8 +116,20 @@ type extractSource interface {
 var (
 	findMainPID     = watchdog.FindMainPID
 	ensureInspector = watchdog.EnsureInspector
-	connectCDP      = func() (extractSource, error) { return cdp.Connect() }
+	connectCDP      = func(ctx context.Context) (extractSource, error) {
+		c, err := cdp.Connect(ctx)
+		if err != nil {
+			return nil, err // 不把 nil 的 *cdp.Client 装进接口
+		}
+		return c, nil
+	}
 )
+
+// sodaRunning 报告汽水是否在运行：FindMainPID 不返回 ErrNotRunning 即算（主进程读不到、枚举进程出错都按在运行）。
+func sodaRunning() bool {
+	_, err := findMainPID()
+	return !errors.Is(err, watchdog.ErrNotRunning)
+}
 
 // sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
 func (p *SodaMusicPlayer) sleepOrStop(d time.Duration) bool {
@@ -138,13 +145,39 @@ func (p *SodaMusicPlayer) sleepOrStop(d time.Duration) bool {
 // 商店版近乎永久，但用户改装官网版后应当自动恢复、不必重启 PlayerCap。
 const storeRecheck = 30 * time.Second
 
+// recheckStep 是商店版重查等待期间判一次汽水是否还在运行的间隔，与外层循环未运行时的等待同为 3 秒：进程退出按外层循环
+// 的常规节奏察觉，不等满 storeRecheck（#231，设计 doc/design/converge-player-behavior-231-design.md §3.2）。
+const recheckStep = 3 * time.Second
+
 // Start 启动汽水音乐轮询循环（阻塞，须在 goroutine 中调用）。
+//
+// 每轮先找主进程，非歌名状态一律由 player.ProcessStatus 合成（#231，设计 §3.2）：没有 SodaMusic.exe 报 waiting_process，
+// 从未见它运行为 process_not_running、运行过为 process_exited；其余都按在运行报 standby 加原因（主进程的命令行读不到、
+// 读不到安装路径为 no_admin，商店版为 version_unsupported；冷却期内、枚举进程出错、inspector 打不开、连 CDP 之前与
+// 连不上为 cdp_disconnected，连上之后由 runSession 改报）。商店版按 storeRecheck 重查，其间每 recheckStep 判一次进程，
+// 退出不等满重查间隔。
 func (p *SodaMusicPlayer) Start() {
 	// releasedPID / releasedAt：最近一次因察觉退出而释放会话的主进程与时刻（见 reattachCooldown）。
 	var releasedPID int
 	var releasedAt time.Time
-	storeWarned := false // 微软商店版只警告一次（issue #212）
-	exeUnknown := false  // 上一轮读不到汽水的安装路径（issue #212）：只警告一次，循环顶部声明的是这一条
+	d := sodaDetails()
+	seen := false           // 本次服务期间见过汽水在运行：区分 process_exited 与 process_not_running
+	storeWarned := false    // 微软商店版只警告一次（issue #212）
+	exeUnknown := false     // 上一轮读不到汽水的安装路径（issue #212）：只警告一次
+	mainUnreadable := false // 上一轮读不到主进程的命令行：只警告一次
+
+	// 连接 CDP 随停止中止（cdp.Connect 自身另有单次上限）：9229 端口接受连接而不完成响应时，轮询 goroutine 不被挡在连接里。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		defer telemetry.Guard()
+		select {
+		case <-p.StopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	for {
 		select {
 		case <-p.StopCh:
@@ -152,18 +185,26 @@ func (p *SodaMusicPlayer) Start() {
 		default:
 		}
 
-		// 读不到安装路径期间声明的是那一条，不与「未启动」两条每轮来回切换。
-		if exeUnknown {
-			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Soda Music installation path (Soda Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
-		} else {
-			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Soda Music not running or not connected"), Reason: player.ReasonProcessNotRunning})
-		}
-		p.Emit(player.EventClearSongData, nil)
-
 		pid, err := findMainPID()
+		running := !errors.Is(err, watchdog.ErrNotRunning)
+		if running {
+			seen = true
+		}
+		unreadable := errors.Is(err, watchdog.ErrMainUnreadable)
+		if unreadable && !mainUnreadable {
+			log.Warn("Cannot read the command line of the Soda Music main process; its inspector was not opened. Run Soda Music with the same privileges as this program")
+		}
+		mainUnreadable = unreadable
 		if err != nil || (pid == releasedPID && time.Since(releasedAt) < reattachCooldown) {
-			// 未运行——用户可能稍后启动，静默等待重试。刚释放的那个主进程正在退出，冷却期内同样等待。
+			// 未运行——用户可能稍后启动，静默等待重试。在运行而认不出主进程（命令行读不到）报 standby / no_admin；
+			// 枚举进程出错、刚释放的那个主进程正在退出（冷却期内）按在运行报 standby，同样等待。
 			storeWarned, exeUnknown = false, false
+			var block player.Blocked
+			if unreadable {
+				block = player.Blocked{Reason: player.ReasonNoAdmin, Detail: i18n.T("Cannot read the Soda Music main process (Soda Music may be running as administrator)")}
+			}
+			p.EmitStatusIfChanged(player.ProcessStatus(running, seen, d, block))
+			p.Emit(player.EventClearSongData, nil)
 			if p.sleepOrStop(3 * time.Second) {
 				return
 			}
@@ -171,28 +212,35 @@ func (p *SodaMusicPlayer) Start() {
 		}
 
 		err = ensureInspector(pid)
+		var block player.Blocked // 汽水在运行而读不了它的原因；零值即调试通道未就绪
 		var packaged *launch.PackagedError
 		if errors.As(err, &packaged) {
-			// 微软商店版：门禁已在开 inspector（注入）之前挡住。只警告一次、standby + version_unsupported、
-			// 按 storeRecheck 重查，用户改装官网版后不必重启 PlayerCap。不连接。
+			block = player.Blocked{Reason: player.ReasonVersionUnsupported, Detail: i18n.T("Soda Music Microsoft Store version unsupported (requires the official installer version)")}
+		} else if errors.Is(err, launch.ErrExeUnknown) {
+			block = player.Blocked{Reason: player.ReasonNoAdmin, Detail: i18n.T("Cannot read the Soda Music installation path (Soda Music may be running as administrator)")}
+		}
+		// 状态在前、清空在后（设计 4.3 第 1 条）；内容不变不重发。
+		p.EmitStatusIfChanged(player.ProcessStatus(true, true, d, block))
+		p.Emit(player.EventClearSongData, nil)
+		if packaged != nil {
+			// 微软商店版：门禁已在开 inspector（注入）之前挡住。只警告一次、按 storeRecheck 重查，用户改装官网版后
+			// 不必重启 PlayerCap。不连接。
 			if !storeWarned {
 				storeWarned = true
 				log.Warn("Soda Music is the Microsoft Store version (%s) and its inspector cannot be opened; skipped Soda Music lyric capture. To use it, uninstall it and install the official installer version", packaged.ExePath)
 				telemetry.ReportOnce("sodamusic.store_install", "汽水音乐为微软商店版，无法开启调试接口", nil, map[string]any{"exe_path": packaged.ExePath})
 			}
-			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("Soda Music Microsoft Store version unsupported (requires the official installer version)"), Reason: player.ReasonVersionUnsupported})
-			if p.sleepOrStop(storeRecheck) {
+			if stopped, _ := player.RecheckWait(p.StopCh, storeRecheck, recheckStep, sodaRunning); stopped {
 				return
 			}
 			continue
 		}
 		storeWarned = false
 		if errors.Is(err, launch.ErrExeUnknown) {
-			// 汽水在运行而读不到它的映像路径：无从确知不是商店版，门禁已拒绝注入。不连接；状态由循环顶部声明。
+			// 汽水在运行而读不到它的映像路径：无从确知不是商店版，门禁已拒绝注入。不连接。
 			if !exeUnknown {
 				exeUnknown = true
 				log.Warn("Cannot read the installation path of Soda Music; its inspector was not opened. Run Soda Music with the same privileges as this program")
-				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Soda Music installation path (Soda Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
 			}
 			if p.sleepOrStop(3 * time.Second) {
 				return
@@ -208,7 +256,7 @@ func (p *SodaMusicPlayer) Start() {
 			continue
 		}
 
-		client, err := connectCDP()
+		client, err := connectCDP(ctx)
 		if err != nil {
 			log.Warn("CDP connection failed: %v", err)
 			if p.sleepOrStop(2 * time.Second) {
@@ -218,12 +266,15 @@ func (p *SodaMusicPlayer) Start() {
 		}
 
 		log.Info("CDP connected, monitoring playback state")
-		if p.runSession(client) {
+		exiting := p.runSession(client)
+		if exiting {
 			releasedPID, releasedAt = pid, time.Now()
 		}
 		client.Close()
 
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("Soda Music CDP disconnected"), Reason: player.ReasonCDPDisconnected})
+		// 状态在前、清空在后：察觉退出即报 process_exited（会话释放后主进程随即结束），否则按汽水是否还在运行报
+		// process_exited 或 cdp_disconnected。
+		p.EmitStatusIfChanged(player.ProcessStatus(!exiting && sodaRunning(), true, d, player.Blocked{}))
 		p.Emit(player.EventClearSongData, nil)
 		if p.sleepOrStop(2 * time.Second) {
 			return
@@ -240,16 +291,16 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 	// failSince 是这一段连续取数失败的起点，取数成功即清零。
 	var failSince time.Time
 
-	// lastMediaID 是已宣告的那首歌，空 = 没有（会话刚建立，或因持续没有歌曲已清空）。announced 是本会话宣告过歌曲，
+	// lastMediaID 是已宣告的那首歌，空 = 没有（会话刚建立，或因没有歌曲已清空）。announced 是本会话宣告过歌曲，
 	// 清空之后仍为真：换歌分支「是不是本会话第一首」的判据用它，不用 lastMediaID。
 	var lastMediaID string
 	var announced bool
-	// noSongSince 是这一段连续读到没有歌曲的起点，读到歌曲即清零（见 noSongTolerance）。
-	var noSongSince time.Time
-	// clearStatus / clearData：已判清空、还没入队的 waiting_song 与 clear_song_data。通道满时 Emit 直接丢弃，而清空
-	// 之后 lastMediaID 已复位、不会再判一次，丢了就再没有机会补，服务端缓存里一直留着上一首。故二者经 TryEmit 逐拍
-	// 重试，状态入队之后才发清空；宣告了新歌即作罢：新歌的 all_lyrics 与 song_info_update 覆盖清空要清的全部缓存字段。
-	var clearStatus, clearData bool
+	// clearData：读到没有歌曲时待入队的 clear_song_data。通道满时 Emit 直接丢弃，而清空之后 lastMediaID 已复位、不会再判
+	// 一次，丢了就再没有机会补，服务端缓存里一直留着上一首。故它在没有歌曲的拍上逐拍重试，且只在 waiting_song 已入队之后
+	// 才发；之间读到歌曲即不再补（新歌的 all_lyrics 与 song_info_update 覆盖清空要清的全部缓存字段）。会话开始即待发：
+	// 上一次连接宣告过的歌可能仍留在画面上（断开时缓存已清而画面按决定保留，设计
+	// doc/design/converge-player-behavior-231-design.md 4.5），连上而没有歌曲同样要清。
+	clearData := true
 	var lastPlaying = -1 // -1 未知 / 0 暂停 / 1 播放
 	// pendingID / pendingSince / pendingRawFresh：正在等就绪的那首歌、从哪一刻开始等、
 	// 以及**这首歌出现之后有没有见过新采样**（见换歌分支的两道就绪闸）。
@@ -267,6 +318,7 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 	var lastLineIdx = -1
 	var currentDurationSec float32
 	var currentTitle string
+	var currentPureHint string
 
 	// 每首歌一个封面 goroutine，换歌/退出时由 ctx 取消——迟到的封面回写不会污染下一首/清屏后状态。
 	// 保持 coverCancel 的显式调用（别包 defer/helper），让 go vet 的 lostcancel 看得见（对照 kugou.go）。
@@ -363,40 +415,34 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 		}
 		failSince = time.Time{}
 
-		// 没有歌曲（首页、清空播放列表）：还没宣告过歌曲当即报 waiting_song；已宣告的歌保留，不发它的位置与状态事件，
-		// 连续满 noSongTolerance 才清空并报 waiting_song（issue #193）。不能静默等待：路由不让 playing 超时（只有
-		// loading 与暂停中的占位会超时），已宣告的歌会一直停在那首。清空后各变量回到会话刚建立时的值，announced 除外；
-		// 同一首歌再出现按换歌重新宣告。汽水退出不经过这里：那时取数只会失败，见上。
+		// 没有歌曲（首页、清空播放列表）：当拍报 waiting_song 并清歌曲数据（issue #193，设计 4.3 第 2、3 条），宣告过的歌
+		// 当拍复位，不按时长保留：汽水换歌时是否有没有歌曲的一刻未实测，已知的换歌过渡是 mediaId 先变、歌名晚到（见换歌
+		// 分支），不走这里。不能静默等待：路由不让 playing 超时（只有 loading 与暂停中的占位会超时），已宣告的歌会一直
+		// 停在那首。清空后各变量回到会话刚建立时的值，announced 除外；同一首歌再出现按换歌重新宣告。汽水退出不经过这里：
+		// 那时取数只会失败，见上。
 		//
-		// 已在下载的封面照常补给保留的这一首，清空时 coverCancel 取消。残余：封面协程通过 ctx 检查之后、清空之前的
-		// 极窄窗口里，它的 song_info_update 可能落在 clear_song_data 之后；换歌时取消上一首的封面同样如此（既有）。
+		// 已在下载的封面清空时由 coverCancel 取消。残余：封面协程通过 ctx 检查之后、清空之前的极窄窗口里，它的
+		// song_info_update 可能落在 clear_song_data 之后；换歌时取消上一首的封面同样如此（既有）。
 		if data.MediaID == "" && data.Name == "" {
-			if noSongSince.IsZero() {
-				noSongSince = time.Now()
-			}
-			if lastMediaID != "" && time.Since(noSongSince) >= noSongTolerance {
+			if lastMediaID != "" {
 				if coverCancel != nil {
 					coverCancel()
 				}
 				romaCh = nil
 				lastMediaID, pendingID, lastPlaying, isPlaying, lastLineIdx = "", "", -1, false, -1
-				currentLyrics, currentLyricItems, currentDurationSec, currentTitle, anchorProgressSec = nil, nil, 0, "", 0
-				clearStatus, clearData = true, true
+				currentLyrics, currentLyricItems, currentDurationSec, currentTitle, currentPureHint, anchorProgressSec = nil, nil, 0, "", "", 0
+				clearData = true
 			}
-			// 先报状态、后清空，同 Start；各自入队才算发出（见 clearStatus）。清空之外，持续没有歌曲时状态经
-			// EmitStatusIfChanged，不随轮询重发，没入队的下一轮补发。
-			if clearStatus {
-				clearStatus = !p.TryEmit(player.EventStatusUpdate, noSongStatus())
-			} else if lastMediaID == "" {
-				p.EmitStatusIfChanged(noSongStatus())
-			}
-			if clearData && !clearStatus {
+			// 先报状态、后清空，同 Start。状态经 EmitStatusIfChanged：持续没有歌曲时不随轮询重发，没入队的下一拍补发。
+			// 清空看最近一次入队的状态是不是 waiting_song：本拍刚入队，或此前已入队、本拍被去重（中间的歌名状态因通道满
+			// 被丢弃时即如此），都算就位；看 EmitStatusIfChanged 的返回值会把后者当成没入队，清空就永远等不到。
+			p.EmitStatusIfChanged(player.NoSongStatus(player.ReasonNoSong, i18n.T("Soda Music has no current song")))
+			if last, _ := p.LastStatus(); clearData && last.Reason == player.ReasonNoSong {
 				clearData = !p.TryEmit(player.EventClearSongData, nil)
 			}
 			time.Sleep(pollInterval)
 			continue
 		}
-		noSongSince = time.Time{}
 
 		progressSec := data.ProgressSeconds
 		durationSec := data.DurationSeconds
@@ -448,7 +494,6 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 			// 再来的歌不算第一首，照常过下面的新鲜度闸：它出现那一拍的读数可能仍是清空之前的旧值。
 			firstSong := !announced
 			announced = true
-			clearStatus, clearData = false, false
 			lastMediaID = data.MediaID
 			lastLineIdx = -1
 			currentDurationSec = durationSec
@@ -512,11 +557,11 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 			initPlay := anchorProgressSec
 			progress := player.ClampProgress(initPlay, currentDurationSec)
 
-			// 若平台只返回一句提示语（如「纯音乐，请欣赏」），归一成 index:-1。
-			pureHint := ""
-			if player.IsPureMusicOnly(lyricItems) {
-				log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
-				pureHint = lyricItems[0].Text
+			// 若平台只返回一句提示语（或歌名行加提示语），归一成 index:-1。
+			currentPureHint = ""
+			if hint, ok := player.PureMusicHint(lyricItems, currentTitle); ok {
+				log.Info("platform returned only the hint \"%s\", treating as no lyrics", hint)
+				currentPureHint = hint
 				currentLyrics = nil
 				lyricItems = []player.LyricLine{} // 显式空 slice——nil 会序列化成 null
 			}
@@ -534,7 +579,7 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 				// index:-1 的 lyric_update 必须显式带 Progress（契约：整首播到哪；漏写零值兜 0 会与
 				// all_lyrics.progress 自相矛盾——lyricupdate_lint_test 全仓强制）。
 				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
-					Index: -1, Text: pureHint, Timestamp: 0, Position: initPlay, Progress: progress,
+					Index: -1, Text: currentPureHint, Timestamp: 0, Position: initPlay, Progress: progress,
 				})
 			}
 
@@ -588,15 +633,23 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 		if currentDurationSec <= 0 && durationSec > 0 {
 			currentDurationSec = durationSec
 			pos := livePos()
+			prog := player.ClampProgress(pos, currentDurationSec)
 			log.Info("duration arrived late; re-sending all_lyrics (duration=%.2fs)", currentDurationSec)
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 				Title:    currentTitle,
 				Duration: currentDurationSec,
 				Position: pos,
-				Progress: player.ClampProgress(pos, currentDurationSec),
+				Progress: prog,
 				Lyrics:   currentLyricItems,
 				Count:    len(currentLyricItems),
 			})
+			// 重发 all_lyrics 会清掉服务端缓存的 lyric_update（server.go）；无歌词曲目须紧跟补发
+			// index:-1 并保留当前曲目的提示原文，否则无歌词结论与提示语从服务端缓存永久丢失。
+			if len(currentLyrics) == 0 {
+				p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
+					Index: -1, Text: currentPureHint, Timestamp: 0, Position: pos, Progress: prog,
+				})
+			}
 		}
 
 		// ── 播放状态变化检测 ──

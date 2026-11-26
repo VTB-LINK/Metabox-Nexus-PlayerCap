@@ -6,6 +6,8 @@ package qqmusic
 import (
 	"reflect"
 	"testing"
+
+	"Metabox-Nexus-PlayerCap/player"
 )
 
 // 连续两次不同偏移，结果都从原始行算起。变异自证：apply 不先 cloneLines（就地平移保存的原始行），或 setOnlineRaw
@@ -43,6 +45,56 @@ func TestLyricStateResultLinesUntouched(t *testing.T) {
 		applyWant(t, &s, desiredRes(1, src, 0, lines, "A"), src == srcAssoc, true, assocA0...)
 		if !reflect.DeepEqual(lines, assocFixture("A")) {
 			t.Fatalf("source %d: apply changed the result's lines: %+v", src, lines)
+		}
+	}
+}
+
+// 振假名切片的不可变性：篡改 setOnlineRaw 入参的 Furigana、或篡改 apply 输出的 Furigana，
+// 均不影响状态机内部保存的在线原始行、关联/本地结果行与后续输出。
+// 变异自证（隔离克隆副本，实测）：删掉 cloneLines 中 Furigana 的 slices.Clone，本例即红。
+func TestLyricStateFuriganaImmutable(t *testing.T) {
+	want := player.LyricFurigana{
+		{Text: "心", Ruby: "こころ"},
+		{Text: "の"},
+	}
+
+	raw := shiftFixture()
+	raw[0].Furigana = player.LyricFurigana{{Text: "心", Ruby: "こころ"}, {Text: "の"}}
+
+	var s lyricState
+	s.reset(1)
+	s.setOnlineRaw(raw)
+
+	// 篡改传给 setOnlineRaw 的入参切片。
+	raw[0].Furigana[0].Ruby = "tampered-input"
+	out1, ch1 := s.apply(onlineRes(1, -1000), true, stateOffsetSec)
+	if !ch1 || !reflect.DeepEqual(out1[0].Furigana, want) {
+		t.Fatalf("篡改 setOnlineRaw 入参影响了在线输出：changed=%v Furigana=%#v，want %#v", ch1, out1[0].Furigana, want)
+	}
+
+	// 篡改 apply 返回的切片，验证后续输出不受污染。
+	out1[0].Furigana[0].Ruby = "tampered-output"
+	out2, ch2 := s.apply(onlineRes(1, 0), true, stateOffsetSec)
+	if !ch2 || !reflect.DeepEqual(out2[0].Furigana, want) {
+		t.Fatalf("篡改 apply 输出影响了后续在线输出：changed=%v Furigana=%#v，want %#v", ch2, out2[0].Furigana, want)
+	}
+
+	for _, src := range []lyricSource{srcAssoc, srcLocal} {
+		lines := assocFixture("F")
+		lines[0].Furigana = player.LyricFurigana{{Text: "心", Ruby: "こころ"}, {Text: "の"}}
+		var st lyricState
+		st.reset(1)
+		got1, ch := st.apply(desiredRes(1, src, -2000, lines, "F"), src == srcAssoc, stateOffsetSec)
+		if !ch || !reflect.DeepEqual(got1[0].Furigana, want) {
+			t.Fatalf("source %d 首次 apply：changed=%v Furigana=%#v，want %#v", src, ch, got1[0].Furigana, want)
+		}
+		got1[0].Furigana[0].Ruby = "tampered-result-output"
+		if !reflect.DeepEqual(lines[0].Furigana, want) {
+			t.Fatalf("source %d 篡改 apply 输出影响了结果原件：%#v", src, lines[0].Furigana)
+		}
+		got2, ch := st.apply(desiredRes(1, src, 0, lines, "F"), src == srcAssoc, stateOffsetSec)
+		if !ch || !reflect.DeepEqual(got2[0].Furigana, want) {
+			t.Fatalf("source %d 二次 apply：changed=%v Furigana=%#v，want %#v", src, ch, got2[0].Furigana, want)
 		}
 	}
 }

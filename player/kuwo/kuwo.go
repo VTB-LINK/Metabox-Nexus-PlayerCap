@@ -33,6 +33,7 @@ const downloadURL = "https://www.kuwo.cn/down"
 type KuwoPlayer struct {
 	player.BaseEmitter
 	offsetMs, pollMs int
+	seen             bool // 本次服务期间是否曾见过酷我进程在运行（仅 Start goroutine 读写）
 	stopOnce         sync.Once
 }
 
@@ -66,25 +67,59 @@ func EffectivePollInterval(pollMs int) time.Duration {
 	return time.Duration(pollMs) * time.Millisecond
 }
 
-// statusFor maps a session error to its public reason and (English) detail, per
-// the build-matching design §3.4. An unverified build (cdp/pos version errors)
-// reports version_unsupported; a build ineligible for auto-restart reports
-// cdp_disconnected with an actionable manual-launch message, not a version
-// rejection; everything else is a transient disconnect.
-func statusFor(err error) (reason, detail string) {
+func kuwoDetails() player.ProcessDetails {
+	return player.ProcessDetails{
+		NotRunning:   i18n.T("Kuwo is not running"),
+		Exited:       i18n.T("Kuwo has exited"),
+		Disconnected: i18n.T("Kuwo connection lost; retrying"),
+	}
+}
+
+// statusFor 把会话错误映射为状态（设计 §3.3）：ErrNotRunning 为进程不在运行，其余为在运行而读不了。
+// 它作为辅助函数只用作 EmitStatusIfChanged 的直接实参（满足 waitingstatus_lint_test.go 规则 2）。
+func statusFor(err error, seen bool) *player.StatusInfo {
 	switch {
 	case errors.Is(err, watchdog.ErrNotRunning):
-		return player.ReasonProcessNotRunning, "Kuwo is not running"
+		return player.ProcessStatus(false, seen, kuwoDetails(), player.Blocked{})
 	case errors.As(err, new(*launch.PackagedError)): // 商店版门禁（#212）
-		return player.ReasonVersionUnsupported, "Kuwo Microsoft Store version unsupported (requires the official installer version)"
+		return player.ProcessStatus(true, true, kuwoDetails(), player.Blocked{
+			Reason: player.ReasonVersionUnsupported,
+			Detail: i18n.T("Kuwo Microsoft Store version unsupported (requires the official installer version)"),
+		})
 	case errors.Is(err, launch.ErrExeUnknown):
-		return player.ReasonNoAdmin, "Cannot read the Kuwo installation path (Kuwo may be running as administrator)"
+		return player.ProcessStatus(true, true, kuwoDetails(), player.Blocked{
+			Reason: player.ReasonNoAdmin,
+			Detail: i18n.T("Cannot read the Kuwo installation path (Kuwo may be running as administrator)"),
+		})
 	case errors.Is(err, pos.ErrUnsupportedCore) || errors.Is(err, cdp.ErrVersionUnsupported):
-		return player.ReasonVersionUnsupported, "This Kuwo playback core is not supported"
+		return player.ProcessStatus(true, true, kuwoDetails(), player.Blocked{
+			Reason: player.ReasonVersionUnsupported,
+			Detail: i18n.T("This Kuwo playback core is not supported"),
+		})
 	case errors.Is(err, watchdog.ErrRestartNotAuthorized):
-		return player.ReasonCDPDisconnected, "Kuwo must be started with debug port 9224; automatic restart is limited to verified builds, please launch Kuwo manually with --remote-debugging-port=9224"
+		return player.ProcessStatus(true, true, kuwoDetails(), player.Blocked{
+			Reason: player.ReasonCDPDisconnected,
+			Detail: i18n.T("Kuwo must be started with debug port 9224; automatic restart is limited to verified builds, please launch Kuwo manually with --remote-debugging-port=9224"),
+		})
 	default:
-		return player.ReasonCDPDisconnected, "Kuwo connection lost; retrying"
+		return player.ProcessStatus(true, true, kuwoDetails(), player.Blocked{})
+	}
+}
+
+// errLogReason 返回 Start 告警去重用的原因分类键，与 statusFor 的非退出 reason 一致，
+// 避免把 statusFor 的结果存入局部变量而违反 waitingstatus_lint_test.go 规则 2。
+func errLogReason(err error) string {
+	switch {
+	case errors.Is(err, watchdog.ErrNotRunning):
+		return player.ReasonProcessNotRunning
+	case errors.As(err, new(*launch.PackagedError)):
+		return player.ReasonVersionUnsupported
+	case errors.Is(err, launch.ErrExeUnknown):
+		return player.ReasonNoAdmin
+	case errors.Is(err, pos.ErrUnsupportedCore) || errors.Is(err, cdp.ErrVersionUnsupported):
+		return player.ReasonVersionUnsupported
+	default:
+		return player.ReasonCDPDisconnected
 	}
 }
 
@@ -112,16 +147,20 @@ func (p *KuwoPlayer) Start() {
 	}()
 	lastReason := ""
 	for ctx.Err() == nil {
-		err := watchdog.EnsureDebugMode(ctx)
+		err := ensureDebugMode(ctx)
 		if err == nil {
+			p.seen = true
 			err = p.connectSession(ctx)
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		reason, detail := statusFor(err)
+		if err == nil || !errors.Is(err, watchdog.ErrNotRunning) {
+			p.seen = true
+		}
+		p.EmitStatusIfChanged(statusFor(err, p.seen))
 		p.Emit(player.EventClearSongData, nil)
-		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T(detail), Reason: reason})
+		reason := errLogReason(err)
 		if reason != lastReason && err != nil {
 			var packaged *launch.PackagedError
 			switch {
@@ -144,6 +183,11 @@ func (p *KuwoPlayer) Start() {
 type snapshotSource interface {
 	Snapshot(context.Context) (cdp.Snapshot, error)
 }
+type cdpSession interface {
+	snapshotSource
+	Build() string
+	Close() error
+}
 type positionSource interface {
 	// Read takes one sample. playing (meta.Status == 1) feeds the corrected
 	// source's #135 transient filter; the bare core reader ignores it.
@@ -151,26 +195,25 @@ type positionSource interface {
 	Close()
 }
 
-func (p *KuwoPlayer) connectSession(ctx context.Context) error {
-	pid, err := watchdog.FindMainPID()
-	if err != nil {
-		return err
+// 以下为离线测试 Start / connectSession 用的包级 seam，生产恒指向真实实现。
+var (
+	ensureDebugMode = watchdog.EnsureDebugMode
+	findMainPID     = watchdog.FindMainPID
+	connectCDP      = func(ctx context.Context) (cdpSession, error) {
+		c, err := cdp.Connect(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
 	}
-	client, err := cdp.Connect(ctx)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	// Per connection: the first seek-lag drift is logged as a warning.
-	warned := false
-	return p.runSession(ctx, client, func() (positionSource, error) {
+	openPosition = func(pid int, build string, warned *bool, pollMs int) (positionSource, error) {
 		reader, err := pos.OpenCore(pid)
 		if err != nil {
 			// Do not box a nil *CoreReader into a non-nil positionSource.
 			return nil, err
 		}
 		timestamp, slot := reader.Build()
-		log.Detail("Kuwo core bound: build %s, PlayerCore timestamp 0x%08X, read slot %d", client.Build(), timestamp, slot)
+		log.Detail("Kuwo core bound: build %s, PlayerCore timestamp 0x%08X, read slot %d", build, timestamp, slot)
 		return withLag(reader, func() (lagReader, string, error) {
 			lag, err := pos.OpenLag(pid)
 			if err != nil {
@@ -178,7 +221,25 @@ func (p *KuwoPlayer) connectSession(ctx context.Context) error {
 				return nil, "", err
 			}
 			return lag, lag.Build(), nil
-		}, &warned, p.pollMs), nil
+		}, warned, pollMs), nil
+	}
+)
+
+func (p *KuwoPlayer) connectSession(ctx context.Context) error {
+	pid, err := findMainPID()
+	if err != nil {
+		return err
+	}
+	p.seen = true
+	client, err := connectCDP(ctx)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	// Per connection: the first seek-lag drift is logged as a warning.
+	warned := false
+	return p.runSession(ctx, client, func() (positionSource, error) {
+		return openPosition(pid, client.Build(), &warned, p.pollMs)
 	})
 }
 
@@ -195,9 +256,10 @@ func (p *KuwoPlayer) runSession(ctx context.Context, client snapshotSource, open
 	jobs := newAssetJobs(ctx)
 	defer jobs.close()
 	defer func() {
-		// Clear BEFORE waiting for bounded in-flight artwork normalization.
+		// 状态先于清空发出（设计 §4.4、§4.5），且在等封面任务结束前清掉对外态；
+		// 连接断开报 standby / cdp_disconnected，进程是否还在由下一轮外层循环判。
+		p.EmitStatusIfChanged(player.ProcessStatus(true, true, kuwoDetails(), player.Blocked{}))
 		p.Emit(player.EventClearSongData, nil)
-		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Kuwo connection lost; retrying"), Reason: player.ReasonCDPDisconnected})
 	}()
 	var reader positionSource
 	defer func() {

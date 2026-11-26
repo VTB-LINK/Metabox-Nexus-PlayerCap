@@ -1,10 +1,13 @@
 package sodamusic
 
-// 本文件守汽水退出时释放 inspector 会话（issue #188，AGENTS §7.7.4）：
+// 本文件守汽水退出时释放 inspector 会话（issue #188，AGENTS §7.7.4）与 Start 外层循环的非歌名状态（#231）：
 //   - runSession 察觉退出（inspector 宣告等待断开，或取数连续失败满 exitFailGrace）即返回 true；
-//   - Start 随即关闭会话、报 standby 并清歌曲数据，冷却期内不对同一 pid 激活 inspector、不连接；
+//   - Start 随即关闭会话、报 waiting_process / process_exited 并清歌曲数据，冷却期内不对同一 pid 激活 inspector、不连接，
+//     其间那个主进程还在即按在运行报 standby / cdp_disconnected；
 //   - 反例：托盘播放（取数照常成功，含后台节流下 1/60Hz 的采样）、短于宽限的失败、持续没有歌曲、
-//     普通断开，都不按退出处理；冷却只对那一个 pid、只在察觉退出之后生效。
+//     普通断开，都不按退出处理；冷却只对那一个 pid、只在察觉退出之后生效；
+//   - 外层循环先找主进程再声明：没有 SodaMusic.exe 报 waiting_process（见过它运行为 process_exited，否则 process_not_running），
+//     其余即报 standby；普通断开按主进程还在不在报 standby 或 process_exited。
 //
 // 不碰汽水、不碰 CDP：客户端换成按会话内时刻返回读数的桩，Start 的 watchdog / cdp 入口经 seam 换成桩。
 // 会话与 Start 都在 testing/synctest 的泡里跑，轮询的 time.Sleep 与 Start 的等待走假时钟，不真等。
@@ -13,7 +16,10 @@ package sodamusic
 // 变异自证（本 worktree 里逐条注入、跑完即还原，均实测）记在各用例的注释里。
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -21,6 +27,7 @@ import (
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/sodamusic/cdp"
+	"Metabox-Nexus-PlayerCap/player/sodamusic/watchdog"
 )
 
 // errLost 模拟连接断开：桩返回它时把自己记为已关闭，同 cdp.Client 读写失败的路径。
@@ -258,18 +265,18 @@ func runStart(t *testing.T, until time.Duration, pidAt func(time.Duration) int,
 					stopped = true
 					p.Stop()
 				}
-				return 0, errors.New("stopped")
+				return 0, watchdog.ErrNotRunning
 			}
 			if pid := pidAt(e); pid != 0 {
 				return pid, nil
 			}
-			return 0, errors.New("not running")
+			return 0, watchdog.ErrNotRunning
 		}
 		ensureInspector = func(pid int) error {
 			r.attaches = append(r.attaches, attach{pid, time.Since(t0)})
 			return nil
 		}
-		connectCDP = func() (extractSource, error) {
+		connectCDP = func(context.Context) (extractSource, error) {
 			script := session(len(r.clients))
 			c := newScriptClient(func(e time.Duration) (*cdp.ExtractionData, error) {
 				if e >= sessionLimit {
@@ -311,6 +318,8 @@ func runStart(t *testing.T, until time.Duration, pidAt func(time.Duration) int,
 
 var (
 	standbyDisconnected = "standby|" + i18n.T("Soda Music CDP disconnected") + "|" + player.ReasonCDPDisconnected
+	notRunning          = "waiting_process|" + i18n.T("Soda Music not running") + "|" + player.ReasonProcessNotRunning
+	exited              = "waiting_process|" + i18n.T("Soda Music has exited") + "|" + player.ReasonProcessExited
 	playingSong         = "playing|回春丹 - 鲜花|"
 )
 
@@ -343,12 +352,15 @@ func (r startRun) eventsBetween(from, to time.Duration) []string {
 	return out
 }
 
-// 察觉退出 → 当拍关闭会话、报 standby 并清歌曲数据 → 同一 pid 冷却期内不激活、不连接，期满照常重连。
-// 两种察觉途径（inspector 宣告、持续失败满宽限）各跑一遍。
+// 察觉退出 → 当拍关闭会话、报 waiting_process / process_exited 并清歌曲数据 → 同一 pid 冷却期内不激活、不连接，
+// 其间那个主进程仍在（本例一直在）即按在运行报 standby → 期满照常重连。两种察觉途径（inspector 宣告、持续失败满宽限）
+// 各跑一遍。
 //
 // 变异自证：Start 去掉冷却判据，两个子例因第二次激活在释放后 2s 变红；runSession 察觉退出时返回 false，
 // 同样变红；Start 不关闭会话（删掉 client.Close()），持续失败子例因会话未关变红（宣告子例的连接由客户端
-// 自己关掉，不受影响）。
+// 自己关掉，不受影响）；以下 #231 加的四条均实测：察觉退出之后按 findMainPID 判（不看 exiting）、会话结束无条件报 standby，
+// 两个子例都因释放当拍报 standby 变红；会话结束先清空后状态，两个子例因顺序变红；冷却期内按不在运行合成，两个子例因冷却期内
+// 报 process_exited 而不是 standby 变红。
 func TestStartReleasesExitingSodaAndHoldsOffSamePID(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -365,8 +377,12 @@ func TestStartReleasesExitingSodaAndHoldsOffSamePID(t *testing.T) {
 				t.Fatalf("第一个会话应在 %v 关闭，实为 closed=%v closedAt=%v", tc.release, c.closed, c.closedAt)
 			}
 			if got := r.eventsBetween(tc.release, tc.release); len(got) < 2 ||
+				got[0] != exited || got[1] != player.EventClearSongData {
+				t.Fatalf("释放当拍应先报 process_exited 再清歌曲数据，实为 %q", got)
+			}
+			if got := r.eventsBetween(tc.release+time.Nanosecond, tc.release+reattachCooldown); len(got) < 2 ||
 				got[0] != standbyDisconnected || got[1] != player.EventClearSongData {
-				t.Fatalf("释放当拍应先报 standby 再清歌曲数据，实为 %q", got)
+				t.Fatalf("冷却期内主进程仍在，应按在运行报 standby，实为 %q", got)
 			}
 			if len(r.attaches) < 2 {
 				t.Fatalf("冷却期满应重新激活，实际只激活 %d 次", len(r.attaches))
@@ -409,7 +425,7 @@ func TestStartAttachesNewPIDDuringCooldown(t *testing.T) {
 	}
 }
 
-// 反例：连上之后一直正常播放（含托盘播放），不释放、不报 standby，只激活一次。
+// 反例：连上之后一直正常播放（含托盘播放），不释放、不报 standby（连上之前那一条除外），只激活一次。
 func TestStartKeepsHealthySession(t *testing.T) {
 	r := runStart(t, 5*time.Minute, always(4242), func(n int) func(time.Duration) (*cdp.ExtractionData, error) {
 		return func(e time.Duration) (*cdp.ExtractionData, error) {
@@ -422,12 +438,56 @@ func TestStartKeepsHealthySession(t *testing.T) {
 	if r.attaches[0] != (attach{4242, 0}) || r.clients[0].closedAt != 4*time.Minute {
 		t.Fatalf("会话应从 0s 一直持续到脚本断开的 4m，实为 attaches=%+v closedAt=%v", r.attaches, r.clients[0].closedAt)
 	}
-	for _, e := range r.eventsBetween(0, 4*time.Minute-time.Millisecond) {
+	for _, e := range r.eventsBetween(time.Nanosecond, 4*time.Minute-time.Millisecond) {
 		if e == standbyDisconnected {
 			t.Fatalf("正常播放期间不应报 standby：%q", r.eventsBetween(0, 4*time.Minute))
 		}
 	}
-	if got := r.eventsBetween(0, 0); len(got) < 3 || got[2] != playingSong {
-		t.Fatalf("连上即应宣告播放中，实为 %q", got)
+	if got := r.eventsBetween(0, 0); len(got) < 3 || got[0] != standbyDisconnected || got[2] != playingSong {
+		t.Fatalf("连上之前报 standby、连上即应宣告播放中，实为 %q", got)
+	}
+}
+
+// TestStartStatusSequence：外层循环的非歌名状态序列。脚本：0～3s 汽水没在运行；3s 启动（pid 4242），连上播放；10s 退出，
+// 会话随之断开（普通断开，不是察觉退出）；15s 再启动（pid 5151），连上播放 5s 后连接断开而汽水仍在，22s 重连。
+//
+// 变异自证：不维护 seen（10s 报成 process_not_running）；循环顶部先按未运行声明、再找主进程（22s 在 standby 之间插进一条
+// process_exited）；会话结束无条件报 standby（10s）；会话结束先清空后状态（10s、20s 两处顺序），均实测变红。
+func TestStartStatusSequence(t *testing.T) {
+	pidAt := func(e time.Duration) int {
+		switch {
+		case e >= 3*time.Second && e < 10*time.Second:
+			return 4242
+		case e >= 15*time.Second:
+			return 5151
+		}
+		return 0
+	}
+	r := runStart(t, 23*time.Second, pidAt, func(n int) func(time.Duration) (*cdp.ExtractionData, error) {
+		return func(e time.Duration) (*cdp.ExtractionData, error) {
+			if (n == 0 && e >= 7*time.Second) || (n > 0 && e >= 5*time.Second) {
+				return nil, errLost
+			}
+			return playingAt(e), nil
+		}
+	})
+	var statuses []string
+	for _, e := range r.events {
+		if e.at >= 23*time.Second {
+			break
+		}
+		statuses = append(statuses, fmt.Sprintf("%v %s", e.at, e.desc))
+	}
+	want := []string{
+		"0s " + notRunning, "0s " + player.EventClearSongData,
+		"3s " + standbyDisconnected, "3s " + player.EventClearSongData, "3s " + playingSong,
+		"10s " + exited, "10s " + player.EventClearSongData,
+		"12s " + player.EventClearSongData,
+		"15s " + standbyDisconnected, "15s " + player.EventClearSongData, "15s " + playingSong,
+		"20s " + standbyDisconnected, "20s " + player.EventClearSongData,
+		"22s " + player.EventClearSongData, "22s " + playingSong,
+	}
+	if strings.Join(statuses, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("状态序列\n got  %q\n want %q", statuses, want)
 	}
 }

@@ -14,7 +14,8 @@ package player
 //
 // # 为什么用 AST 门禁
 //
-// 四家的 Start 要真进程或真 CDP 才能跑到会话结束，没有离线夹具。AST 扫描不需要编译目标平台。
+// 四家的 Start 要真进程或真 CDP 才能跑到会话结束，没有离线夹具（cloudmusic 的 startstatus_test.go 经桩能跑到会话结束，
+// 只查状态与 clear_song_data 的先后，不查作废代次）。AST 扫描不需要编译目标平台。
 //
 // # 它不守什么
 //

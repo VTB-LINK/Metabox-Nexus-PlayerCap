@@ -4,10 +4,16 @@ package applemusic
 // 而另一处在走、读不出后重新找到），以及不该认的不认（刚启动时的进度条、没有歌名时在走的东西）。
 
 import (
+	"bytes"
+	"fmt"
+	stdlog "log"
+	"math"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/applemusic/mem"
 )
@@ -702,4 +708,261 @@ func TestDiscoveryTwinLostThenRediscovered(t *testing.T) {
 	if st := statuses(evs); len(st) == 0 || st[len(st)-1] != "playing" || count(evs, player.EventSongInfoUpdate) != 0 {
 		t.Fatalf("重新发现后应按恢复报 playing、不重新宣告，got status=%v song_info=%d", st, count(evs, player.EventSongInfoUpdate))
 	}
+}
+
+// TestTwinStatsAndReport 守 C8 的量化计数、Detail 日志与遥测摘要（设计 §6.4）：
+//   - 已宣告且在放时位置结构作废计 lost、记 lostAt，打作废 Detail；同曲目找回计 refoundSame、更新 maxRefind，
+//     打同曲目找回 Detail；换为不同时长时清 lostAt 并打不同时长 Detail；
+//   - 没有作废（含仅在暂停中作废、仅因停住换结构）时 summary 返回 nil 且不上报；
+//   - reportTwinStats 上报键为 "applemusic.twin_lost"，extra 恰含 lost、refound_same、max_refind_ms、attached_minutes。
+//
+// 变异自证（均实测变红）：
+//   - watchCandidates 同曲目找回分支不加 refoundSame（「作废一次后找回同一首」「作废两次只找回一次（未找回）」
+//     「作废两次第二次找回不同时长走beginSong」三例均红）；
+//   - summary() 在 lost 为 0 时返回非 nil（「没有作废时summary为nil且不上报」「停住换结构不计入作废与找回」两例均红）。
+func TestTwinStatsAndReport(t *testing.T) {
+	// captureLogs 在回调期间捕获标准 logger 输出的日志文本。
+	captureLogs := func(fn func()) string {
+		var buf bytes.Buffer
+		orig := stdlog.Writer()
+		stdlog.SetOutput(&buf)
+		defer stdlog.SetOutput(orig)
+		fn()
+		return buf.String()
+	}
+
+	type reportCall struct {
+		key, msg string
+		tags     map[string]string
+		extra    map[string]any
+	}
+	captureReport := func(fn func()) []reportCall {
+		orig := reportOnce
+		defer func() { reportOnce = orig }()
+		var calls []reportCall
+		reportOnce = func(key, message string, tags map[string]string, extra map[string]any) {
+			calls = append(calls, reportCall{key: key, msg: message, tags: tags, extra: extra})
+		}
+		fn()
+		return calls
+	}
+
+	// 按当前语言构造 Detail 日志前缀，不依赖中文或英文单边硬编码。
+	droppedTag := strings.Split(i18n.T("Position structure dropped (playing: %v, announced: %v, position %.2fs)"), "%")[0]
+	refoundSameTag := strings.Split(i18n.T("Position structure refound after %dms (same song)"), "%dms")[1]
+	refoundDiffTag := strings.Split(i18n.T("Position structure refound after %dms (different duration)"), "%dms")[1]
+
+	countLines := func(logs, sub string) int {
+		n := 0
+		for _, line := range strings.Split(logs, "\n") {
+			if strings.Contains(line, "[+]") && strings.Contains(line, sub) {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("作废一次后找回同一首", func(t *testing.T) {
+		var h *harness
+		var start time.Time
+		logs := captureLogs(func() {
+			h = newHarness(t)
+			start = h.now
+			h.f.songs = np("丢失")
+			h.f.docs = []mem.TTMLDoc{{Text: ttmlDoc(200.4, "第一行"), Count: 1}}
+			h.setTwin(200, 30, true)
+			h.run(5 * time.Second)
+
+			saved := h.f.twins[realTwin]
+			delete(h.f.twins, realTwin)
+			h.play = false
+			h.run(1500 * time.Millisecond)
+
+			h.setTwin(200, saved.Pos+2, true)
+			h.run(15 * time.Second)
+		})
+
+		if got := countLines(logs, droppedTag); got != 1 {
+			t.Fatalf("应恰打 1 行作废 Detail 日志，got %d\n%s", got, logs)
+		}
+		if got := countLines(logs, refoundSameTag); got != 1 {
+			t.Fatalf("应恰打 1 行同曲目找回 Detail 日志，got %d\n%s", got, logs)
+		}
+		if got := countLines(logs, refoundDiffTag); got != 0 {
+			t.Fatalf("不应打不同时长找回日志，got %d\n%s", got, logs)
+		}
+		wantDropPart := fmt.Sprintf(strings.Split(i18n.T("Position structure dropped (playing: %v, announced: %v, position %.2fs)"), "%.2f")[0], true, true)
+		if !strings.Contains(logs, wantDropPart) {
+			t.Fatalf("作废日志应含 playing=true, announced=true（%q），日志：\n%s", wantDropPart, logs)
+		}
+
+		sum := h.s.twins.summary(h.now)
+		if sum == nil {
+			t.Fatal("作废 1 次后 summary 不应为 nil")
+		}
+		if len(sum) != 4 {
+			t.Fatalf("summary 应恰含 4 个键，got %v", sum)
+		}
+		if sum["lost"] != 1 || sum["refound_same"] != 1 {
+			t.Fatalf("summary 计数错误：got %v，want lost=1 refound_same=1", sum)
+		}
+		maxMs, ok := sum["max_refind_ms"].(int64)
+		if !ok || maxMs <= 0 || maxMs != h.s.twins.maxRefind.Milliseconds() {
+			t.Fatalf("max_refind_ms=%v，want >0 且等于 %d", sum["max_refind_ms"], h.s.twins.maxRefind.Milliseconds())
+		}
+		wantMin := h.now.Sub(start).Minutes()
+		gotMin, ok := sum["attached_minutes"].(float64)
+		if !ok || math.Abs(gotMin-wantMin) > 1e-9 {
+			t.Fatalf("attached_minutes=%v，want %v", sum["attached_minutes"], wantMin)
+		}
+
+		calls := captureReport(func() { h.s.reportTwinStats() })
+		if len(calls) != 1 {
+			t.Fatalf("reportTwinStats 应上报 1 次，got %d 次", len(calls))
+		}
+		if calls[0].key != "applemusic.twin_lost" || calls[0].msg != "Apple Music 位置结构作废的频率摘要" || calls[0].tags != nil {
+			t.Fatalf("上报参数不符：got %+v", calls[0])
+		}
+		if calls[0].extra["lost"] != 1 || calls[0].extra["refound_same"] != 1 {
+			t.Fatalf("上报 extra 不符：got %+v", calls[0].extra)
+		}
+	})
+
+	t.Run("没有作废时summary为nil且不上报", func(t *testing.T) {
+		h := newHarness(t)
+		h.f.songs = np("正常播放")
+		h.setTwin(200, 10, true)
+		h.run(10 * time.Second)
+		if sum := h.s.twins.summary(h.now); sum != nil {
+			t.Fatalf("没有作废时 summary 应为 nil，got %v", sum)
+		}
+		if calls := captureReport(func() { h.s.reportTwinStats() }); len(calls) != 0 {
+			t.Fatalf("没有作废时不应上报遥测，got %+v", calls)
+		}
+
+		// 暂停中作废：不计入 lost，summary 仍为 nil、不上报，但作废 Detail 照打且 playing=false。
+		pos := h.f.twins[realTwin].Pos
+		h.setTwin(200, pos, false)
+		h.run(3 * time.Second)
+		logs := captureLogs(func() {
+			delete(h.f.twins, realTwin)
+			h.run(1500 * time.Millisecond)
+		})
+		if got := countLines(logs, droppedTag); got != 1 {
+			t.Fatalf("暂停中作废也应打 1 行 Detail 日志，got %d\n%s", got, logs)
+		}
+		if sum := h.s.twins.summary(h.now); sum != nil {
+			t.Fatalf("仅在暂停中作废时 summary 仍应为 nil，got %v", sum)
+		}
+		if calls := captureReport(func() { h.s.reportTwinStats() }); len(calls) != 0 {
+			t.Fatalf("仅在暂停中作废时不应上报遥测，got %+v", calls)
+		}
+	})
+
+	t.Run("停住换结构不计入作废与找回", func(t *testing.T) {
+		var h *harness
+		logs := captureLogs(func() {
+			h = newHarness(t)
+			h.f.songs = np("锁死")
+			h.setTwin(200, 30, true)
+			h.run(5 * time.Second)
+
+			pos := h.f.twins[realTwin].Pos
+			h.setTwin(200, pos, false)
+			const other uintptr = 0x5000
+			for i := 1; i <= 60; i++ {
+				h.f.twins[other] = mem.Twin{Dur: 200, Pos: pos + float64(i)}
+				h.run(time.Second)
+				if h.s.twin == other {
+					break
+				}
+			}
+		})
+		if sum := h.s.twins.summary(h.now); sum != nil {
+			t.Fatalf("未作废、仅停住换结构时 summary 应为 nil，got %v", sum)
+		}
+		if got := countLines(logs, refoundSameTag); got != 0 {
+			t.Fatalf("停住换结构不应打 refound 日志，got %d\n%s", got, logs)
+		}
+	})
+
+	t.Run("作废两次只找回一次（未找回）", func(t *testing.T) {
+		var h *harness
+		logs := captureLogs(func() {
+			h = newHarness(t)
+			h.f.songs = np("丢失两次")
+			h.setTwin(200, 30, true)
+			h.run(5 * time.Second)
+
+			// 第一次作废并找回同一首
+			saved := h.f.twins[realTwin]
+			delete(h.f.twins, realTwin)
+			h.play = false
+			h.run(1500 * time.Millisecond)
+			h.setTwin(200, saved.Pos+2, true)
+			h.run(15 * time.Second)
+			if h.s.twin != realTwin {
+				t.Fatal("前置：第一次应找回位置结构")
+			}
+
+			// 第二次作废，直到会话结束未找回
+			delete(h.f.twins, realTwin)
+			h.play = false
+			h.run(1500 * time.Millisecond)
+		})
+
+		sum := h.s.twins.summary(h.now)
+		if sum == nil || sum["lost"] != 2 || sum["refound_same"] != 1 {
+			t.Fatalf("作废两次只找回一次，got %v，want lost=2 refound_same=1", sum)
+		}
+		if got := countLines(logs, droppedTag); got != 2 {
+			t.Fatalf("应打 2 行作废日志，got %d", got)
+		}
+		if got := countLines(logs, refoundSameTag); got != 1 {
+			t.Fatalf("应打 1 行同曲目找回日志，got %d", got)
+		}
+	})
+
+	t.Run("作废两次第二次找回不同时长走beginSong", func(t *testing.T) {
+		var h *harness
+		logs := captureLogs(func() {
+			h = newHarness(t)
+			h.f.songs = np("第一首")
+			h.setTwin(200, 30, true)
+			h.run(5 * time.Second)
+
+			// 第一次作废 → 找回同一首
+			saved := h.f.twins[realTwin]
+			delete(h.f.twins, realTwin)
+			h.play = false
+			h.run(1500 * time.Millisecond)
+			h.setTwin(200, saved.Pos+2, true)
+			h.run(15 * time.Second)
+
+			// 第二次作废 → 找回不同时长的新歌
+			delete(h.f.twins, realTwin)
+			h.play = false
+			h.run(1500 * time.Millisecond)
+			h.f.songs = np("第二首")
+			h.setTwin(260, 5, true)
+			h.run(15 * time.Second)
+		})
+
+		sum := h.s.twins.summary(h.now)
+		if sum == nil || sum["lost"] != 2 || sum["refound_same"] != 1 {
+			t.Fatalf("第二次找回不同时长应为 lost=2 refound_same=1，got %v", sum)
+		}
+		if !h.s.twins.lostAt.IsZero() {
+			t.Fatal("beginSong 找回不同时长后应清零 lostAt")
+		}
+		if got := countLines(logs, droppedTag); got != 2 {
+			t.Fatalf("应打 2 行作废日志，got %d", got)
+		}
+		if got := countLines(logs, refoundSameTag); got != 1 {
+			t.Fatalf("应打 1 行同曲目找回日志，got %d", got)
+		}
+		if got := countLines(logs, refoundDiffTag); got != 1 {
+			t.Fatalf("应打 1 行不同时长找回日志，got %d\n%s", got, logs)
+		}
+	})
 }

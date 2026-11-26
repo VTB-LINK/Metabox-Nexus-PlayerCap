@@ -34,7 +34,8 @@ func TestCoreOpenFailureReturnsErrorWithoutPanic(t *testing.T) {
 				t.Fatalf("want bounded retry and original error; opens=%d err=%v", opens, err)
 			}
 			events := drainEvents(p)
-			if len(events) != 2 || events[0].Type != player.EventClearSongData || events[1].Data.(*player.StatusInfo).Status != "waiting_process" {
+			st, ok := events[0].Data.(*player.StatusInfo)
+			if len(events) != 2 || events[0].Type != player.EventStatusUpdate || !ok || st.Status != "standby" || st.Reason != player.ReasonCDPDisconnected || events[1].Type != player.EventClearSongData {
 				t.Fatalf("failure left stale state: %+v", events)
 			}
 		})

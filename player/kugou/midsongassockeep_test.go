@@ -64,7 +64,7 @@ func TestSessionMidSongPlayedAt(t *testing.T) {
 		)
 		checkLyricEvents(t, lyricEvents(run.events), []string{
 			"all_lyrics@40.00:关联一/关联二", "lyric_update#1:关联二",
-			"all_lyrics@42.00:缓存一/缓存二", "lyric_update#1:缓存二",
+			"all_lyrics@41.40:缓存一/缓存二", "lyric_update#1:缓存二",
 		})
 	})
 	// 同一次播放：换歌拍采纳的关联与之后带标记的缓存 PlayedAt 都是 300，不换。换歌拍不记 PlayedAt 时本例变红。
@@ -98,7 +98,7 @@ func TestSessionMidSongPlayedAt(t *testing.T) {
 	})
 }
 
-// 换歌拍 100 ms 取到关联（不在线取词），此后各拍在 1.1 s、2.1 s……；1.5 s 送来的结果在 2.1 s（读数 42 s）那拍处理。
+// 换歌拍 100 ms 取到关联（不在线取词），此后各拍在 1.1 s、2.1 s……；1.5 s 送来的结果在 1.1 s（读数 41 s）后的等待期即时处理（41.40 s）。
 func TestSessionMidSongKeepsAssociation(t *testing.T) {
 	t.Run("换歌拍取到关联，播放中关联失效只剩缓存", func(t *testing.T) {
 		run := runLocal(t, 1000, map[string][]reply{"A": {
@@ -127,7 +127,7 @@ func TestSessionMidSongKeepsAssociation(t *testing.T) {
 		)
 		checkLyricEvents(t, lyricEvents(run.events), []string{
 			"all_lyrics@40.00:关联一/关联二", "lyric_update#1:关联二",
-			"all_lyrics@42.00:另一一/另一二", "lyric_update#1:另一二",
+			"all_lyrics@41.40:另一一/另一二", "lyric_update#1:另一二",
 		})
 	})
 	// 审查给的回归：换歌拍时酷狗尚未落盘，把同一文件另一行带关联的队列行当成了正在播放的行，取到关联；落盘后
@@ -144,20 +144,20 @@ func TestSessionMidSongKeepsAssociation(t *testing.T) {
 		)
 		checkLyricEvents(t, lyricEvents(run.events), []string{
 			"all_lyrics@40.00:关联一/关联二", "lyric_update#1:关联二",
-			"all_lyrics@42.00:缓存一/缓存二", "lyric_update#1:缓存二",
+			"all_lyrics@41.40:缓存一/缓存二", "lyric_update#1:缓存二",
 		})
 	})
 }
 
-// 换歌拍等满 300 ms 在线取词，此后各拍在 1.3 s、2.3 s、3.3 s……：1.5 s 的关联在 2.3 s（读数 42 s）换上，
-// 2.8 s 的缓存在 3.3 s（读数 43 s）收到：带标记不换，不带标记照换。
+// 换歌拍等满 300 ms 在线取词，此后各拍在 1.3 s、2.3 s、3.3 s……：1.5 s 的关联在 1.3 s（读数 41 s）后即时换上（41.20 s），
+// 2.8 s 的缓存在 2.3 s（读数 42 s）后即时收到（42.50 s）：带标记不换，不带标记照换。
 func TestSessionMidSongOnlineThenAssociation(t *testing.T) {
 	for name, c := range map[string]struct {
 		cache assoc.Result
 		want  []string
 	}{
 		"带标记的缓存不换":  {foundSkipped("A", lyricSet("缓存")), nil},
-		"不带标记的缓存照换": {found("A", lyricSet("缓存")), []string{"all_lyrics@43.00:缓存一/缓存二", "lyric_update#1:缓存二"}},
+		"不带标记的缓存照换": {found("A", lyricSet("缓存")), []string{"all_lyrics@42.50:缓存一/缓存二", "lyric_update#1:缓存二"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			run := runLocal(t, 1000, map[string][]reply{"A": {
@@ -172,7 +172,7 @@ func TestSessionMidSongOnlineThenAssociation(t *testing.T) {
 			)
 			checkLyricEvents(t, lyricEvents(run.events), append([]string{
 				"all_lyrics@40.00:在线一/在线二", "lyric_update#1:在线二",
-				"all_lyrics@42.00:关联一/关联二", "lyric_update#1:关联二",
+				"all_lyrics@41.20:关联一/关联二", "lyric_update#1:关联二",
 			}, c.want...))
 		})
 	}
@@ -195,7 +195,7 @@ func TestSessionMidSongSameContentAssociation(t *testing.T) {
 
 // 上一首是关联，换到 B 之后本地未及时给出（在线取词），播放中 B 的缓存照换：来源在换歌拍清零。B 的缓存带标记，
 // 只有清零才会换。A 的换歌拍 100 ms 取到关联，1.1 s 一拍；B 于 2.1 s 换歌、2.4 s 在线取词，此后 3.4 s、4.4 s……；
-// B 的缓存于 3.6 s 送到。
+// B 的缓存于 3.6 s 送到并即时生效（1.20 s）。
 func TestSessionMidSongResetsOnSongChange(t *testing.T) {
 	run := runLocal(t, 1000, map[string][]reply{
 		"A": {{100 * time.Millisecond, foundAssoc("A", lyricSet("关联"))}},
@@ -211,6 +211,6 @@ func TestSessionMidSongResetsOnSongChange(t *testing.T) {
 	checkLyricEvents(t, lyricEvents(run.events), []string{
 		"all_lyrics@40.00:关联一/关联二", "lyric_update#1:关联二",
 		"all_lyrics@0.00:在线一/在线二", "lyric_update#0:在线一",
-		"all_lyrics@2.00:缓存一/缓存二", "lyric_update#0:缓存一",
+		"all_lyrics@1.20:缓存一/缓存二", "lyric_update#0:缓存一",
 	})
 }

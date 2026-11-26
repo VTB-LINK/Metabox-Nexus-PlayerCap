@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"Metabox-Nexus-PlayerCap/i18n"
+	"Metabox-Nexus-PlayerCap/player/wsdial"
 
 	"github.com/gorilla/websocket"
 )
@@ -72,12 +73,15 @@ type Client struct {
 // Build returns the channel suffix reported by the bridge, such as "W1".
 func (c *Client) Build() string { return c.build }
 
+// connectTimeout 是一次 Connect（取 /json、读完响应体、WebSocket 握手、查桥版本）的上限，对齐四家 CDP 客户端（#231）。
+const connectTimeout = 5 * time.Second
+
 func Connect(ctx context.Context) (*Client, error) {
-	return connect(ctx, "http://127.0.0.1:9224/json")
+	return connect(ctx, "http://127.0.0.1:9224/json", connectTimeout)
 }
 
-func connect(ctx context.Context, endpoint string) (*Client, error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+func connect(ctx context.Context, endpoint string, timeout time.Duration) (*Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -94,7 +98,13 @@ func connect(ctx context.Context, endpoint string) (*Client, error) {
 		return nil, ErrUnavailable
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMessage+1))
-	if err != nil || len(body) > maxMessage {
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, i18n.Errorf("kuwo: CDP request failed: %w", err)
+		}
+		return nil, ErrUnavailable
+	}
+	if len(body) > maxMessage {
 		return nil, ErrUnavailable
 	}
 	var targets []target
@@ -105,8 +115,8 @@ func connect(ctx context.Context, endpoint string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	dialer := websocket.Dialer{HandshakeTimeout: 3 * time.Second, Proxy: nil}
-	conn, _, err := dialer.DialContext(ctx, ws, nil)
+	// 经 wsdial.Dial 握手，确保 ctx 取消时立即中止（selectTarget 已限定目标为 127.0.0.1，不走代理）。
+	conn, err := wsdial.Dial(ctx, ws)
 	if err != nil {
 		return nil, i18n.Errorf("kuwo: CDP connection failed: %w", err)
 	}

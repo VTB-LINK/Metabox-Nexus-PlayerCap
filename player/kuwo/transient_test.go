@@ -112,9 +112,9 @@ func songNamed(events []player.Event, name string) bool {
 	return false
 }
 
-func waitingProcessSeen(events []player.Event) bool {
+func disconnectSeen(events []player.Event) bool {
 	for _, e := range events {
-		if si, ok := e.Data.(*player.StatusInfo); ok && si.Status == "waiting_process" {
+		if si, ok := e.Data.(*player.StatusInfo); ok && (si.Status == "standby" || si.Status == "waiting_process") {
 			return true
 		}
 	}
@@ -173,8 +173,8 @@ func TestSwitchSettlingWindowKeepsSession(t *testing.T) {
 	if _, n := src.errStats(); n != 4 {
 		t.Fatalf("settling phase was not exercised: %d error calls", n)
 	}
-	if waitingProcessSeen(events) {
-		t.Fatal("player reported waiting_process during a switch")
+	if disconnectSeen(events) {
+		t.Fatal("player reported disconnect during a switch")
 	}
 }
 

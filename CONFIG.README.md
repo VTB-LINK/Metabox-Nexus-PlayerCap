@@ -27,6 +27,8 @@ prior-player:
 # - kugou
 # - sodamusic
 # - applemusic
+# - spotify
+# - kuwo
 
 # 优先播放器暂停超过n秒，自动切换到最后一个普通播放器
 prior-player-expire: 15
@@ -77,15 +79,27 @@ kugou-offset: -430
 
 # 汽水音乐 配置
 sodamusic-offset: -340
-# sodamusic-poll: 200     # 低于 200 会被静默抬到 200（每次 Extract 是主进程→渲染器桥 + transport 往返，较重）
+# sodamusic-poll: 200     # 低于 200 会被静默抬到 200
 # sodamusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # sodamusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
 
-# Apple Music 配置（纯内存扫描接入，与自身同用户的 AppleMusic.exe 普通权限即可读，无需管理员）
+# Apple Music 配置
 applemusic-offset: -900
-# applemusic-poll: 50     # 低于 50 会被静默抬到 50（每轮只读 24 字节；位置的跳变与歌词行都在这一轮里发现、推出，调慢歌词跟着晚）
+# applemusic-poll: 50     # 低于 50 会被静默抬到 50
 # applemusic-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
 # applemusic-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
+
+# Spotify 配置
+# spotify-offset: -200
+# spotify-poll: 200       # 低于 200 会被静默抬到 200
+# spotify-idle-hide: 15   # 无活跃自动隐藏（秒）：不写=跟随全局 per-player-idle-hide，0=关
+# spotify-audio-normalize: false   # 波形音量归一化开关：不写=跟随全局 audio-normalize
+
+# 酷我音乐配置
+kuwo-offset: -380
+# kuwo-poll: 50           # 低于 50 会被静默抬到 50
+# kuwo-idle-hide: 15      # 不写=跟随全局 per-player-idle-hide，0=关
+# kuwo-audio-normalize: false   # 不写=跟随全局 audio-normalize
 ```
 
 ## 版本与自动迁移

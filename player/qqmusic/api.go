@@ -60,6 +60,8 @@ type lyricLine struct {
 	// 或那一行不满足 player.BuildRomaDetailed 的约定时为零值。PlayTime 同 Detailed，由
 	// applyDetailedOffset 一并套。
 	RomaDetailed player.LyricTextDetailed
+	// Furigana 本行的振假名分段序列（仅主歌词轨携带有效 [kana:] 并通过全曲守恒校验时填入；无注音行恒为 nil）。
+	Furigana player.LyricFurigana
 }
 
 // transToleranceMs 是翻译行与主歌词行配对时允许的最大时间差。配对本身由 alignByTime 按
@@ -132,7 +134,7 @@ func mergeTrans(lines []lyricLine, transLRC string) {
 	if transLRC == "" || len(lines) == 0 {
 		return
 	}
-	transLines, _, _ := parseLRC(transLRC, 0)
+	transLines := parseAuxLRC(transLRC)
 	mergeTransLines(lines, transLines)
 }
 
@@ -588,7 +590,7 @@ func mergeRoma(lines []lyricLine, romaLRC string) {
 	if romaLRC == "" || len(lines) == 0 {
 		return
 	}
-	romaLines, _, _ := parseLRC(romaLRC, 0)
+	romaLines := parseAuxLRC(romaLRC)
 	mergeRomaLines(lines, romaLines)
 }
 
@@ -689,14 +691,31 @@ func attachRoma(lines []lyricLine, rawRoma string, crypt int) {
 	log.Detail("attachRoma: %d/%d lines have roma_text", withRoma, len(lines))
 }
 
-// parseLRC 解析在线取词的歌词：逐行解析（见 scanLRC），一行都没解析出时把不带时间戳的文本行按时长均分。
+// parseLRC 解析在线取词的主歌词：逐行解析（见 scanLRC），仅在产出带时间戳行时提取并挂载 [kana:] 振假名；
+// 一行都没解析出时把不带时间戳的文本行按时长均分（均分兜底不提取振假名）。
 func parseLRC(lrc string, durationMs uint32) ([]lyricLine, string, string) {
-	lines, songName, singer, rawTextLines := scanLRC(lrc, 0)
+	return parseLRCTrack(lrc, durationMs, true)
+}
+
+// parseAuxLRC 解析在线附属轨（翻译 trans / 音译 roma）：禁用振假名提取，彻底忽略附属轨残留的 [kana:] 且不打日志。
+func parseAuxLRC(lrc string) []lyricLine {
+	lines, _, _ := parseLRCTrack(lrc, 0, false)
+	return lines
+}
+
+func parseLRCTrack(lrc string, durationMs uint32, withFurigana bool) ([]lyricLine, string, string) {
+	lines, songName, singer, rawTextLines, kc := scanLRC(lrc, 0, withFurigana)
+	if len(lines) > 0 {
+		if withFurigana {
+			applyKana(lines, &kc, false)
+		}
+		return lines, songName, singer
+	}
 
 	// Fallback: distribute plain text evenly across duration
-	if len(lines) == 0 && len(rawTextLines) > 0 {
+	if len(rawTextLines) > 0 {
 		intervalSec := float32(4.0)
-		if durationMs > 0 && len(rawTextLines) > 0 {
+		if durationMs > 0 {
 			intervalSec = (float32(durationMs) / 1000.0) / float32(len(rawTextLines))
 		}
 		for i, text := range rawTextLines {
@@ -712,16 +731,53 @@ func parseLRC(lrc string, durationMs uint32) ([]lyricLine, string, string) {
 	return lines, songName, singer
 }
 
-// parseLRCLines 是 parseLRC 去掉均分兜底的部分，供关联的本地歌词文件用（设计 §6.6 第 3 步）：本地文件可能是任意内容，
+// parseLRCLines 是 parseLRC 去掉均分兜底的部分，供关联的本地主歌词文件用（设计 §6.6 第 3 步）：本地文件可能是任意内容，
 // 均分会把乱码或纯文本当成歌词发出。解析出 maxLocalLines+1 行即停，超限的输入不整份展开，由调用方判为不可用。
 func parseLRCLines(lrc string) ([]lyricLine, string, string) {
-	lines, songName, singer, _ := scanLRC(lrc, maxLocalLines+1)
+	return parseLRCLinesTrack(lrc, true)
+}
+
+// parseLRCLinesTrack 解析本地歌词单轨：主轨启用振假名提取，翻译/音译附属轨禁用；
+// 超行数上限早退（len(lines) >= limit）时调用方将拒收该文件，不做 attachFurigana。
+func parseLRCLinesTrack(lrc string, withFurigana bool) ([]lyricLine, string, string) {
+	limit := maxLocalLines + 1
+	lines, songName, singer, _, kc := scanLRC(lrc, limit, withFurigana)
+	if withFurigana && len(lines) > 0 && len(lines) < limit {
+		applyKana(lines, &kc, true)
+	}
 	return lines, songName, singer
 }
 
+// applyKana 在主轨见到 [kana:] 时挂载振假名；解析非法或全曲守恒失配时打一条跳过 Detail 日志并降级为空，
+// 全曲守恒通过但个别行因文本校验不匹配局部降级时打一条局部降级 Detail 日志，无 [kana:] 或全行通过时零日志。
+func applyKana(lines []lyricLine, kc *kanaCollector, local bool) {
+	if !kc.hasTag() {
+		return
+	}
+	entries, ok, reason := kc.entries()
+	if ok {
+		ok, reason = attachFurigana(lines, entries)
+	}
+	switch {
+	case !ok:
+		if local {
+			log.Detail("Skipped QQ Music local furigana: %s", reason)
+		} else {
+			log.Detail("Skipped QQ Music furigana: %s", reason)
+		}
+	case reason != "":
+		if local {
+			log.Detail("Partially degraded QQ Music local furigana: %s", reason)
+		} else {
+			log.Detail("Partially degraded QQ Music furigana: %s", reason)
+		}
+	}
+}
+
 // scanLRC 逐行解析歌词，认普通 LRC 的 [分:秒.百分秒] 与 QRC 的 [起始,时长] 两种行，取 [ti:]、[ar:] 为歌名与歌手；
+// [kana:] 元数据行（含 QRC XML 包装行）一律剥离，仅在 withFurigana 为真时经 kanaCollector 流式收集；
 // rawTextLines 为不以「[」开头、不带时间戳的文本行，供 parseLRC 的均分兜底。limit 大于 0 时解析出 limit 行即停。
-func scanLRC(lrc string, limit int) (lines []lyricLine, songName, singer string, rawTextLines []string) {
+func scanLRC(lrc string, limit int, withFurigana bool) (lines []lyricLine, songName, singer string, rawTextLines []string, kc kanaCollector) {
 	// 分钟位用 \d+ 而非 \d{2}：写死两位时，时长超 99 分钟的音频（长混音 / DJ 串烧 /
 	// 有声书类）行首是 [100:05.00]，整行匹配不上 → 被静默丢弃。秒与毫秒保持原样
 	// （\d{2} 与 \d{2,3}，后者兼容三位毫秒）。
@@ -737,6 +793,12 @@ func scanLRC(lrc string, limit int) (lines []lyricLine, songName, singer string,
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		if rest, ok := matchKanaLine(line); ok {
+			if withFurigana {
+				kc.feedRest(rest)
+			}
 			continue
 		}
 
@@ -811,7 +873,7 @@ func scanLRC(lrc string, limit int) (lines []lyricLine, songName, singer string,
 			rawTextLines = append(rawTextLines, line)
 		}
 	}
-	return lines, songName, singer, rawTextLines
+	return lines, songName, singer, rawTextLines, kc
 }
 
 // songDetailResponse holds the relevant fields from get_song_detail_yqq

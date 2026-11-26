@@ -1,68 +1,148 @@
 package player
 
-// 本文件只测 IsPureMusicOnly：把「平台其实没歌词、只给了一句提示语」认出来。
+// 本文件只测 PureMusicHint：把「平台其实没有歌词，只给了一句提示语」认出来并返回提示原文
+// （#231，设计 doc/design/converge-player-behavior-231-design.md §7.4）。
 //
-// 它是纯函数，所以**这些测试证明不了接线**（cloudmusic/kugou 有没有真的调它、调用点对不对，
-// 接线没有用例，只能真机验 —— AGENTS.md §8）。这里只钉死判据本身，
-// 尤其是 len == 1 那道护栏：没有它，这就退化成纯关键词匹配。
+// 它是纯函数，各播放器的接线由各自包里的提示测试守。这里钉死判据本身：
+//   - 提示句：恰为「纯音乐，请欣赏」，或以「此歌曲为」「该歌曲为」开头且以「欣赏」结尾（精确匹配，不 trim 空白）；
+//   - 形状闸门：整首恰一行提示句，或两行且第 0 行去空白后等于非空标题去空白、第 1 行为提示句（返回第 1 行提示原文，绝不是歌名行）。
+//
+// 变异自证（均实测变红）：
+//   - 去掉形状闸门（任意行是提示句即认）→ 「两行而第 0 行与标题不同」「两行而标题为空」「两行而标题仅空白」
+//     「两行歌词中第 0 行是共用提示」「两行歌词中第 0 行是 kuwo 提示」「三行含歌名行与提示」「三行以提示结尾」红；
+//   - 歌名行比较不去空白（直接 lines[0].Text == title）→ 三条「歌名行…」正例红；
+//   - 歌名行加提示时返回 lines[0].Text 而非 lines[1].Text → 三条「歌名行…」正例红；
+//   - 提示句判定只看前缀（去掉 strings.HasSuffix(text, "欣赏")）→ 「只有前缀此歌曲为」「只有前缀该歌曲为」
+//     「kuwo 提示带尾随空格」红。
 
 import "testing"
-
-const hint = "纯音乐，请欣赏"
 
 // line 造一行歌词，只关心 Text。
 func line(idx int, text string) LyricLine {
 	return LyricLine{Index: idx, Text: text}
 }
 
-// TestIsPureMusicOnlyRecognizesHint 认出提示语。
-func TestIsPureMusicOnlyRecognizesHint(t *testing.T) {
-	if !IsPureMusicOnly([]LyricLine{line(0, hint)}) {
-		t.Errorf("%q 单独一行应被认作提示语", hint)
-	}
-}
+func TestPureMusicHint(t *testing.T) {
+	const (
+		sharedHint   = "纯音乐，请欣赏"
+		kuwoDJHint   = "此歌曲为DJ舞曲，请您欣赏"
+		kuwoPureHint = "此歌曲为没有填词的纯音乐，请您欣赏"
+		kuwoGaiHint  = "该歌曲为纯音乐请欣赏"
+	)
 
-// TestIsPureMusicOnlyNeedsExactlyOneLine 钉死 len == 1 那道护栏。
-//
-// **这是本文件最重要的一条**。没有它，「某首歌真的唱了这七个字」就会被整首吞掉——
-// 而歌词里出现「纯音乐，请欣赏」并非不可想象（翻唱、玩梗、旁白）。
-// 加上护栏后，误判需要「整首歌只有一行 **且** 那行恰好是这七个字」。
-//
-// 变异自证：把 len(lyrics) == 1 改成 len(lyrics) >= 1 即红。
-func TestIsPureMusicOnlyNeedsExactlyOneLine(t *testing.T) {
-	multi := []LyricLine{
-		line(0, hint),
-		line(1, "这是真的歌词"),
-	}
-	if IsPureMusicOnly(multi) {
-		t.Error("首行恰好是提示语、但后面还有真歌词——不能当作纯音乐，整首会被吞掉")
-	}
-}
+	cases := []struct {
+		name     string
+		lines    []LyricLine
+		title    string
+		wantHint string
+		wantOK   bool
+	}{
+		// 正例：单行提示
+		{"共用说法一行", []LyricLine{line(0, sharedHint)}, "", sharedHint, true},
+		{"共用说法一行带标题", []LyricLine{line(0, sharedHint)}, "某歌 - 某歌手", sharedHint, true},
+		{"kuwo DJ 舞曲提示一行", []LyricLine{line(0, kuwoDJHint)}, "", kuwoDJHint, true},
+		{"kuwo 无填词纯音乐提示一行", []LyricLine{line(0, kuwoPureHint)}, "", kuwoPureHint, true},
+		{"kuwo 该歌曲为提示一行", []LyricLine{line(0, kuwoGaiHint)}, "", kuwoGaiHint, true},
 
-// TestIsPureMusicOnlyIgnoresOtherText 单行但不是提示语 → 不认。
-//
-// 一首歌的歌词只有一行是完全合法的（短歌、纯人声采样）。
-func TestIsPureMusicOnlyIgnoresOtherText(t *testing.T) {
-	for _, text := range []string{
-		"纯音乐",          // 不完整，不认
-		"纯音乐，请欣赏 ",     // 带尾随空格，不认
-		"Instrumental", // 别的说法，平台没这么给过
-		"",             // 空行
-		"这首歌只有一行歌词",
-	} {
-		if IsPureMusicOnly([]LyricLine{line(0, text)}) {
-			t.Errorf("%q 不在提示语表里，不该被认作纯音乐", text)
-		}
-	}
-}
+		// 正例：歌名行加提示（标题含空格、第 0 行不含空格；必须返回第 1 行提示原文而非第 0 行歌名）
+		{
+			name:     "歌名行加 kuwo 提示",
+			lines:    []LyricLine{line(0, "Go Time-Mark Petrie"), line(1, kuwoGaiHint)},
+			title:    "Go Time - Mark Petrie",
+			wantHint: kuwoGaiHint,
+			wantOK:   true,
+		},
+		{
+			name:     "歌名行加共用提示",
+			lines:    []LyricLine{line(0, "Go Time-Mark Petrie"), line(1, sharedHint)},
+			title:    "Go Time - Mark Petrie",
+			wantHint: sharedHint,
+			wantOK:   true,
+		},
+		{
+			name:     "歌名行含制表符与全角外空白差异仍匹配",
+			lines:    []LyricLine{line(0, "Mark\tPetrie-GoTime"), line(1, kuwoPureHint)},
+			title:    "Mark Petrie - Go Time",
+			wantHint: kuwoPureHint,
+			wantOK:   true,
+		},
 
-// TestIsPureMusicOnlyEmpty 空歌词不是「只有提示语」——它本来就没歌词，
-// 调用方走的是别的分支（qqmusic 的 API 直接返回零行）。
-func TestIsPureMusicOnlyEmpty(t *testing.T) {
-	if IsPureMusicOnly(nil) {
-		t.Error("nil 不该被认作提示语")
+		// 反例：形状闸门
+		{
+			name:   "两行而第 0 行与标题不同",
+			lines:  []LyricLine{line(0, "Other Song-Mark Petrie"), line(1, kuwoGaiHint)},
+			title:  "Go Time - Mark Petrie",
+			wantOK: false,
+		},
+		{
+			name:   "两行而标题为空",
+			lines:  []LyricLine{line(0, "Go Time-Mark Petrie"), line(1, kuwoGaiHint)},
+			title:  "",
+			wantOK: false,
+		},
+		{
+			name:   "两行而标题仅空白",
+			lines:  []LyricLine{line(0, "   "), line(1, kuwoGaiHint)},
+			title:  " ",
+			wantOK: false,
+		},
+		{
+			name:   "两行歌词中第 0 行是共用提示",
+			lines:  []LyricLine{line(0, sharedHint), line(1, "这是真的歌词")},
+			title:  "Go Time - Mark Petrie",
+			wantOK: false,
+		},
+		{
+			name:   "两行歌词中第 0 行是 kuwo 提示",
+			lines:  []LyricLine{line(0, kuwoDJHint), line(1, "第二行")},
+			title:  "Go Time - Mark Petrie",
+			wantOK: false,
+		},
+		{
+			name:   "两行歌名行加普通歌词",
+			lines:  []LyricLine{line(0, "Go Time-Mark Petrie"), line(1, "第一句歌词")},
+			title:  "Go Time - Mark Petrie",
+			wantOK: false,
+		},
+		{
+			name:   "三行含歌名行与提示",
+			lines:  []LyricLine{line(0, "Go Time-Mark Petrie"), line(1, kuwoGaiHint), line(2, "多余一行")},
+			title:  "Go Time - Mark Petrie",
+			wantOK: false,
+		},
+		{
+			name:   "三行以提示结尾",
+			lines:  []LyricLine{line(0, "第一行"), line(1, "第二行"), line(2, sharedHint)},
+			title:  "第一行",
+			wantOK: false,
+		},
+
+		// 反例：提示句文本本身不匹配
+		{"只有前缀此歌曲为", []LyricLine{line(0, "此歌曲为DJ舞曲")}, "", "", false},
+		{"只有前缀该歌曲为", []LyricLine{line(0, "该歌曲为纯音乐")}, "", "", false},
+		{"只有后缀请您欣赏", []LyricLine{line(0, "请您欣赏")}, "", "", false},
+		{"只有后缀欣赏", []LyricLine{line(0, "欣赏")}, "", "", false},
+		{"纯音乐三字", []LyricLine{line(0, "纯音乐")}, "", "", false},
+		{"共用提示前后带空格", []LyricLine{line(0, " 纯音乐，请欣赏 ")}, "", "", false},
+		{"共用提示带尾随空格", []LyricLine{line(0, "纯音乐，请欣赏 ")}, "", "", false},
+		{"kuwo 提示带前导空格", []LyricLine{line(0, " 此歌曲为DJ舞曲，请您欣赏")}, "", "", false},
+		{"kuwo 提示带尾随空格", []LyricLine{line(0, "此歌曲为DJ舞曲，请您欣赏 ")}, "", "", false},
+		{"英文说法不认", []LyricLine{line(0, "Instrumental")}, "", "", false},
+		{"普通单行歌词", []LyricLine{line(0, "这首歌只有一行歌词")}, "", "", false},
+
+		// 反例：空输入
+		{"nil 切片", nil, "Go Time - Mark Petrie", "", false},
+		{"空切片", []LyricLine{}, "Go Time - Mark Petrie", "", false},
+		{"一行空文本", []LyricLine{line(0, "")}, "Go Time - Mark Petrie", "", false},
 	}
-	if IsPureMusicOnly([]LyricLine{}) {
-		t.Error("空 slice 不该被认作提示语")
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotHint, gotOK := PureMusicHint(c.lines, c.title)
+			if gotOK != c.wantOK || gotHint != c.wantHint {
+				t.Errorf("PureMusicHint(%+v, %q) = (%q, %v)，期望 (%q, %v)",
+					c.lines, c.title, gotHint, gotOK, c.wantHint, c.wantOK)
+			}
+		})
 	}
 }

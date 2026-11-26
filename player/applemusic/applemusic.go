@@ -16,7 +16,7 @@
 //     自然衔接时位置结构看不出换歌（归零只有几十毫秒），靠的就是它；封面晚到也是它报的。
 //
 // 全扫（mem.Reader.Scan，本机 0.12~0.24s）只在需要时发生，都有节流：存储换了；换歌后取标题、歌词
-// 与封面（歌词缺失时头 3 秒约每 0.4 秒一次、到 15 秒约每 1.2 秒一次，之后退避到 60 秒一次）；尚未确认
+// 与封面（歌词缺失时头 3 秒约每 0.4 秒一次、到 15 秒约每 1.2 秒一次，之后退避到 15 秒一次）；尚未确认
 // 位置结构时，没见到存储只找存储（不收候选，封顶 5s），见到了才收集候选（封顶 15s）；位置结构停住太久
 // 或迟迟宣告不了时找别的。稳态播放零全扫。全扫途中照常读位置、推歌词行（scanTick），别的都等扫完。
 //
@@ -161,8 +161,8 @@ var (
 	// titleSteps 取不到标题时的全扫间隔。
 	titleSteps = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
 	// lyricLateSteps 过了宽限期仍没有歌词时的全扫间隔，停在最后一档：用户中途打开歌词面板、或歌词
-	// 很晚才到时，最多一分钟后补上。
-	lyricLateSteps = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 60 * time.Second}
+	// 很晚才到时，最多约 15s 后补上（#247）。没有歌词的歌每 15s 一次全扫，约 0.2s，约占单核 1.5%。
+	lyricLateSteps = []time.Duration{5 * time.Second, 10 * time.Second, 15 * time.Second}
 	// coverTries 宣告时还没有封面的，在换歌后这几个时刻各找一次，之后放弃。封面与标题同在一条存储里，
 	// 通常一起到；见过晚 0.4s 的（首次开播），旧会话见过晚 4s 以上的。封面写进来时存储会重建、盯梢会
 	// 发现，这几次只防没盯上（例如首扫时没有完整副本）。
@@ -206,8 +206,56 @@ func (p *AppleMusicPlayer) sleepOrStop(d time.Duration) bool {
 	}
 }
 
+// attach 与 reportOnce 是 Start / runSession 用到的外部入口，离线用例替换它们以驱动外层状态与 C8 上报。
+var (
+	attach     = mem.Attach
+	reportOnce = telemetry.ReportOnce
+)
+
+// appleMusicDetails 是 Apple Music 在「没在读歌」时各种情形的 detail。
+// Disconnected 为空：applemusic 没有调试通道，进程在运行而读不了时总有 Blocked。
+func appleMusicDetails() player.ProcessDetails {
+	return player.ProcessDetails{
+		NotRunning: i18n.T("Apple Music not running"),
+		Exited:     i18n.T("Apple Music has exited"),
+	}
+}
+
+// twinStats 是本次附加期间位置结构作废与找回的计数（设计 §6.4）。
+type twinStats struct {
+	lost        int           // 作废次数（已宣告且在放时）
+	refoundSame int           // 找回为同一首的次数
+	maxRefind   time.Duration // 作废到找回的最长间隔
+	lostAt      time.Time     // 最近一次作废的时刻；零值表示没有未找回的作废
+	attachedAt  time.Time     // 本次附加开始的时刻，用于计算 attached_minutes
+}
+
+// summary 返回上报用的摘要；lost 为 0 时返回 nil。
+func (t twinStats) summary(now time.Time) map[string]any {
+	if t.lost == 0 {
+		return nil
+	}
+	var mins float64
+	if !t.attachedAt.IsZero() && now.After(t.attachedAt) {
+		mins = now.Sub(t.attachedAt).Minutes()
+	}
+	return map[string]any{
+		"lost":             t.lost,
+		"refound_same":     t.refoundSame,
+		"max_refind_ms":    t.maxRefind.Milliseconds(),
+		"attached_minutes": mins,
+	}
+}
+
 // Start 启动 Apple Music 轮询循环（阻塞，须在 goroutine 中调用）。
+//
+// 非歌名状态一律由 player.ProcessStatus 合成、经 EmitStatusIfChanged 发出（#231，设计
+// doc/design/converge-player-behavior-231-design.md §3.2）：attach 拒绝访问按进程在运行报
+// standby / no_admin，其余错误按未运行报 waiting_process（按本次服务期间是否见过它运行区分
+// process_not_running 与 process_exited）；会话结束只在进程退出或 Stop 时发生，报 process_exited。
 func (p *AppleMusicPlayer) Start() {
+	d := appleMusicDetails()
+	seen := false // 本次服务期间见过 Apple Music 在运行：区分 process_exited 与 process_not_running
 	for {
 		select {
 		case <-p.StopCh:
@@ -215,12 +263,16 @@ func (p *AppleMusicPlayer) Start() {
 		default:
 		}
 
-		r, err := mem.Attach()
+		r, err := attach()
 		if err != nil {
 			if errors.Is(err, mem.ErrAccessDenied) {
-				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Apple Music process (Apple Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
+				seen = true
+				p.EmitStatusIfChanged(player.ProcessStatus(true, true, d, player.Blocked{
+					Reason: player.ReasonNoAdmin,
+					Detail: i18n.T("Cannot read the Apple Music process (Apple Music may be running as administrator)"),
+				}))
 			} else {
-				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Apple Music not running"), Reason: player.ReasonProcessNotRunning})
+				p.EmitStatusIfChanged(player.ProcessStatus(false, seen, d, player.Blocked{}))
 			}
 			p.Emit(player.EventClearSongData, nil)
 			if p.sleepOrStop(3 * time.Second) {
@@ -229,12 +281,13 @@ func (p *AppleMusicPlayer) Start() {
 			continue
 		}
 
+		seen = true
 		log.Info("Attached to AppleMusic.exe, monitoring playback state")
 		p.runSession(r)
 		r.Close()
 
 		// 进程退出（Apple Music 常自重启，pid/地址会变）——回到外层重新 Attach。
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("Apple Music has exited"), Reason: player.ReasonProcessExited})
+		p.EmitStatusIfChanged(player.ProcessStatus(false, true, d, player.Blocked{}))
 		p.Emit(player.EventClearSongData, nil)
 		log.Info("Session ended; waiting for a new AppleMusic process...")
 		if p.sleepOrStop(2 * time.Second) {
@@ -247,6 +300,7 @@ func (p *AppleMusicPlayer) Start() {
 func (p *AppleMusicPlayer) runSession(r *mem.Reader) {
 	s := newSession(p, r, time.Now)
 	defer close(s.coverEnd)
+	defer s.reportTwinStats()
 	poll := EffectivePollInterval(p.pollMs)
 	for {
 		select {
@@ -274,7 +328,7 @@ type songState struct {
 	album     string
 	resolved  bool
 	lyrics    []krc.Line
-	pureHint  string // TTML 只有一行「纯音乐」提示时的那行文本（lyrics 此时为空），随 index:-1 发出
+	pureHint  string // TTML 只有无歌词提示时的提示原文（lyrics 此时为空），随 index:-1 发出
 	docHash   uint64 // 已采用的 TTML；0 = 未采用
 	coverHash uint64 // 已采用的封面（原始字节的哈希，缩放可能还没落地）；0 = 还没有
 	coverURI  string // 已落地的 cover_base64（见 putCover）
@@ -348,6 +402,7 @@ type session struct {
 	// 位置源
 	twin       uintptr   // 已确认的位置结构；0 = 未知
 	twinFailAt time.Time // 已确认的位置结构从这一刻起一直读不出；零值 = 上一次读成功
+	twins      twinStats // 本次附加期间位置结构作废与找回的计数（设计 §6.4）
 	loading    bool      // 位置结构时长为 0（换歌加载中）
 	loadingAt  time.Time
 	cands      map[uintptr]*cand // 候选观察表
@@ -367,23 +422,23 @@ type session struct {
 	curChains  map[uintptr]string
 
 	// 当前曲目
-	song          songState
-	announced     bool // 已为当前曲目发过 song_info_update / all_lyrics
-	noSongShown   bool // 已发「没有歌」，避免重复
-	needTitle     bool
-	needLyrics    bool
-	needCover     bool
-	needConfirm   bool
-	verdictSent   bool // 已发过「无歌词」（index:-1）
-	songChangedAt time.Time
-	songScanAt    time.Time // 下一次为当前曲目全扫的时刻；零值 = 不需要
-	titleTries    int
-	lateTries     int
-	lastScanEnd   time.Time
-	emptyTitle    string // 正在等它稳住的「歌手为空」标题
-	emptySince    time.Time
-	prevCover     uint64 // 最近一次别的歌采用的封面与那首歌的专辑（见 staleCover）；0 = 没有
-	prevAlbum     string
+	song            songState
+	announced       bool // 已为当前曲目发过 song_info_update / all_lyrics
+	titleGiveUpSent bool // 本次换歌已报过取不到歌名（metadata_unavailable），每次换歌至多报一次
+	needTitle       bool
+	needLyrics      bool
+	needCover       bool
+	needConfirm     bool
+	verdictSent     bool // 已发过「无歌词」（index:-1）
+	songChangedAt   time.Time
+	songScanAt      time.Time // 下一次为当前曲目全扫的时刻；零值 = 不需要
+	titleTries      int
+	lateTries       int
+	lastScanEnd     time.Time
+	emptyTitle      string // 正在等它稳住的「歌手为空」标题
+	emptySince      time.Time
+	prevCover       uint64 // 最近一次别的歌采用的封面与那首歌的专辑（见 staleCover）；0 = 没有
+	prevAlbum       string
 
 	// 封面缩放（见 startCover、pollCover）
 	coverCh   chan coverResult // 容量 1
@@ -406,6 +461,9 @@ type session struct {
 
 	clk         clock
 	lastLineIdx int
+	// noSongClear：附加后首拍 waiting_song 之后的 clear_song_data 尚未入队（通道满时在后续无歌 tick 重试），
+	// 使断线清缓存后重连无歌时服务端能向专属出口派发清除（#231）。
+	noSongClear bool
 }
 
 func newSession(p *AppleMusicPlayer, r memReader, clock func() time.Time) *session {
@@ -415,6 +473,7 @@ func newSession(p *AppleMusicPlayer, r memReader, clock func() time.Time) *sessi
 		r:           r,
 		now:         clock,
 		offsetSec:   float32(p.offsetMs) / 1000,
+		twins:       twinStats{attachedAt: now},
 		docOwner:    map[uint64]string{},
 		docSeenAt:   map[uint64]time.Time{},
 		docMissed:   map[uint64]int{},
@@ -429,11 +488,30 @@ func newSession(p *AppleMusicPlayer, r memReader, clock func() time.Time) *sessi
 		coverEnd:    make(chan struct{}),
 	}
 	s.clk.lastRaw = -1
-	// 附加成功后先报「没有歌」：此前外层报的是「未启动」，附加后若一直没有歌也不能沿用它。
+	// 附加成功后先报「没有歌」并紧跟一条 clear_song_data：此前外层报的是「未启动」，附加后若一直没有歌也
+	// 不能沿用它，且重连无歌时服务端依赖 clear_song_data 派生清除专属出口在断开期间保留的旧歌画面（#231）。
 	// 确认位置结构（即确认在放）之前不宣告任何歌：暂停中启动时报的就是这个，属实。
 	s.showNoSong()
+	s.noSongClear = true
+	s.flushNoSongClear()
 	s.restartTwinScan(now, true)
 	return s
+}
+
+// flushNoSongClear 在已成功发出 waiting_song/no_song 后补发一次 clear_song_data；
+// 首拍通道全满或仅余 1 槽时留待后续无歌 tick 按「先状态后清空」补齐（#231）。
+func (s *session) flushNoSongClear() {
+	if !s.noSongClear {
+		return
+	}
+	last, ok := s.p.LastStatus()
+	if !ok || last.Reason != player.ReasonNoSong {
+		s.showNoSong()
+		last, ok = s.p.LastStatus()
+	}
+	if ok && last.Reason == player.ReasonNoSong {
+		s.noSongClear = !s.p.TryEmit(player.EventClearSongData, nil)
+	}
 }
 
 // twinScanTable 返回与此刻状态相符的 twinScan 间隔表：没见到存储、也没确认位置结构用 idleScanSteps
@@ -470,9 +548,12 @@ func (s *session) retableTwinScan(now time.Time) {
 	}
 }
 
-// tick 是一轮轮询：读位置 → 复读候选与存储 → 封面缩放结果 → 到期的全扫 → 无歌词判决 → 歌词行 → 位置采样。
+// tick 是一轮轮询：补齐开场无歌清空 → 读位置 → 复读候选与存储 → 封面缩放结果 → 到期的全扫 → 无歌词判决 → 歌词行 → 位置采样。
 func (s *session) tick() {
 	now := s.now()
+	if !s.announced && s.twin == 0 {
+		s.flushNoSongClear()
+	}
 	s.readPosition(now)
 	if now.Sub(s.watchAt) >= watchInterval {
 		s.watchAt = now
@@ -585,6 +666,11 @@ func (s *session) onTwin(t mem.Twin, now time.Time) {
 // 起手一律按在放：时长变成非 0 就是开播（暂停中切歌时时长一直是 0，按了播放才写入，2026-10-08 真机）。
 // 万一不是，位置不走，startPauseThreshold 内会判成暂停。
 func (s *session) beginSong(t mem.Twin, now time.Time, est float64, fromStart bool) {
+	if !s.twins.lostAt.IsZero() {
+		d := now.Sub(s.twins.lostAt)
+		s.twins.lostAt = time.Time{}
+		log.Detail("Position structure refound after %dms (different duration)", d.Milliseconds())
+	}
 	log.Info("Song change: duration %.0fs", t.Dur)
 	s.songsBegun++
 	s.rotateChains()
@@ -593,6 +679,8 @@ func (s *session) beginSong(t mem.Twin, now time.Time, est float64, fromStart bo
 	}
 	s.song = songState{dur: t.Dur}
 	s.announced = false
+	s.noSongClear = false
+	s.titleGiveUpSent = false
 	s.needTitle, s.needLyrics, s.needCover, s.needConfirm = true, true, true, true
 	s.verdictSent = false
 	s.songChangedAt = now
@@ -615,16 +703,30 @@ func (s *session) rotateChains() {
 
 // dropTwin 作废位置结构：位置未知，播放态按暂停报（没有可靠位置源时不报 playing，审查 P1-5）。
 func (s *session) dropTwin(now time.Time) {
+	wasPlaying := s.clk.playing
+	pos := s.clk.live(now)
+	log.Detail("Position structure dropped (playing: %v, announced: %v, position %.2fs)", wasPlaying, s.announced, pos)
+	if wasPlaying && s.announced {
+		s.twins.lost++
+		s.twins.lostAt = now
+	}
 	s.twin = 0
 	s.twinFailAt = time.Time{}
 	s.loading = false
 	s.restartTwinScan(now, true)
-	if s.clk.playing && s.announced {
+	if wasPlaying && s.announced {
 		s.clk.freeze(now)
 		s.emitTime(player.EventPlaybackPause)
 		s.emitStatus()
 	}
 	s.clk.playing = false
+}
+
+// reportTwinStats 在会话结束前上报本次附加期间的位置结构作废摘要；没有作废时不上报（设计 §6.4）。
+func (s *session) reportTwinStats() {
+	if sum := s.twins.summary(s.now()); sum != nil {
+		reportOnce("applemusic.twin_lost", "Apple Music 位置结构作废的频率摘要", nil, sum)
+	}
 }
 
 // watchCandidates 复读候选表，认出像歌曲那样在走的那个：时长不变、位置是整数、每次只走一格、
@@ -677,6 +779,15 @@ func (s *session) watchCandidates(now time.Time) {
 	s.twinScan.stop()
 	s.staleScan.stop()
 	if sameSong && s.announced && c.dur == s.song.dur {
+		if !s.twins.lostAt.IsZero() {
+			d := now.Sub(s.twins.lostAt)
+			s.twins.lostAt = time.Time{}
+			s.twins.refoundSame++
+			if d > s.twins.maxRefind {
+				s.twins.maxRefind = d
+			}
+			log.Detail("Position structure refound after %dms (same song)", d.Milliseconds())
+		}
 		// 同一首（位置结构丢失或停住后找到在走的那个）：接上位置，按恢复处理。找回的位置可能在已推的
 		// 行之前，行号复位——不复位则 nextLine 一直拒发，歌词停到播放位置越过原先那一行为止。
 		s.cands = nil
@@ -730,11 +841,15 @@ func (s *session) checkStale(now time.Time) {
 func (s *session) maybeScan() {
 	now := s.now()
 	songReady := s.twin != 0 && !s.loading && s.song.dur > 0
-	// 换歌后迟迟取不到标题：上一首的标题与歌词不能一直挂在屏上，先报「没有歌」，取到再宣告。
-	// 每轮都判，不等下一次扫描（扫描按退避排，等它会拖到十几秒）。
-	if songReady && !s.announced && s.needTitle && now.Sub(s.songChangedAt) >= titleGiveUp && !s.noSongShown {
+	// 换歌后迟迟取不到标题：上一首的标题与歌词不能一直挂在屏上，报 standby/metadata_unavailable 并清屏
+	// （每次换歌至多报一次），取到再宣告。每轮都判，不等下一次扫描（扫描按退避排，等它会拖到十几秒）。
+	if songReady && !s.announced && s.needTitle && now.Sub(s.songChangedAt) >= titleGiveUp && !s.titleGiveUpSent {
+		s.titleGiveUpSent = true
 		log.Warn("No title %v after the song change; clearing the overlay for now", titleGiveUp)
-		s.showNoSong()
+		s.p.EmitStatusIfChanged(player.ProcessStatus(true, true, appleMusicDetails(), player.Blocked{
+			Reason: player.ReasonMetadataUnavailable,
+			Detail: i18n.T("Cannot read the Apple Music track title"),
+		}))
 		s.p.Emit(player.EventClearSongData, nil)
 	}
 	if now.Sub(s.lastScanEnd) < minScanGap && !s.lastScanEnd.IsZero() {
@@ -1101,6 +1216,7 @@ func (s *session) applyMeta(np mem.NowPlaying, now time.Time) bool {
 		}
 		s.song = songState{dur: s.song.dur}
 		s.announced = false
+		s.titleGiveUpSent = false
 		s.needLyrics, s.needCover, s.needConfirm = true, true, true
 		s.verdictSent = false
 		s.songChangedAt = now
@@ -1112,17 +1228,19 @@ func (s *session) applyMeta(np mem.NowPlaying, now time.Time) bool {
 	return true
 }
 
-// applyLyrics 采用一份 TTML 并补发 all_lyrics（歌词晚到也要补发，审查 P1-3）。只有一行「纯音乐」提示
-// 的 TTML 不当歌词：清空行、留下提示随 index:-1 发出——行里留着它会再推一条 index 0 的 lyric_update
+// applyLyrics 采用一份 TTML 并补发 all_lyrics（歌词晚到也要补发，审查 P1-3）。只有无歌词提示
+// 的 TTML 不当歌词：清空行、留下提示原文随 index:-1 发出——行里留着它会再推一条 index 0 的 lyric_update
 // （kugou 踩过同一处）。
 func (s *session) applyLyrics(lines []krc.Line, h uint64) {
 	applyDetailedOffset(lines, s.offsetSec)
 	s.docOwner[h] = s.song.key()
 	s.docDur[h] = s.song.dur // 留存的副本之后只配给同一时长的曲目（见 lyricCandidates）
-	pure := player.IsPureMusicOnly(toLyricLines(lines, s.offsetSec))
+	hint, pure := player.PureMusicHint(toLyricLines(lines, s.offsetSec), buildTitle(s.song.title, s.song.artist))
 	if pure {
-		s.song.pureHint = lines[0].Text
+		s.song.pureHint = hint
 		lines = nil
+	} else {
+		s.song.pureHint = ""
 	}
 	s.song.lyrics = lines
 	s.song.docHash = h
@@ -1130,7 +1248,7 @@ func (s *session) applyLyrics(lines []krc.Line, h uint64) {
 	s.lastLineIdx = -1
 	if s.announced {
 		s.emitAllLyrics()
-		if pure && !s.verdictSent {
+		if pure {
 			s.emitVerdict()
 		}
 	}
@@ -1248,7 +1366,7 @@ func (s *session) announce() {
 	}
 	s.emitSongInfo()
 	s.announced = true
-	s.noSongShown = false
+	s.noSongClear = false
 	s.lastLineIdx = -1
 	s.emitAllLyrics()
 	if !s.needLyrics && len(s.song.lyrics) == 0 {
@@ -1284,8 +1402,9 @@ func (s *session) emitAllLyrics() {
 	})
 }
 
-// emitVerdict 发「这首歌没有歌词」：index:-1 的 lyric_update，每首歌至多一次。之后歌词若到了，照常补发
-// all_lyrics。
+// emitVerdict 发「这首歌没有歌词」：index:-1 的 lyric_update。宽限期到期由 checkVerdict 发一次
+// （text 为空）；若之后才扫到仅含无歌词提示的 TTML，applyLyrics 发完空 all_lyrics 后会补发带提示
+// 原文的 index:-1，保持服务端缓存与下游一致；普通有词 TTML 晚到只补发 all_lyrics。
 func (s *session) emitVerdict() {
 	s.verdictSent = true
 	log.Info("Instrumental / no lyrics; word-by-word: %s", detailedFlag(s.song.lyrics))
@@ -1321,13 +1440,9 @@ func (s *session) emitTime(evt string) {
 	s.p.Emit(evt, &player.PlaybackTimeInfo{Position: pos, Progress: player.ClampProgress(pos, float32(s.song.dur))})
 }
 
-// showNoSong 报「进程在、没有歌」（waiting_song + no_song），只报一次。
+// showNoSong 报「进程在、没有歌」（waiting_song + no_song），经 EmitStatusIfChanged 去重。
 func (s *session) showNoSong() {
-	if s.noSongShown {
-		return
-	}
-	s.noSongShown = true
-	s.p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: i18n.T("Apple Music not playing"), Reason: player.ReasonNoSong})
+	s.p.EmitStatusIfChanged(player.NoSongStatus(player.ReasonNoSong, i18n.T("Apple Music not playing")))
 }
 
 // clearSong 曲目没了：清屏并把当前曲目整个复位。复位是要害——旧实现只清屏不复位，同名歌再出现时
@@ -1341,6 +1456,8 @@ func (s *session) clearSong() {
 	}
 	s.song = songState{}
 	s.announced = false
+	s.noSongClear = false
+	s.titleGiveUpSent = false
 	s.needTitle, s.needLyrics, s.needCover, s.needConfirm = false, false, false, false
 	s.songScanAt = time.Time{}
 	s.lastLineIdx = -1

@@ -272,15 +272,20 @@ func runFallSrc(t *testing.T, src *fallSrc, done func([]tagged) bool) []tagged {
 }
 
 // songSpan is the events from song name's song_info_update up to the next
-// clear_song_data (a switch, or the session's end).
+// clear_song_data or non-song status_update (a switch, clear, or the session's end).
 func songSpan(ev []tagged, name string) []tagged {
 	start := -1
 	for i, e := range ev {
 		if si, ok := e.Data.(*player.SongInfo); ok && si.Name == name && start < 0 {
 			start = i
 		}
-		if e.Type == player.EventClearSongData && start >= 0 {
-			return ev[start:i]
+		if start >= 0 {
+			if e.Type == player.EventClearSongData {
+				return ev[start:i]
+			}
+			if si, ok := e.Data.(*player.StatusInfo); ok && si.Status != "playing" && si.Status != "paused" {
+				return ev[start:i]
+			}
 		}
 	}
 	if start < 0 {

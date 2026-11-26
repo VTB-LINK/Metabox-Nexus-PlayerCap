@@ -127,6 +127,31 @@ func TestEmitStatusIfChangedDroppedIsNotRecorded(t *testing.T) {
 	}
 }
 
+// LastStatus 报告最近一次成功入队的状态：被去重时仍是它，通道满而丢弃的不算；还没有时 ok 为假（#231 代码审：
+// EmitStatusIfChanged 在两种情形都返回假，sodamusic 的清空要据此区分）。
+//
+// 变异自证（均实测）：LastStatus 恒报 ok 为假即红。
+func TestLastStatus(t *testing.T) {
+	b := NewBaseEmitter("test")
+	if _, ok := b.LastStatus(); ok {
+		t.Fatal("还没有状态，ok 应为假")
+	}
+	b.EmitStatusIfChanged(waitingInfo())
+	if b.EmitStatusIfChanged(waitingInfo()) {
+		t.Fatal("前置条件：相同内容应被去重")
+	}
+	if got, ok := b.LastStatus(); !ok || got != *waitingInfo() {
+		t.Errorf("被去重之后应仍报 %+v，实为 %+v（ok=%v）", *waitingInfo(), got, ok)
+	}
+	for len(b.EventCh) < cap(b.EventCh) {
+		b.Emit(EventSongInfoUpdate, &SongInfo{Title: "filler"})
+	}
+	b.Emit(EventStatusUpdate, &StatusInfo{Status: "playing", Detail: "song"}) // 通道满，丢弃
+	if got, _ := b.LastStatus(); got != *waitingInfo() {
+		t.Errorf("丢弃的状态不算入队，应仍报 %+v，实为 %+v", *waitingInfo(), got)
+	}
+}
+
 // 载荷为空或类型不对的状态事件不让它 panic，也不记。
 func TestEmitStatusIfChangedToleratesMalformedStatusEvents(t *testing.T) {
 	b := NewBaseEmitter("test")

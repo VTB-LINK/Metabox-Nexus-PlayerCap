@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	stdlog "log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,14 +63,14 @@ func TestClassifyLibcef(t *testing.T) {
 	dataPick := func(p patchEntry) []byte { return p.data }
 
 	t.Run("全 orig（原版未打）→ 可打、未打", func(t *testing.T) {
-		allPatched, canAutoFix, err := classifyLibcef(buildReader(origPick))
+		allPatched, canAutoFix, err := classifyLibcef(buildReader(origPick), true)
 		if err != nil || allPatched != false || canAutoFix != true {
 			t.Fatalf("期望 (false,true,nil)，实得 (%v,%v,%v)", allPatched, canAutoFix, err)
 		}
 	})
 
 	t.Run("全 data（已打）→ 已打、可识别", func(t *testing.T) {
-		allPatched, canAutoFix, err := classifyLibcef(buildReader(dataPick))
+		allPatched, canAutoFix, err := classifyLibcef(buildReader(dataPick), true)
 		if err != nil || allPatched != true || canAutoFix != true {
 			t.Fatalf("期望 (true,true,nil)，实得 (%v,%v,%v)", allPatched, canAutoFix, err)
 		}
@@ -79,7 +81,7 @@ func TestClassifyLibcef(t *testing.T) {
 		mixed := buildReader(func(p patchEntry) []byte { return p.orig })
 		mixed.at[libcefPatches[0].offset] = libcefPatches[0].data
 		mixed.at[libcefPatches[3].offset] = libcefPatches[3].data
-		allPatched, canAutoFix, err := classifyLibcef(mixed)
+		allPatched, canAutoFix, err := classifyLibcef(mixed, true)
 		if err != nil || allPatched != false || canAutoFix != true {
 			t.Fatalf("期望 (false,true,nil)，实得 (%v,%v,%v)", allPatched, canAutoFix, err)
 		}
@@ -95,7 +97,7 @@ func TestClassifyLibcef(t *testing.T) {
 				junk[k] = 0xEE // 既非 orig 也非 data
 			}
 			r.at[libcefPatches[victim].offset] = junk
-			allPatched, canAutoFix, err := classifyLibcef(r)
+			allPatched, canAutoFix, err := classifyLibcef(r, true)
 			if err != nil || allPatched != false || canAutoFix != false {
 				t.Errorf("污染 Patch%d 后期望 (false,false,nil)，实得 (%v,%v,%v)", victim+1, allPatched, canAutoFix, err)
 			}
@@ -104,7 +106,7 @@ func TestClassifyLibcef(t *testing.T) {
 
 	t.Run("读不到偏移（短文件）→ 返回 err，绝不当作可打", func(t *testing.T) {
 		// 空读取器：任何偏移都 EOF。旧实现此处会返回 (false,true,nil) 照打，是缺陷。
-		allPatched, canAutoFix, err := classifyLibcef(sparseReaderAt{at: map[int64][]byte{}})
+		allPatched, canAutoFix, err := classifyLibcef(sparseReaderAt{at: map[int64][]byte{}}, true)
 		if err == nil {
 			t.Fatalf("读失败必须返回 error，实得 (%v,%v,nil)", allPatched, canAutoFix)
 		}
@@ -112,6 +114,46 @@ func TestClassifyLibcef(t *testing.T) {
 			t.Errorf("读失败时不得返回可打/已打，实得 allPatched=%v canAutoFix=%v", allPatched, canAutoFix)
 		}
 	})
+}
+
+// TestClassifyLibcefWarnFlag：指纹不认识时 warn 为真打一条 Warn、为假不打，判定结果与 warn 无关；认识的 DLL 两种都
+// 不打。ensurePatched 重查同一份不认识的 DLL（路径与版本都相同）时传假：修补受阻期间 kugou 的 Start 每 30 秒重查一次
+// （#231，设计 §5.5），每次都打即每 30 秒一条同样的警告。
+//
+// 变异自证（实测变红）：classifyLibcef 不看 warn、一律打警告 →「不认识、warn 为假」红。
+func TestClassifyLibcefWarnFlag(t *testing.T) {
+	var buf bytes.Buffer
+	w := stdlog.Writer()
+	stdlog.SetOutput(&buf)
+	defer stdlog.SetOutput(w)
+
+	known := buildReader(func(p patchEntry) []byte { return p.orig })
+	unknown := buildReader(func(p patchEntry) []byte { return p.orig })
+	unknown.at[libcefPatches[4].offset] = bytes.Repeat([]byte{0xEE}, len(libcefPatches[4].data))
+	cases := []struct {
+		name     string
+		r        io.ReaderAt
+		warn     bool
+		canFix   bool
+		warnings int
+	}{
+		{"不认识、warn 为真", unknown, true, false, 1},
+		{"不认识、warn 为假", unknown, false, false, 0},
+		{"认识、warn 为真", known, true, true, 0},
+		{"认识、warn 为假", known, false, true, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			buf.Reset()
+			_, canFix, err := classifyLibcef(c.r, c.warn)
+			if err != nil || canFix != c.canFix {
+				t.Fatalf("classifyLibcef = (_, %v, %v)，期望 canAutoFix=%v、无错误", canFix, err, c.canFix)
+			}
+			if n := strings.Count(buf.String(), "[!]"); n != c.warnings {
+				t.Errorf("警告 %d 条，期望 %d 条；日志：%s", n, c.warnings, buf.String())
+			}
+		})
+	}
 }
 
 // TestCheckPatchStatusRealDLL 用真机上的真实 libcef.dll 锚定 orig/data 字节表

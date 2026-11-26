@@ -12,6 +12,7 @@ package cdp
 // 变异自证（本 worktree 里逐条注入、跑完即还原，均实测）记在各用例的注释里。
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -81,7 +82,7 @@ func TestDialSubscribesWaitingForDisconnect(t *testing.T) {
 		}
 		got <- f
 	})
-	c, err := dial(url)
+	c, err := dial(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +124,7 @@ func TestExtractReleasesOnWaitingForDisconnect(t *testing.T) {
 		_, err = readFrame(conn)
 		closed <- err
 	})
-	c, err := dial(url)
+	c, err := dial(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestExtractIgnoresOtherFrames(t *testing.T) {
 		_ = conn.WriteJSON(evalReply(req.ID, playingData))
 		_, _ = readFrame(conn) // 等客户端关闭
 	})
-	c, err := dial(url)
+	c, err := dial(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
 	}

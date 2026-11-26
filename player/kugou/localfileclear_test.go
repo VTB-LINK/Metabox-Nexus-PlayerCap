@@ -17,8 +17,10 @@ import (
 )
 
 // A 是会话第一首（在线，与 B 同名），0.1 s 收到 P 为 aP（默认 0 s）的结果，给 B 定下界限 aP；B 于 2.1 s 换歌。B 的
-// 换歌拍没有回复时等满 300 ms，其后各拍在 3.4 s、4.4 s、5.4 s……（读数 1、2、3 s），回复的 after 自 2.1 s 起算：1 s、2 s、
-// 3 s 送到的分别在读数 1、2、3 s 那拍收下。换歌拍于 0.1 s 收到回复的两例，其后各拍在 3.2 s、4.2 s……，收下的拍次不变。
+// 换歌拍没有回复时等满 300 ms 于 2.4 s 落锚 0 s，其后各拍在 3.4 s、4.4 s、5.4 s……（读数 1、2、3 s）；稳定播放期
+// 事件驱动即时收下回复（自 2.1 s 起算的 1 s、2 s、3 s 分别于 3.1 s、4.1 s、5.1 s 到达），按此刻 LivePosition 发出
+// 位置 0.70 s、1.70 s、2.70 s。换歌拍于 0.1 s 收到回复的两例在 2.2 s 落锚 0 s，1 s 后的回复于 3.1 s 即时收下，
+// 位置为 0.90 s。
 //
 // 变异自证：
 //   - 清词时不清沿用标记：「清掉、同样的结果不重发」红；清词后来源、P 与沿用标记都不变（重复结果重发）：再加「单曲循环」；
@@ -47,49 +49,49 @@ func TestSessionLocalFileMidSongClear(t *testing.T) {
 		want   []string // 其后的歌词事件
 	}{
 		{"清掉、同样的结果不重发", 0, sameName, "XB", []step{{sec, dn("XB", 2*sec)}, {2 * sec, dn("XB", 2*sec)}},
-			nil, lyricsAt("1.00", "")},
+			nil, lyricsAt("0.70", "")},
 		{"在线出错时保留的歌词同样清掉", 0, sameName, "EB", []step{{sec, dn("EB", 2*sec)}},
-			nil, lyricsAt("1.00", "")},
+			nil, lyricsAt("0.70", "")},
 		{"清掉之后再来的歌词照常换上", 0, sameName, "XB", []step{{sec, dn("XB", 2*sec)}, {2 * sec, playedAt(found("XB", lyricSet("新")), lpt(2*sec))}},
-			nil, slices.Concat(lyricsAt("1.00", ""), lyricsAt("2.00", "新"))},
+			nil, slices.Concat(lyricsAt("0.70", ""), lyricsAt("1.70", "新"))},
 		{"先采纳旧 P 的关联、再收到新 P 的：清掉", 0, sameName, "XB", []step{
 			{sec, playedAt(foundAssoc("XB", lyricSet("旧")), lpt(-sec))},
 			{2 * sec, dn("XB", 2*sec)},
-		}, nil, slices.Concat(lyricsAt("1.00", "旧"), lyricsAt("2.00", ""))},
+		}, nil, slices.Concat(lyricsAt("0.70", "旧"), lyricsAt("1.70", ""))},
 		{"旧关联内容恰与沿用的相同、未重发：同样清掉", 0, sameName, "XB", []step{
 			{sec, playedAt(foundAssoc("XB", lyricSet("A")), lpt(-sec))},
 			{2 * sec, dn("XB", 2*sec)},
-		}, nil, slices.Concat(keep, lyricsAt("2.00", ""))},
+		}, nil, slices.Concat(keep, lyricsAt("1.70", ""))},
 		// 清掉之前来源是关联；清掉之后同一次播放（P 相同）带「关联未取用」的缓存要照常换上，来源未清零会被「2甲」挡住。
 		{"清掉之后来源清零", 0, sameName, "XB", []step{
 			{sec, playedAt(foundAssoc("XB", lyricSet("关联")), lpt(-sec))},
 			{2 * sec, dn("XB", 2*sec)},
 			{3 * sec, playedAt(foundSkipped("XB", lyricSet("缓存")), lpt(2*sec))},
-		}, nil, slices.Concat(lyricsAt("1.00", "关联"), lyricsAt("2.00", ""), lyricsAt("3.00", "缓存"))},
+		}, nil, slices.Concat(lyricsAt("0.70", "关联"), lyricsAt("1.70", ""), lyricsAt("2.70", "缓存"))},
 		{"单曲循环重播后清掉，同样的结果不重发", 0, sameName, "XB", []step{
 			{sec, playedAt(found("XB", lyricSet("缓存")), lpt(2*sec))},
 			{2 * sec, dn("XB", 3*sec)},
 			{3 * sec, dn("XB", 3*sec)},
-		}, nil, slices.Concat(lyricsAt("1.00", "缓存"), lyricsAt("2.00", ""))},
+		}, nil, slices.Concat(lyricsAt("0.70", "缓存"), lyricsAt("1.70", ""))},
 		{"首次播放换歌拍时还没有 P、落盘后清掉", 0, sameName, "XB", []step{
 			{100 * time.Millisecond, assoc.Result{Hash: "XB", Kind: assoc.KindNone}},
 			{sec, dn("XB", 2*sec)},
-		}, nil, lyricsAt("1.00", "")},
+		}, nil, lyricsAt("0.90", "")},
 		{"换歌拍误选旧 P、落盘后清掉", 0, sameName, "XB", []step{
 			{100 * time.Millisecond, dn("XB", -sec)},
 			{sec, dn("XB", 2*sec)},
-		}, nil, lyricsAt("1.00", "")},
+		}, nil, lyricsAt("0.90", "")},
 		{"P 恰为开始时刻减 5 秒，清掉", lpt(-5 * sec), sameName, "XB", []step{{sec, dn("XB", -2900*time.Millisecond)}},
-			nil, lyricsAt("1.00", "")},
+			nil, lyricsAt("0.70", "")},
 		// 反例：不清。
 		{"P 相同按「2甲」保持（关联）", 0, sameName, "XB", []step{
 			{sec, playedAt(foundAssoc("XB", lyricSet("关联")), lpt(2*sec))},
 			{2 * sec, dn("XB", 2*sec)},
-		}, nil, lyricsAt("1.00", "关联")},
+		}, nil, lyricsAt("0.70", "关联")},
 		{"P 相同按「2甲」保持（缓存）", 0, sameName, "XB", []step{
 			{sec, playedAt(found("XB", lyricSet("缓存")), lpt(2*sec))},
 			{2 * sec, dn("XB", 2*sec)},
-		}, nil, lyricsAt("1.00", "缓存")},
+		}, nil, lyricsAt("0.70", "缓存")},
 		{"P 等于界限", 0, sameName, "XB", []step{{sec, dn("XB", 0)}}, nil, keep},
 		{"P 早于界限", 0, sameName, "XB", []step{{sec, dn("XB", -sec)}}, nil, keep},
 		{"P 早于开始时刻减 5 秒", lpt(-5 * sec), sameName, "XB", []step{{sec, diskNone("XB", lpt(-2900*time.Millisecond)-1)}}, nil, keep},

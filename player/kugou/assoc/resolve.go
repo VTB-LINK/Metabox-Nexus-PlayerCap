@@ -28,15 +28,33 @@ const maxCandidates = 64
 // 单条记录至多 4 MiB，不设此限时留存的候选与关联键可达 64 × 4 MiB。
 const maxPathBytes = 32767 * 3
 
+const (
+	maxAbsLyricOffsetMs = 600_000
+	unassocMenuKey      = "419721cb5e7bf802fd14b272f5d5322e" // 右键菜单取消关联：酷狗重播仍保持取消状态
+	unassocDialogKey    = "a9695a2f209c200cd9d393fa58d5f915" // 关联弹窗取消关联：酷狗仅当次播放清词，重播回落缓存
+)
+
+// clampLyricOffsetMs 将酷狗歌词偏移钳位在 [-600_000, +600_000] 毫秒范围内。
+func clampLyricOffsetMs(v int) int {
+	if v > maxAbsLyricOffsetMs {
+		return maxAbsLyricOffsetMs
+	}
+	if v < -maxAbsLyricOffsetMs {
+		return -maxAbsLyricOffsetMs
+	}
+	return v
+}
+
 // Kind 是一次解析的结局。
 type Kind uint8
 
 const (
-	KindNone         Kind = iota // 库里没有可用的歌词，调用方在线取词
-	KindFound                    // 取到歌词
-	KindTransient                // 读库暂时失败
-	KindNotConfirmed             // 尚未确认可以读库
-	KindDisabled                 // 本会话不再读库
+	KindNone         Kind = iota // 无本地可读歌词文件，调用方走在线取词（可能携带内存 LyricOffsetMs 与 HasMemoryLyric）
+	KindFound                    // 取到本地或缓存歌词行（携带 LyricOffsetMs）
+	KindUnassociated             // 用户显式取消关联：清空歌词且禁止回退缓存/在线/同名复用
+	KindTransient                // 暂时失败
+	KindNotConfirmed             // 尚未确认
+	KindDisabled                 // 本会话停用本地读取
 )
 
 // Source 是歌词的来源。
@@ -73,14 +91,16 @@ func (s Source) String() string {
 //
 // 没有走到 pick 的结果（暂时失败、未确认、停用）以上三项都为零值。
 type Result struct {
-	Hash         string
-	Kind         Kind
-	Lines        []klyric.Line
-	Source       Source
-	Retry        bool
-	AssocSkipped bool
-	PlayedAt     int64
-	LocalFile    bool
+	Hash           string
+	Kind           Kind
+	Lines          []klyric.Line
+	LyricOffsetMs  int  // 酷狗侧歌词偏移（毫秒，正数提前、负数延后，钳位在 [-600_000, +600_000]）
+	HasMemoryLyric bool // 内存模式下酷狗 CLyric 已加载歌词行但磁盘路径为空或不可读，供会话触发在线恢复
+	Source         Source
+	Retry          bool
+	AssocSkipped   bool
+	PlayedAt       int64
+	LocalFile      bool
 }
 
 // tables 是 collect 所需的读库接口，*kgdb.DB 满足它。
@@ -94,19 +114,22 @@ var _ tables = (*kgdb.DB)(nil)
 
 // candidate 是一份待读的歌词文件。Path 为 LyricInfo.LyricPath 原文：绝对路径，或相对歌词目录的路径。
 type candidate struct {
-	Path       string
-	Source     Source
-	UpdateTime int64
+	Path         string
+	Source       Source
+	UpdateTime   int64
+	RealOffsetMs int
 }
 
 // collected 是 collect 的结局：按次序的候选；keyed 为第 1 步得出了关联键（键在 LyricInfo 里没有行的也算）；
-// playedAt 为 P 的 LastPlayTime，没有 P 为 0；localFile 为 P 的 MusicFilePath 是绝对路径。pick 据后三项置 Result 的
-// AssocSkipped、PlayedAt 与 LocalFile。
+// playedAt 为 P 的 LastPlayTime，没有 P 为 0；localFile 为 P 的 MusicFilePath 是绝对路径；
+// menuUnassoc 为 P 命中右键菜单取消关联哨兵；pKey 为 P 的规范化 LyricKey。
 type collected struct {
-	cands     []candidate
-	keyed     bool
-	playedAt  int64
-	localFile bool
+	cands       []candidate
+	keyed       bool
+	playedAt    int64
+	localFile   bool
+	menuUnassoc bool
+	pKey        string
 }
 
 // errSchema 表示取不到 LyricInfo 表或其必需的列，即酷狗的表结构不是认得的这一版（设计 §6.5 末）。
@@ -141,14 +164,34 @@ func collect(db tables, hash string) (collected, error) {
 	if err != nil {
 		return collected{}, err
 	}
-	res := collected{keyed: len(keys) > 0, playedAt: p.played, localFile: filepath.IsAbs(p.path)}
+	res := collected{keyed: len(keys) > 0, playedAt: p.played, localFile: filepath.IsAbs(p.path), pKey: p.key}
+	if p.played > 0 && p.key == unassocMenuKey {
+		res.menuUnassoc = true
+		return res, nil
+	}
+	cols, err := db.Columns("LyricInfo")
+	if errors.Is(err, kgdb.ErrNoTable) || errors.Is(err, kgdb.ErrUnsupportedTable) {
+		return collected{}, errSchema(err)
+	}
+	if err != nil {
+		return collected{}, err
+	}
+	hasRealOffset := hasColumn(cols, "RealOffset")
+	scanCols := []string{"Key", "LyricPath", "SongHash", "UpdateTime"}
+	if hasRealOffset {
+		scanCols = append(scanCols, "RealOffset")
+	}
 	var manual, cache []candidate
 	cacheRows := 0
-	err = db.Scan("LyricInfo", []string{"Key", "LyricPath", "SongHash", "UpdateTime"}, func(row []kgdb.Value) bool {
+	err = db.Scan("LyricInfo", scanCols, func(row []kgdb.Value) bool {
 		if len(row[1].Bytes) > maxPathBytes {
 			return true
 		}
-		c := candidate{Path: row[1].String(), UpdateTime: row[3].Int64()}
+		realOffsetMs := 0
+		if hasRealOffset {
+			realOffsetMs = clampLyricOffsetMs(int(max(min(row[4].Int64(), maxAbsLyricOffsetMs), -maxAbsLyricOffsetMs)))
+		}
+		c := candidate{Path: row[1].String(), UpdateTime: row[3].Int64(), RealOffsetMs: realOffsetMs}
 		if k := lyricKey(row[0]); keys[k] {
 			delete(keys, k) // Key 是主键；库异常时同一 Key 有多行也只取第一行，关联一级不超过 maxCandidates 条
 			c.Source = SourceAssociation
@@ -231,6 +274,9 @@ func associationKeys(db tables, h string) (keys map[string]bool, p playing, err 
 	if err != nil {
 		return nil, playing{}, err
 	}
+	if p.played > 0 && p.key == unassocMenuKey {
+		return nil, p, nil
+	}
 	if p.played > 0 && p.key != "" {
 		return map[string]bool{p.key: true}, p, nil
 	}
@@ -251,7 +297,7 @@ func associationKeys(db tables, h string) (keys map[string]bool, p playing, err 
 				return true
 			}
 			k := lyricKey(row[1])
-			if k == "" || !sameHash(row[0], h) {
+			if k == "" || k == unassocMenuKey || k == unassocDialogKey || !sameHash(row[0], h) {
 				return true
 			}
 			if p.played > 0 {
@@ -366,6 +412,9 @@ func lyricKey(v kgdb.Value) string {
 // 结果之前有暂缺的候选时 Retry 为真。col.keyed 为真、而结果不是关联时 AssocSkipped 为真；PlayedAt、LocalFile 取
 // col.playedAt、col.localFile，结果为 KindNone 时同样带上。
 func pick(col collected, lyricDir string, read func(path string) ([]byte, error)) Result {
+	if col.menuUnassoc {
+		return Result{Kind: KindUnassociated, PlayedAt: col.playedAt, LocalFile: col.localFile}
+	}
 	r := Result{AssocSkipped: col.keyed, PlayedAt: col.playedAt, LocalFile: col.localFile}
 	for _, c := range col.cands {
 		path := c.Path
@@ -380,8 +429,13 @@ func pick(col collected, lyricDir string, read func(path string) ([]byte, error)
 			r.Retry = r.Retry || !errors.Is(err, klyric.ErrLyricTooLarge) && !errors.Is(err, errNotDiskFile)
 			continue
 		}
-		if lines, err := klyric.ParseLocal(b); err == nil && len(lines) > 0 {
+		if lines, fileOff, hasOffset, err := klyric.ParseLocalWithOffset(b); err == nil && len(lines) > 0 {
 			r.Kind, r.Lines, r.Source = KindFound, lines, c.Source
+			if hasOffset {
+				r.LyricOffsetMs = clampLyricOffsetMs(fileOff)
+			} else {
+				r.LyricOffsetMs = clampLyricOffsetMs(c.RealOffsetMs)
+			}
 			r.AssocSkipped = col.keyed && c.Source != SourceAssociation
 			return r
 		}

@@ -74,7 +74,7 @@ func TestTransportReadsValueAndSkipsEvents(t *testing.T) {
 				payload, _ := json.Marshal(map[string]string{"before": "Status=1&SongId=1", "song": encodedSong("MUSIC_1", "title", "artist"), "after": "Status=1&SongId=1"})
 				_ = c.WriteJSON(map[string]interface{}{"id": id, "result": map[string]interface{}{"result": map[string]interface{}{"value": string(payload)}}})
 			})
-			c, err := connect(context.Background(), s.URL+"/json")
+			c, err := connect(context.Background(), s.URL+"/json", connectTimeout)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,7 +99,7 @@ func TestTransportCancellationClosesSocket(t *testing.T) {
 func testCancellationClosesSocket(t *testing.T, build string) {
 	entered := make(chan struct{}, 1)
 	s := fakeCEF(t, build, "MUSIC_9.6.0.0_"+build, func(c *websocket.Conn, id uint64) { entered <- struct{}{} })
-	c, err := connect(context.Background(), s.URL+"/json")
+	c, err := connect(context.Background(), s.URL+"/json", connectTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestTransportRejectsUnverifiedOrMismatchedBridge(t *testing.T) {
 	} {
 		t.Run(tc.page+"/"+tc.version, func(t *testing.T) {
 			s := fakeCEF(t, tc.page, tc.version, func(*websocket.Conn, uint64) { t.Error("snapshot on unverified bridge") })
-			c, err := connect(context.Background(), s.URL+"/json")
+			c, err := connect(context.Background(), s.URL+"/json", connectTimeout)
 			if err == nil {
 				c.Close()
 				t.Fatal("unverified bridge accepted")
@@ -154,14 +154,14 @@ func TestTransportRejectsUnverifiedOrMismatchedBridge(t *testing.T) {
 	}
 	// Suffix agreement is case-insensitive: the page directory is lower-cased.
 	s := fakeCEF(t, "ug1", "MUSIC_9.6.0.0_UG1", func(*websocket.Conn, uint64) {})
-	c, err := connect(context.Background(), s.URL+"/json")
+	c, err := connect(context.Background(), s.URL+"/json", connectTimeout)
 	if err != nil {
 		t.Fatalf("case-only difference rejected: %v", err)
 	}
 	c.Close()
 	// An unverified page directory is rejected before the bridge is queried.
 	s = fakeCEF(t, "W1/../../9.7.0.0_W1", "MUSIC_9.6.0.0_W1", func(*websocket.Conn, uint64) { t.Error("snapshot on unverified page") })
-	if c, err := connect(context.Background(), s.URL+"/json"); !errors.Is(err, ErrVersionUnsupported) {
+	if c, err := connect(context.Background(), s.URL+"/json", connectTimeout); !errors.Is(err, ErrVersionUnsupported) {
 		if c != nil {
 			c.Close()
 		}
@@ -182,7 +182,7 @@ func TestTransportUnreachableIsNotVersionRejection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := httptest.NewServer(tc.h)
 			defer s.Close()
-			if _, err := connect(context.Background(), s.URL+"/json"); !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrVersionUnsupported) {
+			if _, err := connect(context.Background(), s.URL+"/json", connectTimeout); !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrVersionUnsupported) {
 				t.Fatalf("want ErrUnavailable, got %v", err)
 			}
 		})
@@ -190,7 +190,7 @@ func TestTransportUnreachableIsNotVersionRejection(t *testing.T) {
 	s := httptest.NewServer(http.NotFoundHandler())
 	endpoint := s.URL + "/json"
 	s.Close()
-	if _, err := connect(context.Background(), endpoint); err == nil || errors.Is(err, ErrVersionUnsupported) {
+	if _, err := connect(context.Background(), endpoint, connectTimeout); err == nil || errors.Is(err, ErrVersionUnsupported) {
 		t.Fatalf("refused connection: %v", err)
 	}
 }
@@ -199,7 +199,7 @@ func TestTransportRejectsThrownEvaluation(t *testing.T) {
 	s := fakeCEF(t, "W1", "MUSIC_9.6.0.0_W1", func(c *websocket.Conn, id uint64) {
 		_ = c.WriteJSON(map[string]interface{}{"id": id, "result": map[string]interface{}{"wasThrown": true, "result": map[string]interface{}{"value": "bad"}}})
 	})
-	c, err := connect(context.Background(), s.URL+"/json")
+	c, err := connect(context.Background(), s.URL+"/json", connectTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}

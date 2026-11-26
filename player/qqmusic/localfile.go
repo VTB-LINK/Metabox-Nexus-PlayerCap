@@ -28,8 +28,8 @@ const (
 	maxQRCPlainBytes  = 4 << 20   // qrc 解压后的明文
 	maxLocalLines     = 50000     // 每轨解析出的行数
 	maxMergeCells     = 1_000_000 // 翻译或音译与原文合并的规模 (n+1)×(m+1)，即 alignByTime 动态规划表的格数
-	maxLocalWords     = 200_000   // 每轨的逐字总数；音译复制给原文各行的逐字总数
-	maxLocalTextBytes = 4 << 20   // 音译复制给原文各行的文本总量（RomaText 与逐字文本的字节数之和）
+	maxLocalWords     = 200_000   // 每轨的逐字总数；音译复制给原文各行的逐字总数；主轨振假名分段总数
+	maxLocalTextBytes = 4 << 20   // 音译复制给原文各行的文本总量（RomaText 与逐字文本的字节数之和）；主轨振假名各段 Text 与 Ruby 累计字节数
 )
 
 var (
@@ -169,7 +169,7 @@ type trackFailure struct {
 // maxMergeCells，或音译超出复制预算（见 mergeRomaBounded）时只跳过该轨并打一条 Detail，不影响原文，依次列进 failed
 // （后两种记为 skipped），供调用方判暂缺、记下文件本身不可用的轨。返回的行未做时间偏移，也未套 offset。
 func loadLocalLyrics(read func(path string, max int64) ([]byte, error), mainPath string, files assoc.LyricFiles) (lines []lyricLine, failed []trackFailure, err error) {
-	lines, err = loadLyricTrack(read, mainPath)
+	lines, err = loadLyricTrackWithFurigana(read, mainPath, true)
 	if err != nil {
 		return nil, []trackFailure{{mainPath, errors.Is(err, errLyricFileMissing), false}}, err
 	}
@@ -187,7 +187,7 @@ func loadLocalLyrics(read func(path string, max int64) ([]byte, error), mainPath
 		if tr.path == "" {
 			continue
 		}
-		track, err := loadLyricTrack(read, tr.path)
+		track, err := loadLyricTrackWithFurigana(read, tr.path, false)
 		loaded := err == nil
 		if err == nil && int64(len(lines)+1)*int64(len(track)+1) > maxMergeCells {
 			err = i18n.Errorf("%d and %d lines exceed the merge limit", len(lines), len(track))
@@ -233,6 +233,10 @@ func mergeRomaBounded(lines, roma []lyricLine) error {
 // maxLocalLines 行或逐字总数超过 maxLocalWords 返回包装 errLyricFileUnusable 的错误。read 自己返回包装
 // errLyricFileUnusable 的错误（读取者认出未变的不可用文件，没有读）时原样返回。
 func loadLyricTrack(read func(path string, max int64) ([]byte, error), path string) ([]lyricLine, error) {
+	return loadLyricTrackWithFurigana(read, path, false)
+}
+
+func loadLyricTrackWithFurigana(read func(path string, max int64) ([]byte, error), path string, withFurigana bool) ([]lyricLine, error) {
 	if !filepath.IsAbs(path) {
 		return nil, i18n.Errorf("%w: path is not absolute", errLyricFileUnusable)
 	}
@@ -252,7 +256,7 @@ func loadLyricTrack(read func(path string, max int64) ([]byte, error), path stri
 	if err != nil {
 		return nil, i18n.Errorf("%w: %v", errLyricFileUnusable, err)
 	}
-	lines, _, _ := parseLRCLines(html.UnescapeString(text))
+	lines, _, _ := parseLRCLinesTrack(html.UnescapeString(text), withFurigana)
 	if len(lines) == 0 {
 		return nil, i18n.Errorf("%w: no timed lyric lines", errLyricFileUnusable)
 	}
@@ -266,5 +270,28 @@ func loadLyricTrack(read func(path string, max int64) ([]byte, error), path stri
 	if words > maxLocalWords {
 		return nil, i18n.Errorf("%w: more than %d per-character units", errLyricFileUnusable, maxLocalWords)
 	}
+	if withFurigana {
+		enforceLocalFuriganaBudget(lines)
+	}
 	return lines, nil
+}
+
+// enforceLocalFuriganaBudget 检查本地主歌词各行振假名的总量预算（设计 §6.3）：
+// 全曲分段总数超过 maxLocalWords 或各段 Text 与 Ruby 累计字节数超过 maxLocalTextBytes 时，
+// 清空全曲各行 Furigana 并记录一条 Detail，保留主歌词正常返回。
+func enforceLocalFuriganaBudget(lines []lyricLine) {
+	segs, textBytes := 0, 0
+	for i := range lines {
+		segs += len(lines[i].Furigana)
+		for _, seg := range lines[i].Furigana {
+			textBytes += len(seg.Text) + len(seg.Ruby)
+		}
+		if segs > maxLocalWords || textBytes > maxLocalTextBytes {
+			for j := range lines {
+				lines[j].Furigana = nil
+			}
+			log.Detail("Skipped QQ Music local furigana: %s", i18n.T("furigana exceeds local lyric size budget"))
+			return
+		}
+	}
 }

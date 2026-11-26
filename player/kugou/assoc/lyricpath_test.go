@@ -30,7 +30,7 @@ func TestPickRelativeJoinAndEscape(t *testing.T) {
 	}
 	for _, c := range usable {
 		var read []string
-		r := pick(collected{cands: []candidate{{c.path, SourceCache, 1}}}, c.dir, recordRead(&read))
+		r := pick(collected{cands: []candidate{{Path: c.path, Source: SourceCache, UpdateTime: 1}}}, c.dir, recordRead(&read))
 		if !slices.Equal(read, []string{c.want}) || r.Kind != KindFound || len(r.Lines) != 2 {
 			t.Errorf("LyricPath %q、歌词目录 %q：读了 %q、结果 %v，want 读 %q 并取到", c.path, c.dir, read, r.Kind, c.want)
 		}
@@ -48,7 +48,7 @@ func TestPickRelativeJoinAndEscape(t *testing.T) {
 	}
 	for _, c := range unusable {
 		var read []string
-		r := pick(collected{cands: []candidate{{c.path, SourceCache, 1}}}, c.dir, recordRead(&read))
+		r := pick(collected{cands: []candidate{{Path: c.path, Source: SourceCache, UpdateTime: 1}}}, c.dir, recordRead(&read))
 		if len(read) != 0 || r.Kind != KindNone || r.Retry {
 			t.Errorf("LyricPath %q、歌词目录 %q：读了 %q、结果 %+v，want 不读、KindNone、不待重试", c.path, c.dir, read, r)
 		}

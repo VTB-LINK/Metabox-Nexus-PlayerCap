@@ -5,8 +5,8 @@ package qqmusic
 // 所用的那一条（assocreader.go 的 readRecord）。
 //
 // 读 QQ 的内存只经会话开始时复制的只读句柄（PROCESS_QUERY_INFORMATION | PROCESS_VM_READ），本文件只调用 VirtualQueryEx、
-// ReadProcessMemory、DuplicateHandle、CloseHandle（songrecordreadonly_test.go 守）。不用 QQMusicMem 的句柄与方法：那个句柄
-// 是 PROCESS_ALL_ACCESS，且轮询线程的 CheckValid 会把 hProcess 清零，跨 goroutine 读它是数据竞争。
+// ReadProcessMemory、DuplicateHandle、CloseHandle（songrecordreadonly_test.go 守）。不用 QQMusicMem 的句柄与方法：mem.go
+// 仍保留历史写/注入方法，且其句柄由轮询线程的 CheckValid/Close 关闭并清零，跨 goroutine 共用仍是数据竞争与 use-after-close。
 
 import (
 	"bytes"

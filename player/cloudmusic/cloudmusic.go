@@ -1,6 +1,7 @@
 package cloudmusic
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -127,6 +128,34 @@ func snapshotMatchesCurrentSong(data *cdp.ExtractionData, songName, songArtist s
 	return currentArtist == targetArtist
 }
 
+// snapshotSong 返回快照里当前歌曲的歌名与歌手：各取 DOM 底栏的，为空的取 Redux 的 CurPlaying。data 与
+// data.CurPlaying 须非空。
+func snapshotSong(data *cdp.ExtractionData) (name, artist string) {
+	name, artist = data.DomSongName, data.DomArtist
+	if name == "" {
+		name = data.CurPlaying.Track.Name
+	}
+	if artist == "" {
+		artist = getArtists(data.CurPlaying.Track.Artists)
+	}
+	return name, artist
+}
+
+// snapshotHasSong 报告这一拍的快照里有没有当前歌曲：data、CurPlaying 非空，且歌名与歌手拼出的身份键非空
+// （buildSongIdentityKey 只在歌名为空时给空键，只有歌手不算有歌）。
+func snapshotHasSong(data *cdp.ExtractionData) bool {
+	return data != nil && data.CurPlaying != nil && buildSongIdentityKey(snapshotSong(data)) != ""
+}
+
+// songStatus 是换歌拍按播放态报的状态：PlayingState 为 2（在播）报 playing，其余报 paused；detail 为歌曲标题。
+// 与 state change 段的判据相同。
+func songStatus(playingState int, title string) *player.StatusInfo {
+	if playingState == 2 {
+		return &player.StatusInfo{Status: "playing", Detail: title}
+	}
+	return &player.StatusInfo{Status: "paused", Detail: title}
+}
+
 // unsupportedRecheck 检测到不支持的网易云版本后，多久重新探一次。
 // 取大值是因为「装的是 v2」是个近乎永久的状态：既不该占 CPU 空转，也得给用户升级后
 // 自动恢复的机会（不必重启 PlayerCap）。微软商店版同样按它重探（issue #212）。
@@ -146,16 +175,67 @@ func EffectivePollInterval(pollMs int) time.Duration {
 	return d
 }
 
+// sessionClient 是 runSession 用到的 CDP 客户端方法。生产恒为 *cdp.Client，离线用例注入按脚本返回快照的桩。
+type sessionClient interface {
+	Extract() (*cdp.ExtractionData, error)
+	IsClosed() bool
+	ForceFetchLyricsInRedux() error
+	FetchLyricsViaCDP(songID string) (*cdp.LyricFetchResult, error)
+	FetchCoverViaCDP(songID string) (string, error)
+	ExtractTlyricLines() map[int]string
+}
+
+// 外层循环用到的进程与连接操作经包级变量调用，离线用例替换它们以驱动 Start，不碰真进程、注册表与 9222 端口。
+var (
+	patchAutoStart  = watchdog.PatchRegistryAutoStart
+	ensureDebugMode = watchdog.EnsureDebugMode
+	isRunning       = watchdog.IsRunning
+	connectCDP      = func(ctx context.Context) (sessionClient, error) {
+		c, err := cdp.Connect(ctx)
+		if err != nil {
+			return nil, err // 不把 nil 的 *cdp.Client 装进接口
+		}
+		return c, nil
+	}
+)
+
+// cloudmusicDetails 是网易云在「没在读歌」时各种情形的 detail。
+func cloudmusicDetails() player.ProcessDetails {
+	return player.ProcessDetails{
+		NotRunning:   i18n.T("NetEase Cloud Music not running"),
+		Exited:       i18n.T("NetEase Cloud Music has exited"),
+		Disconnected: i18n.T("NetEase Cloud Music CDP disconnected"),
+	}
+}
+
 // Start 启动轮询循环（阻塞）
+//
+// 每轮在 EnsureDebugMode 之后判一次网易云是否在运行，非歌名状态一律由 player.ProcessStatus 按进程层次合成
+// （#231，设计 doc/design/converge-player-behavior-231-design.md §3.2）：不在运行报 waiting_process，从未见它运行为
+// process_not_running、运行过为 process_exited；在运行而读不了它报 standby 加原因（v2、商店版、读不到安装路径；
+// 连 CDP 之前与连不上为 cdp_disconnected，连上之后由 runSession 改报）。v2 与商店版按 unsupportedRecheck 重查，其间每 2 秒
+// 判一次进程，退出不等满重查间隔。
 func (p *CloudMusicPlayer) Start() {
 	// 0. Patch Windows registry auto-start
-	watchdog.PatchRegistryAutoStart()
+	patchAutoStart()
 
-	p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("NetEase Cloud Music not running"), Reason: player.ReasonProcessNotRunning})
-
+	d := cloudmusicDetails()
+	seen := false              // 本次服务期间见过网易云在运行：区分 process_exited 与 process_not_running
 	warnedUnsupported := false // v2 警告只打一次（它是永久状态，每轮打就是新的刷屏）
 	warnedStore := false       // 微软商店版警告只打一次，理由同 v2（issue #212）
 	warnedExeUnknown := false  // 读不到安装路径的警告只打一次（issue #212）
+
+	// 连接 CDP 随停止中止（cdp.Connect 自身另有单次上限）：9222 端口接受连接而不完成响应时，轮询 goroutine 不被挡在连接里。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		defer telemetry.Guard()
+		select {
+		case <-p.StopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
 	for {
 		select {
@@ -164,7 +244,11 @@ func (p *CloudMusicPlayer) Start() {
 		default:
 		}
 
-		restarted, err := watchdog.EnsureDebugMode()
+		restarted, err := ensureDebugMode()
+		running := isRunning()
+		if running {
+			seen = true
+		}
 		var unsupported *watchdog.UnsupportedVersionError
 		if errors.As(err, &unsupported) {
 			// v2：什么都不做。watchdog 已在 taskkill 之前挡住，这里只负责「别再往下走」。
@@ -196,10 +280,13 @@ func (p *CloudMusicPlayer) Start() {
 
 				warnedUnsupported = true
 			}
-			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
-				Status: "standby", Detail: fmt.Sprintf(i18n.T("NetEase Cloud Music v%s unsupported (requires v3+)"), unsupported.Version), Reason: player.ReasonVersionUnsupported,
-			})
-			time.Sleep(unsupportedRecheck)
+			p.EmitStatusIfChanged(player.ProcessStatus(running, seen, d, player.Blocked{
+				Reason: player.ReasonVersionUnsupported, Detail: fmt.Sprintf(i18n.T("NetEase Cloud Music v%s unsupported (requires v3+)"), unsupported.Version),
+			}))
+			// 重查间隔只用于重做版本判定；其间每 2 秒判进程，退出即回到循环顶部改报 waiting_process。
+			if stopped, _ := player.RecheckWait(p.StopCh, unsupportedRecheck, 2*time.Second, isRunning); stopped {
+				return
+			}
 			continue
 		}
 		warnedUnsupported = false // 版本变了（升级/换装）→ 下次再是 v2 可以再警告一次
@@ -218,38 +305,47 @@ func (p *CloudMusicPlayer) Start() {
 					map[string]any{"exe_path": packaged.ExePath})
 				warnedStore = true
 			}
-			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
-				Status: "standby", Detail: i18n.T("NetEase Cloud Music Microsoft Store version unsupported (requires the official installer version)"), Reason: player.ReasonVersionUnsupported,
-			})
-			time.Sleep(unsupportedRecheck)
+			p.EmitStatusIfChanged(player.ProcessStatus(running, seen, d, player.Blocked{
+				Reason: player.ReasonVersionUnsupported, Detail: i18n.T("NetEase Cloud Music Microsoft Store version unsupported (requires the official installer version)"),
+			}))
+			if stopped, _ := player.RecheckWait(p.StopCh, unsupportedRecheck, 2*time.Second, isRunning); stopped {
+				return
+			}
 			continue
 		}
 		warnedStore = false
 		if errors.Is(err, launch.ErrExeUnknown) {
 			// 有 cloudmusic.exe 在运行而读不到它的映像路径（通常是它以更高权限运行）：无从确知不是商店版，
-			// watchdog 已拒绝结束、重启。不往下连：特效与取词都以门禁通过为前提。
+			// watchdog 已拒绝结束、重启。不往下连：特效与取词都以门禁通过为前提。路径读到或网易云退出后，
+			// 下一轮按当时的层次改报，不另撤状态。
 			if !warnedExeUnknown {
 				log.Warn("Cannot read the installation path of NetEase Cloud Music; it was not restarted automatically. Run NetEase Cloud Music with the same privileges as this program")
 				warnedExeUnknown = true
 			}
-			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the NetEase Cloud Music installation path (NetEase Cloud Music may be running as administrator)"), Reason: player.ReasonNoAdmin})
+			p.EmitStatusIfChanged(player.ProcessStatus(running, seen, d, player.Blocked{
+				Reason: player.ReasonNoAdmin, Detail: i18n.T("Cannot read the NetEase Cloud Music installation path (NetEase Cloud Music may be running as administrator)"),
+			}))
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		if warnedExeUnknown {
-			// 路径读得到了，或网易云已退出：撤下「读不到安装路径」的状态，免得它一直留着。
-			warnedExeUnknown = false
-			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("NetEase Cloud Music not running"), Reason: player.ReasonProcessNotRunning})
-		}
+		warnedExeUnknown = false
 		if err != nil {
 			log.Error("watchdog error: %v", err)
 		}
+		if !running {
+			p.EmitStatusIfChanged(player.ProcessStatus(false, seen, d, player.Blocked{}))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		// 进程在运行而还没读到它（含带参数重启后等 CEF 就绪、CDP 连不上）：报 standby / cdp_disconnected，
+		// 连上之后由 runSession 按第一次读到的快照改报。
+		p.EmitStatusIfChanged(player.ProcessStatus(true, seen, d, player.Blocked{}))
 		if restarted {
 			log.Info("restarted NetEase Cloud Music, waiting 5s...")
 			time.Sleep(5 * time.Second)
 		}
 
-		client, err := cdp.Connect()
+		client, err := connectCDP(ctx)
 		if err != nil {
 			time.Sleep(2 * time.Second)
 			continue
@@ -261,12 +357,13 @@ func (p *CloudMusicPlayer) Start() {
 		atomic.StoreInt32(&p.connected, 0)
 		log.Info("session ended, waiting for NetEase Cloud Music to restart...")
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("NetEase Cloud Music has exited"), Reason: player.ReasonProcessExited})
+		// 状态在前、清空在后（设计 4.3 第 1 条）：进程已退出报 process_exited，仍在运行（连接断开）报 cdp_disconnected。
+		p.EmitStatusIfChanged(player.ProcessStatus(isRunning(), true, d, player.Blocked{}))
 		p.Emit(player.EventClearSongData, nil)
 	}
 }
 
-func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
+func (p *CloudMusicPlayer) runSession(client sessionClient) {
 	var lastSongIdentityKey string
 	var lastPlayingState int = -1
 	var lastLineIdx int = -1
@@ -341,6 +438,15 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		}
 		errLog.reset() // 取词成功 → 下次故障可再记一次
 
+		// 本会话还没宣告过歌时读到没有歌，如实报 waiting_song（设计 4.3 第 2 条），不让状态停在连上之前的那一条；
+		// 先状态、后 clear_song_data（设计 4.3 第 1 条、4.5）：上一次连接宣告过的歌可能仍留在画面上，服务端据此清屏。
+		// 每拍都发，重复的清除由服务端去重。宣告过歌之后读到没有歌暂不报、保留上一首：换歌时 CurPlaying 是否短暂为空未实测
+		// （设计 4.4，阶段二先探针）。
+		if lastSongIdentityKey == "" && !snapshotHasSong(data) {
+			p.EmitStatusIfChanged(player.NoSongStatus(player.ReasonNoSong, i18n.T("NetEase Cloud Music has no current song")))
+			p.Emit(player.EventClearSongData, nil)
+			continue
+		}
 		if data == nil || data.CurPlaying == nil {
 			continue
 		}
@@ -353,16 +459,8 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 		now := got
 
 		// Detect song change by DOM song name
-		songName := data.DomSongName
-		songArtist := data.DomArtist
+		songName, songArtist := snapshotSong(data)
 		songCover := data.DomCoverUrl
-
-		if songName == "" {
-			songName = data.CurPlaying.Track.Name
-		}
-		if songArtist == "" {
-			songArtist = getArtists(data.CurPlaying.Track.Artists)
-		}
 		if songCover == "" {
 			songCover = data.CurPlaying.Track.Album.PicUrl
 		}
@@ -550,9 +648,8 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				//
 				// activeLyrics 必须一起清：它是后续轮询的输入，不清的话 all_lyrics 说
 				// count:0、轮询却仍按那一行发 index:0。
-				if player.IsPureMusicOnly(lyricItems) {
-					log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
-					pureHint := lyricItems[0].Text
+				if pureHint, ok := player.PureMusicHint(lyricItems, songTitle); ok {
+					log.Info("platform returned only the hint \"%s\", treating as no lyrics", pureHint)
 					activeLyrics = nil
 					isPureMusic = true
 					emitPos(player.EventAllLyrics, &player.AllLyricsData{
@@ -570,10 +667,9 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				}
 			}
 
-			// 切歌时主动发 status_update（lastPlayingState 不再重置，state change 段不会重复触发）
-			if data.PlayingState == 2 {
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: songTitle})
-			}
+			// 切歌时按播放态主动发 status_update，暂停中连上、暂停中换歌也报（报 paused，设计 4.3 第 2 条）。
+			// lastPlayingState 已在分支开头记下，state change 段不会重复触发。
+			p.Emit(player.EventStatusUpdate, songStatus(data.PlayingState, songTitle))
 
 			// 上面的取词是阻塞的（实测 459～696ms），时钟在它之后才由 0 起走，同改动前：换歌后的落后量
 			// 「分支耗时 − 起播延迟」是对表设计的起点（设计 §1.2）。起点若配 got（分支之前），时钟会超前
@@ -610,9 +706,8 @@ func (p *CloudMusicPlayer) runSession(client *cdp.Client) {
 				// 同 :420 —— Redux 里同样可能只有那一行提示语。
 				// 文案与那边逐字一致（AGENTS.md §6.1）：来源是 Redux 这件事，上面那条
 				// 「歌词加载完成(Redux)」已经说了；这里再分叉一版措辞只会让 grep 漏掉一半。
-				if player.IsPureMusicOnly(lyricItems) {
-					log.Info("platform returned only the hint \"%s\", treating as no lyrics", lyricItems[0].Text)
-					pureHint := lyricItems[0].Text
+				if pureHint, ok := player.PureMusicHint(lyricItems, currentSongTitle); ok {
+					log.Info("platform returned only the hint \"%s\", treating as no lyrics", pureHint)
 					activeLyrics = nil
 					isPureMusic = true
 					lateLyrics = func() {

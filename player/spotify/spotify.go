@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -84,6 +85,10 @@ func EffectivePollInterval(pollMs int) time.Duration {
 // 与 cloudmusic 同值同理由：装了什么版本近乎永久，但用户升级后应当自动恢复（不必重启服务）。微软商店版同样按它
 // 重探（issue #212）。
 const unsupportedRecheck = 30 * time.Second
+
+// recheckStep 是重探等待期间判一次 Spotify 是否还在运行的间隔，与外层循环未运行时的等待同为 3 秒：进程退出按外层
+// 循环的常规节奏察觉，不等满 unsupportedRecheck（#231，设计 doc/design/converge-player-behavior-231-design.md §3.2）。
+const recheckStep = 3 * time.Second
 
 // installerURL 是 Spotify 官网安装包的直链（2026-11-17 实测 200）。官网下载页在 Windows 上给的是微软商店的按钮，
 // 提示里直接给安装包，免得用户照着下载页又装回商店版。
@@ -149,8 +154,9 @@ const (
 // 故：播放中真实位置 = transform 换算值 − progressLeadSec；暂停时两者相等（不校正）。
 // 残差 ±0.3s（换歌那一瞬间的界面延迟无法从外部测准）由 spotify-offset 吸收；默认 -200 经项目负责人确认正合适，不单独对齐。
 //
-// **别把这条校正搬到时钟里**：它只作用于"读数 → 位置"这一步，且必须跟着读数那一刻的播放态走
-// （暂停后再出现的读数是没有超前的，用播放中的规则去减会把位置拽回去 1 秒）。
+// **别把这条校正搬到时钟里**：它只作用于"读数 → 位置"这一步（见 posConverter）。
+// 暂停态读数不含超前；恢复播放后、页面刷出新有效读数前读到的仍是暂停态残留值，须继续沿用无超前口径，
+// 直到页面刷出新的有效读数再切回减 progressLeadSec，否则恢复首拍会把位置拽回 1 秒。
 //
 // 播放倍速（`spotify_cli speed`）非 1x 时这条常数会失准（动画 1 秒覆盖的内容长度随倍速变），
 // 未实测，故不猜。
@@ -177,7 +183,8 @@ const extractErrRepeat = 60 * time.Second
 const untitledWarnAfter = 10 * time.Second
 
 // untitledWatch 判定歌名选择器是否失效：时长大于 0（进度条上有曲目）而歌名为空，持续 untitledWarnAfter
-// 即告警，每个会话一次。歌名为空时上层把每一拍都当作没有曲目，不出任何消息（issue #128 即此症状）。
+// 即告警，每个会话一次。歌名为空时上层不宣告这首歌：连上时报 standby / metadata_unavailable，宣告过歌之后
+// 不出任何消息（issue #128 即此症状，见 classifyTrack）。
 type untitledWatch struct {
 	since  time.Time
 	warned bool
@@ -199,6 +206,82 @@ func (w *untitledWatch) observe(title string, durationMs float64, now time.Time)
 	return true
 }
 
+// trackPresence 是一拍快照里有没有曲目（设计 doc/design/converge-player-behavior-231-design.md 4.4 spotify 的判据）。
+// 歌名为空不等于没有曲目：歌名选择器失效时仍读得到正的时长与推进的位置。
+type trackPresence int
+
+const (
+	trackNamed   trackPresence = iota // 歌名非空
+	trackAbsent                       // 确实没有曲目
+	trackUnnamed                      // 曲目在、歌名读不到
+)
+
+// classifyTrack 按设计 4.4 的判据分类。durationMs 有效指有限正数（接受式判定：NaN 的任何比较都为假）；
+// playing 是本拍按图标（认不出时按位置推进）得出的播放态。
+func classifyTrack(title string, durationMs float64, playing bool) trackPresence {
+	switch {
+	case title != "":
+		return trackNamed
+	case durationMs > 0 && durationMs <= math.MaxFloat64 || playing:
+		return trackUnnamed
+	}
+	return trackAbsent
+}
+
+// preAnnounceStatus 是本会话还没宣告过歌时、非 trackNamed 的拍要声明的状态（设计 4.3 第 2、6 条）；trackNamed 返回 nil，
+// 调用方须先排除它（EmitStatusIfChanged 不接受 nil）。
+func preAnnounceStatus(c trackPresence) *player.StatusInfo {
+	switch c {
+	case trackAbsent:
+		return player.NoSongStatus(player.ReasonNoSong, i18n.T("Spotify has no current track"))
+	case trackUnnamed:
+		return player.ProcessStatus(true, true, spotifyDetails(), player.Blocked{
+			Reason: player.ReasonMetadataUnavailable, Detail: i18n.T("Cannot read the Spotify track title"),
+		})
+	}
+	return nil
+}
+
+// spotifyDetails 是 Spotify 在「没在读歌」时各种情形的 detail。
+func spotifyDetails() player.ProcessDetails {
+	return player.ProcessDetails{
+		NotRunning:   i18n.T("Spotify not running"),
+		Exited:       i18n.T("Spotify has exited"),
+		Disconnected: i18n.T("Spotify CDP disconnected"),
+	}
+}
+
+// sessionClient 是 runSession 用到的 CDP 会话方法。生产恒为 *cdp.Client，离线用例注入按脚本返回快照的桩。
+type sessionClient interface {
+	lyricsClient
+	Snapshot() (*cdp.Snapshot, error)
+	IsClosed() bool
+	Close()
+}
+
+// 外层循环与会话用到的 watchdog、cdp 入口经包级变量调用，离线用例替换它们以驱动 Start，不碰真进程、注册表、
+// 9223 端口与 spotify_cli。
+var (
+	patchAutoStart  = watchdog.PatchRegistryAutoStart
+	ensureDebugMode = watchdog.EnsureDebugMode
+	findMainPID     = watchdog.FindMainPID
+	findCLI         = watchdog.CLIPath
+	connectCDP      = func(ctx context.Context) (sessionClient, error) {
+		c, err := cdp.Connect(ctx)
+		if err != nil {
+			return nil, err // 不把 nil 的 *cdp.Client 装进接口
+		}
+		return c, nil
+	}
+)
+
+// spotifyRunning 报告 Spotify 是否在运行：FindMainPID 不返回 ErrNotRunning 即算（读不到主进程的命令行、枚举进程出错
+// 都按在运行，同 EnsureDebugMode 的口径）。
+func spotifyRunning() bool {
+	_, err := findMainPID()
+	return !errors.Is(err, watchdog.ErrNotRunning)
+}
+
 // sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
 func (p *SpotifyPlayer) sleepOrStop(d time.Duration) bool {
 	select {
@@ -210,14 +293,34 @@ func (p *SpotifyPlayer) sleepOrStop(d time.Duration) bool {
 }
 
 // Start 启动 Spotify 轮询循环（阻塞，须在 goroutine 中调用）。
+//
+// 每轮按 EnsureDebugMode 的结论声明当前层次，非歌名状态一律由 player.ProcessStatus 合成（#231，设计
+// doc/design/converge-player-behavior-231-design.md §3.2）：ErrNotRunning 报 waiting_process，从未见它运行为
+// process_not_running、运行过为 process_exited；其余结论都表示进程在运行，报 standby 加原因（版本不支持、商店版、
+// 读不到安装路径；端口未就绪、watchdog 的其他错误与连 CDP 之前为 cdp_disconnected，连上之后由 runSession 改报）。
+// 版本不支持与商店版按 unsupportedRecheck 重探，其间每 recheckStep 判一次进程，退出不等满重探间隔。
 func (p *SpotifyPlayer) Start() {
 	// 把调试 flag 补进用户的自启项：下次开机/自启就带端口，省掉一次「杀掉再拉起」。
 	// 值不存在（用户没开自启）时什么都不做。
-	watchdog.PatchRegistryAutoStart()
+	patchAutoStart()
 
+	d := spotifyDetails()
+	seen := false // 本次服务期间见过 Spotify 在运行：区分 process_exited 与 process_not_running
 	unsupportedWarned := false
 	storeWarned := false // 微软商店版只警告一次，理由同版本不支持（issue #212）
-	exeUnknown := false  // 上一轮读不到安装路径（issue #212）：只警告一次，循环顶部声明的是这一条
+	exeUnknown := false  // 上一轮读不到安装路径（issue #212）：只警告一次
+
+	// 连接 CDP 随停止中止（cdp.Connect 自身另有单次上限）：9223 端口接受连接而不完成响应时，轮询 goroutine 不被挡在连接里。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		defer telemetry.Guard()
+		select {
+		case <-p.StopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
 	for {
 		select {
@@ -226,40 +329,26 @@ func (p *SpotifyPlayer) Start() {
 		default:
 		}
 
-		// 每轮先声明「未连上」，避免上一场的状态留在缓存里（与 sodamusic 同形）。读不到安装路径期间声明的是那一条，
-		// 不在两条之间每轮来回切换。
-		if exeUnknown {
-			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Spotify installation path (Spotify may be running as administrator)"), Reason: player.ReasonNoAdmin})
-		} else {
-			p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Spotify not running or not connected"), Reason: player.ReasonProcessNotRunning})
+		err := ensureDebugMode()
+		running := !errors.Is(err, watchdog.ErrNotRunning)
+		if running {
+			seen = true
 		}
-		p.Emit(player.EventClearSongData, nil)
-
-		err := watchdog.EnsureDebugMode()
+		var block player.Blocked // 进程在运行而读不了它的原因；零值即调试通道未就绪
+		wait := 3 * time.Second
+		recheck := false
 		var packaged *launch.PackagedError
-		if !errors.Is(err, launch.ErrExeUnknown) {
-			exeUnknown = false
-		}
 		switch {
-		case errors.Is(err, watchdog.ErrNotRunning):
-			// 未运行——用户可能稍后启动，静默等待重试（上面已报未启动态）。
-			if p.sleepOrStop(3 * time.Second) {
-				return
-			}
-			continue
+		case !running:
+			// 未运行——用户可能稍后启动，静默等待重试（不代用户启动）。
 		case errors.Is(err, watchdog.ErrVersionUnsupported):
 			// 近乎永久的状态：不空转、不每次刷屏，但给用户升级后自动恢复的机会。
 			if !unsupportedWarned {
 				unsupportedWarned = true
 				log.Warn("Spotify does not support the remote debugging port; lyric capture is unavailable (reason: %v)", err)
 			}
-			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
-				Status: "standby", Detail: i18n.T("Spotify version unsupported (remote debugging unavailable)"), Reason: player.ReasonVersionUnsupported,
-			})
-			if p.sleepOrStop(unsupportedRecheck) {
-				return
-			}
-			continue
+			block = player.Blocked{Reason: player.ReasonVersionUnsupported, Detail: i18n.T("Spotify version unsupported (remote debugging unavailable)")}
+			recheck = true
 		case errors.As(err, &packaged):
 			// 微软商店版：watchdog 已在杀、拉起之前挡住（门禁）。形状同上面的版本不支持：只警告一次、
 			// standby + version_unsupported、按 unsupportedRecheck 重探，用户改装官网版后不必重启服务。
@@ -268,42 +357,43 @@ func (p *SpotifyPlayer) Start() {
 				log.Warn("Spotify is the Microsoft Store version (%s) and cannot be started with the debug flags; skipped Spotify lyric capture. To use it, uninstall it and install the official installer version: %s", packaged.ExePath, installerURL)
 				telemetry.ReportOnce("spotify.store_install", "Spotify 为微软商店版，无法带调试参数启动", nil, map[string]any{"exe_path": packaged.ExePath})
 			}
-			p.Emit(player.EventStatusUpdate, &player.StatusInfo{
-				Status: "standby", Detail: i18n.T("Spotify Microsoft Store version unsupported (requires the official installer version)"), Reason: player.ReasonVersionUnsupported,
-			})
-			if p.sleepOrStop(unsupportedRecheck) {
-				return
-			}
-			continue
+			block = player.Blocked{Reason: player.ReasonVersionUnsupported, Detail: i18n.T("Spotify Microsoft Store version unsupported (requires the official installer version)")}
+			recheck = true
 		case errors.Is(err, launch.ErrExeUnknown):
-			// 有 Spotify.exe 在运行而读不到它的映像路径：无从确知不是商店版，watchdog 已拒绝杀、重启。
-			// 此前每 3 秒打一条 Error，改为只警告一次；状态由循环顶部声明。
+			// 有 Spotify.exe 在运行而读不到它的映像路径：无从确知不是商店版，watchdog 已拒绝杀、重启。只警告一次。
 			if !exeUnknown {
-				exeUnknown = true
 				log.Warn("Cannot read the installation path of Spotify; it was not restarted automatically. Run Spotify with the same privileges as this program")
-				p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("Cannot read the Spotify installation path (Spotify may be running as administrator)"), Reason: player.ReasonNoAdmin})
 			}
-			if p.sleepOrStop(3 * time.Second) {
-				return
-			}
-			continue
+			block = player.Blocked{Reason: player.ReasonNoAdmin, Detail: i18n.T("Cannot read the Spotify installation path (Spotify may be running as administrator)")}
 		case errors.Is(err, watchdog.ErrPortNotReady):
 			// 刚带 flag 启动 / 端口被别的程序占着：短退避重试。
-			if p.sleepOrStop(1 * time.Second) {
-				return
-			}
-			continue
+			wait = time.Second
 		case err != nil:
 			log.Error("watchdog error: %v", err)
-			if p.sleepOrStop(3 * time.Second) {
+		}
+		exeUnknown = errors.Is(err, launch.ErrExeUnknown)
+		if err == nil {
+			unsupportedWarned = false
+			storeWarned = false
+		}
+		// 每轮声明当前层次，状态在前、清空在后（设计 4.3 第 1 条）；内容不变不重发。连上之前（含连不上）报的是
+		// standby / cdp_disconnected，连上之后由 runSession 按第一拍改报。
+		p.EmitStatusIfChanged(player.ProcessStatus(running, seen, d, block))
+		p.Emit(player.EventClearSongData, nil)
+		if recheck {
+			if stopped, _ := player.RecheckWait(p.StopCh, unsupportedRecheck, recheckStep, spotifyRunning); stopped {
 				return
 			}
 			continue
 		}
-		unsupportedWarned = false
-		storeWarned = false
+		if err != nil {
+			if p.sleepOrStop(wait) {
+				return
+			}
+			continue
+		}
 
-		client, err := cdp.Connect()
+		client, err := connectCDP(ctx)
 		if err != nil {
 			log.Warn("CDP connection failed: %v", err)
 			if p.sleepOrStop(2 * time.Second) {
@@ -317,7 +407,8 @@ func (p *SpotifyPlayer) Start() {
 		client.Close()
 
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("Spotify CDP disconnected"), Reason: player.ReasonCDPDisconnected})
+		// 状态在前、清空在后：进程已退出报 process_exited，仍在运行（连接断开）报 cdp_disconnected。
+		p.EmitStatusIfChanged(player.ProcessStatus(spotifyRunning(), true, d, player.Blocked{}))
 		p.Emit(player.EventClearSongData, nil)
 		if p.sleepOrStop(2 * time.Second) {
 			return
@@ -326,18 +417,19 @@ func (p *SpotifyPlayer) Start() {
 }
 
 // runSession 轮询页面播放态并 emit 事件，直到 CDP 断开。
-func (p *SpotifyPlayer) runSession(client *cdp.Client) {
+func (p *SpotifyPlayer) runSession(client sessionClient) {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	pollInterval := EffectivePollInterval(p.pollMs)
 
 	// cliPath 只在这里取一次：spotify_cli.exe 随 Spotify 安装、路径不会中途变；
 	// 取不到就整场没有歌词（标题/歌手/进度照常），并在下面告警一次。
-	cliPath, cliErr := watchdog.CLIPath()
+	cliPath, cliErr := findCLI()
 	if cliErr != nil {
 		log.Warn("Spotify CLI not found (%v); lyrics are unavailable this session, playback state still works", cliErr)
 	}
 
 	var clk clock
+	var posConv posConverter
 	var lastSongKey string
 	var lastLineIdx = -1
 	var currentLyrics []lyric.Line
@@ -358,9 +450,10 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 	// 保持 coverCancel 的显式调用（别包 defer/helper），让 go vet 的 lostcancel 看得见（对照 kugou.go）。
 	var coverCancel context.CancelFunc
 
-	// 图标判不出播放态时的兜底状态（见 stallWindow）。
+	// 图标判不出播放态时的兜底状态（见 stallWindow）。lastMoveAt 把会话第一个位置样本也记作推进（宣告用的播放态沿用
+	// 这一口径）；lastAdvanceAt 只记实际观察到的位置变化，歌名为空时判「曲目在」只认它。
 	var lastPositionMs = -1.0
-	var lastMoveAt time.Time
+	var lastMoveAt, lastAdvanceAt time.Time
 	var unknownIconWarned bool
 	var cliMismatchWarned bool
 	var untitled untitledWatch
@@ -485,8 +578,37 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 			log.Warn("the progress bar shows a track but its title has been unreadable for %v; Spotify's page structure may have changed, so nothing is reported for this track", untitledWarnAfter)
 		}
 
-		// 没有曲目（首页/未播放/刚启动）：静默等待，交给路由超时判 idle。
-		if snap.Title == "" {
+		// 本拍的播放态先于歌名判断算出：歌名为空时它是「曲目在」的证据之一（classifyTrack）。playingSeen 是这份证据：
+		// 图标认得出即按图标，认不出只认实际观察到的位置推进，会话第一个位置样本不算（它不说明位置在走）。
+		playing, iconKnown := snap.Playing()
+		playingSeen := playing
+		if !iconKnown {
+			// 图标常量不认识（Spotify 换了图标/结构）：退回「位置有没有在推进」。
+			moved := lastPositionMs >= 0 && snap.PositionMs != lastPositionMs
+			if moved {
+				lastAdvanceAt = now
+			}
+			if lastPositionMs < 0 || moved {
+				lastMoveAt = now
+			}
+			lastPositionMs = snap.PositionMs
+			playing = !lastMoveAt.IsZero() && now.Sub(lastMoveAt) < stallWindow
+			playingSeen = !lastAdvanceAt.IsZero() && now.Sub(lastAdvanceAt) < stallWindow
+			if !unknownIconWarned {
+				unknownIconWarned = true
+				log.Warn("play/pause icon not recognised; falling back to position-advance detection")
+			}
+		}
+
+		// 歌名为空。路由对 playing 没有超时，静默不会让已宣告的歌退场。本会话还没宣告过歌：没有曲目报 waiting_song，
+		// 曲目在而读不到歌名报 standby / metadata_unavailable（设计 4.3 第 2、6 条，4.4 spotify 阶段一），先状态、后
+		// clear_song_data（4.3 第 1 条、4.5：上一次连接宣告过的歌可能仍留在画面上），每拍都发，重复的清除由服务端去重。
+		// 宣告过歌之后歌名变空：不发事件、保留上一首（会话中途的处理以换歌空档的实测为前提，设计 4.4 阶段二）。
+		if c := classifyTrack(snap.Title, snap.DurationMs, playingSeen); c != trackNamed {
+			if lastSongKey == "" {
+				p.EmitStatusIfChanged(preAnnounceStatus(c))
+				p.Emit(player.EventClearSongData, nil)
+			}
 			time.Sleep(pollInterval)
 			continue
 		}
@@ -495,29 +617,15 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 		singer := strings.Join(snap.Artists, " / ")
 		songKey := snapSongKey(snap)
 		durationSec := float32(snap.DurationMs) / 1000.0
-		posSec := float32(snap.PositionMs) / 1000.0
+		rawSec := float32(snap.PositionMs) / 1000.0
 
-		playing, iconKnown := snap.Playing()
-		if !iconKnown {
-			// 图标常量不认识（Spotify 换了图标/结构）：退回「位置有没有在推进」。
-			if lastPositionMs < 0 || snap.PositionMs != lastPositionMs {
-				lastMoveAt = now
-			}
-			lastPositionMs = snap.PositionMs
-			playing = !lastMoveAt.IsZero() && now.Sub(lastMoveAt) < stallWindow
-			if !unknownIconWarned {
-				unknownIconWarned = true
-				log.Warn("play/pause icon not recognised; falling back to position-advance detection")
-			}
-		}
-
-		// 页面读数 → 真实位置：播放中要减掉进度条的动画超前量（见 progressLeadSec）。
-		// 判据必须用**这一刻的播放态**，不能用上一轮的：暂停后新出现的读数没有超前。
-		posSec = truePositionSec(float32(snap.PositionMs)/1000.0, playing)
+		// 页面读数 → 真实位置：播放中减掉进度条的动画超前量（见 progressLeadSec / posConverter）；
+		// 暂停态读数不含超前，恢复播放后至页面刷出新有效读数前继续沿用无超前口径。
+		isNewSong := songKey != lastSongKey
+		posSec, stalePos, clamped := posConv.convertTick(rawSec, durationSec, playing, isNewSong, lastSongKey == "")
 
 		// ── 换歌检测（歌名 + 歌手归一化后的稳定键）──
-		if songKey != lastSongKey {
-			firstSong := lastSongKey == ""
+		if isNewSong {
 			lastSongKey = songKey
 			lastLineIdx = -1
 			currentLyrics = nil
@@ -527,10 +635,9 @@ func (p *SpotifyPlayer) runSession(client *cdp.Client) {
 			retry.stop()
 			clk.reset()
 
-			// 换歌时页面的位置读数（见 trackStartGraceSec）。
-			if !firstSong && posSec > trackStartGraceSec {
-				log.Detail("position %.2fs right after the song change looks stale; anchoring at 0", posSec)
-				posSec = 0
+			// 换歌时页面的位置读数（见 trackStartGraceSec）：convertTick 已在超限时夹零并复位无超前状态。
+			if clamped {
+				log.Detail("position %.2fs right after the song change looks stale; anchoring at 0", stalePos)
 			}
 			// 换歌分支的落锚：时钟状态跟着新曲目重置，事件不在这里发（对外只有下面的 status）。
 			clk.observe(clockRaw(posSec, durationSec), playing, float64(durationSec), now)
@@ -833,15 +940,15 @@ type lyricsSettle struct {
 
 // settleLyrics 判定一次取词结果怎么落地：
 //   - 拿到行级歌词：换上，停止补取；
-//   - 平台只给了提示语（player.IsPureMusicOnly）：按无歌词处理；
+//   - 平台只给了提示语（player.PureMusicHint，此处无标题传空串、只认一行形状）：按无歌词处理；
 //   - 取到了响应却没有可用的行级歌词（UNSYNCED、零行、只有提示语），或平台答复 404（notFound）：平台已经答复，
 //     再试也不会有——换歌那次不起补取，补取那次停止补取；
 //   - 换歌那次没取到响应（401 / 403 / 网络错误等）：有 URI 才开始补取（没有 URI 就没有补取的钥匙，不必空转）；
 //     补取仍没取到响应：照节奏继续，到次数上限为止（lyricsMaxTries，见 lyricsRetry.land）。
 func settleLyrics(r lyricsResult) lyricsSettle {
 	var s lyricsSettle
-	if items := toLyricLines(r.lines, 0); player.IsPureMusicOnly(items) {
-		s.hint = items[0].Text
+	if hint, ok := player.PureMusicHint(toLyricLines(r.lines, 0), ""); ok {
+		s.hint = hint
 	} else {
 		s.lines = r.lines
 	}
@@ -927,6 +1034,60 @@ func truePositionSec(rawSec float32, playing bool) float32 {
 		return v
 	}
 	return 0
+}
+
+// posConverter 把页面 `--progress-bar-transform` 换算出的秒数转为真实播放位置。
+//
+// 暂停态下页面的读数不含 1s 动画超前量；恢复播放后、页面下一次刷新该读数之前，
+// 轮询读到的仍是暂停态留下的同一个原始值，继续按无超前原样输出，使 clock 识别为
+// 「采样未变、仅播放态切换（stateChanged && !rawChanged）」并从冻结位置平滑外推。
+// 只在 runSession 的轮询 goroutine 内调用，不加锁。
+type posConverter struct {
+	hasUnled bool
+	unledRaw float32
+}
+
+func (c *posConverter) reset() {
+	*c = posConverter{}
+}
+
+// convert 返回本拍换算后的位置（秒）。durationSec 用于与 clockRaw 同口径过滤非法读数：
+// NaN、负数或超长读数不改变已记录采样的口径，原样返回交由后续 clockRaw 统一判 -1。
+func (c *posConverter) convert(rawSec, durationSec float32, playing bool) float32 {
+	if !(rawSec >= 0) {
+		return rawSec
+	}
+	if !playing {
+		if durationSec > 0 && rawSec > durationSec*1.05 {
+			return rawSec
+		}
+		c.hasUnled = true
+		c.unledRaw = rawSec
+		return rawSec
+	}
+	if c.hasUnled && rawSec == c.unledRaw {
+		return rawSec
+	}
+	pos := truePositionSec(rawSec, true)
+	if durationSec > 0 && pos > durationSec*1.05 {
+		return pos
+	}
+	c.hasUnled = false
+	return pos
+}
+
+// convertTick 按本拍是否换歌执行换歌复位、位置换算与跨歌残留夹零，供 runSession 与离线单测共用。
+// clamped 为真时，返回的 posSec 已夹为 0，stalePos 为夹零前的换算值（供日志输出）。
+func (c *posConverter) convertTick(rawSec, durationSec float32, playing, isNewSong, firstSong bool) (posSec, stalePos float32, clamped bool) {
+	if isNewSong {
+		c.reset()
+	}
+	posSec = c.convert(rawSec, durationSec, playing)
+	if isNewSong && !firstSong && posSec > trackStartGraceSec {
+		c.reset()
+		return 0, posSec, true
+	}
+	return posSec, 0, false
 }
 
 // fetchLyrics 按优先级取一份歌词，返回解析好的行、响应、诊断串（为空表示拿到了行）与 notFound。

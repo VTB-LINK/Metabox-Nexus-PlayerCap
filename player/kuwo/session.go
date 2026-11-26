@@ -3,7 +3,6 @@ package kuwo
 import (
 	"errors"
 	"sort"
-	"strings"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/i18n"
@@ -44,19 +43,23 @@ var (
 // session has one owner: the polling loop. Workers return values, never emit
 // events. Generation AND RID checks prevent late assets crossing songs/idle.
 type session struct {
-	p                        *KuwoPlayer
-	gen                      uint64
-	rid                      string
-	song                     player.SongInfo
-	clock                    pos.CoreClock
-	duration                 float32
-	playing, haveState, idle bool
-	lines                    []player.LyricLine
-	lineIndex                int
-	allSent                  bool
-	tries                    int
-	retryAt                  time.Time
-	stall                    livenessWatch
+	p                                      *KuwoPlayer
+	gen                                    uint64
+	rid                                    string
+	song                                   player.SongInfo
+	clock                                  pos.CoreClock
+	duration                               float32
+	playing, haveState, idle, clearPending bool
+	lines                                  []player.LyricLine
+	// hint is the platform's original pure-music hint text when the lyrics were
+	// recognised as a no-lyrics hint by player.PureMusicHint (#231). It resets
+	// automatically with *s = session{...} on song change or clear.
+	hint      string
+	lineIndex int
+	allSent   bool
+	tries     int
+	retryAt   time.Time
+	stall     livenessWatch
 	// outMs and outAt are this tick's public position and observation time,
 	// set in observe before any event of the tick: the position every
 	// positioned event of the tick, and of accept until the next tick, carries.
@@ -164,15 +167,24 @@ func (w *livenessWatch) stalled(playing bool, posMs int32, now time.Time) bool {
 func newSession(p *KuwoPlayer) *session { return &session{p: p, lineIndex: -2} }
 
 func (s *session) clear() bool {
-	if s.idle {
+	if s.idle && !s.clearPending {
 		return false
 	}
-	s.p.NewSongGen()
-	s.p.Emit(player.EventClearSongData, nil)
-	s.p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: i18n.T("Kuwo has no current song"), Reason: player.ReasonNoSong})
-	p := s.p
-	*s = session{p: p, idle: true, lineIndex: -2}
-	return true
+	first := !s.idle
+	if first {
+		s.p.NewSongGen()
+		p := s.p
+		*s = session{p: p, idle: true, clearPending: true, lineIndex: -2}
+	}
+	// 先报状态、后清空，同 Start（设计 §4.4、§4.5）。通道满或仅余 1 槽时状态或清空可能被非阻塞
+	// 丢弃，保留 clearPending 在后续无歌拍重试；清空以最近一次成功入队的状态是否为 no_song 门控
+	// （本拍入队，或前拍已入队、本拍被去重），不用 EmitStatusIfChanged 的返回值，否则前拍状态入队、
+	// 清空被丢弃时重试拍永远等不到清空。
+	s.p.EmitStatusIfChanged(player.NoSongStatus(player.ReasonNoSong, i18n.T("Kuwo has no current song")))
+	if last, ok := s.p.LastStatus(); ok && last.Reason == player.ReasonNoSong {
+		s.clearPending = !s.p.TryEmit(player.EventClearSongData, nil)
+	}
+	return first
 }
 
 // hold reports whether this tick's sample is held instead of observed
@@ -236,7 +248,7 @@ func (s *session) observe(meta cdp.Snapshot, sample pos.Sample) bool {
 		*s = session{p: p, gen: gen, rid: sample.RID, lineIndex: -2, lines: []player.LyricLine{}}
 		s.p.Emit(player.EventClearSongData, nil)
 	}
-	s.idle = false
+	s.idle, s.clearPending = false, false
 	s.coreMs, s.haveCore = sample.CoreMs, true
 	seek := s.clock.Observe(sample)
 	s.outMs, s.outAt = sample.PositionMs, sample.ObservedAt
@@ -433,35 +445,14 @@ func (s *session) accept(r assetResult, now time.Time) {
 	s.retryAt = time.Time{}
 	s.settled = true
 	s.lines = toLyricLines(r.lines, float32(s.p.offsetMs)/1000)
-	if player.IsPureMusicOnly(s.lines) || isKuwoHintOnly(s.lines, s.song.Title) {
+	if hint, ok := player.PureMusicHint(s.lines, s.song.Title); ok {
 		s.lines = []player.LyricLine{}
+		s.hint = hint
+	} else {
+		s.hint = ""
 	}
 	s.emitAll()
 }
-
-// isKuwoHintOnly reports whether the lyrics are only Kuwo's own hint for a song
-// without words, which the API docs treat as no lyrics, like the shared hint
-// player.IsPureMusicOnly knows (#201). Seen (2026-11-14): one line
-// "此歌曲为DJ舞曲，请您欣赏", "此歌曲为没有填词的纯音乐，请您欣赏" or
-// "该歌曲为纯音乐请欣赏"; or the song's title line ("Go Time-Mark Petrie" for
-// "Go Time - Mark Petrie") followed by "该歌曲为纯音乐请欣赏". A title line counts
-// only when it equals the song's title once whitespace is removed; any other
-// lyrics, a song that happens to sing the hint included, are kept.
-func isKuwoHintOnly(lines []player.LyricLine, title string) bool {
-	switch len(lines) {
-	case 1:
-		return isKuwoHint(lines[0].Text)
-	case 2:
-		return isKuwoHint(lines[1].Text) && title != "" && squashSpace(lines[0].Text) == squashSpace(title)
-	}
-	return false
-}
-
-func isKuwoHint(text string) bool {
-	return (strings.HasPrefix(text, "此歌曲为") || strings.HasPrefix(text, "该歌曲为")) && strings.HasSuffix(text, "欣赏")
-}
-
-func squashSpace(s string) string { return strings.Join(strings.Fields(s), "") }
 
 func (s *session) retryDue(now time.Time) bool {
 	return s.rid != "" && s.playing && !s.retryAt.IsZero() && !now.Before(s.retryAt)
@@ -492,7 +483,7 @@ func (s *session) emitLine(now time.Time) {
 	if i != s.lineIndex && (i >= 0 || s.settled && len(s.lines) == 0) {
 		var sent bool
 		if i < 0 {
-			sent = s.emitPos(player.EventLyricUpdate, &player.LyricUpdate{Index: -1, Position: position, Progress: player.ClampProgress(position, s.duration)})
+			sent = s.emitPos(player.EventLyricUpdate, &player.LyricUpdate{Index: -1, Text: s.hint, Position: position, Progress: player.ClampProgress(position, s.duration)})
 		} else {
 			line := s.lines[i]
 			sent = s.emitPos(player.EventLyricUpdate, player.BuildLyricUpdate(i, line.Timestamp, line.Text, line.SubText, line.RomaText, line.TextDetailed, float32(s.p.offsetMs)/1000, position, s.duration))

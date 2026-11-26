@@ -1,8 +1,8 @@
 package kugou
 
-// 本文件只测播放中换词（#205，设计 §6.7「播放中」）：每拍非阻塞地取读取者的一条结果，是当前这首的歌词、且内容
-// （套 offset 之前的指纹）与当前歌词不同，才以此刻的位置发一条 all_lyrics、行号置为未定（随后同一拍按新歌词发
-// 当前行）；上一首的、内容相同的、不是歌词的结果都不发事件（关联没了保持当前歌词到下一首，设计 §1）。暂停中换词
+// 本文件只测播放中换词（#205，设计 §6.7「播放中」；#250 起稳定播放期事件驱动即时消费读取者结果）：收到当前这首的歌词、
+// 且内容（套 offset 之前的指纹）与当前歌词不同，才以此刻的 LivePosition 发一条 all_lyrics、行号置为未定（随后立即按新
+// 歌词发当前行）；上一首的、内容相同的、不是歌词的结果都不发事件（关联没了保持当前歌词到下一首，设计 §1）。暂停中换词
 // 的位置是暂停时冻结的位置。夹具见 fakelocal_test.go；轮询间隔 1 s，换歌拍在 0 s、等满 300 ms 后在线取词，此后
 // 各拍在 1.3 s、2.3 s……
 //
@@ -24,8 +24,8 @@ import (
 	"Metabox-Nexus-PlayerCap/player/kugou/assoc"
 )
 
-// 300 ms 内没有结果：在线取词；1.5 s 送来不同的歌词，下一拍（2.3 s、读数 42 s）发一条 all_lyrics，位置为此刻的位置，
-// 行号重置后按新歌词再发当前行（行号与换词前相同）。
+// 300 ms 内没有结果：在线取词；1.5 s 送来不同的歌词，在 1.3 s（读数 41 s）后的等待期即时收下，位置为 LivePosition
+// 41.20 s，发一条 all_lyrics，行号重置后按新歌词立即再发当前行（行号与换词前相同）。
 func TestSessionLocalTimeoutFallsBack(t *testing.T) {
 	run := runLocal(t, 1000, map[string][]reply{"A": {{1500 * time.Millisecond, found("A", lyricSet("本地"))}}},
 		twice(read("A", "playing", 40, 200)),
@@ -38,7 +38,7 @@ func TestSessionLocalTimeoutFallsBack(t *testing.T) {
 	}
 	checkLyricEvents(t, lyricEvents(run.events), []string{
 		"all_lyrics@40.00:在线一/在线二", "lyric_update#1:在线二",
-		"all_lyrics@42.00:本地一/本地二", "lyric_update#1:本地二",
+		"all_lyrics@41.20:本地一/本地二", "lyric_update#1:本地二",
 	})
 	for _, e := range run.events {
 		if e.Type == player.EventPlaybackResume || e.Type == player.EventPlaybackPause {
@@ -86,7 +86,7 @@ func TestSessionSameLyricsNoEvent(t *testing.T) {
 		)
 		checkLyricEvents(t, lyricEvents(run.events), []string{
 			"all_lyrics@40.00:在线一/在线二", "lyric_update#1:在线二",
-			"all_lyrics@42.00:本地一/本地二", "lyric_update#1:本地二",
+			"all_lyrics@41.20:本地一/本地二", "lyric_update#1:本地二",
 		})
 	})
 }
@@ -103,7 +103,7 @@ func TestSessionLocalAfterNoLyrics(t *testing.T) {
 	checkLyricEvents(t, lyricEvents(run.events), []string{
 		"all_lyrics@40.00:在线一/在线二", "lyric_update#1:在线二",
 		"all_lyrics@40.00:", "lyric_update#-1:",
-		"all_lyrics@42.00:在线一/在线二", "lyric_update#1:在线二",
+		"all_lyrics@41.20:在线一/在线二", "lyric_update#1:在线二",
 	})
 }
 

@@ -28,12 +28,12 @@ import (
 var log = logger.New("KuGou] [Watchdog") // 渲染为 [KuGou] [Watchdog]
 
 // ErrInstallNotFound 表示未找到酷狗安装。酷狗不在运行时上层等它启动后重试，届时按运行中的进程定位（酷狗可能
-// 装在注册表与常见路径之外）；在运行时上层同样重试，连续多轮仍找不到才终态停用。见 kugou.go 的 classifyEnsureErr。
+// 装在注册表与常见路径之外）；在运行时上层同样重试，连续多轮仍找不到才按受阻处理、改为定时重查。见 kugou.go 的 classifyEnsureErr。
 var ErrInstallNotFound = i18n.Sentinel("KuGou installation not found (KuGou.exe or libcef.dll is missing)")
 
 // ErrVersionUnsupported 表示 libcef.dll 在已知偏移处的字节指纹既非原版也非已 patch，
-// 版本不认识，拒绝盲打补丁。属终态错误，不应重试（重试也只会反复弹 UAC）。
-// 上层据此停止而非空转，见 kugou.go 的分流。
+// 版本不认识，拒绝盲打补丁。上层不立即重试（重试也只会反复弹 UAC），按受阻处理、定时重走只读的判定，
+// 换成受支持的版本后照常修补。见 kugou.go 的分流。
 var ErrVersionUnsupported = i18n.Sentinel("libcef.dll version unsupported (byte fingerprint at the known offsets does not match)")
 
 // ErrInstallChanged 表示修补前预选了安装、等到酷狗启动后重新定位，启动的却是另一份安装（或重新定位出错）。
@@ -45,6 +45,10 @@ var ErrInstallChanged = i18n.Sentinel("KuGou that started is a different install
 // **上层必须退避并设上限**：本函数在 launchElevatedHelper 处弹 UAC，被拒即返回；调用方
 // 若立刻重试，UAC 安全桌面就会全屏夺焦——直播时是事故。见 kugou.go 的 elevationGate。
 var ErrElevationFailed = i18n.Sentinel("Administrator rights not obtained")
+
+// ErrElevationNeeded 表示 libcef.dll 需要修补，而本次运行已放弃提权（UAC 连续被拒，见 kugou.go 的 elevationGate）：
+// EnsurePatchedNoElevate 走到要弹 UAC 的分支时返回它，不调用 launchElevatedHelper。
+var ErrElevationNeeded = i18n.Sentinel("libcef.dll needs repair, but elevation is disabled for this run")
 
 const (
 	TargetProcessName = "KuGou.exe"
@@ -120,19 +124,24 @@ func isCDPAvailable() bool {
 //
 // 经 openShared 以读写删全共享打开：Confirm 每个会话都会调用本函数，句柄存续期间不能挡住酷狗更新器改名或删除该 DLL。
 func CheckPatchStatus(libcefPath string) (allPatched bool, canAutoFix bool, err error) {
+	return checkPatchStatus(libcefPath, true)
+}
+
+// checkPatchStatus 同 CheckPatchStatus；warn 为假时指纹不认识也不打警告（ensurePatched 重查同一份 DLL 时）。
+func checkPatchStatus(libcefPath string, warn bool) (allPatched bool, canAutoFix bool, err error) {
 	f, err := openShared(libcefPath)
 	if err != nil {
 		return false, false, i18n.Errorf("open libcef.dll: %w", err)
 	}
 	defer f.Close()
-	return classifyLibcef(f)
+	return classifyLibcef(f, warn)
 }
 
 // classifyLibcef 是 CheckPatchStatus 的纯判定核心，只依赖 io.ReaderAt，便于用合成
 // 字节流覆盖三态（真实 DLL 有 ~139MB，不适合进单元测试）。*os.File 满足 io.ReaderAt，
 // 其 ReadAt 在读不满时必返回 error（io.ReaderAt 契约），故无需 io.ReadFull；ReadAt
-// 也不移动文件偏移，与并发/复用同一路径的读写互不干扰。
-func classifyLibcef(r io.ReaderAt) (allPatched bool, canAutoFix bool, err error) {
+// 也不移动文件偏移，与并发/复用同一路径的读写互不干扰。warn 为真时，指纹不认识打一条 Warn，写明哪一处、什么字节。
+func classifyLibcef(r io.ReaderAt, warn bool) (allPatched bool, canAutoFix bool, err error) {
 	allPatched = true // 直到发现某处不等于 data
 	for i, p := range libcefPatches {
 		buf := make([]byte, len(p.data)) // len(orig)==len(data)，见 TestPatchTableConsistency
@@ -146,7 +155,9 @@ func classifyLibcef(r io.ReaderAt) (allPatched bool, canAutoFix bool, err error)
 		}
 		if !isData && !isOrig {
 			// 该偏移既非已打补丁的字节，也非我们认识的原始指令：版本指纹不匹配
-			log.Warn("Patch%d (offset=0x%X) bytes %X are neither original nor patched; libcef.dll version unsupported", i+1, p.offset, buf)
+			if warn {
+				log.Warn("Patch%d (offset=0x%X) bytes %X are neither original nor patched; libcef.dll version unsupported", i+1, p.offset, buf)
+			}
 			return false, false, nil
 		}
 	}
@@ -1171,7 +1182,20 @@ func samePath(a, b string) bool {
 // 逐个核验，选定安装之后再核验预选的 exe（酷狗不在运行时它取自注册表或常见安装根，修补、拉起的都是它）；DLL 已修补、
 // 只等酷狗启动时，等到之后再核验一次（awaitPatchedKuGou），要修补时 killAndPatch 在结束之前再核验一次。门禁不过时原样
 // 返回它的错误。
-func EnsurePatched(stopCh <-chan struct{}) error {
+func EnsurePatched(stopCh <-chan struct{}) error { return ensurePatched(stopCh, true) }
+
+// EnsurePatchedNoElevate 与 EnsurePatched 相同，但走到需要提权的分支时返回 ErrElevationNeeded，不调用 launchElevatedHelper。
+// 上层放弃提权之后一律以此调用（设计 doc/design/converge-player-behavior-231-design.md §5.3）：DLL 已修补或 CDP 已可用时
+// 照常返回 nil，这两种情形都不需要提权。
+func EnsurePatchedNoElevate(stopCh <-chan struct{}) error { return ensurePatched(stopCh, false) }
+
+// installLogged 与 fingerprintWarned 是 ensurePatched 的日志去重：上层在修补受阻期间每 30 秒重走一次判定（kugou.go 的
+// storeRecheck），安装目录与版本（键为 KuGou.exe 路径与版本）、指纹不认识的警告（键为 libcef.dll 路径与版本）各只在键与上一次
+// 打过的不同时才打。只由 ensurePatched 读写，ensurePatched 只在 kugou 的 Start 所在的 goroutine 上调用。
+var installLogged, fingerprintWarned string
+
+// ensurePatched 是 EnsurePatched 与 EnsurePatchedNoElevate 的实体，allowElevate 为假时不弹 UAC。
+func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 	if err := gateRunningFn(); err != nil {
 		return err
 	}
@@ -1187,7 +1211,6 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 	if err := launch.Gate(exePath); err != nil {
 		return err
 	}
-	log.Info("KuGou install directory: %s", filepath.Dir(exePath))
 
 	// 版本号不作**正向**判据——「能不能打」由 libcef.dll 的字节指纹决定（见
 	// CheckPatchStatus）。KuGou.exe 的版本号与它 vendored 的 CEF 版本相互独立，拿前者当
@@ -1196,10 +1219,14 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 	if ver == "" {
 		ver = filepath.Base(filepath.Dir(libcefPath))
 	}
-	if ver == knownVersion {
-		log.Info("KuGou version: %s (recommended)", ver)
-	} else {
-		log.Info("KuGou version: %s (recommended version is %s; the libcef.dll byte fingerprint is authoritative)", ver, knownVersion)
+	if key := exePath + "|" + ver; key != installLogged {
+		installLogged = key
+		log.Info("KuGou install directory: %s", filepath.Dir(exePath))
+		if ver == knownVersion {
+			log.Info("KuGou version: %s (recommended)", ver)
+		} else {
+			log.Info("KuGou version: %s (recommended version is %s; the libcef.dll byte fingerprint is authoritative)", ver, knownVersion)
+		}
 	}
 	// 全量版本 tag：支持与否都设，让 Sentry 聚合野外最多的酷狗版本（异常上报只覆盖被拒的版本）。
 	telemetry.SetPlayerVersion("kugou", ver)
@@ -1219,14 +1246,16 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 		return i18n.Errorf("%w: KuGou %s is in the 10.x series; patches target only %s (different CEF baseline)", ErrVersionUnsupported, ver, knownVersion)
 	}
 
-	allPatched, canAutoFix, err := CheckPatchStatus(libcefPath)
+	fingerprint := libcefPath + "|" + ver
+	allPatched, canAutoFix, err := checkPatchStatus(libcefPath, fingerprint != fingerprintWarned)
 	if err != nil {
 		return i18n.Errorf("check patch status: %w", err)
 	}
 	if !canAutoFix {
 		// 9 处偏移里有字节既非原版也非已 patch：这个 DLL 不是我们逆向针对的那个 CEF。
-		// 拒绝盲打——拿错版本的偏移写 93MB 签名 DLL 会让用户被迫重装酷狗。终态错误。
-		//
+		// 拒绝盲打——拿错版本的偏移写 93MB 签名 DLL 会让用户被迫重装酷狗。上层按受阻处理、定时重查。
+		fingerprintWarned = fingerprint
+
 		// 「预期之外」，且是这几条里最值钱的一条：酷狗换了 vendored 的 CEF，而我们的偏移表
 		// 停在 20.1.22.27795 / CEF 89.20.0。上报带上酷狗版本 —— **那正是下一次该逆向哪个
 		// 版本的输入**。注意酷狗版本与它 vendored 的 CEF 版本相互独立（见 :699 注释），
@@ -1246,7 +1275,10 @@ func EnsurePatched(stopCh <-chan struct{}) error {
 		return awaitPatchedKuGou(func() kugouWait { return waitForKuGou(stopCh, nil) })
 	}
 
-	// DLL 未 patch：先弹 UAC 获取提权（helper 在后台等待触发指令）
+	// DLL 未 patch：先弹 UAC 获取提权（helper 在后台等待触发指令）。上层已放弃提权时到此为止。
+	if !allowElevate {
+		return ErrElevationNeeded
+	}
 	log.Info("libcef.dll needs repair; requesting administrator rights (UAC)...")
 	helper, err := launchElevatedHelper(libcefPath)
 	if err != nil {

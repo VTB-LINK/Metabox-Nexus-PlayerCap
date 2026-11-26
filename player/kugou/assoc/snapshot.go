@@ -84,58 +84,77 @@ var realFS = dbFS{
 //
 // 不能完全排除的时序（未提交的页在两遍期间不变、在读后检查之前回滚）及其后果见设计 §6.4 末。
 func readCandidates(ctx context.Context, dbPath, hash string, fs dbFS) (collected, error) {
+	return readConsistent(ctx, dbPath, fs, func(db *kgdb.DB) (collected, error) {
+		return collect(db, hash)
+	})
+}
+
+// readPlayingRow 经两遍页一致骨架只读查询 hash 对应的正在播放队列行 P，仅扫描 PlayQueueAssistItem* 表，
+// 跳过 LyricInfo 与其余歌单表。
+func readPlayingRow(ctx context.Context, dbPath, hash string, fs dbFS) (playing, error) {
+	h := strings.TrimSpace(hash)
+	if strings.Trim(h, "0") == "" {
+		return playing{}, nil
+	}
+	return readConsistent(ctx, dbPath, fs, func(db *kgdb.DB) (playing, error) {
+		return playingRow(db, h)
+	})
+}
+
+func readConsistent[T any](ctx context.Context, dbPath string, fs dbFS, fn func(db *kgdb.DB) (T, error)) (T, error) {
+	var zero T
 	wal := dbPath + "-wal"
 	switch found, err := fs.exists(wal); {
 	case err != nil:
-		return collected{}, i18n.Errorf("%w: %v", errTransient, err)
+		return zero, i18n.Errorf("%w: %v", errTransient, err)
 	case found:
-		return collected{}, i18n.Errorf("%w: WAL file %s exists", kgdb.ErrUnsupportedDB, wal)
+		return zero, i18n.Errorf("%w: WAL file %s exists", kgdb.ErrUnsupportedDB, wal)
 	}
 	journal := dbPath + "-journal"
 	if err := journalCheck(fs, journal); err != nil {
-		return collected{}, err
+		return zero, err
 	}
 	size, err := fs.size(dbPath)
 	if err != nil {
-		return collected{}, i18n.Errorf("%w: %v", errTransient, err)
+		return zero, i18n.Errorf("%w: %v", errTransient, err)
 	}
 	if size <= 0 || size%kgdb.PageSize != 0 {
-		return collected{}, i18n.Errorf("%w: database size %d is not a positive multiple of %d", errTransient, size, kgdb.PageSize)
+		return zero, i18n.Errorf("%w: database size %d is not a positive multiple of %d", errTransient, size, kgdb.PageSize)
 	}
 
 	var sums [2][sha256.Size]byte
-	var last pass
+	var last pass[T]
 	for i := range sums {
 		if i > 0 {
 			if err := journalCheck(fs, journal); err != nil {
-				return collected{}, err
+				return zero, err
 			}
 		}
-		last = readPass(ctx, dbPath, hash, size, fs)
+		last = readPass(ctx, dbPath, size, fs, fn)
 		if err := ctx.Err(); err != nil {
-			return collected{}, err
+			return zero, err
 		}
 		if last.readErr != nil {
-			return collected{}, i18n.Errorf("%w: %v", errTransient, last.readErr)
+			return zero, i18n.Errorf("%w: %v", errTransient, last.readErr)
 		}
 		sums[i] = last.sum
 	}
 
 	if err := journalCheck(fs, journal); err != nil {
-		return collected{}, err
+		return zero, err
 	}
 	now, err := fs.size(dbPath)
 	if err != nil {
-		return collected{}, i18n.Errorf("%w: %v", errTransient, err)
+		return zero, i18n.Errorf("%w: %v", errTransient, err)
 	}
 	if now != size {
-		return collected{}, i18n.Errorf("%w: database size changed from %d to %d", errTransient, size, now)
+		return zero, i18n.Errorf("%w: database size changed from %d to %d", errTransient, size, now)
 	}
 	if sums[0] != sums[1] {
-		return collected{}, i18n.Errorf("%w: pages read in the two passes differ", errTransient)
+		return zero, i18n.Errorf("%w: pages read in the two passes differ", errTransient)
 	}
 	if last.err != nil && !errors.Is(last.err, kgdb.ErrUnsupportedDB) && !errors.Is(last.err, kgdb.ErrCorrupt) {
-		return collected{}, i18n.Errorf("%w: %v", errTransient, last.err)
+		return zero, i18n.Errorf("%w: %v", errTransient, last.err)
 	}
 	return last.res, last.err
 }
@@ -152,43 +171,44 @@ func journalCheck(fs dbFS, journal string) error {
 	return nil
 }
 
-// pass 是一遍读取的结局：collect 的结局或解析的错误，以及读到的页的摘要。readErr 非空表示打开或读页失败
+// pass 是一遍读取的结局：回调的结局或解析的错误，以及读到的页的摘要。readErr 非空表示打开或读页失败
 // （含读不满、取消），本遍作废。
-type pass struct {
-	res     collected
+type pass[T any] struct {
+	res     T
 	err     error
 	readErr error
 	sum     [sha256.Size]byte
 }
 
-// readPass 打开库读一遍：取页层、读 sqlite_master、collect，读完关闭。size 是读前取得的库大小。
-func readPass(ctx context.Context, dbPath, hash string, size int64, fs dbFS) pass {
+// readPass 打开库读一遍：取页层、读 sqlite_master、执行 fn，读完关闭。size 是读前取得的库大小。
+func readPass[T any](ctx context.Context, dbPath string, size int64, fs dbFS, fn func(db *kgdb.DB) (T, error)) pass[T] {
 	if err := ctx.Err(); err != nil {
-		return pass{readErr: err}
+		return pass[T]{readErr: err}
 	}
 	r, c, err := fs.open(dbPath)
 	if err != nil {
-		return pass{readErr: err}
+		return pass[T]{readErr: err}
 	}
 	defer c.Close()
 	pr := &pageReader{ctx: ctx, r: r, sum: sha256.New()}
-	var p pass
-	p.res, p.err = collectFrom(pr, size, hash)
+	var p pass[T]
+	p.res, p.err = readDBWith(pr, size, fn)
 	p.readErr = pr.err
 	pr.sum.Sum(p.sum[:0])
 	return p
 }
 
-func collectFrom(r io.ReaderAt, size int64, hash string) (collected, error) {
+func readDBWith[T any](r io.ReaderAt, size int64, fn func(db *kgdb.DB) (T, error)) (T, error) {
+	var zero T
 	pg, err := kgdb.NewPager(r, size)
 	if err != nil {
-		return collected{}, err
+		return zero, err
 	}
 	db, err := kgdb.Open(pg)
 	if err != nil {
-		return collected{}, err
+		return zero, err
 	}
-	return collect(db, hash)
+	return fn(db)
 }
 
 // pageReader 包装一遍读取的 ReaderAt：每次读前检查取消；读满的页以「LE32 页号 ‖ 读入的字节」喂进本遍的

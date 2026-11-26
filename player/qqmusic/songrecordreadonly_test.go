@@ -5,7 +5,7 @@ package qqmusic
 //
 // # 为什么
 //
-// QQMusicMem 的句柄是 PROCESS_ALL_ACCESS，mem.go 里有写内存与注入的实现（AGENTS.md §7.1「只读」的边界、§3.6）。读记录
+// mem.go 仍保留历史写内存与注入的实现，且 QQMusicMem 的句柄由轮询线程的 CheckValid/Close 关闭并清零（AGENTS.md §7.1「只读」的边界、§3.6）。读记录
 // 跑在读取者 goroutine 里、扫的是 QQ 的整片私有可写内存，写错一处即坏主播的 QQ（§0 第 1 条）。所以它只用会话开始时复制的
 // 只读句柄，只调用 VirtualQueryEx、ReadProcessMemory、DuplicateHandle、CloseHandle（另有取本进程伪句柄的 CurrentProcess，
 // 不是系统调用），复制时访问权限恰为 PROCESS_QUERY_INFORMATION | PROCESS_VM_READ、不继承、不带 DUPLICATE_SAME_ACCESS。
@@ -136,7 +136,7 @@ func songRecordReadOnlyProblems(src string, procs, memMethods []string) []string
 			case slices.Contains(songRecordBannedSelectors, n.Sel.Name):
 				bad(n, "动态取系统调用：.%s", n.Sel.Name)
 			case slices.Contains(memMethods, n.Sel.Name) && !slices.Contains(songRecordMemAllowed, n.Sel.Name):
-				bad(n, "用了 QQMusicMem 的方法 %s（其句柄可写，且由轮询线程清零）", n.Sel.Name)
+				bad(n, "用了 QQMusicMem 的方法 %s（mem.go 仍保留写/注入方法，且其句柄由轮询线程关闭并清零）", n.Sel.Name)
 			}
 		case *ast.Ident:
 			if slices.Contains(procs, n.Name) {
@@ -182,7 +182,7 @@ func TestSongRecordReadOnly(t *testing.T) {
 }
 
 // 以改写过的 songrecord.go 自证门禁拦得住：加一处 WriteProcessMemory（直调、经 LazyProc、经别名导入）；访问参数改为
-// PROCESS_ALL_ACCESS（x/sys 的与本包的）、多加 PROCESS_VM_WRITE；带 DUPLICATE_SAME_ACCESS；可继承；导入 syscall；
+// PROCESS_ALL_ACCESS（x/sys 的与裸标识符）、多加 PROCESS_VM_WRITE；带 DUPLICATE_SAME_ACCESS；可继承；导入 syscall；
 // 用 QQMusicMem 的方法读内存；删掉 DuplicateHandle。每一种都须报出，且改写确实发生了。
 func TestSongRecordReadOnlyCatchesMutations(t *testing.T) {
 	procs, memMethods := packageGlobals(t)
@@ -205,7 +205,7 @@ func TestSongRecordReadOnlyCatchesMutations(t *testing.T) {
 		{"经 LazyProc 写", "", "\nfunc mutant() { procWriteProcessMemory.Call(0, 0, 0, 0, 0) }\n", "procWriteProcessMemory"},
 		{"经别名导入写", `"golang.org/x/sys/windows"`, `"golang.org/x/sys/windows"` + "\n\tw2 \"golang.org/x/sys/windows\"", "w2"},
 		{"访问参数为 x/sys 的 PROCESS_ALL_ACCESS", access, "windows.PROCESS_ALL_ACCESS", "PROCESS_ALL_ACCESS"},
-		{"访问参数为本包的 PROCESS_ALL_ACCESS", access, "PROCESS_ALL_ACCESS", "PROCESS_ALL_ACCESS"},
+		{"访问参数为裸标识符 PROCESS_ALL_ACCESS", access, "PROCESS_ALL_ACCESS", "PROCESS_ALL_ACCESS"},
 		{"多加 PROCESS_VM_WRITE", access, access + "|windows.PROCESS_VM_WRITE", "PROCESS_VM_WRITE"},
 		{"DUPLICATE_SAME_ACCESS", dupTail, access + ", false, windows.DUPLICATE_SAME_ACCESS)", "DUPLICATE_SAME_ACCESS"},
 		{"可继承", dupTail, access + ", true, 0)", "true"},

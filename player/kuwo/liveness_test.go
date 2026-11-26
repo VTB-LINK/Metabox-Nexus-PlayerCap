@@ -102,11 +102,13 @@ func TestLivenessWatch(t *testing.T) {
 // A stalled clock ends the session through the disconnect path, never the
 // version-unsupported path.
 func TestClockStalledMapsToDisconnect(t *testing.T) {
-	if reason, _ := statusFor(pos.ErrClockStalled); reason != player.ReasonCDPDisconnected {
-		t.Fatalf("stalled clock reason=%q", reason)
+	st := statusFor(pos.ErrClockStalled, true)
+	if st.Status != "standby" || st.Reason != player.ReasonCDPDisconnected {
+		t.Fatalf("stalled clock status=%+v", st)
 	}
-	if reason, _ := statusFor(pos.ErrUnsupportedCore); reason == player.ReasonCDPDisconnected {
-		t.Fatal("unsupported core must not be a disconnect")
+	unsup := statusFor(pos.ErrUnsupportedCore, true)
+	if unsup.Status != "standby" || unsup.Reason == player.ReasonCDPDisconnected {
+		t.Fatalf("unsupported core must not be a disconnect: %+v", unsup)
 	}
 }
 

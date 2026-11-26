@@ -54,30 +54,54 @@ const procAccess = windows.PROCESS_CREATE_THREAD |
 	windows.PROCESS_VM_WRITE |
 	windows.PROCESS_VM_READ
 
+// ErrNotRunning 表示没有 SodaMusic.exe 在运行。上层据此报「未启动」并静默等待。
+var ErrNotRunning = i18n.Sentinel("SodaMusic is not running")
+
+// ErrMainUnreadable 表示有 SodaMusic.exe 在运行，而读不到命令行、认不出哪个是主进程（多因汽水以管理员身份运行）。
+// 进程在运行：上层报 standby + no_admin，不当作未运行（#231，设计 §3.2）。
+var ErrMainUnreadable = i18n.Sentinel("SodaMusic is running, but the command line of its main process cannot be read")
+
+// 枚举与读命令行经包级变量调用，测试替换它们以离线驱动 FindMainPID，不碰真进程。
+var (
+	runningFn = launch.Running
+	cmdlineFn = cmdlineOf
+)
+
+// cmdlineOf 按进程号读命令行。
+func cmdlineOf(pid uint32) (string, error) {
+	p, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return "", err
+	}
+	return p.Cmdline()
+}
+
 // FindMainPID 找汽水音乐的**主进程**（Electron browser 进程）——即命令行里**没有** `--type=`
 // 的那个 SodaMusic.exe。渲染器/GPU/utility 子进程都带 `--type=`，Node inspector 只在主进程上。
 //
-// 找不到（没运行）返回 err；调用方据此报「未启动」并降级。
+// 按名字在进程快照里枚举（launch.Running）：不用 gopsutil 枚举，它的进程名取自映像路径，以管理员身份运行的汽水连名字
+// 也取不到，会被当成没在运行。没有 SodaMusic.exe 返回 ErrNotRunning；有而主进程的命令行读不到返回 ErrMainUnreadable；
+// 命令行都读得到却都带 `--type=`（主进程已退出、子进程还没退完）按没在运行返回 ErrNotRunning；枚举出错原样返回。
 func FindMainPID() (int, error) {
-	procs, err := process.Processes()
+	procs, err := runningFn(TargetProcessName)
 	if err != nil {
 		return 0, i18n.Errorf("failed to enumerate processes: %w", err)
 	}
+	unreadable := false
 	for _, p := range procs {
-		name, err := p.Name()
-		if err != nil || !strings.EqualFold(name, TargetProcessName) {
-			continue
-		}
-		// 主进程的命令行不含 --type=（子进程都带）。Cmdline 偶尔取不到（权限）→ 跳过该候选。
-		cmd, err := p.Cmdline()
+		cmd, err := cmdlineFn(p.PID)
 		if err != nil {
+			unreadable = true
 			continue
 		}
 		if !strings.Contains(cmd, "--type=") {
-			return int(p.Pid), nil
+			return int(p.PID), nil
 		}
 	}
-	return 0, i18n.Errorf("SodaMusic main process not found (%s not running?)", TargetProcessName)
+	if unreadable {
+		return 0, ErrMainUnreadable
+	}
+	return 0, ErrNotRunning
 }
 
 // InspectorUp 报告 9229 是否已可用（能取到 /json/list）。

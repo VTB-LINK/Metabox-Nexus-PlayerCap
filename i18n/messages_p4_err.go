@@ -80,7 +80,6 @@ var p4ErrMessages = map[string]string{
 	"no accompaniment decoder found":                                                                                "未找到伴奏解码器",
 	"the accompaniment decoder changed before the announcement":                                                     "伴奏解码器在宣告之前变了",
 	"the accompaniment decoder path does not match the song mid":                                                    "伴奏解码器的路径与歌曲 mid 不符",
-	"SodaMusic main process not found (%s not running?)":                                                            "未找到汽水音乐主进程（%s 未运行？）",
 	"SodaMusic main process is exiting and waiting for the debugger to disconnect":                                  "汽水音乐主进程正在退出，等待调试会话断开",
 	"Process not found: %s":                                                                                         "未找到进程: %s",
 	"failed to enumerate processes: %w":                                                                             "枚举进程失败: %w",
@@ -121,6 +120,7 @@ var p4ErrMessages = map[string]string{
 	"failed to read /json/list: %w":                                           "读取 /json/list 失败: %w",
 	"no usable page target on port %d":                                        "端口 %d 上没有可用的页面目标",
 	"Runtime.enable failed: %w":                                               "Runtime.enable 失败: %w",
+	"CDP connection aborted: %w":                                              "CDP 连接中止: %w",
 	"CDP request %s timed out after %s":                                       "CDP 请求 %s 等待 %s 后超时",
 	"failed to parse evaluate reply: %w":                                      "解析 evaluate 回复失败: %w",
 	"evaluate error: %s":                                                      "evaluate 出错: %s",
@@ -179,13 +179,16 @@ var p4ErrMessages = map[string]string{
 	"elevated helper failed at startup: %s":                     "elevated helper 启动即失败: %s",
 	"elevated helper exited at startup without giving a reason": "elevated helper 启动后即退出，未留下原因",
 
-	// —— 包级 sentinel（i18n.Sentinel）：kugou/spotify watchdog、qqmusic、applemusic/mem、audiocap/frame ——
+	// —— 包级 sentinel（i18n.Sentinel）：kugou/spotify/sodamusic watchdog、qqmusic、applemusic/mem、audiocap/frame ——
 	"KuGou installation not found (KuGou.exe or libcef.dll is missing)":                                    "未找到酷狗安装（KuGou.exe 或 libcef.dll 不存在）",
 	"libcef.dll version unsupported (byte fingerprint at the known offsets does not match)":                "libcef.dll 版本不受支持（已知偏移处字节指纹不匹配）",
+	"libcef.dll needs repair, but elevation is disabled for this run":                                      "libcef.dll 需要修复，但本次运行已不再请求提权",
 	"Administrator rights not obtained":                                                                    "未取得管理员权限",
 	"Spotify is not running":                                                                               "Spotify 未在运行",
 	"this Spotify version does not support remote-debugging-port (or the installation file is unreadable)": "这一版 Spotify 不支持 remote-debugging-port（或安装文件不可读）",
 	"Spotify is running with the debug flag, but the debug port is not ready yet":                          "Spotify 带着调试 flag 在跑，但调试端口尚未就绪",
+	"SodaMusic is not running":                                                                             "汽水音乐未在运行",
+	"SodaMusic is running, but the command line of its main process cannot be read":                        "汽水音乐在运行，但读不到其主进程的命令行",
 	"input is not QRC ciphertext":                                                                          "输入不是 QRC 密文",
 	"songMid unavailable (possibly playing a local file)":                                                  "songMid 不可用（可能是本地文件播放）",
 	"AppleMusic.exe is not running":                                                                        "AppleMusic.exe 未运行",
@@ -435,4 +438,12 @@ var p4ErrMessages = map[string]string{
 	// —— player/qqmusic：编号补全的兜底请求（issue #218）——
 	"song detail for songid %d did not confirm the songid (%s)": "歌曲详情未核实 songid %d（%s）",
 	"malformed songmid %q": "songmid %q 的形式不对",
+	// —— player/kugou/assoc：酷狗进程内存只读快照器（issue #250、#251）——
+	"open process %d returned null handle":     "打开进程 %d 返回空句柄",
+	"kugou.dll or deferred.dll not loaded yet": "kugou.dll 或 deferred.dll 尚未加载",
+	"unsupported KuGou PE fingerprint: %s":     "不支持的酷狗 PE 指纹：%s",
+	"invalid module base 0x%X":                 "模块基址 0x%X 不合法",
+	"invalid DOS magic at 0x%X":                "0x%X 处 DOS 魔数不合法",
+	"invalid e_lfanew 0x%X at 0x%X":            "0x%[2]X 处 e_lfanew 0x%[1]X 不合法",
+	"not a 64-bit PE32+ image at 0x%X":         "0x%X 处不是 64 位 PE32+ 映像",
 }

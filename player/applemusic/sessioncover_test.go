@@ -241,10 +241,11 @@ func TestSessionCoverIdentityKeptAcrossClear(t *testing.T) {
 			skipTo(h, first, 220)
 			h.run(5 * time.Second)
 		}
+		fromClear := h.mark()
 		h.setTwin(0, 0, false)
 		h.run(7 * time.Second)
-		if count(h.evs, player.EventClearSongData) != 1 {
-			t.Fatalf("前置：加载超过 %v 应清屏一次，got %d", loadingGrace, count(h.evs, player.EventClearSongData))
+		if count(h.since(fromClear), player.EventClearSongData) != 1 {
+			t.Fatalf("前置：加载超过 %v 应清屏一次，got %d", loadingGrace, count(h.since(fromClear), player.EventClearSongData))
 		}
 		return h
 	}

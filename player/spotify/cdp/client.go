@@ -20,6 +20,7 @@
 package cdp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ import (
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/spotify/lyric"
+	"Metabox-Nexus-PlayerCap/player/wsdial"
 	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"github.com/gorilla/websocket"
@@ -123,15 +125,36 @@ type Client struct {
 	appVer    string
 }
 
+// connectTimeout 是一次 Connect（取 /json/list、读完响应体、WebSocket 握手、开两个域）的上限。调用方 Start 跑在 Spotify
+// 的轮询 goroutine 上：9223 端口接受连接而不完成响应时，没有上限它就停在这里，进程检查与停止都不再执行。
+const connectTimeout = 5 * time.Second
+
+// maxJSONBytes 是 /json/list 响应体的读取上限。实际只有几个目标的条目，远小于此。
+const maxJSONBytes = 1 << 20
+
 // Connect 连 9223：GET /json/list → 取 xpui 页面 → Dial → 开 Runtime/Network 两个域。
-func Connect() (*Client, error) {
-	httpClient := &http.Client{Timeout: 2 * time.Second}
-	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/json/list", debugPort))
+//
+// ctx 取消（调用方停止）即中止；此外整个过程不超过 connectTimeout。
+func Connect(ctx context.Context) (*Client, error) {
+	return connect(ctx, fmt.Sprintf("http://127.0.0.1:%d", debugPort), connectTimeout)
+}
+
+// connect 是 Connect 的实体：base 为 http://主机:端口，timeout 为整个过程的上限。测试经它连本地的测试服务。
+func connect(ctx context.Context, base string, timeout time.Duration) (*Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// 请求、读响应体与 WebSocket 握手都随 ctx 中止（握手见 wsdial）。
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/json/list", nil)
+	if err != nil {
+		return nil, i18n.Errorf("failed to fetch /json/list: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, i18n.Errorf("failed to fetch /json/list: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONBytes))
 	if err != nil {
 		return nil, i18n.Errorf("failed to read /json/list: %w", err)
 	}
@@ -160,7 +183,7 @@ func Connect() (*Client, error) {
 		return nil, i18n.Errorf("no usable page target on port %d", debugPort)
 	}
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, err := wsdial.Dial(ctx, wsURL) // 握手随 ctx 中止（见 wsdial）
 	if err != nil {
 		return nil, i18n.Errorf("WebSocket connection failed: %w", err)
 	}
@@ -171,9 +194,12 @@ func Connect() (*Client, error) {
 		done:    make(chan struct{}),
 	}
 	go c.readLoop()
+	// 开域的两次调用各有 controlTimeout，另随 ctx 中止：到期或停止即关闭会话，等待中的调用随之返回。
+	stop := context.AfterFunc(ctx, c.Close)
 
 	// Runtime.enable 让页面把 console/异常事件推过来（我们不看，但保持与其它 player 一致的会话形态）。
 	if _, err := c.call("Runtime.enable", nil, controlTimeout); err != nil {
+		stop()
 		c.Close()
 		return nil, i18n.Errorf("Runtime.enable failed: %w", err)
 	}
@@ -181,6 +207,9 @@ func Connect() (*Client, error) {
 	// 失败不致命：没有 token 时还有页面缓存那条兜底路径，故只告警。
 	if _, err := c.call("Network.enable", nil, controlTimeout); err != nil {
 		log.Warn("Network.enable failed; lyric access token capture is unavailable this session: %v", err)
+	}
+	if !stop() { // ctx 已结束、会话已被关掉：不交出一条关掉的会话
+		return nil, i18n.Errorf("CDP connection aborted: %w", ctx.Err())
 	}
 	return c, nil
 }
@@ -526,7 +555,8 @@ func (c *Client) IsClosed() bool {
 // dir="auto" 的元素上：可链接时它包在 <a> 里，不可链接时包在 <span> 里或直接是 <span>，故不按 <a> 取。
 // 组件里第一个 dir="auto" 是歌名；歌名缺席时第一个会落到歌手行或音质标签（context-item-info-quality）上，
 // 两者都排除。封面也限定在组件内：「当前播放」侧栏另有一个 cover-art-image，给的是另一档。
-// 歌名为空即上层判「无歌」，故组件结构一变就不出消息，只有上层的 untitledWatch 告警一次。
+// 歌名为空时上层不宣告这首歌（连上时按时长与播放态报 waiting_song 或 metadata_unavailable，宣告过歌之后不出消息），
+// 故组件结构一变就宣告不了歌，只有上层的 untitledWatch 告警一次。
 func snapshotJS() string {
 	return "(function(){try{" +
 		"var q=function(s){return document.querySelector(s)};" +

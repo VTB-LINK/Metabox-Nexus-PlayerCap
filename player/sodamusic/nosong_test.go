@@ -1,18 +1,19 @@
 package sodamusic
 
-// 本文件守 runSession 读到没有歌曲（mediaId 与歌名都为空）时的状态（issue #193）：
-//   - 已宣告过歌曲：连续没有歌曲满 noSongTolerance 才报 waiting_song（no_song）并清歌曲数据，先状态后清空，只一次；
-//     其间不发上一首的位置与状态事件（本文件的读数不带封面 URL，容忍期内没有任何事件）；
-//   - 清空的两条事件没能入队（通道满）时逐拍补发，先状态后清空；补发之前宣告了新歌即作罢；
-//   - 会话开始时没有歌曲：当即报 waiting_song，持续没有歌曲不重发；
-//   - 反例：短于容忍期的没有歌曲之后换到新歌、或同一首继续，都不清空、不报；几段各自短于容忍期、合计超过的，
-//     计时每次读到歌曲即清零；mediaId 已变、歌名未到（换歌过渡）不算没有歌曲；
+// 本文件守 runSession 读到没有歌曲（mediaId 与歌名都为空）时的状态（issue #193；#231，设计
+// doc/design/converge-player-behavior-231-design.md 4.3 第 1～3 条）：
+//   - 已宣告过歌曲：当拍报 waiting_song（no_song）并清歌曲数据，先状态后清空，只一次，持续没有歌曲不重发；不按时长保留上一首；
+//   - 会话开始时没有歌曲：当拍报 waiting_song 并清歌曲数据（上一次连接宣告过的歌可能仍留在画面上），只一次；
+//   - 清空的两条事件没能入队（通道满）时在没有歌曲的拍上逐拍补发，先状态后清空；补发之前读到了歌曲即不再补；waiting_song
+//     已入队而本拍被去重（中间的歌名状态因通道满被丢弃）不挡清空；
+//   - 反例：一拍没有歌曲随后换到新歌或同一首继续、几段短暂的没有歌曲，每段都当拍清空，歌曲回来按换歌重新宣告；
+//     mediaId 已变、歌名未到（换歌过渡）不算没有歌曲；
 //   - 清空之后同一首歌再出现按换歌重新宣告，落锚照常过新鲜度闸（不算本会话第一首）；会话第一首在中途照常按读数落锚。
 //
 // 真机未覆盖：汽水会自动填充播放列表，正常操作碰不到没有歌曲（issue #193）。客户端是 exitrelease_test.go 的
 // scriptClient，会话在 testing/synctest 的泡里跑，轮询的 time.Sleep 走假时钟。
 //
-// 变异自证（在独立 worktree 里逐条注入 sodamusic.go、跑本文件、还原，均实测）记在各用例的注释里。
+// 变异自证（在临时副本里逐条注入 sodamusic.go、跑本文件、还原，均实测）记在各用例的注释里。
 
 import (
 	"testing"
@@ -161,13 +162,33 @@ func allLyrics(evs []timedEvent) (at []time.Duration, pos []float32) {
 	return at, pos
 }
 
-// 已宣告的歌之后一直没有歌曲：满容忍期的那一拍先报 waiting_song、后清空，各一次；之前与之后不发任何事件。
+// clearsFollowStatus 报告每条 waiting_song 是否都紧跟一条 clear_song_data、每条 clear_song_data 是否都紧跟在 waiting_song 之后。
+func clearsFollowStatus(evs []timedEvent) bool {
+	var seq []string
+	for _, e := range evs {
+		if s := e.String(); s == waitingNoSong || s == player.EventClearSongData {
+			seq = append(seq, s)
+		}
+	}
+	if len(seq)%2 != 0 {
+		return false
+	}
+	for i := 0; i < len(seq); i += 2 {
+		if seq[i] != waitingNoSong || seq[i+1] != player.EventClearSongData {
+			return false
+		}
+	}
+	return true
+}
+
+// 已宣告的歌之后一直没有歌曲：没有歌曲的第一拍即先报 waiting_song、后清空，各一次；之前与之后不发任何事件。
 // 播放中与暂停中各跑一遍。
 //
-// 变异自证：去掉容忍期（宣告过即当拍清空）、容忍期少一拍（`>= noSongTolerance-200*time.Millisecond`），两个子例
-// 因清空早于 12s 变红；清空分支整个删掉（恢复静默等待），因 10s 之后没有事件变红；状态改用 p.Emit 直接发，因每拍
-// 重发变红；先清空后报状态，因顺序变红；清空时不复位 lastMediaID，因每拍重复清空变红。
-func TestNoSongAfterSongClearsAfterTolerance(t *testing.T) {
+// 变异自证（均实测）：恢复 2 s 等待（`noSongSince` 计时满 2 s 才报状态并清空），两个子例因清空晚于 10s 变红；状态改为每拍经
+// TryEmit 发，因每拍重发变红；先清空后报状态，因顺序变红；清空时不复位 lastMediaID，因每拍重复清空变红。
+// 未能自证的一处：删掉清空分支（不复位已宣告的歌），本例仍绿——会话开始时置的待发清空没被消耗，没有歌曲时照样先状态后清空
+// 各一次；这一变异由 TestNoSongOneTickThenSameSong、TestNoSongEachGapClears、TestNoSongClearedSongAnnouncedAgain 守（实测变红）。
+func TestNoSongAfterSongClearsAtOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		read func(time.Duration) *cdp.ExtractionData
@@ -185,13 +206,10 @@ func TestNoSongAfterSongClearsAfterTolerance(t *testing.T) {
 				}
 				return nil, errLost
 			})
-			clearAt := 10*time.Second + noSongTolerance
-			if got := between(evs, 10*time.Second, clearAt); len(got) != 0 {
-				t.Fatalf("容忍期内不应发出任何事件，实为 %q", got)
-			}
+			clearAt := 10 * time.Second
 			if got := between(evs, clearAt, clearAt+time.Nanosecond); len(got) != 2 ||
 				got[0] != waitingNoSong || got[1] != player.EventClearSongData {
-				t.Fatalf("满容忍期的那一拍应先报 waiting_song 再清空，实为 %q", got)
+				t.Fatalf("没有歌曲的第一拍应先报 waiting_song 再清空，实为 %q", got)
 			}
 			if got := between(evs, clearAt+time.Nanosecond, sessionLimit); len(got) != 0 {
 				t.Fatalf("清空之后持续没有歌曲不应再发事件，实为 %q", got)
@@ -200,21 +218,21 @@ func TestNoSongAfterSongClearsAfterTolerance(t *testing.T) {
 	}
 }
 
-// 到期那一拍事件通道已满，或只剩一个空位、被 waiting_song 占去：没能入队的 waiting_song 与 clear_song_data 逐拍补发，
-// 通道腾出后各入队一次，先状态后清空。脚本：10s 起没有歌曲（12s 到期），11.8s～15s 通道塞满（路由消费跟不上）。
+// 没有歌曲的第一拍事件通道已满，或只剩一个空位、被 waiting_song 占去：没能入队的 waiting_song 与 clear_song_data 逐拍补发，
+// 通道腾出后各入队一次，先状态后清空。脚本：10s 起没有歌曲，9.8s～15s 通道塞满（路由消费跟不上）。
 //
-// 变异自证：clear_song_data 改回 p.Emit、发过即作罢（不看是否入队），「只剩一个空位」因始终没有清空变红（「通道满」时
-// 状态也没入队，清空跟着等到通道腾出才发，不受这一变异影响）；清空挪到状态之前尝试、且不等状态入队，两个子例都因
-// 顺序变红。
-// 未能自证的一处：「状态入队之后才发清空」这道闸只在路由恰好于两次 TryEmit 之间腾出空位时起作用，桩里通道只在取数时
-// 收取，造不出这一时序；单去掉这道闸、或清空时的状态改用不看入队的 Emit，两个子例仍绿（实测），这一点靠读代码。
+// 变异自证（均实测）：清空挪到状态之前尝试、且不等状态入队，两个子例都因顺序变红；状态改为每拍经 TryEmit 发，两个子例都因
+// 重发变红；清空时不复位 lastMediaID，两个子例都因重复清空变红；清空改为只在本拍 EmitStatusIfChanged 返回真时才发，「只剩
+// 一个空位」因 waiting_song 入队之后被去重、清空一直等不到而变红。
+// 未能自证的一处：「状态入队之后才发清空」这道闸只在路由恰好于两次发送之间腾出空位时起作用，桩里通道只在取数时
+// 收取，造不出这一时序；单去掉这道闸（只看 clearData），本文件各用例仍绿（实测），这一点靠读代码。
 func TestNoSongClearRetriedWhenChannelFull(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		free int
 	}{{"通道满", 0}, {"只剩一个空位", 1}} {
 		t.Run(tc.name, func(t *testing.T) {
-			evs := sessionEventsChoked(t, 11800*time.Millisecond, 15*time.Second, tc.free, func(e time.Duration) (*cdp.ExtractionData, error) {
+			evs := sessionEventsChoked(t, 9800*time.Millisecond, 15*time.Second, tc.free, func(e time.Duration) (*cdp.ExtractionData, error) {
 				switch {
 				case e < 10*time.Second:
 					return playingAt(e), nil
@@ -223,7 +241,7 @@ func TestNoSongClearRetriedWhenChannelFull(t *testing.T) {
 				}
 				return nil, errLost
 			})
-			if got := between(evs, 10*time.Second+time.Nanosecond, sessionLimit); len(got) != 2 ||
+			if got := between(evs, 10*time.Second, sessionLimit); len(got) != 2 ||
 				got[0] != waitingNoSong || got[1] != player.EventClearSongData {
 				t.Fatalf("通道腾出后应先 waiting_song、后 clear_song_data，各一次，实为 %q", got)
 			}
@@ -231,12 +249,13 @@ func TestNoSongClearRetriedWhenChannelFull(t *testing.T) {
 	}
 }
 
-// 清空没能入队期间宣告了新歌：待发的清空作罢（新歌的宣告覆盖缓存），不在之后某次读到没有歌曲时提前发出。
-// 脚本：12s 到期时通道满（11.8s～13s），13s 起是新歌，20s 起再次没有歌曲，应到 22s 才报 waiting_song 并清空。
+// 清空没能入队期间读到了新歌：待发的清空作罢，不在新歌宣告之后发出（那会清掉新歌）。脚本：10s 起没有歌曲而通道满
+// （9.8s～13s），13s 起是新歌，20s 起再次没有歌曲，应到 20s 那一拍才报 waiting_song 并清空，各一次。
 //
-// 变异自证：宣告新歌时不复位待发的清空，本例因 20s 那一拍就报 waiting_song 并清空变红。
+// 变异自证（均实测）：待发的状态与清空挪到每拍末尾补发（不限没有歌曲的拍），本例因 13s 宣告新歌之后即报 waiting_song 并清空
+// 变红；先清空后报状态、状态改为每拍经 TryEmit 发、清空时不复位 lastMediaID，同样变红。
 func TestNoSongPendingClearDroppedOnNewSong(t *testing.T) {
-	evs := sessionEventsChoked(t, 11800*time.Millisecond, 13*time.Second, 0, func(e time.Duration) (*cdp.ExtractionData, error) {
+	evs := sessionEventsChoked(t, 9800*time.Millisecond, 13*time.Second, 0, func(e time.Duration) (*cdp.ExtractionData, error) {
 		switch {
 		case e < 10*time.Second:
 			return playingAt(e), nil
@@ -253,20 +272,46 @@ func TestNoSongPendingClearDroppedOnNewSong(t *testing.T) {
 			got = append(got, e)
 		}
 	}
-	if len(got) != 2 || got[0].String() != waitingNoSong || got[0].at <= 22*time.Second || got[1].at <= 22*time.Second {
-		t.Fatalf("应只在 22s 到期后报一次 waiting_song 并清空一次，实为 %v", got)
+	if len(got) != 2 || got[0].String() != waitingNoSong || got[0].at <= 20*time.Second || got[1].at <= 20*time.Second {
+		t.Fatalf("应只在 20s 那一拍报一次 waiting_song 并清空一次（取到的时刻晚一拍），实为 %v", got)
 	}
 	if count(evs, playingB) != 1 {
 		t.Fatalf("新歌应宣告一次：%q", between(evs, 0, sessionLimit))
 	}
 }
 
-// 换歌时短于容忍期的没有歌曲（最后一拍距起点 noSongTolerance-200ms），随后是新歌：不报 waiting_song、
-// 不清空，新歌照常宣告。
+// 审查给的反例（#231 代码审）：宣告过《鲜花》；10s 没有歌曲时通道只剩一个空位，waiting_song 入队而 clear_song_data 没能入队；
+// 通道仍满时 10.2s～11s 短暂出现《乙曲》，它的歌名状态与歌曲事件全被丢弃，最近一次入队的状态仍是 waiting_song；11s 起再次
+// 没有歌曲，15s 通道腾出。这时的 waiting_song 被去重，清空不能因此一直等下去：通道腾出后应补上 clear_song_data，在
+// waiting_song 之后，各一次。
 //
-// 变异自证：去掉容忍期、容忍期少一拍（同上），本例都因出现 waiting_song 与 clear_song_data 变红。
-func TestNoSongShortGapThenNextSong(t *testing.T) {
-	gapEnd := 10*time.Second + noSongTolerance // 这一拍起是新歌
+// 变异自证（均实测）：清空改为只在本拍 EmitStatusIfChanged 返回真时才发（被去重当作没入队），本例因一直没有清空变红；恢复 2 s
+// 等待、先清空后报状态、状态改为每拍经 TryEmit 发、清空时不复位 lastMediaID，同样变红。
+func TestNoSongClearNotStuckByDedupedStatus(t *testing.T) {
+	evs := sessionEventsChoked(t, 9800*time.Millisecond, 15*time.Second, 1, func(e time.Duration) (*cdp.ExtractionData, error) {
+		switch {
+		case e < 10*time.Second:
+			return playingAt(e), nil
+		case e < 10*time.Second+200*time.Millisecond:
+			return noSong, nil
+		case e < 11*time.Second:
+			return songB(0), nil
+		case e < 30*time.Second:
+			return noSong, nil
+		}
+		return nil, errLost
+	})
+	if got := between(evs, 10*time.Second, sessionLimit); len(got) != 2 ||
+		got[0] != waitingNoSong || got[1] != player.EventClearSongData {
+		t.Fatalf("通道腾出后应先 waiting_song、后 clear_song_data，各一次，实为 %q", got)
+	}
+}
+
+// 反例：一拍没有歌曲（10s），随后是新歌：那一拍即报 waiting_song 并清空，新歌照常宣告。
+//
+// 变异自证（均实测）：恢复 2 s 等待，本例因没有 waiting_song 与 clear_song_data 变红；先清空后报状态，因顺序变红。
+func TestNoSongOneTickThenNextSong(t *testing.T) {
+	gapEnd := 10*time.Second + 200*time.Millisecond // 这一拍起是新歌
 	evs := sessionEvents(t, func(e time.Duration) (*cdp.ExtractionData, error) {
 		switch {
 		case e < 10*time.Second:
@@ -278,38 +323,40 @@ func TestNoSongShortGapThenNextSong(t *testing.T) {
 		}
 		return nil, errLost
 	})
-	if n, c := count(evs, waitingNoSong), count(evs, player.EventClearSongData); n != 0 || c != 0 {
-		t.Fatalf("短于容忍期不应报 waiting_song 或清空，实为 %d 条、%d 条：%q", n, c, between(evs, 0, sessionLimit))
+	if got := between(evs, 10*time.Second, gapEnd); len(got) != 2 || got[0] != waitingNoSong || got[1] != player.EventClearSongData {
+		t.Fatalf("没有歌曲的那一拍应先报 waiting_song 再清空，实为 %q", got)
 	}
 	if got := between(evs, gapEnd, gapEnd+time.Nanosecond); len(got) == 0 || got[0] != playingB {
 		t.Fatalf("新歌到来的那一拍应宣告新歌，实为 %q", got)
 	}
 }
 
-// 反例：短于容忍期的没有歌曲之后同一首继续：不重新宣告、不报 waiting_song、不清空。
+// 反例：一拍没有歌曲（10s），随后同一首继续：那一拍即清空，同一首按换歌重新宣告（all_lyrics 与 playing 各再发一次）。
 //
-// 变异自证：去掉容忍期，本例因清空并重新宣告变红。
-func TestNoSongSameSongGoesOn(t *testing.T) {
+// 变异自证（均实测）：恢复 2 s 等待，本例因没有清空、没有重新宣告变红；先清空后报状态、清空时不复位 lastMediaID、删掉清空
+// 分支，同样变红。
+func TestNoSongOneTickThenSameSong(t *testing.T) {
 	evs := sessionEvents(t, func(e time.Duration) (*cdp.ExtractionData, error) {
 		switch {
 		case e >= 30*time.Second:
 			return nil, errLost
-		case e >= 10*time.Second && e < 11*time.Second:
+		case e >= 10*time.Second && e < 10*time.Second+200*time.Millisecond:
 			return noSong, nil
 		}
 		return playingAt(e), nil
 	})
-	if at, _ := allLyrics(evs); len(at) != 1 || count(evs, playingSong) != 1 ||
-		count(evs, waitingNoSong) != 0 || count(evs, player.EventClearSongData) != 0 {
-		t.Fatalf("同一首继续不应清空或重新宣告：%q", between(evs, 0, sessionLimit))
+	if at, _ := allLyrics(evs); len(at) != 2 || count(evs, playingSong) != 2 ||
+		count(evs, waitingNoSong) != 1 || count(evs, player.EventClearSongData) != 1 || !clearsFollowStatus(evs) {
+		t.Fatalf("一拍没有歌曲应清空一次、同一首重新宣告一次：%q", between(evs, 0, sessionLimit))
 	}
 }
 
-// 反例：几段没有歌曲各自短于容忍期，之间各有一拍读到同一首歌，合计远超容忍期：计时每次读到歌曲即清零，不清空。
+// 反例：几段没有歌曲（每段 1.6s）之间各有一拍读到同一首歌，共四段：每段都当拍清空、同一首每次重新宣告。
 //
-// 变异自证：删掉读到歌曲时的 `noSongSince = time.Time{}`，本例因在第二段里清空变红；去掉容忍期同样变红。
-func TestNoSongToleranceRestartsOnSong(t *testing.T) {
-	gap := noSongTolerance - 400*time.Millisecond
+// 变异自证（均实测）：恢复 2 s 等待，本例因一次都没有清空变红；先清空后报状态、状态改为每拍经 TryEmit 发、清空时不复位
+// lastMediaID、删掉清空分支，同样变红。
+func TestNoSongEachGapClears(t *testing.T) {
+	gap := 1600 * time.Millisecond
 	evs := sessionEvents(t, func(e time.Duration) (*cdp.ExtractionData, error) {
 		if e >= 30*time.Second {
 			return nil, errLost
@@ -320,16 +367,19 @@ func TestNoSongToleranceRestartsOnSong(t *testing.T) {
 		}
 		return playingAt(e), nil
 	})
-	if n, c := count(evs, waitingNoSong), count(evs, player.EventClearSongData); n != 0 || c != 0 {
-		t.Fatalf("各段短于容忍期不应清空，实为 waiting_song %d 条、clear_song_data %d 条", n, c)
+	if n, c := count(evs, waitingNoSong), count(evs, player.EventClearSongData); n != 4 || c != 4 || !clearsFollowStatus(evs) {
+		t.Fatalf("四段没有歌曲应各报一次 waiting_song、各清空一次且状态在前，实为 waiting_song %d 条、clear_song_data %d 条", n, c)
+	}
+	if n := count(evs, playingSong); n != 5 {
+		t.Fatalf("同一首应宣告 5 次（会话开始一次，每段之后各一次），实为 %d 次", n)
 	}
 }
 
-// 会话开始时没有歌曲：第一拍即报 waiting_song，持续没有歌曲不重发，也不发 clear_song_data（Start 连接前已发过）；
-// 歌曲到来照常宣告。
+// 会话开始时没有歌曲：第一拍即报 waiting_song、随即清空（上一次连接宣告过的歌可能仍留在画面上，设计 4.5），各一次，
+// 持续没有歌曲不重发；歌曲到来照常宣告。
 //
-// 变异自证：报状态的条件去掉 `lastMediaID == ""`（只在清空时报），本例因没有 waiting_song 变红；状态改用 p.Emit
-// 直接发，本例因每拍重发变红。
+// 变异自证（均实测）：会话开始时不置待发的清空（`clearData := false`），本例因没有 clear_song_data 变红；
+// 状态改为每拍经 TryEmit 发，本例因每拍重发变红；先清空后报状态，本例因顺序变红。
 func TestNoSongAtSessionStartReportsAtOnce(t *testing.T) {
 	evs := sessionEvents(t, func(e time.Duration) (*cdp.ExtractionData, error) {
 		switch {
@@ -340,17 +390,17 @@ func TestNoSongAtSessionStartReportsAtOnce(t *testing.T) {
 		}
 		return nil, errLost
 	})
-	if got := between(evs, 0, 30*time.Second); len(got) != 1 || got[0] != waitingNoSong || evs[0].at != 0 {
-		t.Fatalf("会话开始时没有歌曲应当即报一次 waiting_song，此外不发事件，实为 %q", got)
+	if got := between(evs, 0, 30*time.Second); len(got) != 2 || got[0] != waitingNoSong || got[1] != player.EventClearSongData || evs[1].at != 0 {
+		t.Fatalf("会话开始时没有歌曲应当即报一次 waiting_song、随即清空一次，此外不发事件，实为 %q", got)
 	}
 	if got := between(evs, 30*time.Second, 30*time.Second+time.Nanosecond); len(got) == 0 || got[0] != playingSong {
 		t.Fatalf("歌曲到来应宣告，实为 %q", got)
 	}
 }
 
-// 反例：换歌时 mediaId 先变、歌名晚到（这一段长于容忍期）不算没有歌曲，不清空；歌名到了照常宣告新歌。
+// 反例：换歌时 mediaId 先变、歌名晚到（这一段 5s）不算没有歌曲，不清空；歌名到了照常宣告新歌。
 //
-// 变异自证：没有歌曲的判据改成只看歌名为空（`data.Name == ""`），本例因清空变红。
+// 变异自证（实测）：没有歌曲的判据改成只看歌名为空（`data.Name == ""`），本例因清空变红。
 func TestNoSongPendingNameNotNoSong(t *testing.T) {
 	evs := sessionEvents(t, func(e time.Duration) (*cdp.ExtractionData, error) {
 		switch {
@@ -376,7 +426,7 @@ func TestNoSongPendingNameNotNoSong(t *testing.T) {
 // 清空之后同一首歌再出现：按换歌重新宣告（all_lyrics 与 playing 各再发一次）；它不是本会话第一首，落锚照常过
 // 新鲜度闸，再出现那一拍的读数不采纳、锚 0，下一个采样到来按前跳纠正。
 //
-// 变异自证：清空分支整个删掉、清空时不复位 lastMediaID，本例都因没有重新宣告变红；清空之后再来的歌算第一首
+// 变异自证（均实测）：清空分支整个删掉、清空时不复位 lastMediaID，本例都因没有重新宣告变红；清空之后再来的歌算第一首
 // （`firstSong := !announced || lastMediaID == ""`）、清空时不复位 pendingID，本例都因 all_lyrics 带 15s 变红。
 func TestNoSongClearedSongAnnouncedAgain(t *testing.T) {
 	evs := sessionEvents(t, func(e time.Duration) (*cdp.ExtractionData, error) {
@@ -401,7 +451,7 @@ func TestNoSongClearedSongAnnouncedAgain(t *testing.T) {
 
 // 反例：会话第一首在中途（61s 处）：照常按读数落锚，不锚 0（服务在歌曲中途启动是最常见的开播姿势）。
 //
-// 变异自证：announced 初值为真（第一首也过新鲜度闸），本例因 all_lyrics 带 0 变红。
+// 变异自证（实测）：announced 初值为真（第一首也过新鲜度闸），本例因 all_lyrics 带 0 变红。
 func TestNoSongFirstSongMidwayAnchorsAtReading(t *testing.T) {
 	evs := sessionEvents(t, func(e time.Duration) (*cdp.ExtractionData, error) {
 		if e >= 5*time.Second {

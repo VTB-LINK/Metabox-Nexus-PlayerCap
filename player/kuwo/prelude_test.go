@@ -208,9 +208,10 @@ var (
 	// The title line plus the hint (ws/29-batch2-1114b, Go Time: "Go Time-Mark Petrie"
 	// for "Go Time - Mark Petrie"); playFetch's song is titled "song MUSIC_1 - artist"
 	// (observedSong).
-	gotTitleThenHint = fetchResult{lines: []lyric.Line{{TimeMs: 0, Text: "song MUSIC_1-artist"}, {TimeMs: 110, Text: "该歌曲为纯音乐请欣赏"}}}
-	gotOtherThenHint = fetchResult{lines: []lyric.Line{{TimeMs: 10000, Text: "song MUSIC_2-artist"}, {TimeMs: 20000, Text: "该歌曲为纯音乐请欣赏"}}}
-	gotTitleThenLine = fetchResult{lines: []lyric.Line{{TimeMs: 10000, Text: "song MUSIC_1-artist"}, {TimeMs: 20000, Text: "第一句歌词"}}}
+	gotTitleThenHint       = fetchResult{lines: []lyric.Line{{TimeMs: 0, Text: "song MUSIC_1-artist"}, {TimeMs: 110, Text: "该歌曲为纯音乐请欣赏"}}}
+	gotTitleThenSharedHint = fetchResult{lines: []lyric.Line{{TimeMs: 0, Text: "song MUSIC_1-artist"}, {TimeMs: 110, Text: "纯音乐，请欣赏"}}}
+	gotOtherThenHint       = fetchResult{lines: []lyric.Line{{TimeMs: 10000, Text: "song MUSIC_2-artist"}, {TimeMs: 20000, Text: "该歌曲为纯音乐请欣赏"}}}
+	gotTitleThenLine       = fetchResult{lines: []lyric.Line{{TimeMs: 10000, Text: "song MUSIC_1-artist"}, {TimeMs: 20000, Text: "第一句歌词"}}}
 )
 
 // playFetch plays MUSIC_1 from 1000 ms, a tick every 50 ms up to tick 20 (all
@@ -240,11 +241,13 @@ func playFetch(t *testing.T, results map[int]fetchResult, pausedFrom int) (*sess
 	return s, ticks
 }
 
-// noLyricTicks lists the ticks that sent index:-1, checking that each carries a
-// non-zero progress matching its position, and that no line was sent.
-func noLyricTicks(t *testing.T, ticks [][]player.Event) []int {
+// noLyricUpdates returns the ticks and texts of index:-1 lyric_update events,
+// checking that each carries a non-zero progress matching its position and that
+// no lyric line was sent.
+func noLyricUpdates(t *testing.T, ticks [][]player.Event) ([]int, []string) {
 	t.Helper()
 	var out []int
+	var texts []string
 	for k, ev := range ticks {
 		for _, e := range ofType(ev, player.EventLyricUpdate) {
 			u := e.Data.(*player.LyricUpdate)
@@ -255,54 +258,68 @@ func noLyricTicks(t *testing.T, ticks [][]player.Event) []int {
 				t.Fatalf("tick %d: index:-1 with position %v progress %v", k, u.Position, u.Progress)
 			}
 			out = append(out, k)
+			texts = append(texts, u.Text)
 		}
 	}
+	return out, texts
+}
+
+// noLyricTicks lists the ticks that sent index:-1, checking that each carries a
+// non-zero progress matching its position, and that no line was sent.
+func noLyricTicks(t *testing.T, ticks [][]player.Event) []int {
+	t.Helper()
+	out, _ := noLyricUpdates(t, ticks)
 	return out
 }
 
 // index:-1 goes out once, on the tick the fetch settles with no lines, and
 // never before: not on the song change tick, not while a retry is pending, not
-// for a song whose lyrics arrive (after any number of failures).
+// for a song whose lyrics arrive (after any number of failures). When the
+// platform returned a pure-music hint (one line, or title line plus hint),
+// index:-1 preserves the hint line's original text (#231).
 //
 // Mutation (verified): dropping the settled condition from emitLine sends
-// index:-1 on tick 0 in every case; settling on any failure sends it on the
-// first failure. Kuwo's hint (#201): not calling isKuwoHintOnly fails the hint
-// cases; dropping the suffix check fails "hint prefix only"; dropping the 该
-// prefix fails "kuwo 该 hint"; not comparing the title line fails "another title
-// then hint"; not checking the second line is a hint fails "title line then a
-// lyric".
+// index:-1 on tick 0; settling on any failure sends it on the first failure.
+// PureMusicHint / hint text (#231): omitting s.hint on index:-1 in emitLine
+// fails the 6 hint cases (text="" instead of the original hint); returning
+// lines[0].Text instead of lines[1].Text in PureMusicHint fails "title line
+// then hint" and "title line then shared hint"; skipping whitespace squashing
+// on the title line fails both "title line then ..." cases; dropping the "欣赏"
+// suffix check fails "hint prefix only".
 func TestIndexMinusOneWaitsForFetch(t *testing.T) {
 	cases := []struct {
-		name    string
-		results map[int]fetchResult
-		paused  int
-		want    []int // ticks that send index:-1
+		name     string
+		results  map[int]fetchResult
+		paused   int
+		want     []int  // ticks that send index:-1
+		wantText string // expected text on index:-1 when want != nil
 	}{
-		{"in flight", nil, -1, nil},
-		{"lyrics arrive", map[int]fetchResult{2: gotLyrics}, -1, nil},
-		{"ErrNoLyrics", map[int]fetchResult{2: gotNoLyrics}, -1, []int{2}},
-		{"zero lines", map[int]fetchResult{2: gotNone}, -1, []int{2}},
-		{"pure music hint", map[int]fetchResult{2: gotPureMusic}, -1, []int{2}},
-		{"kuwo DJ hint", map[int]fetchResult{2: gotKuwoDJHint}, -1, []int{2}},
-		{"kuwo no-words hint", map[int]fetchResult{2: gotKuwoPureHint}, -1, []int{2}},
-		{"kuwo hint among two lines", map[int]fetchResult{2: gotHintAmongTwo}, -1, nil},
-		{"hint prefix only", map[int]fetchResult{2: gotHintNoSuffix}, -1, nil},
-		{"hint suffix only", map[int]fetchResult{2: gotHintNoPrefix}, -1, nil},
-		{"kuwo 该 hint", map[int]fetchResult{2: gotKuwoGaiHint}, -1, []int{2}},
-		{"title line then hint", map[int]fetchResult{2: gotTitleThenHint}, -1, []int{2}},
-		{"another title then hint", map[int]fetchResult{2: gotOtherThenHint}, -1, nil},
-		{"title line then a lyric", map[int]fetchResult{2: gotTitleThenLine}, -1, nil},
-		{"one failure, then lyrics", map[int]fetchResult{2: gotFailure, 6: gotLyrics}, -1, nil},
-		{"two failures, then lyrics", map[int]fetchResult{2: gotFailure, 4: gotFailure, 6: gotLyrics}, -1, nil},
-		{"one failure, waiting", map[int]fetchResult{2: gotFailure}, -1, nil},
-		{"two failures, waiting", map[int]fetchResult{2: gotFailure, 4: gotFailure}, -1, nil},
-		{"three failures", map[int]fetchResult{2: gotFailure, 4: gotFailure, 6: gotFailure}, -1, []int{6}},
-		{"failure, then ErrNoLyrics", map[int]fetchResult{2: gotFailure, 4: gotNoLyrics}, -1, []int{4}},
-		{"failure, then zero lines", map[int]fetchResult{2: gotFailure, 4: gotNone}, -1, []int{4}},
-		{"paused in flight, ErrNoLyrics while paused", map[int]fetchResult{5: gotNoLyrics}, 2, []int{5}},
-		{"paused in flight, zero lines while paused", map[int]fetchResult{5: gotNone}, 2, []int{5}},
-		{"paused in flight, lyrics while paused", map[int]fetchResult{5: gotLyrics}, 2, nil},
-		{"third failure while paused", map[int]fetchResult{2: gotFailure, 4: gotFailure, 8: gotFailure}, 6, []int{8}},
+		{"in flight", nil, -1, nil, ""},
+		{"lyrics arrive", map[int]fetchResult{2: gotLyrics}, -1, nil, ""},
+		{"ErrNoLyrics", map[int]fetchResult{2: gotNoLyrics}, -1, []int{2}, ""},
+		{"zero lines", map[int]fetchResult{2: gotNone}, -1, []int{2}, ""},
+		{"pure music hint", map[int]fetchResult{2: gotPureMusic}, -1, []int{2}, "纯音乐，请欣赏"},
+		{"kuwo DJ hint", map[int]fetchResult{2: gotKuwoDJHint}, -1, []int{2}, "此歌曲为DJ舞曲，请您欣赏"},
+		{"kuwo no-words hint", map[int]fetchResult{2: gotKuwoPureHint}, -1, []int{2}, "此歌曲为没有填词的纯音乐，请您欣赏"},
+		{"kuwo hint among two lines", map[int]fetchResult{2: gotHintAmongTwo}, -1, nil, ""},
+		{"hint prefix only", map[int]fetchResult{2: gotHintNoSuffix}, -1, nil, ""},
+		{"hint suffix only", map[int]fetchResult{2: gotHintNoPrefix}, -1, nil, ""},
+		{"kuwo 该 hint", map[int]fetchResult{2: gotKuwoGaiHint}, -1, []int{2}, "该歌曲为纯音乐请欣赏"},
+		{"title line then hint", map[int]fetchResult{2: gotTitleThenHint}, -1, []int{2}, "该歌曲为纯音乐请欣赏"},
+		{"title line then shared hint", map[int]fetchResult{2: gotTitleThenSharedHint}, -1, []int{2}, "纯音乐，请欣赏"},
+		{"another title then hint", map[int]fetchResult{2: gotOtherThenHint}, -1, nil, ""},
+		{"title line then a lyric", map[int]fetchResult{2: gotTitleThenLine}, -1, nil, ""},
+		{"one failure, then lyrics", map[int]fetchResult{2: gotFailure, 6: gotLyrics}, -1, nil, ""},
+		{"two failures, then lyrics", map[int]fetchResult{2: gotFailure, 4: gotFailure, 6: gotLyrics}, -1, nil, ""},
+		{"one failure, waiting", map[int]fetchResult{2: gotFailure}, -1, nil, ""},
+		{"two failures, waiting", map[int]fetchResult{2: gotFailure, 4: gotFailure}, -1, nil, ""},
+		{"three failures", map[int]fetchResult{2: gotFailure, 4: gotFailure, 6: gotFailure}, -1, []int{6}, ""},
+		{"failure, then ErrNoLyrics", map[int]fetchResult{2: gotFailure, 4: gotNoLyrics}, -1, []int{4}, ""},
+		{"failure, then zero lines", map[int]fetchResult{2: gotFailure, 4: gotNone}, -1, []int{4}, ""},
+		{"paused in flight, ErrNoLyrics while paused", map[int]fetchResult{5: gotNoLyrics}, 2, []int{5}, ""},
+		{"paused in flight, zero lines while paused", map[int]fetchResult{5: gotNone}, 2, []int{5}, ""},
+		{"paused in flight, lyrics while paused", map[int]fetchResult{5: gotLyrics}, 2, nil, ""},
+		{"third failure while paused", map[int]fetchResult{2: gotFailure, 4: gotFailure, 8: gotFailure}, 6, []int{8}, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -310,8 +327,14 @@ func TestIndexMinusOneWaitsForFetch(t *testing.T) {
 			if len(ofType(ticks[0], player.EventAllLyrics)) != 1 || ofType(ticks[0], player.EventLyricUpdate) != nil {
 				t.Fatalf("change tick: want all_lyrics and no lyric_update, got %+v", ticks[0])
 			}
-			if got := noLyricTicks(t, ticks); !slices.Equal(got, c.want) {
+			got, texts := noLyricUpdates(t, ticks)
+			if !slices.Equal(got, c.want) {
 				t.Fatalf("index:-1 on ticks %v, want %v", got, c.want)
+			}
+			for _, text := range texts {
+				if text != c.wantText {
+					t.Fatalf("index:-1 text = %q, want %q", text, c.wantText)
+				}
 			}
 			for k, r := range c.results {
 				if r.err == nil && len(ofType(ticks[k], player.EventAllLyrics)) != 1 {
@@ -323,6 +346,63 @@ func TestIndexMinusOneWaitsForFetch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pure-music hint belongs to its song: switching to another song without
+// lyrics (ErrNoLyrics or zero lines), or going idle and restarting without
+// lyrics, resets session.hint so index:-1 carries empty text instead of the
+// previous song's hint (#231).
+//
+// Mutation (verified): carrying s.hint across the song-change reset in observe
+// fails "switch to ErrNoLyrics"; omitting s.hint in emitLine fails all three
+// subtests on the first song's hint check.
+func TestPureMusicHintResetsOnSongChange(t *testing.T) {
+	checkSingleNoLyric := func(t *testing.T, ev []player.Event, wantText string) {
+		t.Helper()
+		lu := ofType(ev, player.EventLyricUpdate)
+		if len(lu) != 1 {
+			t.Fatalf("got %d lyric_update events, want 1: %+v", len(lu), lu)
+		}
+		u := lu[0].Data.(*player.LyricUpdate)
+		if u.Index != -1 || u.Text != wantText {
+			t.Fatalf("lyric_update = {Index:%d Text:%q}, want {Index:-1 Text:%q}", u.Index, u.Text, wantText)
+		}
+	}
+
+	t.Run("switch to ErrNoLyrics", func(t *testing.T) {
+		p := New(0, 50)
+		s := newSession(p)
+		t0 := time.Now()
+		ev1 := lyricsTick(s, t0, "MUSIC_1", 0, 1000, gotKuwoPureHint.lines, nil)
+		checkSingleNoLyric(t, ev1, "此歌曲为没有填词的纯音乐，请您欣赏")
+
+		ev2 := lyricsTick(s, t0, "MUSIC_2", 100, 1000, nil, lyric.ErrNoLyrics)
+		checkSingleNoLyric(t, ev2, "")
+	})
+
+	t.Run("switch to zero lines", func(t *testing.T) {
+		p := New(0, 50)
+		s := newSession(p)
+		t0 := time.Now()
+		ev1 := lyricsTick(s, t0, "MUSIC_1", 0, 1000, gotTitleThenHint.lines, nil)
+		checkSingleNoLyric(t, ev1, "该歌曲为纯音乐请欣赏")
+
+		ev2 := lyricsTick(s, t0, "MUSIC_2", 100, 1000, nil, nil)
+		checkSingleNoLyric(t, ev2, "")
+	})
+
+	t.Run("clear then ErrNoLyrics on same RID", func(t *testing.T) {
+		p := New(0, 50)
+		s := newSession(p)
+		t0 := time.Now()
+		ev1 := lyricsTick(s, t0, "MUSIC_1", 0, 1000, gotKuwoDJHint.lines, nil)
+		checkSingleNoLyric(t, ev1, "此歌曲为DJ舞曲，请您欣赏")
+
+		s.clear()
+		drainEvents(p)
+		ev2 := lyricsTick(s, t0, "MUSIC_1", 100, 1000, nil, lyric.ErrNoLyrics)
+		checkSingleNoLyric(t, ev2, "")
+	})
 }
 
 // The outcome belongs to the song: a song change or the session going idle

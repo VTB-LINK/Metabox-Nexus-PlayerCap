@@ -260,31 +260,164 @@ func TestSessionPreAttachLyricsNotReused(t *testing.T) {
 	}
 }
 
-// TTML 只有一行「纯音乐，请欣赏」：按无歌词发（all_lyrics 空、index:-1 带提示，不必等宽限期），之后不得
-// 再推一条 index 0 的 lyric_update。
+// TTML 只有无歌词提示（共用说法、kuwo 形状，或「歌名行 + 提示句」）：按无歌词发（all_lyrics 空、index:-1 带提示原文，
+// 不必等宽限期），之后不得再推 index >= 0 的 lyric_update；歌名行与当前曲目不同时照常按普通歌词处理（#231）。
 //
-// 变异自证：删掉 applyLyrics 里 pure 时清空行的处理，出现 index 0 的 lyric_update 而红。
+// 变异自证（均实测变红）：删掉 applyLyrics 里 pure 时清空行的处理，出现 index 0 的 lyric_update 而红；
+// s.song.pureHint 改回读 lines[0].Text 而非 PureMusicHint 返回的 hint，「歌名行加提示取第 1 行原文」因 text 为歌名行而红；
+// 改回只认「纯音乐，请欣赏」的旧判断，「kuwo 形状一行」「歌名行加提示取第 1 行原文」红。
 func TestSessionPureMusicHintNotPushedAsLine(t *testing.T) {
-	h := newHarness(t)
-	h.f.songs = np("纯音乐")
-	h.f.docs = []mem.TTMLDoc{{Text: `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Line"><body dur="200.500"><div><p begin="0.0" end="200.0" itunes:key="L1">纯音乐，请欣赏</p></div></body></tt>`, Count: 1}}
-	h.setTwin(200, 10, true)
-	h.run(8 * time.Second)
-	al := allLyrics(h.evs)
-	if len(al) != 1 || al[0].Count != 0 {
-		t.Fatalf("应只发一条空的 all_lyrics，got %+v", al)
-	}
-	var sawHint bool
-	for _, e := range h.evs {
-		if lu, ok := e.Data.(*player.LyricUpdate); ok {
-			if lu.Index >= 0 {
-				t.Fatalf("纯音乐提示不应作为第 %d 行推出", lu.Index)
-			}
-			sawHint = sawHint || lu.Text == "纯音乐，请欣赏"
+	const (
+		sharedHint   = "纯音乐，请欣赏"
+		kuwoPureHint = "此歌曲为没有填词的纯音乐，请您欣赏"
+		kuwoGaiHint  = "该歌曲为纯音乐请欣赏"
+	)
+	makeTTML := func(lines ...string) string {
+		var ps string
+		for i, text := range lines {
+			ps += fmt.Sprintf(`<p begin="%d.0" end="%d.0" itunes:key="L%d">%s</p>`, i*2, i*2+2, i+1, text)
 		}
+		return `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Line"><body dur="200.500"><div>` + ps + `</div></body></tt>`
 	}
-	if !sawHint {
-		t.Fatal("index:-1 应带上纯音乐提示")
+	songWithArtist := func(title, artist string) []mem.NowPlaying {
+		s := store(title, "封面:"+title)
+		s.Artist = artist
+		return []mem.NowPlaying{s}
+	}
+
+	cases := []struct {
+		name         string
+		title        string
+		artist       string
+		lines        []string
+		wantNoLyrics bool
+		wantHint     string
+	}{
+		{"共用提示一行", "纯音乐", "歌手", []string{sharedHint}, true, sharedHint},
+		{"kuwo 形状一行", "纯音乐", "歌手", []string{kuwoPureHint}, true, kuwoPureHint},
+		// buildTitle("Go Time", "Mark Petrie") = "Mark Petrie - Go Time"
+		{"歌名行加提示取第 1 行原文", "Go Time", "Mark Petrie", []string{"Mark Petrie-Go Time", kuwoGaiHint}, true, kuwoGaiHint},
+		{"反例：首行与标题不同按普通歌词", "Go Time", "Mark Petrie", []string{"Other Artist-Go Time", kuwoGaiHint}, false, ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.f.songs = songWithArtist(c.title, c.artist)
+			h.f.docs = []mem.TTMLDoc{{Text: makeTTML(c.lines...), Count: 1}}
+			h.setTwin(200, 10, true)
+			h.run(8 * time.Second)
+			al := allLyrics(h.evs)
+			if c.wantNoLyrics {
+				if len(al) != 1 || al[0].Count != 0 {
+					t.Fatalf("应只发一条空的 all_lyrics，got %+v", al)
+				}
+				var sawHint bool
+				for _, e := range h.evs {
+					if lu, ok := e.Data.(*player.LyricUpdate); ok {
+						if lu.Index >= 0 {
+							t.Fatalf("纯音乐提示不应作为第 %d 行推出", lu.Index)
+						}
+						if lu.Text != c.wantHint {
+							t.Fatalf("index:-1 的 text = %q，期望提示原文 %q", lu.Text, c.wantHint)
+						}
+						sawHint = true
+					}
+				}
+				if !sawHint {
+					t.Fatal("index:-1 应带上纯音乐提示")
+				}
+			} else {
+				if len(al) != 1 || al[0].Count != len(c.lines) {
+					t.Fatalf("非提示语应发 %d 行歌词，got %+v", len(c.lines), al)
+				}
+				if v := verdicts(h.evs); len(v) != 0 {
+					t.Fatalf("非提示语不应发 index:-1，got %+v", v)
+				}
+			}
+		})
+	}
+}
+
+// 超过 lyricGrace（15s）先发了无提示（text=""）的 index:-1 之后，内存里才扫到仅含无歌词提示的 TTML：
+// applyLyrics 重发空的 all_lyrics（服务端会清掉 LyricUpdate 缓存）后，必须再补发一条携带提示原文的 index:-1，
+// 使提示原文对外送达且留在服务端缓存中；之后不再重复发 index:-1，也不推 index >= 0（#231）。
+//
+// 变异自证：把 applemusic.go applyLyrics 里的 `if pure` 改回 `if pure && !s.verdictSent`，两个子用例均红（实测）。
+func TestSessionLatePureMusicHintAfterGrace(t *testing.T) {
+	const (
+		kuwoPureHint = "此歌曲为没有填词的纯音乐，请您欣赏"
+		kuwoGaiHint  = "该歌曲为纯音乐请欣赏"
+	)
+	makeTTML := func(lines ...string) string {
+		var ps string
+		for i, text := range lines {
+			ps += fmt.Sprintf(`<p begin="%d.0" end="%d.0" itunes:key="L%d">%s</p>`, i*2, i*2+2, i+1, text)
+		}
+		return `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Line"><body dur="200.500"><div>` + ps + `</div></body></tt>`
+	}
+	songWithArtist := func(title, artist string) []mem.NowPlaying {
+		s := store(title, "封面:"+title)
+		s.Artist = artist
+		return []mem.NowPlaying{s}
+	}
+
+	cases := []struct {
+		name     string
+		title    string
+		artist   string
+		lines    []string
+		wantHint string
+	}{
+		{"宽限期后晚到单行提示", "纯音乐", "歌手", []string{kuwoPureHint}, kuwoPureHint},
+		{"宽限期后晚到歌名行加提示", "Go Time", "Mark Petrie", []string{"Mark Petrie-Go Time", kuwoGaiHint}, kuwoGaiHint},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.f.songs = songWithArtist(c.title, c.artist)
+			h.setTwin(200, 0, true)
+			h.s.twin = realTwin
+			h.run(lyricGrace + 2*time.Second)
+
+			v0 := verdicts(h.evs)
+			if len(v0) != 1 || v0[0].Text != "" {
+				t.Fatalf("宽限期满应先发 1 条空 text 的 index:-1，got %+v", v0)
+			}
+
+			// 宽限期满后才扫到提示型 TTML；退避扫描最长 15s 一次，推进 20s 确保扫到且覆盖后续轮次。
+			from := h.mark()
+			h.f.docs = []mem.TTMLDoc{{Text: makeTTML(c.lines...), Count: 1}}
+			h.run(20 * time.Second)
+
+			evs := h.since(from)
+			al := allLyrics(evs)
+			if len(al) != 1 || al[0].Count != 0 {
+				t.Fatalf("提示型 TTML 晚到应补发 1 条空的 all_lyrics，got %+v", al)
+			}
+			// 重放服务端缓存规则（all_lyrics 清 LyricUpdate，lyric_update 写入），验证最终缓存非 nil 且带提示原文。
+			var cached *player.LyricUpdate
+			var lateVerdicts []*player.LyricUpdate
+			for _, e := range evs {
+				switch d := e.Data.(type) {
+				case *player.AllLyricsData:
+					cached = nil
+				case *player.LyricUpdate:
+					if d.Index >= 0 {
+						t.Fatalf("提示型 TTML 不应推第 %d 行歌词", d.Index)
+					}
+					cached = d
+					lateVerdicts = append(lateVerdicts, d)
+				}
+			}
+			if len(lateVerdicts) != 1 || lateVerdicts[0].Text != c.wantHint {
+				t.Fatalf("补发空 all_lyrics 后应补发 1 条带提示原文 %q 的 index:-1，got %+v", c.wantHint, lateVerdicts)
+			}
+			if cached == nil || cached.Index != -1 || cached.Text != c.wantHint || cached.Progress <= 0 {
+				t.Fatalf("服务端最终缓存应为带提示原文与正进度的 index:-1，got %+v", cached)
+			}
+		})
 	}
 }
 
@@ -611,11 +744,12 @@ func TestSessionLyricsSeenOnlyWhileLoading(t *testing.T) {
 		if got := lastLyrics(h.evs); got != "第 0 行" {
 			t.Fatalf("前置：时长写入后应带着歌词宣告，got %q", got)
 		}
+		fromClear := h.mark()
 		h.setTwin(0, 0, false) // 又归零
 		h.run(time.Second)
 		h.f.songs = nil // 存储也消失
 		h.run(6 * time.Second)
-		if n := count(h.evs, player.EventClearSongData); n != 1 {
+		if n := count(h.since(fromClear), player.EventClearSongData); n != 1 {
 			t.Fatalf("前置：加载超过 %v 应清屏一次，got %d", loadingGrace, n)
 		}
 		from := h.mark()

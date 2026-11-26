@@ -45,6 +45,7 @@ func main() {
 		fmt.Println("连 QQ 音乐失败:", err, "（QQ 开着吗？版本在 knownVersions 里吗？需管理员）")
 		return
 	}
+	defer mem.Close()
 	fmt.Println("QQ 版本:", mem.Version())
 	meta, err := mem.ReadAllMetadata()
 	if err != nil {

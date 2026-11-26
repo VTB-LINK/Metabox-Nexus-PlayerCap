@@ -84,22 +84,35 @@ type localSession struct {
 	carried bool
 }
 
+// results 安全返回读取者的结果通道：r 为 nil 时返回 nil，供 select 自动屏蔽且绝不对 nil 接口调 Results()。
+func (s *localSession) results() <-chan assoc.Result {
+	if s.r == nil {
+		return nil
+	}
+	return s.r.Results()
+}
+
 // ownPlay 判 P 的 LastPlayTime 是否属于这一首的这一次播放（设计 §6.7「P 属于这一次播放」）：不早于开始时刻减
 // playGrace，这一首有界限时还须大于界限。没有 P（为 0）时不属于。
 func (s *localSession) ownPlay(played int64) bool {
 	return played > 0 && played >= fileTime(s.start.Add(-playGrace)) && (s.bound == 0 || played > s.bound)
 }
 
-// localNone 判 res 是否为本地文件两条规则所指的结果：这一首有界限，res 为没有、不待重试、带本地文件标记，且 P 属于
-// 这一次播放，即酷狗为这份磁盘文件确实没有歌词（设计 §6.7）。
+// localNone 判 res 是否为本地文件两条规则所指的结果：这一首有界限，res 为没有、酷狗内存无已加载歌词行
+// （!HasMemoryLyric）、不待重试、带本地文件标记，且 P 属于这一次播放，即酷狗为这份磁盘文件确实没有歌词
+// （设计 §6.4.4、§6.7）。
 func (s *localSession) localNone(res assoc.Result) bool {
-	return res.Kind == assoc.KindNone && !res.Retry && res.LocalFile && s.bound > 0 && s.ownPlay(res.PlayedAt)
+	return res.Kind == assoc.KindNone && !res.HasMemoryLyric && !res.Retry && res.LocalFile && s.bound > 0 && s.ownPlay(res.PlayedAt)
 }
 
-// seen 记下这一首的一条结果：P 属于这一次播放的，计入 own。
+// seen 记下这一首的一条结果：P 属于这一次播放的，计入 own；若当前本地歌词采纳时 PlayedAt 尚未落盘（为 0），
+// 同步补记 curPlayedAt 以衔接后续同次播放保护与单曲循环重播清词。
 func (s *localSession) seen(res assoc.Result) {
 	if s.ownPlay(res.PlayedAt) {
 		s.own = max(s.own, res.PlayedAt)
+		if s.cur != 0 && s.curPlayedAt == 0 {
+			s.curPlayedAt = res.PlayedAt
+		}
 	}
 }
 
@@ -112,20 +125,31 @@ func (s *localSession) note(res assoc.Result) {
 	}
 }
 
-// await 在换歌拍写入 hash，在 stop、localWait 与结果通道上等这一首的结果（其他 hash 的丢弃）：取到歌词返回行、
-// 来源与 found；没有、暂时失败、未确认、停用与超时 found 为假，调用方在线取词；收到 stop 返回 stopped，调用方结束会话，
-// 不再在线取词（单次至多 8 s，不受 stop 中断）。读取者疑似阻塞（最早一次未获结果的写入已过 stuckAfter，如读取者
-// panic 后已退出）时照常写入、不等。
-//
-// 结果合 localNone（这一首有界限，结果为没有、不待重试、带本地文件标记，P 属于这一次播放）时 none 为真：调用方照常
-// 在线取词，但取不到或出错时不沿用上一首的歌词（设计 §6.7「换歌拍」例外）。
+// localAwait 是换歌拍 await 等待本地读取者的结论。
+type localAwait struct {
+	lines          []klyric.Line
+	src            assoc.Source
+	lyricOffsetMs  int
+	found          bool
+	unassociated   bool
+	none           bool // 合 localNone（本地文件确实无词，换歌拍不沿用同名上一首）
+	hasMemoryLyric bool
+	stopped        bool
+}
+
+// await 在换歌拍写入 hash，在 stop、localWait 与结果通道上等这一首的结果（其他 hash 的丢弃）：
+//   - KindUnassociated：立即返回 unassociated（不在线取词、不复用）；
+//   - KindFound（非空行）：记下来源与 PlayedAt，返回 found 与 lyricOffsetMs；
+//   - KindNone：返回 localNone 判定、lyricOffsetMs 与 hasMemoryLyric，由调用方进入在线取词；
+//   - 其余结局（停用、暂时失败、未确认、空行 KindFound、超时、读取者疑似阻塞）：返回未命中（偏移 0），走在线取词；
+//   - stop：返回 stopped，调用方结束会话。
 //
 // 换歌拍同时开始新的一首：记下开始时刻，上一首的 own 转作这一首的界限，来源与沿用标记清零。读取者为 nil 时同样如此。
-func (s *localSession) await(stop <-chan struct{}, hash string) (lines []klyric.Line, src assoc.Source, found, none, stopped bool) {
+func (s *localSession) await(stop <-chan struct{}, hash string) localAwait {
 	s.cur, s.curPlayedAt, s.carried = 0, 0, false
 	s.start, s.bound, s.own = time.Now(), s.own, 0
 	if s.r == nil || hash == "" {
-		return nil, 0, false, false, false
+		return localAwait{}
 	}
 	stuck := !s.unanswered.IsZero() && time.Since(s.unanswered) >= stuckAfter
 	s.r.SetHash(hash)
@@ -133,77 +157,132 @@ func (s *localSession) await(stop <-chan struct{}, hash string) (lines []klyric.
 		s.unanswered = time.Now()
 	}
 	if stuck {
-		return nil, 0, false, false, false
+		return localAwait{}
 	}
 	timer := time.NewTimer(localWait)
 	defer timer.Stop()
 	for {
 		select {
 		case <-stop:
-			return nil, 0, false, false, true
+			return localAwait{stopped: true}
 		case <-timer.C:
-			return nil, 0, false, false, false
-		case res := <-s.r.Results():
+			return localAwait{}
+		case res := <-s.results():
 			s.note(res)
 			switch {
 			case s.r == nil: // 停用
-				return nil, 0, false, false, false
+				return localAwait{}
 			case res.Hash != hash:
 				continue
 			}
 			s.seen(res)
-			if res.Kind == assoc.KindFound && len(res.Lines) > 0 {
-				s.cur, s.curPlayedAt = res.Source, res.PlayedAt
-				return res.Lines, res.Source, true, false, false
+			switch res.Kind {
+			case assoc.KindUnassociated:
+				return localAwait{unassociated: true}
+			case assoc.KindFound:
+				if len(res.Lines) > 0 {
+					s.cur, s.curPlayedAt = res.Source, res.PlayedAt
+					return localAwait{
+						lines:         res.Lines,
+						src:           res.Source,
+						lyricOffsetMs: res.LyricOffsetMs,
+						found:         true,
+					}
+				}
+				return localAwait{}
+			case assoc.KindNone:
+				off := 0
+				if res.HasMemoryLyric {
+					off = res.LyricOffsetMs
+				}
+				return localAwait{
+					none:           s.localNone(res),
+					lyricOffsetMs:  off,
+					hasMemoryLyric: res.HasMemoryLyric,
+				}
+			default:
+				return localAwait{}
 			}
-			return nil, 0, false, s.localNone(res), false
 		}
 	}
 }
 
-// poll 非阻塞地取一条结果：是 hash 这一首的歌词、且指纹与 fp 不同，返回行、来源、新指纹与 true；没有结果、上一首的、
-// 内容相同的与不是歌词的返回 false，调用方不发事件。
+// pollKind 表示播放中 poll 从本地读取者收到的待处理动作种类。
+type pollKind uint8
+
+const (
+	pollEmpty          pollKind = iota // 无结果、非本首、停用、暂时失败、未确认或被防关联降级守卫忽略
+	pollUnassociated                   // 用户显式取消关联：清空歌词且禁止回退
+	pollFound                          // 收到新的本地/缓存歌词或偏移变化候选（已过防关联降级守卫）
+	pollClearLocalNone                 // #205 本地文件确实无歌词：清掉沿用或不同 PlayedAt 的旧本地歌词
+	pollNone                           // 其余 KindNone：供会话按设计 §6.4.4 解除取消关联、重算偏移或触发异步在线恢复
+)
+
+// localPoll 是播放中 poll 非阻塞收一条结果后的返回结构。
+type localPoll struct {
+	kind           pollKind
+	lines          []klyric.Line
+	src            assoc.Source
+	lyricOffsetMs  int
+	hasMemoryLyric bool
+}
+
+// classify 按设计 §6.4.4 与 #205 规则分类一条播放中收到的本地读取者结果，并返回待执行动作。
 //
-// 以下三条同时满足时同样返回 false（设计 §6.7「播放中」）：当前歌词来自关联；新结果不是关联且带「关联未取用」标记
-// （res.AssocSkipped）；新结果的 P 的 LastPlayTime（res.PlayedAt）与采纳当前歌词时记下的相同，即仍是同一次播放。
-// 关联在播放中失效（被酷狗拒绝、文件改名或删除、判为不可用）时，酷狗仍显示原来的歌词，按用户决定「2甲」保持当前
-// 歌词到下一首。其余情形照换：不带标记即第 1 步本就没有关联键；PlayedAt 不同，说明当初采纳的关联属于换歌拍时
-// 酷狗尚未落盘、被误选为 P 的另一行，或已是新的一次播放，应换成缓存（设计 §8）。
+// 防关联降级守卫（设计 §6.7「播放中」）：当前歌词来自关联、新结果不是关联且带 AssocSkipped 标记、且 PlayedAt 与
+// 采纳当前歌词时记下的相同（同一次播放）时忽略，保持当前歌词到下一首；其余情形照常更新来源与 PlayedAt 并返回
+// pollFound，由调用方按指纹与偏移决定是否重发。
 //
-// 清词（设计 §6.7「播放中」）：结果合 localNone，且当前歌词是换歌拍沿用的（carried），或采纳自本地、而结果的 PlayedAt
-// 与记下的不同，即清掉：返回空的行、空歌词的指纹与 true，调用方据此发无歌词；来源清零、记下结果的 PlayedAt、沿用标记
-// 清除，同样的结果再来时两条都不成立，不再发。采纳自本地、PlayedAt 相同的仍按「2甲」保持；当前歌词是在线取到的不清。
-// carried 只在沿用了非空的歌词时为真，cur 只在采纳了非空的歌词时非零，故清掉的总是沿用或采纳来的非空歌词。
-func (s *localSession) poll(hash string, fp [32]byte) ([]klyric.Line, assoc.Source, [32]byte, bool) {
-	if s.r == nil {
-		return nil, 0, fp, false
+// 清词（设计 §6.7「播放中」）：非 HasMemoryLyric 且合 localNone，且当前歌词是换歌拍沿用的（carried）或采纳自本地
+// 而 PlayedAt 不同时，清零来源与沿用标记、记下新 PlayedAt 并返回 pollClearLocalNone。
+func (s *localSession) classify(hash string, res assoc.Result) localPoll {
+	s.note(res)
+	if s.r == nil || res.Hash != hash {
+		return localPoll{}
 	}
-	select {
-	case res := <-s.r.Results():
-		s.note(res)
-		if res.Hash != hash {
-			break
-		}
-		s.seen(res)
-		if s.localNone(res) {
-			if !s.carried && (s.cur == 0 || res.PlayedAt == s.curPlayedAt) {
-				break
-			}
-			s.cur, s.curPlayedAt, s.carried = 0, res.PlayedAt, false
-			return nil, 0, lyricFingerprint(nil), true
-		}
-		if res.Kind != assoc.KindFound || len(res.Lines) == 0 {
-			break
+	s.seen(res)
+	switch res.Kind {
+	case assoc.KindUnassociated:
+		s.cur, s.curPlayedAt, s.carried = 0, res.PlayedAt, false
+		return localPoll{kind: pollUnassociated}
+	case assoc.KindFound:
+		if len(res.Lines) == 0 {
+			return localPoll{}
 		}
 		if s.cur == assoc.SourceAssociation && res.Source != assoc.SourceAssociation && res.AssocSkipped &&
 			res.PlayedAt == s.curPlayedAt {
-			break
+			return localPoll{}
 		}
 		s.cur, s.curPlayedAt, s.carried = res.Source, res.PlayedAt, false
-		if nfp := lyricFingerprint(res.Lines); nfp != fp {
-			return res.Lines, res.Source, nfp, true
+		return localPoll{
+			kind:          pollFound,
+			lines:         res.Lines,
+			src:           res.Source,
+			lyricOffsetMs: res.LyricOffsetMs,
 		}
+	case assoc.KindNone:
+		if s.localNone(res) && (s.carried || (s.cur != 0 && res.PlayedAt != s.curPlayedAt)) {
+			s.cur, s.curPlayedAt, s.carried = 0, res.PlayedAt, false
+			return localPoll{kind: pollClearLocalNone}
+		}
+		return localPoll{
+			kind:           pollNone,
+			lyricOffsetMs:  res.LyricOffsetMs,
+			hasMemoryLyric: res.HasMemoryLyric,
+		}
+	}
+	return localPoll{}
+}
+
+// poll 非阻塞地取一条结果并交给 classify 分类。
+func (s *localSession) poll(hash string) localPoll {
+	if s.r == nil {
+		return localPoll{}
+	}
+	select {
+	case res := <-s.results():
+		return s.classify(hash, res)
 	default:
 	}
-	return nil, 0, fp, false
+	return localPoll{}
 }

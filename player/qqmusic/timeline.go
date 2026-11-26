@@ -31,13 +31,14 @@ func shiftTimeline(lines []lyricLine, lyricOffsetMs int) {
 	}
 }
 
-// cloneLines 深拷贝 lines：逐字切片 Detailed.Words、RomaDetailed.Words 另行分配，改副本不影响原件。
+// cloneLines 深拷贝 lines：逐字切片 Detailed.Words、RomaDetailed.Words 与振假名切片 Furigana 另行分配，改副本不影响原件。
 // shiftTimeline 与 applyDetailedOffset 都就地改写，每次应用都从原始行拷贝一份再套。
 func cloneLines(lines []lyricLine) []lyricLine {
 	out := slices.Clone(lines)
 	for i := range out {
 		out[i].Detailed.Words = slices.Clone(out[i].Detailed.Words)
 		out[i].RomaDetailed.Words = slices.Clone(out[i].RomaDetailed.Words)
+		out[i].Furigana = slices.Clone(out[i].Furigana)
 	}
 	return out
 }

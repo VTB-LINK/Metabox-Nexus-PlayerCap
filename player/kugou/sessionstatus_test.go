@@ -198,7 +198,7 @@ func TestNoSongMidSessionStaysSilent(t *testing.T) {
 }
 
 // 断开重连后的新会话从头判定：同一个播放器、同一首歌（hash 相同），新会话里仍按第一首处理；无歌也重新报
-// waiting_song。两次会话之间照 Start 的写法发出断开与等待重连两条状态。
+// waiting_song。两次会话之间照 Start 的写法发出会话结束后的状态（酷狗已退出）。
 //
 // 变异自证：删掉第一首按 paused 发的分支、或删掉无歌分支的 EmitStatusIfChanged，第二次会话红。
 func TestReconnectedSessionStartsOver(t *testing.T) {
@@ -206,8 +206,7 @@ func TestReconnectedSessionStartsOver(t *testing.T) {
 	checkEvents(t, runScript(t, p, nil, song("A", "playing"), song("A", "playing")),
 		[]string{waitingSong, playingOf("A")})
 
-	p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("KuGou CDP disconnected"), Reason: player.ReasonCDPDisconnected})
-	p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("KuGou not running or CDP not ready"), Reason: player.ReasonProcessNotRunning})
+	p.EmitStatusIfChanged(player.ProcessStatus(false, true, kugouDetails(), player.Blocked{}))
 	drainStatus(p)
 
 	checkEvents(t, runScript(t, p, nil, nil, song("A", "stopped"), song("A", "stopped"), song("A", "playing")),

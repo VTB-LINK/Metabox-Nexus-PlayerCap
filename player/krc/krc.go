@@ -12,6 +12,7 @@ package krc
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math"
 	"regexp"
 	"slices"
@@ -410,4 +411,61 @@ func trackLine(content [][]string, i int) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.Join(content[i], ""))
+}
+
+// maxOffsetTagMs 是 [offset:] 标签允许的毫秒绝对值上限（±10 分钟），超界按符号钳位。
+const maxOffsetTagMs = 600_000
+
+// ParseOffsetTag 从 KRC 或 LRC 明文中提取独占整行的 [offset:整数ms] 元数据标签。
+//
+// 仅接受首尾分别为 '[' 与 ']'、且内部不含 '[' 或 ']' 的独立标签行（跳过多标签行与正文伪标签）；
+// 键名按 ASCII 忽略大小写匹配 "offset"，值须为可选前导 '+'/'-' 加十进制 ASCII 数字。超界或超
+// int64 的合法整数按符号钳位在 [-600_000, +600_000]；存在多条合法行时取最后一条，非法行忽略且不
+// 覆盖先前已解析的合法值。
+func ParseOffsetTag(plain string) (lyricOffsetMs int, ok bool) {
+	plain = strings.TrimPrefix(plain, "\uFEFF")
+	for raw := range strings.Lines(plain) {
+		line := strings.TrimSpace(raw)
+		if len(line) < 2 || line[0] != '[' || line[len(line)-1] != ']' {
+			continue
+		}
+		inner := line[1 : len(line)-1]
+		if strings.ContainsAny(inner, "[]") {
+			continue
+		}
+		key, val, found := strings.Cut(inner, ":")
+		if !found || !strings.EqualFold(strings.TrimSpace(key), "offset") {
+			continue
+		}
+		s := strings.TrimSpace(val)
+		digits := s
+		neg := false
+		if len(digits) > 0 && (digits[0] == '+' || digits[0] == '-') {
+			neg = digits[0] == '-'
+			digits = digits[1:]
+		}
+		if !isASCIIDigits(digits) {
+			continue
+		}
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			if errors.Is(err, strconv.ErrRange) {
+				if neg {
+					lyricOffsetMs = -maxOffsetTagMs
+				} else {
+					lyricOffsetMs = maxOffsetTagMs
+				}
+				ok = true
+			}
+			continue
+		}
+		if v > maxOffsetTagMs {
+			v = maxOffsetTagMs
+		} else if v < -maxOffsetTagMs {
+			v = -maxOffsetTagMs
+		}
+		lyricOffsetMs = int(v)
+		ok = true
+	}
+	return lyricOffsetMs, ok
 }

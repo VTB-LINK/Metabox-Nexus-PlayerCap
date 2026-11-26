@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -35,7 +36,7 @@ func main() {
 		fmt.Println("激活 inspector 失败:", err, "（可能需要管理员权限）")
 		return
 	}
-	client, err := cdp.Connect()
+	client, err := cdp.Connect(context.Background())
 	if err != nil {
 		fmt.Println("连接 inspector 失败:", err)
 		return

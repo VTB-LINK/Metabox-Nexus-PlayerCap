@@ -63,17 +63,17 @@ var designSamples = []struct {
 	want       []candidate
 }{
 	{"本地文件、手动关联 krc", true, sampleWumingzhi, []candidate{
-		{pathWumingzhiKRC, SourceAssociation, 1763280000},
-		{pathWumingzhiLRC, SourceCache, 1763200000},
+		{Path: pathWumingzhiKRC, Source: SourceAssociation, UpdateTime: 1763280000},
+		{Path: pathWumingzhiLRC, Source: SourceCache, UpdateTime: 1763200000},
 	}},
 	{"本地文件、酷狗自动匹配", false, sampleWumingzhi, []candidate{
-		{pathWumingzhiLRC, SourceCache, 1763200000},
+		{Path: pathWumingzhiLRC, Source: SourceCache, UpdateTime: 1763200000},
 	}},
 	{"在线歌曲、手动关联 lrc", true, sampleTonghua, []candidate{
-		{pathTonghuaLRC, SourceAssociation, 1763290000},
+		{Path: pathTonghuaLRC, Source: SourceAssociation, UpdateTime: 1763290000},
 	}},
 	{"在线歌曲、酷狗缓存", true, sampleSpectre, []candidate{
-		{pathSpectreKRC, SourceCache, 1763250000},
+		{Path: pathSpectreKRC, Source: SourceCache, UpdateTime: 1763250000},
 	}},
 }
 

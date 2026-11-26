@@ -3,6 +3,7 @@ package lyric
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -62,8 +63,13 @@ type downloadResponse struct {
 //
 // Returns nil, nil when no lyrics are found (not an error).
 func Fetch(hash string, durationMs int, name, singer string) ([]Line, error) {
+	return FetchContext(context.Background(), hash, durationMs, name, singer)
+}
+
+// FetchContext 同 Fetch，但将 ctx 透传到所有在线取词 HTTP 请求，并在 ctx 取消或超时后立即终止后续回退。
+func FetchContext(ctx context.Context, hash string, durationMs int, name, singer string) ([]Line, error) {
 	// Tier 1: lyric search by playing hash.
-	cand, err := searchByHash(hash, durationMs)
+	cand, err := searchByHash(ctx, hash, durationMs)
 	if err != nil {
 		return nil, err
 	}
@@ -73,9 +79,12 @@ func Fetch(hash string, durationMs int, name, singer string) ([]Line, error) {
 
 	// Tier 2: resolve canonical hash via song catalog and retry.
 	if cand == nil && normName != "" {
-		canonical, cerr := resolveCanonicalHash(normName, normSinger, durationMs)
+		canonical, cerr := resolveCanonicalHash(ctx, normName, normSinger, durationMs)
+		if cerr != nil && ctx != nil && ctx.Err() != nil {
+			return nil, cerr
+		}
 		if cerr == nil && canonical != "" && !strings.EqualFold(canonical, hash) {
-			cand, err = searchByHash(canonical, durationMs)
+			cand, err = searchByHash(ctx, canonical, durationMs)
 			if err != nil {
 				return nil, err
 			}
@@ -84,7 +93,7 @@ func Fetch(hash string, durationMs int, name, singer string) ([]Line, error) {
 
 	// Tier 3: strict keyword fallback.
 	if cand == nil && normName != "" {
-		cand, err = searchByKeyword(normName, normSinger, durationMs)
+		cand, err = searchByKeyword(ctx, normName, normSinger, durationMs)
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +103,7 @@ func Fetch(hash string, durationMs int, name, singer string) ([]Line, error) {
 		return nil, nil
 	}
 
-	return download(cand.ID, cand.AccessKey)
+	return download(ctx, cand.ID, cand.AccessKey)
 }
 
 type searchCand struct {
@@ -104,11 +113,11 @@ type searchCand struct {
 
 // searchByHash queries krcs by hash and returns the server-recommended candidate
 // (via `proposal` field), falling back to the first candidate.
-func searchByHash(hash string, durationMs int) (*searchCand, error) {
+func searchByHash(ctx context.Context, hash string, durationMs int) (*searchCand, error) {
 	if hash == "" {
 		return nil, nil
 	}
-	sr, err := callSearch("", durationMs, hash)
+	sr, err := callSearch(ctx, "", durationMs, hash)
 	if err != nil || sr == nil || len(sr.Candidates) == 0 {
 		return nil, err
 	}
@@ -129,12 +138,12 @@ func searchByHash(hash string, durationMs int) (*searchCand, error) {
 // within ±5s of the playback duration. This is meant for 伴奏/伴唱/Live
 // variants where the original lyrics apply; it intentionally fails for DJ
 // remixes/covers by other artists where original lyrics would mistime.
-func searchByKeyword(normName, normSinger string, targetDurationMs int) (*searchCand, error) {
+func searchByKeyword(ctx context.Context, normName, normSinger string, targetDurationMs int) (*searchCand, error) {
 	keyword := normName
 	if normSinger != "" {
 		keyword = normSinger + " " + normName
 	}
-	sr, err := callSearch(keyword, targetDurationMs, "")
+	sr, err := callSearch(ctx, keyword, targetDurationMs, "")
 	if err != nil || sr == nil || len(sr.Candidates) == 0 {
 		return nil, err
 	}
@@ -222,12 +231,16 @@ func escapeKeyword(kw string) string {
 }
 
 // callSearch hits krcs.kugou.com/search and returns the parsed response.
-func callSearch(keyword string, durationMs int, hash string) (*searchResponse, error) {
+func callSearch(ctx context.Context, keyword string, durationMs int, hash string) (*searchResponse, error) {
 	searchURL := fmt.Sprintf(
 		"https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=%s&duration=%d&hash=%s",
 		escapeKeyword(keyword), durationMs, hash,
 	)
-	resp, err := httpClient.Get(searchURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, i18n.Errorf("lyric search: %w", err)
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, i18n.Errorf("lyric search: %w", err)
 	}
@@ -254,8 +267,12 @@ func callSearch(keyword string, durationMs int, hash string) (*searchResponse, e
 //
 // **回落不是可选项**：KRC 可能缺失/解不开（魔数不符、密钥换代、zlib 坏），那时必须仍能出
 // 行级歌词——绝不因为逐字拿不到就让主播整首没词。逐字有没有由 Line.Detailed 如实反映。
-func download(id, accessKey string) ([]Line, error) {
-	if content, err := fetchContent(id, accessKey, "krc"); err == nil && content != "" {
+func download(ctx context.Context, id, accessKey string) ([]Line, error) {
+	content, err := fetchContent(ctx, id, accessKey, "krc")
+	if err != nil && ctx != nil && ctx.Err() != nil {
+		return nil, err
+	}
+	if err == nil && content != "" {
 		if plain, derr := krcDecrypt(content); derr == nil {
 			if lines := krc.ParsePlainKRC(plain); len(lines) > 0 {
 				return lines, nil
@@ -263,7 +280,7 @@ func download(id, accessKey string) ([]Line, error) {
 		}
 	}
 	// 回落：行级 LRC（既有行为，一字未改）
-	content, err := fetchContent(id, accessKey, "lrc")
+	content, err = fetchContent(ctx, id, accessKey, "lrc")
 	if err != nil {
 		return nil, err
 	}
@@ -278,12 +295,16 @@ func download(id, accessKey string) ([]Line, error) {
 }
 
 // fetchContent 按指定格式（krc/lrc）取回 base64 的歌词内容；无内容时返回空串而非错误。
-func fetchContent(id, accessKey, format string) (string, error) {
+func fetchContent(ctx context.Context, id, accessKey, format string) (string, error) {
 	dlURL := fmt.Sprintf(
 		"https://lyrics.kugou.com/download?ver=1&client=pc&id=%s&accesskey=%s&fmt=%s&charset=utf8",
 		id, accessKey, format,
 	)
-	resp, err := httpClient.Get(dlURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
+	if err != nil {
+		return "", i18n.Errorf("lyric download: %w", err)
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", i18n.Errorf("lyric download: %w", err)
 	}
@@ -338,7 +359,7 @@ type songCatalogResponse struct {
 // returns the hash of the first entry whose songname + singername match (with
 // duration within ±5s). This recovers the canonical audio hash when the
 // playing hash is a client-side 伴唱 mix not registered in the lyric DB.
-func resolveCanonicalHash(normName, normSinger string, targetDurationMs int) (string, error) {
+func resolveCanonicalHash(ctx context.Context, normName, normSinger string, targetDurationMs int) (string, error) {
 	keyword := normName
 	if normSinger != "" {
 		keyword = normSinger + " " + normName
@@ -347,7 +368,11 @@ func resolveCanonicalHash(normName, normSinger string, targetDurationMs int) (st
 		"http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword=%s&page=1&pagesize=10",
 		escapeKeyword(keyword),
 	)
-	resp, err := httpClient.Get(searchURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return "", i18n.Errorf("catalog search: %w", err)
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", i18n.Errorf("catalog search: %w", err)
 	}

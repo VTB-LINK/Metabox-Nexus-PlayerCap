@@ -11,26 +11,124 @@ import (
 	"testing"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/applemusic/mem"
 )
 
-// 附加后先报「没有歌」：外层此前报的是「未启动」，附加后若一直没有歌也不能沿用它（审查 P2）。
+// 附加后先报「没有歌」并紧跟恰好一条 clear_song_data：外层此前报的是「未启动」，附加后若一直没有歌也
+// 不能沿用它（审查 P2），且断线清缓存后重连无歌时服务端依赖 clear_song_data 派生清除专属画面（#231）。
 //
-// 变异自证：删掉 newSession 里的 s.showNoSong()，一条事件都没有而红。
+// 变异自证（均实测）：删掉 newSession 里的 s.showNoSong() 或 s.flushNoSongClear()，本用例红。
 func TestSessionStartsWithNoSong(t *testing.T) {
 	h := newHarness(t)
 	h.run(10 * time.Second)
-	if len(h.evs) == 0 {
-		t.Fatal("附加后应先报 waiting_song，却一条事件都没有")
+	if len(h.evs) < 2 {
+		t.Fatalf("附加后应先报 waiting_song 并紧跟 clear_song_data，实得 %d 条 %+v", len(h.evs), h.evs)
 	}
 	st, ok := h.evs[0].Data.(*player.StatusInfo)
 	if !ok || st.Status != "waiting_song" || st.Reason != player.ReasonNoSong {
 		t.Fatalf("首个事件应为 waiting_song/no_song，got %+v", h.evs[0].Data)
 	}
+	if h.evs[1].Type != player.EventClearSongData {
+		t.Fatalf("第 2 条事件应紧跟 clear_song_data，got %s", h.evs[1].Type)
+	}
+	if n := count(h.evs, player.EventClearSongData); n != 1 {
+		t.Fatalf("持续无歌应只发一条 clear_song_data，got %d", n)
+	}
 	if count(h.evs, player.EventSongInfoUpdate) != 0 {
 		t.Fatal("没有歌时不应宣告歌曲")
 	}
+}
+
+// TestSessionStartNoSongClearRetriesWhenQueueFull 钉住 newSession 首拍通道余 1 槽或全满时，
+// 后续无歌 tick 补齐 waiting_song/no_song 与 clear_song_data（先状态后清空，只发一次）；
+// 补发前进入 beginSong 则取消待发清空。
+//
+// 变异自证（均实测）：newSession 去掉清空、tick 去掉 flushNoSongClear、beginSong 去掉清 noSongClear，
+// 各自使对应子例变红。
+func TestSessionStartNoSongClearRetriesWhenQueueFull(t *testing.T) {
+	const filler = "filler"
+	for _, tc := range []struct {
+		name string
+		free int
+	}{
+		{"通道仅余1槽", 1},
+		{"通道全满0槽", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeMem{twins: map[uintptr]mem.Twin{}}
+			p := New(0, 50)
+			for len(p.EventCh) < cap(p.EventCh)-tc.free {
+				p.EventCh <- player.Event{Type: filler}
+			}
+			now := time.Unix(1_700_000_000, 0)
+			s := newSession(p, f, func() time.Time { return now })
+
+			var got []player.Event
+			drain := func() {
+				for {
+					select {
+					case e := <-p.Events():
+						if e.Type != filler {
+							got = append(got, e)
+						}
+					default:
+						return
+					}
+				}
+			}
+			drain() // 腾空通道，模拟路由消费跟上
+
+			// 推进若干 tick，应补齐缺失的状态与 clear_song_data，且不重复发
+			for range 5 {
+				now = now.Add(step)
+				s.tick()
+				drain()
+			}
+			if len(got) != 2 {
+				t.Fatalf("%s 补发后应恰好 2 条（waiting_song + clear_song_data），got %d 条 %+v", tc.name, len(got), got)
+			}
+			st, ok := got[0].Data.(*player.StatusInfo)
+			if got[0].Type != player.EventStatusUpdate || !ok || st.Status != "waiting_song" || st.Reason != player.ReasonNoSong {
+				t.Fatalf("%s 第 1 条应为 waiting_song/no_song，got %s %+v", tc.name, got[0].Type, got[0].Data)
+			}
+			if got[1].Type != player.EventClearSongData {
+				t.Fatalf("%s 第 2 条应为 clear_song_data，got %s", tc.name, got[1].Type)
+			}
+		})
+	}
+
+	t.Run("补发前开始新歌取消待发清空", func(t *testing.T) {
+		f := &fakeMem{twins: map[uintptr]mem.Twin{}}
+		p := New(0, 50)
+		for len(p.EventCh) < cap(p.EventCh)-1 { // 仅余 1 槽：首拍 waiting_song 入队，clear_song_data 滞留
+			p.EventCh <- player.Event{Type: filler}
+		}
+		now := time.Unix(1_700_000_000, 0)
+		s := newSession(p, f, func() time.Time { return now })
+		if !s.noSongClear {
+			t.Fatal("前置：首拍仅余 1 槽时 noSongClear 应保持为真")
+		}
+		for {
+			select {
+			case <-p.Events():
+			default:
+				goto drained
+			}
+		}
+	drained:
+		s.beginSong(mem.Twin{Dur: 200, Pos: 0}, now, 0, true)
+		if s.noSongClear {
+			t.Fatal("beginSong 应清除滞留的 noSongClear")
+		}
+		s.flushNoSongClear()
+		select {
+		case e := <-p.Events():
+			t.Fatalf("beginSong 之后不应再补发任何事件，实得 %+v", e)
+		default:
+		}
+	})
 }
 
 // 暂停中启动（有标题、没有在走的位置结构）：不宣告、不报 playing，一直是「未在播放」——属实，且没有
@@ -692,30 +790,89 @@ func TestSessionNoEventsWhileLoading(t *testing.T) {
 	}
 }
 
-// 换歌后一直取不到标题：上一首的信息不能一直挂着，titleGiveUp（10s）一到就清屏，不拖到下一次扫描。
+// 换歌后一直取不到标题：上一首的信息不能一直挂着，titleGiveUp（10s）一到就报 standby/metadata_unavailable
+// 并紧随 clear_song_data，不拖到下一次扫描；每次换歌至多报一次；歌名随后取到即宣告。若取不到标题后切入
+// 加载满 loadingGrace（6s），仍转报 waiting_song/no_song。
 //
-// 变异自证：删掉 maybeScan 里 titleGiveUp 的那一段，一直不清屏而红。（只把它挪到全扫之后本例仍绿：
-// 迟迟宣告不了时候选扫描在换歌后 5、7、10s 各来一次，10s 那次正好赶上——每轮都判是不依赖这个巧合。）
+// 变异自证（均实测变红）：
+//   - titleGiveUp 改回 showNoSong（两个子例均红：首子例报 waiting_song/no_song，次子例加载满 6s 只发 clear_song_data）；
+//   - titleGiveUp 去掉 !s.titleGiveUpSent 守卫（首子例每轮重发、发出 11 条事件而非 2 条而红）。
 func TestSessionTitleGiveUpOnTime(t *testing.T) {
-	h := newHarness(t)
-	h.f.songs = np("A")
-	h.setTwin(200, 10, true)
-	h.run(5 * time.Second)
-	h.setTwin(0, 0, false)
-	h.f.songs = nil
-	h.run(600 * time.Millisecond)
-	h.setTwin(260, 0, true)
+	t.Run("10s报metadata_unavailable只报一次，随后取到歌名即宣告", func(t *testing.T) {
+		h := newHarness(t)
+		h.f.songs = np("A")
+		h.setTwin(200, 10, true)
+		h.run(5 * time.Second)
+		h.setTwin(0, 0, false)
+		h.f.songs = nil
+		h.run(600 * time.Millisecond)
+		h.setTwin(260, 0, true)
 
-	from := h.mark()
-	h.run(9500 * time.Millisecond)
-	if n := count(h.since(from), player.EventClearSongData); n != 0 {
-		t.Fatalf("10s 之前不应清屏，got %d", n)
-	}
-	h.run(1500 * time.Millisecond)
-	evs := h.since(from)
-	if count(evs, player.EventClearSongData) != 1 || !slices.Contains(statuses(evs), "waiting_song") {
-		t.Fatalf("约 10s 时应清屏并报 waiting_song，got clear=%d status=%v", count(evs, player.EventClearSongData), statuses(evs))
-	}
+		from := h.mark()
+		h.run(9500 * time.Millisecond)
+		if evs := h.since(from); len(evs) != 0 {
+			t.Fatalf("10s 之前不应发状态或清屏，got %d 条（首条 %s）", len(evs), evs[0].Type)
+		}
+		h.run(1500 * time.Millisecond)
+		evs := h.since(from)
+		if len(evs) != 2 {
+			t.Fatalf("约 10s 时应发 status_update 与紧随的 clear_song_data 共 2 条，got %d 条 %+v", len(evs), evs)
+		}
+		st, ok := evs[0].Data.(*player.StatusInfo)
+		wantDetail := i18n.T("Cannot read the Apple Music track title")
+		if evs[0].Type != player.EventStatusUpdate || !ok || st.Status != "standby" || st.Reason != player.ReasonMetadataUnavailable || st.Detail != wantDetail {
+			t.Fatalf("首条应为 standby/metadata_unavailable（%q），got %s %+v", wantDetail, evs[0].Type, evs[0].Data)
+		}
+		if evs[1].Type != player.EventClearSongData {
+			t.Fatalf("第 2 条应紧随 clear_song_data，got %s", evs[1].Type)
+		}
+
+		// 仍取不到标题继续跑 20s：不得再报第二次状态或 clear_song_data。
+		from = h.mark()
+		h.run(20 * time.Second)
+		if more := h.since(from); len(more) != 0 {
+			t.Fatalf("每次换歌至多报一次 metadata_unavailable，之后 20s 不应再发事件，got %d 条（首条 %s）", len(more), more[0].Type)
+		}
+
+		// 歌名随后取到：照常宣告。
+		from = h.mark()
+		h.f.songs = np("B")
+		h.run(65 * time.Second)
+		evs = h.since(from)
+		if got := infoSeq(evs); !slices.Equal(got, []string{"B", "B+图"}) {
+			t.Fatalf("歌名随后取到应宣告 B（不带图的宣告与封面落地后补的一条），got %v", got)
+		}
+		if st := statuses(evs); len(st) == 0 || st[len(st)-1] != "playing" {
+			t.Fatalf("宣告后应报 playing，got %v", st)
+		}
+	})
+
+	t.Run("报metadata_unavailable后加载满6s仍转报waiting_song", func(t *testing.T) {
+		h := newHarness(t)
+		h.f.songs = np("A")
+		h.setTwin(200, 10, true)
+		h.run(5 * time.Second)
+		h.setTwin(0, 0, false)
+		h.f.songs = nil
+		h.run(600 * time.Millisecond)
+		h.setTwin(260, 0, true)
+		h.run(11 * time.Second)
+
+		from := h.mark()
+		h.setTwin(0, 0, false) // 切入加载中，持续超过 loadingGrace（6s）
+		h.run(loadingGrace + 500*time.Millisecond)
+		evs := h.since(from)
+		if len(evs) != 2 {
+			t.Fatalf("加载满 %v 应发 waiting_song 与 clear_song_data 共 2 条，got %d 条 %+v", loadingGrace, len(evs), evs)
+		}
+		st, ok := evs[0].Data.(*player.StatusInfo)
+		if evs[0].Type != player.EventStatusUpdate || !ok || st.Status != "waiting_song" || st.Reason != player.ReasonNoSong {
+			t.Fatalf("加载满 %v 应报 waiting_song/no_song，got %s %+v", loadingGrace, evs[0].Type, evs[0].Data)
+		}
+		if evs[1].Type != player.EventClearSongData {
+			t.Fatalf("第 2 条应紧随 clear_song_data，got %s", evs[1].Type)
+		}
+	})
 }
 
 // 时长相同的下一首、没看到归零（真机自然播完衔接时归零只有约 57ms，轮询看不到）：位置结构这头只看到

@@ -153,10 +153,10 @@ func TestScanBudgetSteadyPlayback(t *testing.T) {
 	}
 }
 
-// 有歌没歌词：宽限期（前 15s）内约每 1.2s 找一次，之后退避，最后一档 60s 一次。
+// 有歌没歌词：宽限期（前 15s）内约每 1.2s 找一次，之后退避，最后一档 15s 一次（#247）。
 //
 // 变异自证：把 scheduleSongScan 里 `since < lyricGrace` 的条件去掉（一直按 lyricGapFast 找），后 5 分钟
-// 全扫两百多次而红。
+// 全扫两百多次而红；最后一档仍为 60s，后 5 分钟 7 次而红。
 func TestScanBudgetNoLyrics(t *testing.T) {
 	h := newHarness(t)
 	h.f.songs = np("无词")
@@ -168,8 +168,8 @@ func TestScanBudgetNoLyrics(t *testing.T) {
 	if early > 25 {
 		t.Fatalf("前 30s 全扫 %d 次，应 ≤ 25", early)
 	}
-	if n := h.f.scans - early; n < 4 || n > 7 {
-		t.Fatalf("没歌词时后 5 分钟内全扫 %d 次，应为每分钟约一次（4~7）", n)
+	if n := h.f.scans - early; n < 18 || n > 22 {
+		t.Fatalf("没歌词时后 5 分钟内全扫 %d 次，应为约每 15s 一次（18~22）", n)
 	}
 }
 

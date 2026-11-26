@@ -4,6 +4,7 @@ func init() {
 	for key, value := range map[string]string{
 		"Kuwo connection lost; retrying":           "酷我连接已断开，正在重试",
 		"Kuwo is not running":                      "酷我尚未运行",
+		"Kuwo has exited":                          "酷我已退出",
 		"This Kuwo playback core is not supported": "暂不支持此酷我播放核心",
 		"Kuwo has no current song":                 "酷我当前没有歌曲",
 		"Kuwo capture unavailable: %v":             "酷我采集暂不可用：%v",

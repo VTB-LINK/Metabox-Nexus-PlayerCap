@@ -128,3 +128,54 @@ func TestHashDistinguishesRomaTextDetailed(t *testing.T) {
 		t.Error("lyric_update 哈希没算上 roma_text_detailed：只改逐字音译的两条被判成内容相同")
 	}
 }
+
+// TestHashDistinguishesFurigana 振假名（furigana）进内容哈希，且带字节长度前缀防止字段拼接碰撞：
+// 只差振假名的两条事件内容并不相同，不能被 switchSkip 当成重复跳过；完全相同的输入哈希相等。
+//
+// 变异自证：删掉 dedup.go 中 all_lyrics 或 lyric_update 的 hashFurigana 调用，对应分支即红；
+// 去掉长度前缀（不论退化为无分隔直接拼接还是仅保留 \x00 分隔符），拼接边界防碰撞即红。
+func TestHashDistinguishesFurigana(t *testing.T) {
+	baseF := player.LyricFurigana{{Text: "こっち"}, {Text: "向", Ruby: "む"}}
+	sameF := player.LyricFurigana{{Text: "こっち"}, {Text: "向", Ruby: "む"}}
+	diffRubyF := player.LyricFurigana{{Text: "こっち"}, {Text: "向", Ruby: "こう"}}
+	splitA := player.LyricFurigana{{Text: "a", Ruby: "bc"}}
+	splitB := player.LyricFurigana{{Text: "ab", Ruby: "c"}}
+	nulSplitA := player.LyricFurigana{{Text: "a\x00b", Ruby: "c"}}
+	nulSplitB := player.LyricFurigana{{Text: "a", Ruby: "b\x00c"}}
+
+	all := func(f player.LyricFurigana) *player.AllLyricsData {
+		return &player.AllLyricsData{
+			Title: "x", Duration: 200, Count: 1,
+			Lyrics: []player.LyricLine{{Index: 0, Timestamp: 10.5, Text: "こっち向", Furigana: f}},
+		}
+	}
+	lu := func(f player.LyricFurigana) *player.LyricUpdate {
+		return &player.LyricUpdate{Index: 0, Text: "こっち向", Timestamp: 10.5, Furigana: f}
+	}
+
+	check := func(name, evtType string, makeData func(player.LyricFurigana) interface{}) {
+		t.Helper()
+		hBase := hashEventData(evtType, makeData(baseF))
+		if hBase != hashEventData(evtType, makeData(sameF)) {
+			t.Errorf("%s 相同 furigana 哈希不等", name)
+		}
+		if hashEventData(evtType, makeData(nil)) != hashEventData(evtType, makeData(player.LyricFurigana{})) {
+			t.Errorf("%s nil 与空切片 furigana 哈希不等", name)
+		}
+		if hBase == hashEventData(evtType, makeData(nil)) {
+			t.Errorf("%s 有无 furigana 哈希相同：未将 furigana 纳入去重哈希", name)
+		}
+		if hBase == hashEventData(evtType, makeData(diffRubyF)) {
+			t.Errorf("%s 同一 text 不同 ruby 哈希相同", name)
+		}
+		if hashEventData(evtType, makeData(splitA)) == hashEventData(evtType, makeData(splitB)) {
+			t.Errorf("%s 相邻字段拼接边界碰撞：{a,bc} 与 {ab,c} 哈希相同", name)
+		}
+		if hashEventData(evtType, makeData(nulSplitA)) == hashEventData(evtType, makeData(nulSplitB)) {
+			t.Errorf("%s 含 NUL 分隔符边界碰撞：{a\\x00b,c} 与 {a,b\\x00c} 哈希相同（缺少长度前缀）", name)
+		}
+	}
+
+	check("all_lyrics", player.EventAllLyrics, func(f player.LyricFurigana) interface{} { return all(f) })
+	check("lyric_update", player.EventLyricUpdate, func(f player.LyricFurigana) interface{} { return lu(f) })
+}

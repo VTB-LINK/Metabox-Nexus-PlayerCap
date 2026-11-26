@@ -39,11 +39,13 @@ var (
 // （大小, 修改时间）恒定；只有 cachePath 读得到（内容 testLRC），其余路径不存在。colFn 非空时取代 candsFn，
 // 给出完整的 collect 结局；candsFn 只给候选，其余为零值（没有关联键、没有 P）。
 type fakeDeps struct {
-	confirmFn func(n int) (watchdog.Confirmed, error)             // 第 n 次确认（从 1 起）
-	candsFn   func(n int, hash string) ([]candidate, error)       // 第 n 次取候选（从 1 起）
-	colFn     func(n int, hash string) (collected, error)         // 同上，给出完整结局
-	statFn    func(at time.Duration) (int64, time.Time, error)    // at 为调用时刻
-	readFn    func(at time.Duration, path string) ([]byte, error) // at 为调用时刻
+	confirmFn    func(n int) (watchdog.Confirmed, error)             // 第 n 次确认（从 1 起）
+	candsFn      func(n int, hash string) ([]candidate, error)       // 第 n 次取候选（从 1 起）
+	colFn        func(n int, hash string) (collected, error)         // 同上，给出完整结局
+	statFn       func(at time.Duration) (int64, time.Time, error)    // at 为调用时刻
+	readFn       func(at time.Duration, path string) ([]byte, error) // at 为调用时刻
+	openMemFn    func(pid uint32) (memSource, memOpenKind, string, error)
+	playingRowFn func(ctx context.Context, dbPath, hash string) (playing, error)
 
 	mu       sync.Mutex
 	t0       time.Time
@@ -55,7 +57,7 @@ type fakeDeps struct {
 func (f *fakeDeps) since() time.Duration { return time.Since(f.t0) }
 
 func (f *fakeDeps) deps() deps {
-	return deps{
+	d := deps{
 		confirm: func() (watchdog.Confirmed, error) {
 			f.mu.Lock()
 			f.confirms = append(f.confirms, f.since())
@@ -97,6 +99,13 @@ func (f *fakeDeps) deps() deps {
 			return 1 << 20, time.Unix(1000, 0), nil
 		},
 	}
+	if f.openMemFn != nil {
+		d.openMem = f.openMemFn
+	}
+	if f.playingRowFn != nil {
+		d.playingRow = f.playingRowFn
+	}
+	return d
 }
 
 // gate 让桩阻塞到用例放行。须在泡内 arm：泡外建的通道上的阻塞不算 durably blocked，synctest.Wait 等不到它。

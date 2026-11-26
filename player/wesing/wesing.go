@@ -23,6 +23,31 @@ func init() { config.RegisterPlayer(PlayerName) }
 
 var log = logger.New("Wesing")
 
+// 外层循环与会话用到的进程、模块与窗口状态入口经包级变量调用，离线用例替换它们以驱动 Start 与 runSession。
+var (
+	findProcess  = proc.FindProcess  // seam
+	openProc     = proc.OpenProc     // seam
+	closeProc    = proc.CloseProc    // seam
+	enumModules  = proc.EnumModules  // seam
+	getPlayState = proc.GetPlayState // seam
+)
+
+// wesingDetails 是全民K歌在「没在读歌」时各种情形的 detail。
+// Disconnected 为空：wesing 没有调试通道，进程在运行而读不了时总有 Blocked。
+func wesingDetails() player.ProcessDetails {
+	return player.ProcessDetails{
+		NotRunning: i18n.T("WeSing client not running"),
+		Exited:     i18n.T("WeSing client has exited"),
+	}
+}
+
+func wesingNoAdminBlocked() player.Blocked {
+	return player.Blocked{
+		Reason: player.ReasonNoAdmin,
+		Detail: i18n.T("Cannot read the WeSing process (WeSing may be running as administrator)"),
+	}
+}
+
 // WesingPlayer 全民K歌播放器
 type WesingPlayer struct {
 	player.BaseEmitter
@@ -39,10 +64,27 @@ func New(offsetMs, pollMs int) *WesingPlayer {
 	}
 }
 
-// Start 启动全民K歌轮询循环（阻塞）
+// sleepOrStop 睡 d，期间可被 Stop 打断。返回 true 表示收到停止信号。
+func (p *WesingPlayer) sleepOrStop(d time.Duration) bool {
+	select {
+	case <-p.StopCh:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// Start 启动全民K歌轮询循环（阻塞）。
+//
+// 非歌名状态一律由 player.ProcessStatus / NoSongStatus 合成、经 EmitStatusIfChanged 发出（#231，设计
+// doc/design/converge-player-behavior-231-design.md §3.2）：未找到进程报 waiting_process（按本次服务期间是否
+// 见过它运行区分 process_not_running 与 process_exited）；找到但打不开进程或 EnumModules 失败且进程仍在运行
+// 报 standby / no_admin。
 func (p *WesingPlayer) Start() {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
+	d := wesingDetails()
+	seen := false // 本次服务期间见过 WeSing.exe 在运行：区分 process_exited 与 process_not_running
 
 	for {
 		select {
@@ -51,22 +93,30 @@ func (p *WesingPlayer) Start() {
 		default:
 		}
 
-		p.EmitStatusIfChanged(&player.StatusInfo{Status: "waiting_process", Detail: i18n.T("WeSing client not running"), Reason: player.ReasonProcessNotRunning})
-		p.Emit(player.EventClearSongData, nil)
-
-		handle, pid := p.waitForProcess()
+		handle, pid := p.waitForProcess(&seen, d)
+		if handle == 0 {
+			return
+		}
 		p.runSession(handle, pid, offsetSec, pollInterval)
-		proc.CloseProc(handle)
+		closeProc(handle)
 
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo（issue #118）
-		p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "standby", Detail: i18n.T("WeSing client has exited"), Reason: player.ReasonProcessExited})
+		// 会话结束：进程已退出报 process_exited；仍在运行只可能是 EnumModules 失败，报 no_admin。
+		var block player.Blocked
+		running := p.isProcessAlive()
+		if running {
+			block = wesingNoAdminBlocked()
+		}
+		p.EmitStatusIfChanged(player.ProcessStatus(running, true, d, block))
 		p.Emit(player.EventClearSongData, nil)
 		log.Info("Session ended, waiting for a new WeSing process...")
-		time.Sleep(2 * time.Second)
+		if p.sleepOrStop(2 * time.Second) {
+			return
+		}
 	}
 }
 
-func (p *WesingPlayer) waitForProcess() (syscall.Handle, uint32) {
+func (p *WesingPlayer) waitForProcess(seen *bool, d player.ProcessDetails) (syscall.Handle, uint32) {
 	log.Info("Waiting for WeSing.exe to start...")
 	printed := false
 	for {
@@ -75,19 +125,26 @@ func (p *WesingPlayer) waitForProcess() (syscall.Handle, uint32) {
 			return 0, 0
 		default:
 		}
-		pid, err := proc.FindProcess(TargetProcessName)
+		pid, err := findProcess(TargetProcessName)
 		if err == nil {
-			handle, err := proc.OpenProc(pid)
+			*seen = true
+			handle, err := openProc(pid)
 			if err == nil {
 				log.Info("Found WeSing.exe (PID: %d)", pid)
 				return handle, pid
 			}
+			p.EmitStatusIfChanged(player.ProcessStatus(true, true, d, wesingNoAdminBlocked()))
+		} else {
+			p.EmitStatusIfChanged(player.ProcessStatus(false, *seen, d, player.Blocked{}))
+			if !printed {
+				log.Info("WeSing.exe not running, waiting...")
+				printed = true
+			}
 		}
-		if !printed {
-			log.Info("WeSing.exe not running, waiting...")
-			printed = true
+		p.Emit(player.EventClearSongData, nil)
+		if p.sleepOrStop(2 * time.Second) {
+			return 0, 0
 		}
-		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -128,7 +185,7 @@ const (
 )
 
 func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec float32, pollInterval time.Duration) {
-	modules, err := proc.EnumModules(pid)
+	modules, err := enumModules(pid)
 	if err != nil {
 		log.Error("Failed to enumerate modules: %v", err)
 		return
@@ -146,7 +203,8 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 	// altSwitchedFor 记录已为哪首歌换过播放时间地址：这一首不再盯候选，一首歌至多换一次、不来回换
 	// （每换一次都要把这首歌重新宣告一遍）。换歌时清掉。
 	altSwitchedFor := ""
-	var lastPhase proc.PlayPhase
+	// 初值不等于任何 PlayPhase：连上时窗口已关（第一拍即 PhaseStandby）也进待机分支，报 window_not_open（#231）。
+	lastPhase := proc.PlayPhase(-1)
 	lastLoadingTitle := ""
 
 	// deadAddrRetriedFor 记录已为哪首歌重新选过址（issue #44），保证每首歌至多重扫一次。
@@ -165,8 +223,9 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 	var pcmVtable uint32
 	var skip pcmSkip
 	notes := pcmNotes{}
-	// lyric_idle 一律经它发出：上一次宣告之后至多一条（#180）。
-	var idle idleNotice
+	// lyric_idle 一律经它发出：上一次宣告之后至多一条（#180）。初值 sent: true：连上时没有宣告过歌，
+	// 第一拍窗口已关时不发 lyric_idle（#231）；宣告一首歌后经 idle.announced() 复位。
+	idle := idleNotice{sent: true}
 
 	for {
 		select {
@@ -179,7 +238,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			return
 		}
 
-		state := proc.GetPlayState(pid)
+		state := getPlayState(pid)
 
 		switch state.Phase {
 		case proc.PhaseStandby:
@@ -188,19 +247,27 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				// EmitForGen 仍有效，会把已清空的歌曲信息贴回服务端缓存。只关 K 歌窗口、进程未退时，Start 里
 				// 的 InvalidateSongGen 不会执行（同 issue #118）。✅ songgenorder_test.go（AST）
 				p.InvalidateSongGen()
-				p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "waiting_song", Detail: i18n.T("WeSing window not open"), Reason: player.ReasonWindowNotOpen})
+				p.EmitStatusIfChanged(player.NoSongStatus(player.ReasonWindowNotOpen, i18n.T("WeSing window not open")))
 				// clear_song_data 传 nil 无妨：它是内部事件，被 server 的 internalEvents 拦住，不会序列化。
 				p.Emit(player.EventClearSongData, nil)
-				// 轮询以 exitWindowClosed 等原因返回时已发过一条的，这里不再发（#180）。
+				// 轮询以 exitWindowClosed 等原因返回时已发过一条的，这里不再发（#180）；
+				// 连上时窗口已关（未宣告过歌）由 idle 初值 sent: true 挡住，不发。
 				idle.emit(p.TryEmit)
 				lastPhase = proc.PhaseStandby
 			}
 			lastTitle = ""
 			skip.reset()
-			time.Sleep(1 * time.Second)
+			if p.sleepOrStop(1 * time.Second) {
+				return
+			}
 			continue
 
 		case proc.PhaseLoading:
+			if lastPhase == proc.PlayPhase(-1) {
+				// 首次连上即处于加载中：以 waiting_song/no_song 脱离未运行，不发 clear_song_data（不把加载当作真停播），
+				// 且 waiting_song 在路由归 idle 不会抢占优先组、同时纳入 player_running（#231）。
+				p.EmitStatusIfChanged(player.NoSongStatus(player.ReasonNoSong, i18n.T("WeSing loading song")))
+			}
 			if state.SongTitle != lastLoadingTitle {
 				log.Info("Loading song: %s", state.SongTitle)
 				lastLoadingTitle = state.SongTitle
@@ -214,9 +281,11 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				// 	Status: "loading",
 				// 	Detail: fmt.Sprintf("加载中: %s", state.SongTitle),
 				// })
-				lastPhase = proc.PhaseLoading
 			}
-			time.Sleep(500 * time.Millisecond)
+			lastPhase = proc.PhaseLoading
+			if p.sleepOrStop(500 * time.Millisecond) {
+				return
+			}
 			continue
 
 		case proc.PhasePlaying:
@@ -498,7 +567,7 @@ func (s *pcmSkip) reset() { s.on = false }
 
 // idleNotice 记录上一次宣告之后是否已发过 lyric_idle（#180）：每首在轮询结束时发一条，随后进入待机时不再发。
 // 此前两处各发一条，播放中关窗口时连发两条，与契约（openapi.yaml 的 lyric_idle：窗口关闭时发送一条）不符。
-// 会话开始后未宣告即进入待机（加载中关窗口）仍发一条。✅ idlenotice_test.go（含 AST：runSession 只经它发出）
+// runSession 以 sent: true 起步：连上时窗口已关（未宣告过歌）不发 lyric_idle（#231）。✅ idlenotice_test.go（含 AST：runSession 只经它发出）
 type idleNotice struct{ sent bool }
 
 // announced 在本首宣告时调用。
@@ -822,7 +891,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 			if !p.isProcessAlive() {
 				return exitProcessDied, 0
 			}
-			state := proc.GetPlayState(pid)
+			state := getPlayState(pid)
 			// PCM 模式下窗口最小化、拖动时读数照常走：两者恒为假，于是不外推，读数停住满 1 s 即判暂停。
 			if clock == nil {
 				isMinimized = state.IsMinimized
@@ -1007,7 +1076,7 @@ func (p *WesingPlayer) lyricTail(ann *allLyricsAnnounce, lyrics []lyric.LyricLin
 }
 
 func (p *WesingPlayer) isProcessAlive() bool {
-	_, err := proc.FindProcess(TargetProcessName)
+	_, err := findProcess(TargetProcessName)
 	return err == nil
 }
 

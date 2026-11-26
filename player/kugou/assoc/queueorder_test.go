@@ -71,7 +71,7 @@ var x3CacheRow = lyricRow{hex32("cc", 1), x3Cache, x3Hash, updated(clock(9, 10, 
 // X3：关联一级只有 P 的 A04；「最近播放」的 A11 建得更晚、LastPlayTime 也更晚，不取。P 带关联时不再扫其余各表。
 func TestCollectQueueX3(t *testing.T) {
 	db := x3DB(keyA04)
-	wantCandidates(t, mustCollect(t, db, x3Hash), []candidate{{pathA04, SourceAssociation, updated(clock(8, 56, 45, 0))}})
+	wantCandidates(t, mustCollect(t, db, x3Hash), []candidate{{Path: pathA04, Source: SourceAssociation, UpdateTime: updated(clock(8, 56, 45, 0))}})
 	if want := []string{"PlayQueueAssistItem_0", "LyricInfo"}; !slices.Equal(db.scanned, want) {
 		t.Fatalf("扫过的表 = %v，want %v", db.scanned, want)
 	}
@@ -107,8 +107,8 @@ func TestCollectQueueB01DanglingPlayingKey(t *testing.T) {
 func TestPickQueuePlayingFileUnusable(t *testing.T) {
 	col := mustResolve(t, x3DB(keyA04, x3CacheRow), x3Hash)
 	wantCandidates(t, col.cands, []candidate{
-		{pathA04, SourceAssociation, updated(clock(8, 56, 45, 0))},
-		{x3Cache, SourceCache, updated(clock(9, 10, 0, 0))},
+		{Path: pathA04, Source: SourceAssociation, UpdateTime: updated(clock(8, 56, 45, 0))},
+		{Path: x3Cache, Source: SourceCache, UpdateTime: updated(clock(9, 10, 0, 0))},
 	})
 	const lyricDir = `C:\KuGou\Lyric`
 	for name, c := range map[string]struct {
@@ -169,7 +169,7 @@ func wumingzhiDB(qqntKey string, extra ...lyricRow) *fakeTables {
 // 只得缓存。
 func TestCollectQueueWumingzhi(t *testing.T) {
 	wantCandidates(t, mustCollect(t, wumingzhiDB(zeroKey), wumingzhiHash), []candidate{
-		{wumingzhiCache, SourceCache, updated(clock(8, 30, 0, 0))},
+		{Path: wumingzhiCache, Source: SourceCache, UpdateTime: updated(clock(8, 30, 0, 0))},
 	})
 }
 
@@ -179,8 +179,8 @@ func TestCollectQueueOtherFileAssociation(t *testing.T) {
 	k := hex32("dd", 1)
 	db := wumingzhiDB(k, lyricRow{k, `D:\Lyrics\无名指-QQNT.krc`, "", updated(clock(7, 0, 0, 0))})
 	wantCandidates(t, mustCollect(t, db, wumingzhiHash), []candidate{
-		{`D:\Lyrics\无名指-QQNT.krc`, SourceAssociation, updated(clock(7, 0, 0, 0))},
-		{wumingzhiCache, SourceCache, updated(clock(8, 30, 0, 0))},
+		{Path: `D:\Lyrics\无名指-QQNT.krc`, Source: SourceAssociation, UpdateTime: updated(clock(7, 0, 0, 0))},
+		{Path: wumingzhiCache, Source: SourceCache, UpdateTime: updated(clock(8, 30, 0, 0))},
 	})
 }
 
@@ -199,7 +199,7 @@ func TestCollectQueueOnlineSong(t *testing.T) {
 		playedTable("PlayQueueAssistItem_0", playedRow{sampleTonghua, zeroKey, name, integer(200)}),
 		li,
 	)
-	wantCandidates(t, mustCollect(t, db, sampleTonghua), []candidate{{"online.krc", SourceCache, 1}})
+	wantCandidates(t, mustCollect(t, db, sampleTonghua), []candidate{{Path: "online.krc", Source: SourceCache, UpdateTime: 1}})
 
 	db = newDB(
 		playedTable("PlayQueueAssistItem_0",
@@ -209,8 +209,8 @@ func TestCollectQueueOnlineSong(t *testing.T) {
 		li,
 	)
 	wantCandidates(t, mustCollect(t, db, sampleTonghua), []candidate{
-		{pathTonghuaLRC, SourceAssociation, 2},
-		{"online.krc", SourceCache, 1},
+		{Path: pathTonghuaLRC, Source: SourceAssociation, UpdateTime: 2},
+		{Path: "online.krc", Source: SourceCache, UpdateTime: 1},
 	})
 }
 
@@ -243,7 +243,7 @@ func TestCollectQueueSameFile(t *testing.T) {
 		return playedTable("PlayQueueAssistItem_0", playedRow{h, "", path, integer(5)})
 	}
 	wantCandidates(t, mustCollect(t, newDB(append([]*fakeTable{queue(song)}, others()...)...), h),
-		[]candidate{{"xxxxx.krc", SourceAssociation, 5}})
+		[]candidate{{Path: "xxxxx.krc", Source: SourceAssociation, UpdateTime: 5}})
 
 	noPathCol := &fakeTable{name: "PlayQueueAssistItem_0", cols: []string{"LastPlayTime", "LyricKey", "MusicFileHash"},
 		rows: [][]kgdb.Value{{integer(5), text(""), text(h)}}}
@@ -263,7 +263,7 @@ func TestCollectQueuePlayingRowChoice(t *testing.T) {
 	withKey, without := playedRow{h, k1, song, integer(7)}, playedRow{h, "", song, integer(7)}
 
 	db := newDB(playedTable("PlayQueueAssistItem_0", withKey, without), li)
-	wantCandidates(t, mustCollect(t, db, h), []candidate{{`D:\k1.krc`, SourceAssociation, 1}})
+	wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: `D:\k1.krc`, Source: SourceAssociation, UpdateTime: 1}})
 	// 并列时先扫到不带关联的那行：它是 P，同一文件的 k1 不用。
 	db = newDB(playedTable("PlayQueueAssistItem_0", without, withKey), li)
 	wantCandidates(t, mustCollect(t, db, h), nil)
@@ -272,7 +272,7 @@ func TestCollectQueuePlayingRowChoice(t *testing.T) {
 	for _, v := range []int64{0, -5} {
 		db = newDB(playedTable("PlayQueueAssistItem_0", playedRow{h, "", song, integer(v)}),
 			playedTable("LocalFile", playedRow{h, k1, song, kgdb.Value{}}), li)
-		wantCandidates(t, mustCollect(t, db, h), []candidate{{`D:\k1.krc`, SourceAssociation, 1}})
+		wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: `D:\k1.krc`, Source: SourceAssociation, UpdateTime: 1}})
 	}
 
 	// 备份表的行 LastPlayTime 远大于队列行，也不是 P：P 是队列里带 k1 的行，只用 k1。
@@ -281,13 +281,13 @@ func TestCollectQueuePlayingRowChoice(t *testing.T) {
 		playedTable("PlayQueueAssistItem_0", playedRow{h, k1, song, lastPlay(clock(0, 0, 1, 0))}),
 		li,
 	)
-	wantCandidates(t, mustCollect(t, db, h), []candidate{{`D:\k1.krc`, SourceAssociation, 1}})
+	wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: `D:\k1.krc`, Source: SourceAssociation, UpdateTime: 1}})
 	// 只有备份表：没有 P，两者都收、按 UpdateTime。
 	db = newDB(playedTable("PlayQueueBackupItems_10062", playedRow{h, kb, song, lastPlay(clock(23, 59, 59, 0))}),
 		playedTable("LocalFile", playedRow{h, k1, song, kgdb.Value{}}), li)
 	wantCandidates(t, mustCollect(t, db, h), []candidate{
-		{`D:\backup.krc`, SourceAssociation, 9},
-		{`D:\k1.krc`, SourceAssociation, 1},
+		{Path: `D:\backup.krc`, Source: SourceAssociation, UpdateTime: 9},
+		{Path: `D:\k1.krc`, Source: SourceAssociation, UpdateTime: 1},
 	})
 }
 
@@ -295,8 +295,8 @@ func TestCollectQueuePlayingRowChoice(t *testing.T) {
 func TestCollectQueueTableName(t *testing.T) {
 	h, kq, kl := hex32("aa", 1), hex32("bb", 1), hex32("bb", 2)
 	const song = `D:\Music\Song.flac`
-	queued := []candidate{{`D:\queue.krc`, SourceAssociation, 1}}
-	notQueued := []candidate{{`D:\local.krc`, SourceAssociation, 9}, {`D:\queue.krc`, SourceAssociation, 1}}
+	queued := []candidate{{Path: `D:\queue.krc`, Source: SourceAssociation, UpdateTime: 1}}
+	notQueued := []candidate{{Path: `D:\local.krc`, Source: SourceAssociation, UpdateTime: 9}, {Path: `D:\queue.krc`, Source: SourceAssociation, UpdateTime: 1}}
 	for name, want := range map[string][]candidate{
 		"PlayQueueAssistItem_0":   queued,
 		"playqueueassistitem_0":   queued,
@@ -323,9 +323,9 @@ func TestCollectQueueNoLastPlayTime(t *testing.T) {
 	const song = `D:\Music\Song.flac`
 	li := lyricInfo(lyricRow{n, `D:\n.krc`, "", 900}, lyricRow{q1, `D:\q1.krc`, "", 100}, lyricRow{q2, `D:\q2.krc`, "", 200})
 	want := []candidate{
-		{`D:\n.krc`, SourceAssociation, 900},
-		{`D:\q2.krc`, SourceAssociation, 200},
-		{`D:\q1.krc`, SourceAssociation, 100},
+		{Path: `D:\n.krc`, Source: SourceAssociation, UpdateTime: 900},
+		{Path: `D:\q2.krc`, Source: SourceAssociation, UpdateTime: 200},
+		{Path: `D:\q1.krc`, Source: SourceAssociation, UpdateTime: 100},
 	}
 	for name, queue := range map[string]*fakeTable{
 		"缺列":   songTable("PlayQueueAssistItem_0", songRow{h, q1}, songRow{h, q2}),
@@ -349,7 +349,7 @@ func TestCollectQueueNotInQueue(t *testing.T) {
 		lyricInfo(lyricRow{k1, `D:\k1.krc`, "", 1}, lyricRow{k2, `D:\k2.krc`, "", 9}),
 	)
 	wantCandidates(t, mustCollect(t, db, h), []candidate{
-		{`D:\k2.krc`, SourceAssociation, 9},
-		{`D:\k1.krc`, SourceAssociation, 1},
+		{Path: `D:\k2.krc`, Source: SourceAssociation, UpdateTime: 9},
+		{Path: `D:\k1.krc`, Source: SourceAssociation, UpdateTime: 1},
 	})
 }

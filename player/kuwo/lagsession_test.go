@@ -1144,8 +1144,8 @@ func TestLagFailureKeepsSession(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("unexpected exit: %v", err)
 	}
-	if waitingProcessSeen(got) {
-		t.Fatal("the session reported waiting_process while the lag reader failed")
+	if disconnectSeen(got) {
+		t.Fatal("the session reported disconnect while the lag reader failed")
 	}
 	if lag.reads < lag.valid+2 {
 		t.Fatalf("%d lag reads: the failing reader was not read on", lag.reads)

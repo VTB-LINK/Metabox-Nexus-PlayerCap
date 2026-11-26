@@ -40,7 +40,7 @@ func TestPickMissingSetsRetry(t *testing.T) {
 	}
 	for _, err := range missing {
 		f := &fakeRead{files: map[string]any{`D:\a.krc`: err, `D:\cache.lrc`: testLRC}}
-		r := pick(collected{cands: []candidate{{`D:\a.krc`, SourceAssociation, 2}, {`D:\cache.lrc`, SourceCache, 1}}}, "", f.fn)
+		r := pick(collected{cands: []candidate{{Path: `D:\a.krc`, Source: SourceAssociation, UpdateTime: 2}, {Path: `D:\cache.lrc`, Source: SourceCache, UpdateTime: 1}}}, "", f.fn)
 		if r.Kind != KindFound || r.Source != SourceCache || !r.Retry || len(r.Lines) != 2 || r.Hash != "" {
 			t.Errorf("关联读出 %v：结果 %+v，want KindFound、SourceCache、Retry、Hash 为空", err, r)
 		}
@@ -49,7 +49,7 @@ func TestPickMissingSetsRetry(t *testing.T) {
 
 func TestPickAllMissingNoneWithRetry(t *testing.T) {
 	f := &fakeRead{files: map[string]any{`D:\b.krc`: errors.New("I/O error")}}
-	r := pick(collected{cands: []candidate{{`D:\a.krc`, SourceAssociation, 2}, {`D:\b.krc`, SourceCache, 1}}}, "", f.fn)
+	r := pick(collected{cands: []candidate{{Path: `D:\a.krc`, Source: SourceAssociation, UpdateTime: 2}, {Path: `D:\b.krc`, Source: SourceCache, UpdateTime: 1}}}, "", f.fn)
 	if r.Kind != KindNone || !r.Retry || r.Lines != nil || r.Source != 0 || len(f.read) != 2 {
 		t.Fatalf("结果 %+v，读了 %q；want KindNone、Retry、两份都试过", r, f.read)
 	}
@@ -72,7 +72,7 @@ func TestPickUnusableNoRetry(t *testing.T) {
 	}}
 	var cands []candidate
 	for i := 1; i <= 8; i++ {
-		cands = append(cands, candidate{fmt.Sprintf(`D:\%d`, i), SourceCache, int64(i)})
+		cands = append(cands, candidate{Path: fmt.Sprintf(`D:\%d`, i), Source: SourceCache, UpdateTime: int64(i)})
 	}
 	r := pick(collected{cands: cands}, "", f.fn)
 	if r.Kind != KindNone || r.Retry || r.Lines != nil || len(f.read) != 8 {
@@ -91,10 +91,10 @@ func TestPickFirstParsable(t *testing.T) {
 		`D:\later.lrc`: testLRC,
 	}}
 	cands := []candidate{
-		{`D:\empty.krc`, SourceAssociation, 3},
-		{`D:\good.lrc`, SourceAssociation, 2},
-		{`D:\missing.lrc`, SourceCache, 9},
-		{`D:\later.lrc`, SourceCache, 1},
+		{Path: `D:\empty.krc`, Source: SourceAssociation, UpdateTime: 3},
+		{Path: `D:\good.lrc`, Source: SourceAssociation, UpdateTime: 2},
+		{Path: `D:\missing.lrc`, Source: SourceCache, UpdateTime: 9},
+		{Path: `D:\later.lrc`, Source: SourceCache, UpdateTime: 1},
 	}
 	r := pick(collected{cands: cands}, "", f.fn)
 	if r.Kind != KindFound || r.Source != SourceAssociation || r.Retry || len(r.Lines) != 1 || r.Lines[0].Text != "第二份" {

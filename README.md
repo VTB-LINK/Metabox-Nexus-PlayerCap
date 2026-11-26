@@ -55,6 +55,7 @@
 - `✔` 表示能取到；某首歌有没有逐字、翻译、音译，取决于平台是否提供。
 - 「音译歌词」指行级音译（`roma_text`）。
 - 逐字音译（`roma_text_detailed`）由全民K歌、QQ 音乐、酷狗音乐、汽水音乐提供；网易云音乐只在一字一音的歌（如粤语歌）上提供；Apple Music、Spotify、酷我没有。有行级音译的行不一定有逐字音译，没有时为 `{}`。
+- 日语歌词振假名（`furigana`，汉字、`々` 或全角数字顶部的假名注音）仅 QQ 音乐在源歌词自带 `[kana:]` 注音时提供，与音译相互独立；没有时为 `[]`。
 - 「本地文件」指播放本地音频文件时能否取到歌词，标 `🚫` 的播放器暂不支持，下面不逐个列出。
 
 **全民K歌 `wesing`**
@@ -73,6 +74,7 @@
 **酷狗音乐 `kugou`**
 
 - 本地文件 `⚠`：歌词跟随酷狗，用酷狗里手动关联的、或酷狗自动匹配到的那份；酷狗也没有时按文件名搜索，可能搜不到，也可能不准。
+- 在线歌曲与歌词偏移：在线与本地歌曲均跟随酷狗中的手动关联本地歌词、「取消关联」（立即清空歌词，酷狗维持取消状态时不回退缓存或在线歌词，重新关联或重新选词后恢复）以及「调节歌词快慢」设定的偏移（与 `kugou-offset` 叠加）。上述实时跟随在已收录模块指纹的版本（当前 `20.1.22.27795`）上经只读内存即时生效；未知版本自动无感退回数据库模式（仅支持已落盘记录与已落盘 `.krc` 的偏移）。
 
 **汽水音乐 `sodamusic`**
 
@@ -112,7 +114,7 @@
 - ✅ **歌曲信息提取** — 歌名、歌手、封面 URL 与封面 Base64（统一为 800×800，非正方形居中裁切；不是 JPEG / PNG、宽或高超过 1600 等处理不了的原样发出）
 - ✅ **实时歌词推送** — 广播当前歌词行与播放进度，轮询频率可调
 - ✅ **逐字歌词** — 每个字的时间戳与持续时间（`text_detailed`），可做卡拉 OK 式逐字高亮
-- ✅ **翻译与音译歌词** — 译文（`sub_text`）、音译（`roma_text`）与逐字音译（`roma_text_detailed`），各播放器的支持情况见能力对照
+- ✅ **翻译、音译与振假名** — 译文（`sub_text`）、音译（`roma_text`）、逐字音译（`roma_text_detailed`）与日语汉字振假名（`furigana`），各播放器的支持情况见能力对照
 - ✅ **UTF-8 文本** — 歌词与歌曲信息以 UTF-8 编码传输，不限语种
 - ✅ **时间偏移** — 全局与 per-player 的 offset（毫秒），正值=延后、负值=提前
 - ✅ **暂停/恢复检测** — 暂停与恢复时广播对应事件
@@ -256,7 +258,7 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
    播放器: sodamusic (*offset=-340ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
    播放器: applemusic (*offset=-900ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    播放器: spotify (offset=-200ms poll=30ms → 200ms idle-hide=0s audio-normalize=true)
-   播放器: kuwo (*offset=-300ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
+   播放器: kuwo (*offset=-380ms poll=30ms → 50ms idle-hide=0s audio-normalize=true)
    * = 显式设置（config.yml 或命令行）；a → b = 写下 a，实际生效 b
 ===========================================================
 ```

@@ -159,7 +159,7 @@ func TestAllLyricsDataRowsCarryDetailed(t *testing.T) {
 		index      int
 		text, roma string
 	}{{3, "word text", "wa do"}, {4, "", ""}, {5, "只有", ""}, {6, "", "ro ma"}, {7, " Hey you ", ""}}
-	rowKeys := []string{"index", "timestamp", "play_time", "text", "sub_text", "roma_text", "text_detailed", "roma_text_detailed"}
+	rowKeys := []string{"index", "timestamp", "play_time", "text", "sub_text", "roma_text", "text_detailed", "roma_text_detailed", "furigana"}
 
 	data, err := json.Marshal(&AllLyricsData{Title: "song", Duration: 10, Count: len(lines), Lyrics: lines})
 	if err != nil {
@@ -262,4 +262,147 @@ func TestRomaTextDetailedJSONShape(t *testing.T) {
 			t.Fatalf("%s：roma_text_detailed.words = %#v，want 两个音节", name, obj["words"])
 		}
 	}
+}
+
+// furigana 恒为 JSON 数组：零值（nil）与空切片均序列化为 []（绝不为 null），
+// LyricUpdate 顶层键序固定为 11 项且末项为 furigana，非空时纯文本段省略 ruby 键、注音段带 ruby 键。
+//
+// 变异自证（隔离副本，实测）：去掉 LyricFurigana.MarshalJSON，LyricLine 零值与 LyricUpdate 零值均因序列化为
+// "furigana":null 而红；去掉 LyricFurigana.UnmarshalJSON，「零值与非空 JSON 往返一致」因 [] 解码为非 nil 空切片而红。
+func TestFuriganaJSONShape(t *testing.T) {
+	marshalAndDecode := func(v any) ([]byte, map[string]any) {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		return data, got
+	}
+
+	emptyCases := []struct {
+		name string
+		val  any
+	}{
+		{"LyricLine 零值", LyricLine{Index: 1, Text: "hello"}},
+		{"LyricLine 空切片", LyricLine{Index: 1, Text: "hello", Furigana: LyricFurigana{}}},
+		{"LyricUpdate 零值", LyricUpdate{Index: 1, Text: "hello"}},
+		{"LyricUpdate 空切片", LyricUpdate{Index: 1, Text: "hello", Furigana: LyricFurigana{}}},
+	}
+	for _, tc := range emptyCases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, got := marshalAndDecode(tc.val)
+			arr, ok := got["furigana"].([]any)
+			if !ok {
+				t.Fatalf("furigana = %#v，want 空数组 []（raw=%s）", got["furigana"], data)
+			}
+			if len(arr) != 0 {
+				t.Fatalf("furigana = %#v，want 长度为 0 的空数组（raw=%s）", arr, data)
+			}
+			if !bytes.Contains(data, []byte(`"furigana":[]`)) {
+				t.Fatalf("JSON 缺少 \"furigana\":[]，raw=%s", data)
+			}
+		})
+	}
+
+	wantUpdateKeys := []string{
+		"index", "text", "sub_text", "roma_text", "timestamp",
+		"play_time", "position", "progress", "text_detailed", "roma_text_detailed", "furigana",
+	}
+	wantLineKeys := []string{
+		"index", "timestamp", "play_time", "text", "sub_text",
+		"roma_text", "text_detailed", "roma_text_detailed", "furigana",
+	}
+	furi := LyricFurigana{
+		{Text: "こっち"},
+		{Text: "向", Ruby: "む"},
+		{Text: "いて"},
+	}
+
+	updateRaw, _ := marshalAndDecode(LyricUpdate{Index: 4, Text: "こっち向いて", Furigana: furi})
+	if keys := topLevelKeys(t, updateRaw); !reflect.DeepEqual(keys, wantUpdateKeys) {
+		t.Fatalf("LyricUpdate 顶层键 = %v（共 %d 项），want %v（共 %d 项）", keys, len(keys), wantUpdateKeys, len(wantUpdateKeys))
+	}
+	lineRaw, _ := marshalAndDecode(LyricLine{Index: 4, Text: "こっち向いて", Furigana: furi})
+	if keys := topLevelKeys(t, lineRaw); !reflect.DeepEqual(keys, wantLineKeys) {
+		t.Fatalf("LyricLine 顶层键 = %v（共 %d 项），want %v（共 %d 项）", keys, len(keys), wantLineKeys, len(wantLineKeys))
+	}
+
+	for name, v := range map[string]any{
+		"LyricLine":   LyricLine{Index: 4, Text: "こっち向いて", Furigana: furi},
+		"LyricUpdate": LyricUpdate{Index: 4, Text: "こっち向いて", Furigana: furi},
+	} {
+		t.Run(name+" 非空分段形状", func(t *testing.T) {
+			data, got := marshalAndDecode(v)
+			arr, ok := got["furigana"].([]any)
+			if !ok || len(arr) != 3 {
+				t.Fatalf("furigana = %#v，want 3 段（raw=%s）", got["furigana"], data)
+			}
+
+			seg0 := arr[0].(map[string]any)
+			if seg0["text"] != "こっち" {
+				t.Fatalf("seg[0].text = %#v，want %q", seg0["text"], "こっち")
+			}
+			if _, hasRuby := seg0["ruby"]; hasRuby {
+				t.Fatalf("纯文本段 seg[0] 不应包含 ruby 键：%#v", seg0)
+			}
+
+			seg1 := arr[1].(map[string]any)
+			if seg1["text"] != "向" || seg1["ruby"] != "む" {
+				t.Fatalf("注音段 seg[1] = %#v，want text=%q ruby=%q", seg1, "向", "む")
+			}
+
+			seg2 := arr[2].(map[string]any)
+			if seg2["text"] != "いて" {
+				t.Fatalf("seg[2].text = %#v，want %q", seg2["text"], "いて")
+			}
+			if _, hasRuby := seg2["ruby"]; hasRuby {
+				t.Fatalf("纯文本段 seg[2] 不应包含 ruby 键：%#v", seg2)
+			}
+		})
+	}
+
+	t.Run("零值与非空 JSON 往返一致", func(t *testing.T) {
+		for _, want := range []LyricLine{
+			{Index: 1, Text: "hello"},
+			{Index: 4, Text: "こっち向いて", Furigana: furi},
+		} {
+			raw, err := json.Marshal(want)
+			if err != nil {
+				t.Fatalf("Marshal(LyricLine) error = %v", err)
+			}
+			var got LyricLine
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("Unmarshal(LyricLine) error = %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("LyricLine JSON 往返不等：\n got  %#v\n want %#v", got, want)
+			}
+		}
+
+		for _, want := range []LyricUpdate{
+			{Index: 1, Text: "hello"},
+			{Index: 4, Text: "こっち向いて", Furigana: furi},
+		} {
+			raw, err := json.Marshal(want)
+			if err != nil {
+				t.Fatalf("Marshal(LyricUpdate) error = %v", err)
+			}
+			var got LyricUpdate
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("Unmarshal(LyricUpdate) error = %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("LyricUpdate JSON 往返不等：\n got  %#v\n want %#v", got, want)
+			}
+		}
+
+		var bad LyricLine
+		if err := json.Unmarshal([]byte(`{"furigana":{}}`), &bad); err == nil {
+			t.Fatalf("非法 furigana 类型应返回错误，got %#v", bad.Furigana)
+		}
+	})
 }

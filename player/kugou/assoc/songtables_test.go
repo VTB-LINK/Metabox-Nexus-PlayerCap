@@ -30,7 +30,7 @@ func TestCollectScansEverySongTable(t *testing.T) {
 		songTable("PlayQueueAssistItem_0", songRow{h, k}),
 		lyricInfo(lyricRow{k, `D:\assoc.krc`, "", 1}, lyricRow{hex32("bb", 2), `D:\other.krc`, "", 2}),
 	)
-	wantCandidates(t, mustCollect(t, db, h), []candidate{{`D:\assoc.krc`, SourceAssociation, 1}})
+	wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: `D:\assoc.krc`, Source: SourceAssociation, UpdateTime: 1}})
 	want := []string{"LocalFile", "lowercols", "RecentlyPlayedItem", "PlayQueueAssistItem_0", "LyricInfo"}
 	if !slices.Equal(db.scanned, want) {
 		t.Fatalf("扫过的表 = %v，want %v", db.scanned, want)
@@ -41,7 +41,7 @@ func TestCollectScansEverySongTable(t *testing.T) {
 func TestCollectNoSongTables(t *testing.T) {
 	h := hex32("aa", 1)
 	db := newDB(lyricInfo(lyricRow{hex32("bb", 1), `D:\assoc.krc`, "", 9}, lyricRow{hex32("cc", 1), "cache.lrc", h, 1}))
-	wantCandidates(t, mustCollect(t, db, h), []candidate{{"cache.lrc", SourceCache, 1}})
+	wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: "cache.lrc", Source: SourceCache, UpdateTime: 1}})
 }
 
 // 一张歌曲条目表 Columns 返回 ErrUnsupportedTable（如虚拟表）、一张 Scan 返回它（如 WITHOUT ROWID 表）、
@@ -53,7 +53,7 @@ func TestCollectSkipsUnsupportedSongTable(t *testing.T) {
 	noRowid := songTable("NoRowidSongs", songRow{h, hex32("bb", 3)})
 	noRowid.scanErr = fmt.Errorf("%w: table NoRowidSongs is WITHOUT ROWID", kgdb.ErrUnsupportedTable)
 	db := newDB(virtual, noRowid, songTable("LocalFile", songRow{h, k}), lyricInfo(lyricRow{k, `D:\assoc.krc`, "", 1}))
-	wantCandidates(t, mustCollect(t, db, h), []candidate{{`D:\assoc.krc`, SourceAssociation, 1}})
+	wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: `D:\assoc.krc`, Source: SourceAssociation, UpdateTime: 1}})
 }
 
 // 裁定 K：一张无关表与一张歌曲条目表的建表语句解析不了（Columns 返回 ErrCorrupt），另一张歌曲条目表
@@ -67,7 +67,7 @@ func TestCollectSkipsUnreadableTable(t *testing.T) {
 	db := newDB(future, odd, songTable("LocalFile", songRow{h, k}), lyricInfo(lyricRow{k, `D:\assoc.krc`, "", 1}))
 	var got []candidate
 	out := captureLog(t, func() { got = mustCollect(t, db, h) })
-	wantCandidates(t, got, []candidate{{`D:\assoc.krc`, SourceAssociation, 1}})
+	wantCandidates(t, got, []candidate{{Path: `D:\assoc.krc`, Source: SourceAssociation, UpdateTime: 1}})
 	if strings.Count(out, "\n") != 2 || !strings.Contains(out, "FutureTable") || !strings.Contains(out, "OddSongs") ||
 		strings.Count(out, "[KuGou] [Assoc] [+]") != 2 {
 		t.Fatalf("日志 = %q，want 两条分别带表名的 Detail", out)

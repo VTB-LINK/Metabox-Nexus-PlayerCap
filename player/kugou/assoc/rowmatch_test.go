@@ -45,9 +45,9 @@ func TestCollectHashCaseAndSpace(t *testing.T) {
 		),
 	)
 	wantCandidates(t, mustCollect(t, db, " 9D6E3B30C1F04A5E8B7D2C9A6F3E1D08 \t"), []candidate{
-		{`D:\assoc.krc`, SourceAssociation, 300},
-		{"lower.lrc", SourceCache, 200},
-		{"upper.lrc", SourceCache, 100},
+		{Path: `D:\assoc.krc`, Source: SourceAssociation, UpdateTime: 300},
+		{Path: "lower.lrc", Source: SourceCache, UpdateTime: 200},
+		{Path: "upper.lrc", Source: SourceCache, UpdateTime: 100},
 	})
 }
 

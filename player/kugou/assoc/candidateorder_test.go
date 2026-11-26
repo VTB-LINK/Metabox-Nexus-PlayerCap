@@ -41,8 +41,8 @@ func TestCollectManualBeforeCache(t *testing.T) {
 		),
 	)
 	wantCandidates(t, mustCollect(t, db, h), []candidate{
-		{`D:\关联.krc`, SourceAssociation, 100},
-		{"cache.lrc", SourceCache, 200},
+		{Path: `D:\关联.krc`, Source: SourceAssociation, UpdateTime: 100},
+		{Path: "cache.lrc", Source: SourceCache, UpdateTime: 200},
 	})
 }
 
@@ -60,8 +60,8 @@ func TestCollectLatestAssociationFirst(t *testing.T) {
 		),
 	)
 	wantCandidates(t, mustCollect(t, db, h), []candidate{
-		{`D:\new.lrc`, SourceAssociation, 300},
-		{`D:\old.lrc`, SourceAssociation, 100},
-		{"cache.lrc", SourceCache, 200},
+		{Path: `D:\new.lrc`, Source: SourceAssociation, UpdateTime: 300},
+		{Path: `D:\old.lrc`, Source: SourceAssociation, UpdateTime: 100},
+		{Path: "cache.lrc", Source: SourceCache, UpdateTime: 200},
 	})
 }

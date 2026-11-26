@@ -2,7 +2,12 @@ package qqmusic
 
 // 本文件只测会话侧歌词状态机何时要求重发（lyricState 的指纹：来源、内容摘要、偏移，设计 §6.8「应用期望状态」第 2 步）。
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+
+	"Metabox-Nexus-PlayerCap/player"
+)
 
 // 同一结果再来不要求重发；输出相同的等价写法（待重试与否、停用与在线偏移 0、停用与无）也不要求。
 func TestLyricStateSameResultNoResend(t *testing.T) {
@@ -110,4 +115,59 @@ func TestLyricStateLocalPathFollowsAdopted(t *testing.T) {
 	odd.localPath = localFlac
 	applyWant(t, &s, odd, true, true, assocA0...)
 	wantSource(t, &s, srcAssoc, "")
+}
+
+// 仅 Furigana 变化时（文本、时间戳、逐字均相同），lyricState 指纹变化并触发重发；
+// Furigana 相同时不无谓重发；跨来源切换仅 Furigana 不同时不被 shownSum 误判为相同而吞掉。
+func TestLyricStateFuriganaChangeResends(t *testing.T) {
+	var s lyricState
+	s.reset(1)
+	s.setOnlineRaw(shiftFixture())
+	if out, ch := s.apply(onlineRes(1, -1000), true, stateOffsetSec); !ch || len(out) != 2 || out[0].Furigana != nil {
+		t.Fatalf("首次无振假名 apply = (%+v, %v)，want changed=true 且 Furigana=nil", out, ch)
+	}
+
+	// 仅新增 Furigana，必须触发重发。
+	kanaA := player.LyricFurigana{{Text: "a", Ruby: "あ"}}
+	withKanaA := shiftFixture()
+	withKanaA[0].Furigana = kanaA
+	s.setOnlineRaw(withKanaA)
+	out, ch := s.apply(onlineRes(1, -1000), true, stateOffsetSec)
+	if !ch || !reflect.DeepEqual(out[0].Furigana, kanaA) {
+		t.Fatalf("仅新增 Furigana 时 apply = (changed=%v, %#v)，want (true, %#v)", ch, out, kanaA)
+	}
+
+	// 再次存入完全相同的 Furigana，不重发。
+	sameKanaA := shiftFixture()
+	sameKanaA[0].Furigana = player.LyricFurigana{{Text: "a", Ruby: "あ"}}
+	s.setOnlineRaw(sameKanaA)
+	if out, ch := s.apply(onlineRes(1, -1000), true, stateOffsetSec); ch || out != nil {
+		t.Fatalf("相同 Furigana 不应重发：got (%+v, %v)", out, ch)
+	}
+
+	// 仅改 Ruby 文本，必须触发重发。
+	kanaB := player.LyricFurigana{{Text: "a", Ruby: "い"}}
+	withKanaB := shiftFixture()
+	withKanaB[0].Furigana = kanaB
+	s.setOnlineRaw(withKanaB)
+	out, ch = s.apply(onlineRes(1, -1000), true, stateOffsetSec)
+	if !ch || !reflect.DeepEqual(out[0].Furigana, kanaB) {
+		t.Fatalf("仅修改 Furigana Ruby 时 apply = (changed=%v, %#v)，want (true, %#v)", ch, out, kanaB)
+	}
+
+	// 跨来源切换到关联歌词：其余字段全同、仅 Furigana 不同，shownSum 不同故必须重发。
+	assocSameExceptKana := shiftFixture()
+	assocSameExceptKana[0].Furigana = player.LyricFurigana{{Text: "a", Ruby: "う"}}
+	out, ch = s.apply(desiredRes(1, srcAssoc, -1000, assocSameExceptKana, "K"), true, stateOffsetSec)
+	if !ch || !reflect.DeepEqual(out[0].Furigana, assocSameExceptKana[0].Furigana) {
+		t.Fatalf("跨来源仅 Furigana 不同时应重发：got (changed=%v, %#v)", ch, out)
+	}
+
+	// 切回在线且在线行与当前已显示行含 Furigana 完全一致：应由 shownSum 判定相同而不重发。
+	onlineMatchesAssoc := shiftFixture()
+	onlineMatchesAssoc[0].Furigana = player.LyricFurigana{{Text: "a", Ruby: "う"}}
+	s.setOnlineRaw(onlineMatchesAssoc)
+	if out, ch := s.apply(onlineRes(1, -1000), true, stateOffsetSec); ch || out != nil {
+		t.Fatalf("跨来源全字段含 Furigana 一致时不应重发：got (%+v, %v)", out, ch)
+	}
 }

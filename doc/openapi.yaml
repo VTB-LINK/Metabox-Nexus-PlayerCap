@@ -101,12 +101,12 @@ paths:
         - 系统编译时注册的所有播放器标识名列表
 
         **player_running 说明：**
-        - 当前正在运行（非 `offline` / `standby` / `waiting_process`）的播放器列表
+        - 进程在运行（非 `offline` / `waiting_process`）的播放器列表，按注册顺序
+        - `standby`（进程在运行而本服务读不了它）计入：它只表示进程在运行，不表示能取到歌词
 
         **player_status 说明：**
         - 所有支持的播放器及其当前状态（按注册顺序），值为 status 字符串
-        - 可能的状态值：`"offline"`（服务端兜底：从未上报过状态）/ `"waiting_process"` / `"waiting_song"` / `"playing"` / `"paused"` / `"standby"` / `"error"`（仅 kugou 故障终态）。`"loading"` 为保留值，当前版本不会出现
-        - 注意 `"error"` 不在 `player_running` 的排除集内，故障中的 kugou 仍会出现在 `player_running` 里
+        - 可能的状态值：`"offline"`（服务端兜底：从未上报过状态）/ `"waiting_process"` / `"standby"` / `"waiting_song"` / `"playing"` / `"paused"`，含义见 StatusInfo 的 `status`。`"loading"` 与 `"error"` 为保留值，当前版本不会出现；若出现，按字面计入 `player_running`
 
         **ws_connected 说明：**
         - 仅统计 `/ws` 与 `/{player}/ws` 的连接；SSE、`effect-ws`、`audio-ws` 连接不计入（后两者见下）
@@ -369,6 +369,7 @@ paths:
         - `lyrics[].roma_text` - 逐行音译（发音标注）歌词文本；cloudmusicv3（网易云 romalrc，罗马音）、qqmusic（QQ QRC 逐字罗马音）与 kugou（KRC 内嵌 type=0 轨、按行号对齐，形态因语言而异：日文罗马音、韩文汉语谐音）提供，均与翻译 sub_text 相互独立、互不覆盖，该曲无音译轨或该行未被覆盖时为空；sodamusic 平台自身无音译源，改由酷狗歌词接口按歌名 + 时长匹配「借」音译补全（非平台原生、不保证稳定：跨平台歌名搜索可能搜不到对应曲、或匹配到不同版本 / 母带 / 翻唱，匹配失败、无对应曲或该行主歌词文本对不上时留空）；wesing 取自进程内存里的音译轨（与主歌词同一个歌词对象，逐行对应、按行号 + 行起始时间配上；只有曲库带音译的歌才有，与全民K歌界面上的音译开关无关；2026-10-09 用韩文、日文歌实测，罗马音）；applemusic 恒为空字符串（不解析 TTML 里的音译轨）；kuwo 当前不提供音译；spotify 无音译源（自家 color-lyrics/v2 只有行级时间轴，provider 为 MusixMatch），恒为空字符串
         - `lyrics[].roma_text_detailed` - 逐字音译：`roma_text` 的逐音节时间轴，形状与 `text_detailed` 相同（timestamp、play_time、duration、words[]），没有时为空对象 `{}`。wesing、qqmusic、kugou、sodamusic 提供，cloudmusicv3 只在一字一音的歌（粤语）上提供：wesing 与 qqmusic 取音译轨自带的字级时间，kugou、sodamusic 与 cloudmusicv3 的时间取自主歌词的字（sodamusic 的音译借自酷狗，只有按字对齐上的行才有）。cloudmusicv3 的音译只有逐行的 romalrc / yromalrc、没有字级时间（2026-10-10 实测）；带逐字歌词的行里，每个逐字单元（纯空白的不计）恰为一个汉字、行级音译的音节数与汉字数相等且都是罗马字时，把音节按顺序配上各个字的时间；带逐字歌词的行里出现假名或谚文的歌（日文、韩文歌）整首为 `{}`，中英混排等对不上的行为 `{}`。applemusic、spotify 与 kuwo 无音译，恒为 `{}`。有 `roma_text` 的行不一定有它：音译的字级单元与行级音译对不上、或时间轴不合法的行为 `{}`。它是一条独立的数组，单元与 `text_detailed` 不一一对应（一个汉字可以拆成多个音节，空格可以单独占一个单元）；各单元的 `text` 拼起来、去掉首尾空白即 `roma_text`
         - `lyrics[].text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`。cloudmusicv3（YRC）/ qqmusic（QRC）/ kugou（KRC）/ sodamusic（明文 KRC）/ wesing（进程内存卡拉OK字级时间）/ applemusic（TTML `<span>`）/ kuwo（有效 lrcx 时间头）提供逐字；kugou 回落到行级 LRC 时各行均为 `{}`，wesing 字级时间轴不合法的行为 `{}`。sodamusic 无行级回落，各行要么都带逐字，要么 `lyrics` 为空；applemusic 仅 `itunes:timing="Word"` 型歌曲有逐字，Line 型各行均为 `{}`；kuwo 无有效 lrcx 时间头或字级时间时为 `{}`；spotify 无逐字源（自家 color-lyrics/v2 只有行级时间轴），恒为 `{}`。逐字文本为 `words[].text` 直接拼接，与该行 `text` 可能有标点差异，不可用于相等比较
+        - `lyrics[].furigana` - 该行的振假名（汉字、`々` 或全角数字顶部假名注音）有序分段数组，绝不为 `null`；无注音行恒为空数组 `[]`。当前仅 `qqmusic` 在在线或本地关联/缓存主歌词携带有效 `[kana:]` 并通过全曲目标字符游标守恒校验时提供（翻译与音译轨残留 `[kana:]` 会被忽略；无 `[kana:]` 曲目不加载本地词典兜底）；无 `[kana:]` 曲目、无注音行及其余七家播放器恒为 `[]`。与 `roma_text` / `roma_text_detailed` 完全正交，双模式拼接契约详见 `LyricLine.furigana` 与 `LyricFuriganaSegment`
       responses:
         "200":
           description: 200 成功
@@ -411,6 +412,7 @@ paths:
                               - { timestamp: 4.44, play_time: 3.94, duration: 1.08, text: "Cold " }
                               - { timestamp: 5.52, play_time: 5.02, duration: 0.36, text: "enough " }
                           roma_text_detailed: {}
+                          furigana: []
                         - index: 1
                           timestamp: 7.57
                           play_time: 7.07
@@ -425,6 +427,7 @@ paths:
                               - { timestamp: 7.92, play_time: 7.42, duration: 0.06, text: "It " }
                               - { timestamp: 7.98, play_time: 7.48, duration: 0.3, text: "feels " }
                           roma_text_detailed: {}
+                          furigana: []
                 有歌词时（sodamusic，明文 KRC 逐字）:
                   summary: 中途接入 sodamusic（真实录音）。示例已裁剪，只删元素不改值：lyrics 实际 35 行（此处留 1）、每行 words 实际 6 个（留 3），故 count 与数组长度对不上，真实响应中两者一致。注意 sodamusic 的 title 是「歌手 - 歌名」（同 kugou，与 wesing / cloudmusicv3 / qqmusic 相反）；它无行级回落，每行的 text_detailed 都带逐字。
                   value:
@@ -453,6 +456,7 @@ paths:
                               - { timestamp: 0.32, play_time: 0.11999999, duration: 0.18, text: "能" }
                               - { timestamp: 0.5, play_time: 0.3, duration: 0.18, text: "够" }
                           roma_text_detailed: {}
+                          furigana: []
                 无歌词时:
                   summary: 平台未返回歌词（cloudmusicv3 纯音乐）。data 不是空对象——lyrics 为空数组、count 为 0，而 title/duration 照常有值。
                   value:
@@ -485,10 +489,11 @@ paths:
         - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量。本端点的 `position` / `progress` 按 `all_lyrics` 的 `position` 规则外推到响应时刻，其余字段与最近一条 `lyric_update` 相同
         - `progress` - 整曲播放进度（0-1），= `position / 歌曲总时长`；与 `play_time`（本行歌词的播出时间）无换算关系
         - `text_detailed` - 逐字/细粒度歌词扩展（含 timestamp、play_time、duration、words[]）；无逐字数据时为空对象 `{}`
+        - `furigana` - 本行的振假名（汉字、`々` 或全角数字顶部假名注音）有序分段数组，绝不为 `null`；无注音行恒为空数组 `[]`。当前仅 `qqmusic` 在在线或本地关联/缓存主歌词携带有效 `[kana:]` 并通过全曲守恒校验时提供（与 `roma_text` / `roma_text_detailed` 完全正交），其余行、无 `[kana:]` 曲目、无歌词（`index: -1`）及其余七家播放器恒为 `[]`；详见 `LyricUpdateData.furigana` 与 `LyricFuriganaSegment`
 
         **`index: -1` 纯音乐说明：**
-        当平台未返回任何歌词数据时，发送 `index: -1` 而非空对象 `{}`。此时 `timestamp` 为 `0`，`sub_text` 与 `roma_text` 均为空字符串，`text_detailed` 为 `{}`；**`progress` 照常反映整曲播放进度，不为 `0`**（歌没有歌词，但它还在播）。
-        **`text` 不保证为空**：cloudmusicv3 与 kugou 对纯音乐返回一行「纯音乐，请欣赏」，服务端已把 `index` 归一为 `-1`，但该提示语原样保留在 `text` 里；qqmusic 的 API 返回零行、以及 sodamusic 的平台未给出 KRC（`lyrics.type` 非 `krc` 或内容为空）、以及 applemusic 扫不到该曲 TTML（纯音乐、歌词未就绪，或 Apple Music 的歌词面板没有打开：面板关着时它不加载歌词）、以及 spotify 的 color-lyrics 返回零行、以及 kuwo 取词有结论而没有歌词行（只有酷我的提示语、或一行歌名行加提示语的也算，提示语不保留）时，`text` 为 `""`。提示语归一逻辑在 cloudmusicv3 / kugou / sodamusic / applemusic / spotify 生效（qqmusic 不做此归一），只是尚未观测到汽水 / Apple Music / Spotify 发出这一行。
+        当平台未返回任何歌词数据时，发送 `index: -1` 而非空对象 `{}`。此时 `timestamp` 为 `0`，`sub_text` 与 `roma_text` 均为空字符串，`text_detailed` 与 `roma_text_detailed` 为 `{}`，`furigana` 为 `[]`；**`progress` 照常反映整曲播放进度，不为 `0`**（歌没有歌词，但它还在播）。
+        **`text` 不保证为空**：平台对无歌词歌曲给出提示语时（如「纯音乐，请欣赏」，或「此歌曲为…欣赏」「该歌曲为…欣赏」，前面可带一行与标题去掉空白后相同的歌名行），服务端把 `index` 归一为 `-1` 并原样保留提示原文进 `text`（前置歌名行不进 `text`）；平台没有给出提示语（零行、404、取词失败、超时，或 sodamusic 未给出 KRC、applemusic 扫不到该曲 TTML、kuwo 明确无歌词）时，`text` 为 `""`。共用提示识别对除 qqmusic 外的播放器生效（spotify 的异步取词无标题，仅认单行形状；qqmusic 待阶段二改造，当前其接口返回的三段冒号提示行被解析器丢弃、结果同零行、`text` 为 `""`）。
         wesing 不发 `index: -1`：读不到歌词时不宣告这首歌，首行之前不发 `lyric_update`。
         判断有无歌词一律用 `index !== -1`，不要看 `text`。
         对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达：applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 `index: -1`。
@@ -539,6 +544,7 @@ paths:
                           - { timestamp: 16.555, play_time: 16.355, duration: 0.224, text: "The  " }
                           - { timestamp: 16.779, play_time: 16.578999, duration: 0.464, text: "spotlight  " }
                           - { timestamp: 17.243, play_time: 17.043, duration: 0.362, text: "filling  " }
+                      furigana: []
                 播放中（逐字 + 翻译）:
                   summary: 播放中（cloudmusicv3，YRC 逐字 + 翻译，真实录音）。words 已裁剪至 2 个，实际 9 个——只删元素不改值。本行逐字首字（156.96）早于行时间戳（157.22），故 play_time 取首字时刻加 offset（此处 offset=-500ms）；position（整曲实时位置 156.4659）与 play_time（156.46）此处相差 0.006s。
                   value:
@@ -562,6 +568,7 @@ paths:
                           - { timestamp: 156.96, play_time: 156.46, duration: 0.18, text: "There's " }
                           - { timestamp: 157.14, play_time: 156.64, duration: 0.57, text: "plenty " }
                       roma_text_detailed: {}
+                      furigana: []
                 播放中（sodamusic，明文 KRC 逐字）:
                   summary: 播放中（sodamusic，真实录音）。words 已裁剪至 3 个，实际 14 个——只删元素不改值。KRC 的字级偏移相对行首、首字即行首，故 text_detailed.timestamp 恒等于行 timestamp、play_time 恒等于 timestamp 加 offset（此处 offset=-200ms），不会像 cloudmusicv3 的 YRC 引子行那样提前。本曲无译轨，sub_text 为空。
                   value:
@@ -586,6 +593,7 @@ paths:
                           - { timestamp: 131.65, play_time: 131.45, duration: 0.29, text: "能" }
                           - { timestamp: 132.05, play_time: 131.85, duration: 0.29, text: "够" }
                       roma_text_detailed: {}
+                      furigana: []
                 尚无数据:
                   summary: 服务端还没有该播放器的歌词数据（播放器未启动，或启动后尚未播放）。这不是「本曲无歌词」——那种情况 data 是下面两例的完整对象。
                   value:
@@ -594,7 +602,7 @@ paths:
                     player: wesing
                     data: {}
                 无可用歌词（qqmusic）:
-                  summary: 平台返回零行歌词时 text 为空字符串。timestamp 为 0、play_time 为 0（无行可播出），而 position / progress 照常反映整曲播放位置（此例为中途接入，故非 0）。
+                  summary: 平台未给出可保留的无歌词提示时 text 为空字符串（qqmusic 阶段二改造前其接口的三段冒号提示行被解析器丢弃，结果同零行）。timestamp 为 0、play_time 为 0（无行可播出），而 position / progress 照常反映整曲播放位置（此例为中途接入，故非 0）。
                   value:
                     code: 0
                     msg: success
@@ -610,6 +618,7 @@ paths:
                       progress: 0.12511556
                       text_detailed: {}
                       roma_text_detailed: {}
+                      furigana: []
                 无可用歌词（cloudmusicv3 / kugou）:
                   summary: 这两家对纯音乐返回一行「纯音乐，请欣赏」，服务端把 index 归一为 -1，但该提示语原样保留在 text 里——所以 index 为 -1 并不蕴含 text 为空。本例为 kugou 的真实录音（2026-11-13），position 已外推到响应时刻。
                   value:
@@ -627,6 +636,7 @@ paths:
                       progress: 0.020842401
                       text_detailed: {}
                       roma_text_detailed: {}
+                      furigana: []
 
   /status_update:
     get:
@@ -637,15 +647,16 @@ paths:
         返回当前活跃播放器的播放状态。
 
         **status 可能的值及含义：**
-        - `"waiting_process"` - 播放器进程未启动。applemusic 为 `"Apple Music 未启动"`（`reason` 为 `process_not_running`）；spotify 为 `"Spotify 未启动或未连上"`（`reason` 为 `process_not_running`；进程在跑、但尚未连上 CEF 远程调试端口 9223 时也报它，播放态与进度读自页面 DOM）；进程在运行但本服务无权读取时也报此状态，`detail` 为 `"无权读取 Apple Music 进程（Apple Music 可能以管理员身份运行）"`（`reason` 为 `no_admin`）；wesing 为 `"K歌客户端未启动"`（`reason` 为 `process_not_running`）；kuwo 为 `"酷我尚未运行"`（`reason` 为 `process_not_running`），连不上时也报此状态而不报 `standby`：未带调试端口且不在自动重启白名单内为 `"酷我需要以调试端口 9224 启动；自动重启只对已验证的构建开放，请手动带 --remote-debugging-port=9224 启动酷我"`、其余连接失败为 `"酷我连接已断开，正在重试"`（两者 `reason` 均为 `cdp_disconnected`），网页桥版本、页面目录或播放核心未通过校验为 `"暂不支持此酷我播放核心"`（`reason` 为 `version_unsupported`），微软商店版为 `"酷我微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`）。cloudmusicv3、spotify、kugou、sodamusic、kuwo 的进程在运行而读不到其安装路径（多因它以管理员身份运行）时报 `"读不到<播放器名>的安装路径（<播放器名>可能以管理员身份运行）"`（`reason` 为 `no_admin`）：无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接
-        - `"waiting_song"` - 播放器已启动但未选择歌曲。applemusic 为 `"Apple Music 未在播放"`（`reason` 为 `no_song`），以下情况都报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒；换歌后 10 秒仍取不到新歌标题。wesing 为 `"K歌窗口未打开"`（`reason` 为 `window_not_open`）：进程在运行而 K 歌播放窗口未打开。kuwo 为 `"酷我当前没有歌曲"`（`reason` 为 `no_song`）：网页桥报告当前没有歌曲。还没宣告过歌曲时（如连上时即没有歌曲）当即报；已宣告过歌曲的，没有歌曲累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）。kugou 为 `"酷狗音乐当前没有歌曲"`（`reason` 为 `no_song`）：连上 CDP 之后、读到第一首歌之前（读到过歌之后再读到没有歌不报）。sodamusic 为 `"汽水音乐当前没有歌曲"`（`reason` 为 `no_song`）：取到的播放态里没有歌曲（如回到首页、清空播放列表）。还没宣告过歌曲时（如连上时即没有歌曲）当即报；已宣告过歌曲的，连续没有歌曲满 2 秒才报，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态。spotify 不产生此状态：连上后若没有曲目，它保持静默、不发状态，交给路由超时判 idle
-        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
+        播放器所处的层次，各值的含义对所有播放器一致；原因看 `reason`，`detail` 只给人读。非歌名状态（`waiting_process`、`standby`、`waiting_song`）只在 `status`、`detail`、`reason` 三者之一变化时发出，状态不变期间不重发。
+        - `"waiting_process"` - 播放器进程没在运行。`reason` 为 `process_not_running`（本次服务期间没见它运行过）或 `process_exited`（曾在运行、现已退出；保持到进程重新出现为止）。进程是否在运行先于一切判定：已知的读取受阻原因（如版本不受支持、微软商店版、未取得管理员权限）在进程不在运行时只写进 `detail`，进程启动后改报 `standby` 加该原因
+        - `"standby"` - 进程在运行，但本服务读不了它；只在进程在运行时出现。`reason` 为 `cdp_disconnected`（调试通道未就绪或已断开）、`version_unsupported`（版本不受支持，含微软商店版）、`no_admin`（无权读取进程或其安装路径，多因播放器以管理员身份运行；读不到安装路径时无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接）、`install_not_found`（未找到安装）或 `metadata_unavailable`（曲目在而读不到曲目信息）。版本不受支持等原因按间隔重查，条件满足即自动恢复、不必重启本服务；重查期间进程退出，在下一个常规轮次即改报 `waiting_process`，不等重查间隔
+        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、spotify 当前不报，保留上一首。qqmusic 当前不产生此状态。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值），装的是微软商店版时为 `"网易云音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，同样每 30 秒重发一次且不去重）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`，微软商店版为 `"酷狗音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，每 30 秒重发一次；不是终态，改装官网版后自动恢复）；sodamusic 为 `"汽水音乐 CDP 已断开"`，微软商店版为 `"汽水音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，每 30 秒重发一次）；applemusic 为 `"Apple Music 已退出"`（进程退出；进程在而无歌时报的是 `waiting_song`，不是 `standby`）；spotify 为 `"Spotify CDP 已断开"`（`reason` 为 `cdp_disconnected`），这一版 Spotify 不支持远程调试端口时为 `"Spotify 版本不支持（无法打开远程调试端口）"`（`reason` 为 `version_unsupported`，每 30 秒重探一次），微软商店版为 `"Spotify 微软商店版不支持（需官网安装版）"`（同为 `version_unsupported`，每 30 秒重探一次）。kuwo 不产生此状态，断开与版本不受支持都报 `waiting_process`
-        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"`（只在酷狗正在运行、连续 5 次定位不到其安装时出现，酷狗未运行时先等它启动，状态保持 `waiting_process`）/ `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
+        - `"error"` - 保留值：当前版本各播放器均不产出此状态，下游可不为它单独处理
 
-        **`reason`（稳定机器码，仅非歌名状态出现、永不本地化）**：下游应按它做逻辑判断，取代对 `detail` 中文的字面量匹配。取值：`process_not_running`（进程未启动/未连上）、`process_exited`（已退出）、`cdp_disconnected`（CDP 断开）、`window_not_open`（窗口未打开）、`version_unsupported`（版本不受支持，含微软商店版）、`install_not_found`（未找到安装）、`no_admin`（权限不足：kugou 为未取得管理员权限、无法自动修复；applemusic 为本服务无权打开其进程，多因 Apple Music 以管理员身份运行；cloudmusicv3、spotify、kugou、sodamusic、kuwo 为读不到运行中播放器的安装路径，无从确知不是微软商店版）、`no_song`（进程在运行，但当前没有可宣告的歌曲：没在播放、换歌加载过久或尚未认出曲目；applemusic、kuwo、kugou 与 sodamusic 产生）。playing/paused 时 `detail` 是歌名、不带 `reason`（`reason` 非空 ⟺ 非歌名状态）。另注：`detail` 现按系统显示语言本地化（中文系统中文、其余英文），供人读；机器判断一律用 `reason`。
+        **`reason`（稳定机器码，仅非歌名状态出现、永不本地化）**：下游应按它做逻辑判断，取代对 `detail` 中文的字面量匹配。取值：`process_not_running`（进程未运行，本次服务期间没见它运行过）、`process_exited`（曾在运行、现已退出）、`cdp_disconnected`（进程在运行，调试通道未就绪或已断开）、`window_not_open`（wesing 的 K 歌窗口未打开）、`version_unsupported`（版本不受支持，含微软商店版）、`install_not_found`（未找到安装）、`no_admin`（权限不足：本服务无权读取播放器进程或读不到其安装路径，多因播放器以管理员身份运行，读不到安装路径时无从确知不是微软商店版；kugou 另指未取得修补所需的管理员权限）、`no_song`（已连上，当前没有可宣告的歌曲）、`metadata_unavailable`（进程在运行、已连上，曲目在而读不到曲目信息）。playing/paused 时 `detail` 是歌名、不带 `reason`（`reason` 非空 ⟺ 非歌名状态）。另注：`detail` 现按系统显示语言本地化（中文系统中文、其余英文），供人读；机器判断一律用 `reason`。
       responses:
         "200":
           description: 200 成功
@@ -686,7 +697,8 @@ paths:
       description: |
         返回当前活跃播放器正在播放歌曲的元数据。
 
-        - 直接切歌（A→B）时，不会先返回空再返回 B，而是直接返回 B 的信息。例外：applemusic 换歌后加载超过 6 秒、或换歌后 10 秒仍取不到新歌标题时，kuwo 换歌时网页桥报告没有歌曲累计超过 2 秒时，先清空（此期间返回 `data: {}`，状态为 `waiting_song`），认出 B 后再返回 B
+        - 路由清除活跃播放器（无活跃播放器）后，本端点返回 `player: ""`、`data: {}`；活跃播放器真停播而另一家处于暂停保持（根仍指向该播放器）时，本端点返回 `player` 为该播放器名、`data: {}`
+        - 直接切歌（A→B）时，不会先返回空再返回 B，而是直接返回 B 的信息。例外：applemusic 换歌后加载超过 6 秒、或换歌后 10 秒仍取不到新歌标题时，kuwo 换歌时网页桥报告没有歌曲累计超过 2 秒时，先清空（此期间返回 `data: {}`，加载超时与 kuwo 状态为 `waiting_song`，applemusic 取不到标题状态为 `standby` + `metadata_unavailable`），认出 B 后再返回 B
       responses:
         "200":
           description: 200 成功
@@ -732,14 +744,16 @@ paths:
 
         **连接建立时：** 若服务端已缓存该播放器的 `lyric_update`，立即补发一条；**若尚无缓存（播放器未启动，或启动后还没推出第一行歌词），连接建立时不发送任何内容**，第一条是之后实际产生的那条 `lyric_update`：歌词行，或平台没有歌词时 `index: -1` 的通知。本端点不会发送 `data:{}` 空对象。
 
+        **清除时（in-band 清除）：** 所有播放器停止输出（路由清屏）时，收到一条 `player: ""`、`index: -1` 的 `lyric_update`（`position` / `progress` 为原活跃播放器当时的位置）；活跃播放器真停播（`waiting_song`，或 `standby` + `metadata_unavailable`）而另一家暂停保持使根仍指向该播放器时，收到一条 `player` 为该播放器名、`index: -1` 的 `lyric_update`。
+
         **初始补发（连接时已有缓存歌词，含逐字 `text_detailed`）：**
         ```
-        data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]},"roma_text_detailed":{}}}
+        data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]},"roma_text_detailed":{},"furigana":[]}}
         ```
 
         **播放过程中，每当歌词更新时接收（wesing 真实录音，`words` 已裁剪至 2 个、实际 10 个）：**
         ```
-        data: {"type":"lyric_update","player":"wesing","data":{"index":21,"text":"看飞机轰的一声去远乡","sub_text":"","roma_text":"","timestamp":165.867,"play_time":165.667,"position":165.69998,"progress":0.57965255,"text_detailed":{"timestamp":165.867,"play_time":165.667,"duration":5.8359833,"words":[{"timestamp":165.867,"play_time":165.667,"duration":0.824,"text":"看"},{"timestamp":166.691,"play_time":166.491,"duration":0.384,"text":"飞"}]},"roma_text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":21,"text":"看飞机轰的一声去远乡","sub_text":"","roma_text":"","timestamp":165.867,"play_time":165.667,"position":165.69998,"progress":0.57965255,"text_detailed":{"timestamp":165.867,"play_time":165.667,"duration":5.8359833,"words":[{"timestamp":165.867,"play_time":165.667,"duration":0.824,"text":"看"},{"timestamp":166.691,"play_time":166.491,"duration":0.384,"text":"飞"}]},"roma_text_detailed":{},"furigana":[]}}
         ```
 
         **完整生命周期示例**（`/wesing/lyric_update-SSE` 的真实录音，`words` 只留前 2 个）：
@@ -747,11 +761,11 @@ paths:
         （连接建立，当前无歌词：不发送任何内容）
 
         （用户开始播放歌曲）
-        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"Hmmm","sub_text":"","roma_text":"","timestamp":1.11,"play_time":0.91,"position":1.85,"progress":0.007875146,"text_detailed":{"timestamp":1.11,"play_time":0.91,"duration":4.59,"words":[{"timestamp":1.11,"play_time":0.91,"duration":4.59,"text":"Hmmm"}]},"roma_text_detailed":{}}}
-        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"Hmmm","sub_text":"","roma_text":"","timestamp":5.7,"play_time":5.5,"position":5.5,"progress":0.023412596,"text_detailed":{"timestamp":5.7,"play_time":5.5,"duration":0.7290001,"words":[{"timestamp":5.7,"play_time":5.5,"duration":0.729,"text":"Hmmm"}]},"roma_text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"Hmmm","sub_text":"","roma_text":"","timestamp":1.11,"play_time":0.91,"position":1.85,"progress":0.007875146,"text_detailed":{"timestamp":1.11,"play_time":0.91,"duration":4.59,"words":[{"timestamp":1.11,"play_time":0.91,"duration":4.59,"text":"Hmmm"}]},"roma_text_detailed":{},"furigana":[]}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"Hmmm","sub_text":"","roma_text":"","timestamp":5.7,"play_time":5.5,"position":5.5,"progress":0.023412596,"text_detailed":{"timestamp":5.7,"play_time":5.5,"duration":0.7290001,"words":[{"timestamp":5.7,"play_time":5.5,"duration":0.729,"text":"Hmmm"}]},"roma_text_detailed":{},"furigana":[]}}
 
         （切歌 — 服务端不发送清空消息，前端自行根据新歌数据重置显示）
-        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"I took an arrow to the heart","sub_text":"","roma_text":"","timestamp":12.43,"play_time":12.2300005,"position":12.25,"progress":0.05889957,"text_detailed":{"timestamp":12.43,"play_time":12.2300005,"duration":1.9839993,"words":[{"timestamp":12.43,"play_time":12.2300005,"duration":0.192,"text":"I "},{"timestamp":12.622,"play_time":12.422,"duration":0.234,"text":"took "}]},"roma_text_detailed":{}}}
+        data: {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"I took an arrow to the heart","sub_text":"","roma_text":"","timestamp":12.43,"play_time":12.2300005,"position":12.25,"progress":0.05889957,"text_detailed":{"timestamp":12.43,"play_time":12.2300005,"duration":1.9839993,"words":[{"timestamp":12.43,"play_time":12.2300005,"duration":0.192,"text":"I "},{"timestamp":12.622,"play_time":12.422,"duration":0.234,"text":"took "}]},"roma_text_detailed":{},"furigana":[]}}
         ```
 
         **约束：**
@@ -781,7 +795,7 @@ paths:
                 有歌词时:
                   summary: 有歌词时（含逐字 text_detailed；无逐字的行该字段为 {}）
                   value: |
-                    data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]},"roma_text_detailed":{}}}
+                    data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]},"roma_text_detailed":{},"furigana":[]}}
 
   /song_info-SSE:
     get:
@@ -791,7 +805,9 @@ paths:
       description: |
         Server-Sent Events 实时歌曲信息推送。
 
-        **连接建立时：** 若服务端已缓存该播放器的 `song_info_update`，立即补发一条；**若尚无缓存，连接建立时不发送任何内容**，第一条会等到实际获取到歌曲信息时才到达。本端点不会发送 `data:{}` 空对象。
+        **连接建立时：** 若服务端已缓存该播放器的 `song_info_update`，立即补发一条；**若尚无缓存，连接建立时不发送任何内容**，第一条会等到实际获取到歌曲信息时才到达。
+
+        **清除时（in-band 清除）：** 所有播放器停止输出（路由清屏）时，收到一条 `player: ""`、`data: {}` 的 `song_info_update`；活跃播放器真停播（`waiting_song`，或 `standby` + `metadata_unavailable`）而另一家暂停保持使根仍指向该播放器时，收到一条 `player` 为该播放器名、`data: {}` 的 `song_info_update`。
 
         **初始补发（连接时已有缓存歌曲信息）：**
         ```
@@ -802,8 +818,7 @@ paths:
         ```
         data: {"type":"song_info_update","player":"wesing","data":{"name":"High歌","singer":"黄龄","title":"High歌 - 黄龄","cover":"http://imgcache.qq.com/music/photo/mid_album_800/t/c/003ZgkGJ2DlCtc.jpg","cover_base64":"data:image/jpeg;base64,..."}}
         ```
-        - 歌曲结束、窗口关闭本身不发空的 `song_info_update`
-        - 直接切歌（A→B）时，不会先发送空再发送 B，而是直接发送 B 的信息
+        - 仅上述清除情形会发空的 `song_info_update`；直接切歌（A→B）时不会先发送空再发送 B，而是直接发送 B 的信息
 
         **约束：**
         - 载荷与 WebSocket 逐字节同构（含 `type` 字段）
@@ -862,13 +877,14 @@ paths:
         ```
 
         status 可能的值及含义：
-        - `"waiting_process"` - 播放器进程未启动。applemusic 为 `"Apple Music 未启动"`（`reason` 为 `process_not_running`）；spotify 为 `"Spotify 未启动或未连上"`（`reason` 为 `process_not_running`；进程在跑、但尚未连上 CEF 远程调试端口 9223 时也报它，播放态与进度读自页面 DOM）；进程在运行但本服务无权读取时也报此状态，`detail` 为 `"无权读取 Apple Music 进程（Apple Music 可能以管理员身份运行）"`（`reason` 为 `no_admin`）；wesing 为 `"K歌客户端未启动"`（`reason` 为 `process_not_running`）；kuwo 为 `"酷我尚未运行"`（`reason` 为 `process_not_running`），连不上时也报此状态而不报 `standby`：未带调试端口且不在自动重启白名单内为 `"酷我需要以调试端口 9224 启动；自动重启只对已验证的构建开放，请手动带 --remote-debugging-port=9224 启动酷我"`、其余连接失败为 `"酷我连接已断开，正在重试"`（两者 `reason` 均为 `cdp_disconnected`），网页桥版本、页面目录或播放核心未通过校验为 `"暂不支持此酷我播放核心"`（`reason` 为 `version_unsupported`），微软商店版为 `"酷我微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`）。cloudmusicv3、spotify、kugou、sodamusic、kuwo 的进程在运行而读不到其安装路径（多因它以管理员身份运行）时报 `"读不到<播放器名>的安装路径（<播放器名>可能以管理员身份运行）"`（`reason` 为 `no_admin`）：无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接
-        - `"waiting_song"` - 播放器已启动但未选择歌曲。applemusic 为 `"Apple Music 未在播放"`（`reason` 为 `no_song`），以下情况都报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒；换歌后 10 秒仍取不到新歌标题。wesing 为 `"K歌窗口未打开"`（`reason` 为 `window_not_open`）：进程在运行而 K 歌播放窗口未打开。kuwo 为 `"酷我当前没有歌曲"`（`reason` 为 `no_song`）：网页桥报告当前没有歌曲。还没宣告过歌曲时（如连上时即没有歌曲）当即报；已宣告过歌曲的，没有歌曲累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）。kugou 为 `"酷狗音乐当前没有歌曲"`（`reason` 为 `no_song`）：连上 CDP 之后、读到第一首歌之前（读到过歌之后再读到没有歌不报）。sodamusic 为 `"汽水音乐当前没有歌曲"`（`reason` 为 `no_song`）：取到的播放态里没有歌曲（如回到首页、清空播放列表）。还没宣告过歌曲时（如连上时即没有歌曲）当即报；已宣告过歌曲的，连续没有歌曲满 2 秒才报，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态。spotify 不产生此状态：连上后若没有曲目，它保持静默、不发状态，交给路由超时判 idle
-        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
+        播放器所处的层次，各值的含义对所有播放器一致；原因看 `reason`，`detail` 只给人读。非歌名状态（`waiting_process`、`standby`、`waiting_song`）只在 `status`、`detail`、`reason` 三者之一变化时发出，状态不变期间不重发。
+        - `"waiting_process"` - 播放器进程没在运行。`reason` 为 `process_not_running`（本次服务期间没见它运行过）或 `process_exited`（曾在运行、现已退出；保持到进程重新出现为止）。进程是否在运行先于一切判定：已知的读取受阻原因（如版本不受支持、微软商店版、未取得管理员权限）在进程不在运行时只写进 `detail`，进程启动后改报 `standby` 加该原因
+        - `"standby"` - 进程在运行，但本服务读不了它；只在进程在运行时出现。`reason` 为 `cdp_disconnected`（调试通道未就绪或已断开）、`version_unsupported`（版本不受支持，含微软商店版）、`no_admin`（无权读取进程或其安装路径，多因播放器以管理员身份运行；读不到安装路径时无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接）、`install_not_found`（未找到安装）或 `metadata_unavailable`（曲目在而读不到曲目信息）。版本不受支持等原因按间隔重查，条件满足即自动恢复、不必重启本服务；重查期间进程退出，在下一个常规轮次即改报 `waiting_process`，不等重查间隔
+        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、spotify 当前不报，保留上一首。qqmusic 当前不产生此状态。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值），装的是微软商店版时为 `"网易云音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，同样每 30 秒重发一次且不去重）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`，微软商店版为 `"酷狗音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，每 30 秒重发一次；不是终态，改装官网版后自动恢复）；sodamusic 为 `"汽水音乐 CDP 已断开"`，微软商店版为 `"汽水音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，每 30 秒重发一次）；applemusic 为 `"Apple Music 已退出"`（进程退出；进程在而无歌时报的是 `waiting_song`，不是 `standby`）；spotify 为 `"Spotify CDP 已断开"`（`reason` 为 `cdp_disconnected`），这一版 Spotify 不支持远程调试端口时为 `"Spotify 版本不支持（无法打开远程调试端口）"`（`reason` 为 `version_unsupported`，每 30 秒重探一次），微软商店版为 `"Spotify 微软商店版不支持（需官网安装版）"`（同为 `version_unsupported`，每 30 秒重探一次）。kuwo 不产生此状态，断开与版本不受支持都报 `waiting_process`
-        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"`（只在酷狗正在运行、连续 5 次定位不到其安装时出现，酷狗未运行时先等它启动，状态保持 `waiting_process`）/ `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
+        - `"error"` - 保留值：当前版本各播放器均不产出此状态，下游可不为它单独处理
 
         ---
 
@@ -889,7 +905,7 @@ paths:
 
         播放中（有歌词时。wesing 真实录音，这首带音译；两处 `words` 各裁剪至 2 个，实际 13 个与 15 个）：
         ```json
-        {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"The spotlight filling my heart また熱くなる想い","sub_text":"","roma_text":"The  spotlight  filling  my  heart  ma ta a tsu ku na ru o mo i","timestamp":16.555,"play_time":16.355,"position":16.4,"progress":0.08927937,"text_detailed":{"timestamp":16.555,"play_time":16.355,"duration":4.8739986,"words":[{"timestamp":16.555,"play_time":16.355,"duration":0.224,"text":"The "},{"timestamp":16.779,"play_time":16.578999,"duration":0.464,"text":"spotlight "}]},"roma_text_detailed":{"timestamp":16.555,"play_time":16.355,"duration":4.8739986,"words":[{"timestamp":16.555,"play_time":16.355,"duration":0.224,"text":"The  "},{"timestamp":16.779,"play_time":16.578999,"duration":0.464,"text":"spotlight  "}]}}}
+        {"type":"lyric_update","player":"wesing","data":{"index":1,"text":"The spotlight filling my heart また熱くなる想い","sub_text":"","roma_text":"The  spotlight  filling  my  heart  ma ta a tsu ku na ru o mo i","timestamp":16.555,"play_time":16.355,"position":16.4,"progress":0.08927937,"text_detailed":{"timestamp":16.555,"play_time":16.355,"duration":4.8739986,"words":[{"timestamp":16.555,"play_time":16.355,"duration":0.224,"text":"The "},{"timestamp":16.779,"play_time":16.578999,"duration":0.464,"text":"spotlight "}]},"roma_text_detailed":{"timestamp":16.555,"play_time":16.355,"duration":4.8739986,"words":[{"timestamp":16.555,"play_time":16.355,"duration":0.224,"text":"The  "},{"timestamp":16.779,"play_time":16.578999,"duration":0.464,"text":"spotlight  "}]},"furigana":[]}}
         ```
 
         ---
@@ -898,7 +914,7 @@ paths:
 
         有歌词时：
         ```json
-        {"type":"all_lyrics","player":"wesing","data":{"title":"blue hour - Hana Hope","duration":183.69305,"position":1.05,"progress":0.005716057,"count":29,"lyrics":[{"index":0,"timestamp":8.505,"play_time":8.305,"text":"Hey 運命が呼んでいる for the big stage","sub_text":"","roma_text":"Hey  u n me i ga yo n de i ru   for  the  big  stage","text_detailed":{"timestamp":8.505,"play_time":8.305,"duration":6.099,"words":[{"timestamp":8.505,"play_time":8.305,"duration":0.794,"text":"Hey "},{"timestamp":9.299,"play_time":9.099,"duration":0.469,"text":"運"}]},"roma_text_detailed":{"timestamp":8.505,"play_time":8.305,"duration":6.099,"words":[{"timestamp":8.505,"play_time":8.305,"duration":0.794,"text":"Hey  "},{"timestamp":9.299,"play_time":9.099,"duration":0.331,"text":"u "}]}}]}}（wesing 真实录音；lyrics 已裁剪至 1 行，实际 29 行；两处 words 各裁剪至 2 个）
+        {"type":"all_lyrics","player":"wesing","data":{"title":"blue hour - Hana Hope","duration":183.69305,"position":1.05,"progress":0.005716057,"count":29,"lyrics":[{"index":0,"timestamp":8.505,"play_time":8.305,"text":"Hey 運命が呼んでいる for the big stage","sub_text":"","roma_text":"Hey  u n me i ga yo n de i ru   for  the  big  stage","text_detailed":{"timestamp":8.505,"play_time":8.305,"duration":6.099,"words":[{"timestamp":8.505,"play_time":8.305,"duration":0.794,"text":"Hey "},{"timestamp":9.299,"play_time":9.099,"duration":0.469,"text":"運"}]},"roma_text_detailed":{"timestamp":8.505,"play_time":8.305,"duration":6.099,"words":[{"timestamp":8.505,"play_time":8.305,"duration":0.794,"text":"Hey  "},{"timestamp":9.299,"play_time":9.099,"duration":0.331,"text":"u "}]},"furigana":[]}]}}（wesing 真实录音；lyrics 已裁剪至 1 行，实际 29 行；两处 words 各裁剪至 2 个）
         ```
 
         ---
@@ -943,7 +959,7 @@ paths:
         wesing 播放中前跳（2026-11-14 录音 `ws/24-wesing-seek-177` ms 111731，PCM 模式，位置从约 62.6 秒跳到 92.55 秒）：跳转那一拍重发当前所在的行，`lyric_update` 同一毫秒紧随其后，跳转之后仍在同一行也重发；落在首行之前时（如重唱回到开头）没有当前行，不发。歌词正文从略，`words` 以 `...` 略去：
         ```
         ← {"type":"playback_resume","player":"wesing","data":{"position":92.54996,"progress":0.4469381}}
-        ← {"type":"lyric_update","player":"wesing","data":{"index":22,"text":"…","sub_text":"","roma_text":"","timestamp":91.896,"play_time":91.69601,"position":92.54996,"progress":0.4469381,"text_detailed":{"timestamp":91.896,"play_time":91.69601,"duration":3.649994,"words":[...]},"roma_text_detailed":{}}}
+        ← {"type":"lyric_update","player":"wesing","data":{"index":22,"text":"…","sub_text":"","roma_text":"","timestamp":91.896,"play_time":91.69601,"position":92.54996,"progress":0.4469381,"text_detailed":{"timestamp":91.896,"play_time":91.69601,"duration":3.649994,"words":[...]},"roma_text_detailed":{},"furigana":[]}}
         ```
         前端收到 `playback_pause` 应停止时间插值，收到 `playback_resume` 应以 `position` 为锚点重新开始插值。
 
@@ -963,16 +979,18 @@ paths:
 
         ---
 
-        **9. `player_clear` - 活跃播放器清除（根订阅者；per-player 通道在无活跃自动隐藏时也会收到）**
+        **9. `player_clear` - 清除显示（根订阅者；per-player 通道在真停播或无活跃自动隐藏时也会收到）**
 
-        当所有播放器都停止输出（全员 inert）时，根订阅者收到此事件，表示应清空显示：
+        触发情形：
         ```json
         {"type":"player_clear","player":"","data":{}}
         ```
-        - **运行中**活跃播放器被清空时，与 `player_switch`(to="") 一起发送（双重通知，向后兼容）
-        - **连接建立时**若当前已无活跃播放器，则作为初始事件单独发送（此时没有配对的 `player_switch`）
-        - 前端应清空歌词、封面、进度等所有显示内容
-        - Per-player 订阅者（如 `/wesing/ws`）默认**不**收到此事件；仅当为该播放器开启「无活跃自动隐藏」（`per-player-idle-hide` 或 `<player>-idle-hide` > 0）且静默超阈值时会收到一条（`player` 为该播放器名，且**不带**配对的 `player_switch`），用于隐藏歌停后停留的末行歌词。隐藏解除后服务端会补发整套缓存，见 `/{player}/ws`
+        - **路由清屏（所有播放器停止输出 / 全员 inert）**：推给根订阅者，`player` 为 `""`，与 `player_switch`(to="") 成对发送（先 switch 后 clear）。根 SSE（`/lyric_update-SSE`、`/song_info-SSE`）同步收到等价的 in-band 清除（`player: ""`、`index: -1` 的 `lyric_update` 与空 `song_info_update`）
+        - **连接建立时无活跃播放器**：推给刚连入 `/ws` 的客户端，单独发送（`player` 为 `""`，不配 `player_switch`）
+        - **活跃播放器真停播且根仍停在它上面**（例如另一家处于暂停保持）：播放器报 `waiting_song`（任意 `reason`）或 `standby` + `metadata_unavailable` 之后，向根订阅者推一条 `player_clear`（`player` 为该播放器名，**不带**配对的 `player_switch`，紧随 `status_update`）；根 SSE 同步收到等价的 in-band 清除（`player` 为该播放器名）
+        - **Per-player 通道真停播**：该播放器报 `waiting_song`（任意 `reason`）或 `standby` + `metadata_unavailable` 且专属出口此前显示过歌曲（未处于无活跃隐藏态）时，向其专属 WS 推一条 `player_clear`（`player` 为该播放器名，**不带**配对的 `player_switch`，紧随 `status_update`）；专属 SSE 同步收到等价的 in-band 清除。**播放器退出与连接断开（`waiting_process`、`standby` 其余 `reason`）时专属通道不发清除**，画面保持退出前的内容
+        - **Per-player 通道无活跃自动隐藏**：为该播放器开启「无活跃自动隐藏」（`per-player-idle-hide` 或 `<player>-idle-hide` > 0）且静默超阈值时，推一条 `player_clear`（`player` 为该播放器名，**不带**配对的 `player_switch`），隐藏解除后服务端补发整套缓存，见 `/{player}/ws`
+        - 前端收到后应清空歌词、封面、进度等所有显示内容
 
         ---
 
@@ -982,7 +1000,7 @@ paths:
         ← {"type":"status_update","player":"wesing","data":{"status":"playing","detail":"这世界那么多人 - 莫文蔚"}}
         ← {"type":"song_info_update","player":"wesing","data":{"name":"这世界那么多人","singer":"莫文蔚","title":"这世界那么多人 - 莫文蔚","cover":"http://imgcache.qq.com/music/photo/mid_album_800/v/X/001fN0ks2oUDvX.jpg","cover_base64":"data:image/jpeg;base64,..."}}
         ← {"type":"all_lyrics","player":"wesing","data":{"title":"这世界那么多人 - 莫文蔚","duration":285.86087,"position":164.23868,"progress":0.5745406,"count":36,"lyrics":[...]}}
-        ← {"type":"lyric_update","player":"wesing","data":{"index":20,"text":"灰树叶飘转在池塘","sub_text":"","roma_text":"","timestamp":159.258,"play_time":159.058,"position":164.23868,"progress":0.5745406,"text_detailed":{"timestamp":159.258,"play_time":159.058,"duration":6.026001,"words":[...]},"roma_text_detailed":{}}}
+        ← {"type":"lyric_update","player":"wesing","data":{"index":20,"text":"灰树叶飘转在池塘","sub_text":"","roma_text":"","timestamp":159.258,"play_time":159.058,"position":164.23868,"progress":0.5745406,"text_detailed":{"timestamp":159.258,"play_time":159.058,"duration":6.026001,"words":[...]},"roma_text_detailed":{},"furigana":[]}}
 
         （随播放进度逐行推送 lyric_update，格式见 /lyric_update 端点）
 
@@ -994,7 +1012,7 @@ paths:
 
         （位置回到开头，如重唱：发 playback_resume，之后从第一行重新推送）
         ← {"type":"playback_resume","player":"wesing","data":{"position":0,"progress":0}}
-        ← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"这世界有那么多人","sub_text":"","roma_text":"","timestamp":18.826,"play_time":18.626,"position":18.65,"progress":0.06524152,"text_detailed":{"timestamp":18.826,"play_time":18.626,"duration":4.7159996,"words":[...]},"roma_text_detailed":{}}}
+        ← {"type":"lyric_update","player":"wesing","data":{"index":0,"text":"这世界有那么多人","sub_text":"","roma_text":"","timestamp":18.826,"play_time":18.626,"position":18.65,"progress":0.06524152,"text_detailed":{"timestamp":18.826,"play_time":18.626,"duration":4.7159996,"words":[...]},"roma_text_detailed":{},"furigana":[]}}
 
         （切歌：上一首停住、报 paused，随后发 lyric_idle，再宣告新歌）
         ← {"type":"status_update","player":"wesing","data":{"status":"paused","detail":"这世界那么多人 - 莫文蔚"}}
@@ -1242,6 +1260,7 @@ paths:
                               - { timestamp: 4.44, play_time: 3.94, duration: 1.08, text: "Cold " }
                               - { timestamp: 5.52, play_time: 5.02, duration: 0.36, text: "enough " }
                           roma_text_detailed: {}
+                          furigana: []
                         - index: 1
                           timestamp: 7.57
                           play_time: 7.07
@@ -1256,6 +1275,7 @@ paths:
                               - { timestamp: 7.92, play_time: 7.42, duration: 0.06, text: "It " }
                               - { timestamp: 7.98, play_time: 7.48, duration: 0.3, text: "feels " }
                           roma_text_detailed: {}
+                          furigana: []
                 无歌词时:
                   summary: 平台未返回歌词（cloudmusicv3 纯音乐）。data 不是空对象——lyrics 为空数组、count 为 0，而 title/duration 照常有值。
                   value:
@@ -1288,6 +1308,7 @@ paths:
         - `play_time` - 本行歌词的上屏时间（秒）。基准为 `timestamp` + offset（offset 是延迟量，取负值即提前）；若本行逐字首字早于行时间戳（典型是 cloudmusicv3 的 YRC 长引子行；kugou 与 sodamusic 的 KRC 字级偏移相对行首、首字即行首，不会提前），取首字时刻，此时 play_time 小于该基准。`index` 为 -1（无可显示歌词）时为 0
         - `position` - 整曲实时播放位置（秒），= `progress × duration`，每条都带、与 index 无关；与 `play_time`（本行播出时间）是两个量。本端点的 `position` / `progress` 按 `all_lyrics` 的 `position` 规则外推到响应时刻，其余字段与最近一条 `lyric_update` 相同
         - `progress` - 整曲播放进度（0-1），= `position / 歌曲总时长`；与 `play_time`（本行歌词的播出时间）无换算关系
+        - `furigana` - 本行的振假名（汉字、`々` 或全角数字顶部假名注音）有序分段数组，绝不为 `null`；无注音行恒为空数组 `[]`。当前仅 `qqmusic` 在在线或本地关联/缓存主歌词携带有效 `[kana:]` 并通过全曲守恒校验时提供（与 `roma_text` / `roma_text_detailed` 完全正交），其余行、无 `[kana:]` 曲目、无歌词（`index: -1`）及其余七家播放器恒为 `[]`；详见 `LyricUpdateData.furigana` 与 `LyricFuriganaSegment`
 
         **`index: -1` 纯音乐说明：** 参见根端点 `/lyric_update` 的说明。
       parameters:
@@ -1336,6 +1357,7 @@ paths:
                         words:
                           - { timestamp: 16.555, play_time: 16.355, duration: 0.224, text: "The  " }
                           - { timestamp: 16.779, play_time: 16.578999, duration: 0.464, text: "spotlight  " }
+                      furigana: []
                 无歌词时:
                   summary: 无歌词时
                   value:
@@ -1354,13 +1376,14 @@ paths:
         Per-player 端点始终返回指定播放器的数据，不受路由切换影响。
 
         **status 可能的值及含义：**
-        - `"waiting_process"` - 播放器进程未启动。applemusic 为 `"Apple Music 未启动"`（`reason` 为 `process_not_running`）；spotify 为 `"Spotify 未启动或未连上"`（`reason` 为 `process_not_running`；进程在跑、但尚未连上 CEF 远程调试端口 9223 时也报它，播放态与进度读自页面 DOM）；进程在运行但本服务无权读取时也报此状态，`detail` 为 `"无权读取 Apple Music 进程（Apple Music 可能以管理员身份运行）"`（`reason` 为 `no_admin`）；wesing 为 `"K歌客户端未启动"`（`reason` 为 `process_not_running`）；kuwo 为 `"酷我尚未运行"`（`reason` 为 `process_not_running`），连不上时也报此状态而不报 `standby`：未带调试端口且不在自动重启白名单内为 `"酷我需要以调试端口 9224 启动；自动重启只对已验证的构建开放，请手动带 --remote-debugging-port=9224 启动酷我"`、其余连接失败为 `"酷我连接已断开，正在重试"`（两者 `reason` 均为 `cdp_disconnected`），网页桥版本、页面目录或播放核心未通过校验为 `"暂不支持此酷我播放核心"`（`reason` 为 `version_unsupported`），微软商店版为 `"酷我微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`）。cloudmusicv3、spotify、kugou、sodamusic、kuwo 的进程在运行而读不到其安装路径（多因它以管理员身份运行）时报 `"读不到<播放器名>的安装路径（<播放器名>可能以管理员身份运行）"`（`reason` 为 `no_admin`）：无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接
-        - `"waiting_song"` - 播放器已启动但未选择歌曲。applemusic 为 `"Apple Music 未在播放"`（`reason` 为 `no_song`），以下情况都报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒；换歌后 10 秒仍取不到新歌标题。wesing 为 `"K歌窗口未打开"`（`reason` 为 `window_not_open`）：进程在运行而 K 歌播放窗口未打开。kuwo 为 `"酷我当前没有歌曲"`（`reason` 为 `no_song`）：网页桥报告当前没有歌曲。还没宣告过歌曲时（如连上时即没有歌曲）当即报；已宣告过歌曲的，没有歌曲累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）。kugou 为 `"酷狗音乐当前没有歌曲"`（`reason` 为 `no_song`）：连上 CDP 之后、读到第一首歌之前（读到过歌之后再读到没有歌不报）。sodamusic 为 `"汽水音乐当前没有歌曲"`（`reason` 为 `no_song`）：取到的播放态里没有歌曲（如回到首页、清空播放列表）。还没宣告过歌曲时（如连上时即没有歌曲）当即报；已宣告过歌曲的，连续没有歌曲满 2 秒才报，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态。spotify 不产生此状态：连上后若没有曲目，它保持静默、不发状态，交给路由超时判 idle
-        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
+        播放器所处的层次，各值的含义对所有播放器一致；原因看 `reason`，`detail` 只给人读。非歌名状态（`waiting_process`、`standby`、`waiting_song`）只在 `status`、`detail`、`reason` 三者之一变化时发出，状态不变期间不重发。
+        - `"waiting_process"` - 播放器进程没在运行。`reason` 为 `process_not_running`（本次服务期间没见它运行过）或 `process_exited`（曾在运行、现已退出；保持到进程重新出现为止）。进程是否在运行先于一切判定：已知的读取受阻原因（如版本不受支持、微软商店版、未取得管理员权限）在进程不在运行时只写进 `detail`，进程启动后改报 `standby` 加该原因
+        - `"standby"` - 进程在运行，但本服务读不了它；只在进程在运行时出现。`reason` 为 `cdp_disconnected`（调试通道未就绪或已断开）、`version_unsupported`（版本不受支持，含微软商店版）、`no_admin`（无权读取进程或其安装路径，多因播放器以管理员身份运行；读不到安装路径时无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接）、`install_not_found`（未找到安装）或 `metadata_unavailable`（曲目在而读不到曲目信息）。版本不受支持等原因按间隔重查，条件满足即自动恢复、不必重启本服务；重查期间进程退出，在下一个常规轮次即改报 `waiting_process`，不等重查间隔
+        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、spotify 当前不报，保留上一首。qqmusic 当前不产生此状态。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
-        - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值），装的是微软商店版时为 `"网易云音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，同样每 30 秒重发一次且不去重）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`，微软商店版为 `"酷狗音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，每 30 秒重发一次；不是终态，改装官网版后自动恢复）；sodamusic 为 `"汽水音乐 CDP 已断开"`，微软商店版为 `"汽水音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，每 30 秒重发一次）；applemusic 为 `"Apple Music 已退出"`（进程退出；进程在而无歌时报的是 `waiting_song`，不是 `standby`）；spotify 为 `"Spotify CDP 已断开"`（`reason` 为 `cdp_disconnected`），这一版 Spotify 不支持远程调试端口时为 `"Spotify 版本不支持（无法打开远程调试端口）"`（`reason` 为 `version_unsupported`，每 30 秒重探一次），微软商店版为 `"Spotify 微软商店版不支持（需官网安装版）"`（同为 `version_unsupported`，每 30 秒重探一次）。kuwo 不产生此状态，断开与版本不受支持都报 `waiting_process`
-        - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"`（只在酷狗正在运行、连续 5 次定位不到其安装时出现，酷狗未运行时先等它启动，状态保持 `waiting_process`）/ `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+        - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
+        - `"error"` - 保留值：当前版本各播放器均不产出此状态，下游可不为它单独处理
       parameters:
         - $ref: "#/components/parameters/PlayerParam"
       responses:
@@ -1404,7 +1427,7 @@ paths:
         返回指定播放器正在播放歌曲的元数据。
         Per-player 端点始终返回指定播放器的数据，不受路由切换影响。
 
-        - 直接切歌（A→B）时，不会先返回空再返回 B，而是直接返回 B 的信息。例外：applemusic 换歌后加载超过 6 秒、或换歌后 10 秒仍取不到新歌标题时，kuwo 换歌时网页桥报告没有歌曲累计超过 2 秒时，先清空（此期间返回 `data: {}`，状态为 `waiting_song`），认出 B 后再返回 B
+        - 直接切歌（A→B）时，不会先返回空再返回 B，而是直接返回 B 的信息。例外：applemusic 换歌后加载超过 6 秒、或换歌后 10 秒仍取不到新歌标题时，kuwo 换歌时网页桥报告没有歌曲累计超过 2 秒时，先清空（此期间返回 `data: {}`，加载超时与 kuwo 状态为 `waiting_song`，applemusic 取不到标题状态为 `standby` + `metadata_unavailable`），认出 B 后再返回 B
       parameters:
         - $ref: "#/components/parameters/PlayerParam"
       responses:
@@ -1453,11 +1476,13 @@ paths:
 
         **连接建立时：** 若已缓存该播放器的 `lyric_update` 则立即补发一条，否则不发送（第一条是之后实际产生的那条 `lyric_update`：歌词行，或平台没有歌词时 `index: -1` 的通知；不发 `data:{}`）。
 
-        **无活跃自动隐藏：** 该播放器的通道被隐藏时收到一条 `index: -1` 的 `lyric_update`；隐藏解除后的补发中，若已缓存 `lyric_update` 则重发一条（触发条件见 `/{player}/ws`）。
+        **真停播与无活跃自动隐藏：**
+        - 该播放器真停播（进程在运行且已连上而当前没有可显示的歌曲：`waiting_song` 任意 `reason`，或 `standby` + `metadata_unavailable`）且此前显示过歌曲（未处于隐藏态）时，当拍收到一条 `index: -1` 的 `lyric_update`（`position` / `progress` 为清空前位置）。播放器退出与连接断开（`waiting_process`、`standby` 其余 `reason`）不发清除。
+        - 开启无活跃自动隐藏且通道被隐藏时收到一条 `index: -1` 的 `lyric_update`；隐藏解除后的补发中，若已缓存 `lyric_update` 则重发一条（触发条件见 `/{player}/ws`）。
 
         **事件格式（含逐字 `text_detailed`；无逐字的行该字段为 `{}`）：**
         ```
-        data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]},"roma_text_detailed":{}}}
+        data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]},"roma_text_detailed":{},"furigana":[]}}
         ```
 
         **约束：**
@@ -1477,7 +1502,7 @@ paths:
                 有歌词时:
                   summary: 有歌词时（含逐字 text_detailed；无逐字的行该字段为 {}）
                   value: |
-                    data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]},"roma_text_detailed":{}}}
+                    data: {"type":"lyric_update","player":"cloudmusicv3","data":{"index":37,"text":"There's plenty of time to sleep when we die","sub_text":"死后自会长眠。","roma_text":"","timestamp":157.22,"play_time":156.46,"position":156.4659,"progress":0.62976056,"text_detailed":{"timestamp":156.96,"play_time":156.46,"duration":7.02,"words":[{"timestamp":156.96,"play_time":156.46,"duration":0.18,"text":"There's "},{"timestamp":157.14,"play_time":156.64,"duration":0.57,"text":"plenty "}]},"roma_text_detailed":{},"furigana":[]}}
 
   /{player}/song_info-SSE:
     get:
@@ -1490,14 +1515,15 @@ paths:
 
         **连接建立时：** 若已缓存该播放器的 `song_info_update` 则立即补发一条，否则不发送（不发 `data:{}`）。
 
-        **无活跃自动隐藏：** 该播放器的通道被隐藏时收到一条 `data` 为 `{}` 的 `song_info_update`；隐藏解除后的补发中，若已缓存 `song_info_update` 则重发一条（触发条件见 `/{player}/ws`）。
+        **真停播与无活跃自动隐藏：**
+        - 该播放器真停播（`waiting_song` 任意 `reason`，或 `standby` + `metadata_unavailable`）且此前显示过歌曲（未处于隐藏态）时，当拍收到一条 `data` 为 `{}` 的 `song_info_update`。播放器退出与连接断开（`waiting_process`、`standby` 其余 `reason`）不发清除。
+        - 开启无活跃自动隐藏且通道被隐藏时收到一条 `data` 为 `{}` 的 `song_info_update`；隐藏解除后的补发中，若已缓存 `song_info_update` 则重发一条（触发条件见 `/{player}/ws`）。
 
         **事件格式：**
         ```
         data: {"type":"song_info_update","player":"wesing","data":{"name":"晚风","singer":"陈婧霏","title":"晚风 - 陈婧霏","cover":"http://imgcache.qq.com/music/photo/mid_album_800/r/k/003JA09X2m9xrk.jpg","cover_base64":"data:image/jpeg;base64,..."}}
         ```
-        - 歌曲结束、窗口关闭本身不发空的 `song_info_update`；空的只在上面的无活跃自动隐藏时发
-        - 直接切歌（A→B）时，不会先发送空再发送 B，而是直接发送 B 的信息
+        - 仅上述真停播或无活跃自动隐藏情形会发空的 `song_info_update`；播放器退出与断开不发清除，直接切歌（A→B）时不会先发送空再发送 B，而是直接发送 B 的信息
 
         **约束：**
         - 载荷与 WebSocket 逐字节同构（含 `type` 字段）
@@ -1535,7 +1561,9 @@ paths:
         行为与根端点 `/ws` 相同，但：
         - 始终接收指定播放器的事件
         - **不会**收到 `player_switch` 事件（per-player 通道不切换播放器）
-        - 默认**不会**收到 `player_clear`；仅当为该播放器开启「无活跃自动隐藏」（全局 `per-player-idle-hide` 或 `<player>-idle-hide` 覆盖，值 > 0）且其静默超过阈值时，会收到一条 `player_clear` 用于清屏。SSE / HTTP 在隐藏态给出等价的「已清空」结果：SSE 发 `lyric_update`（index:-1）/ 空 `song_info_update`，HTTP 返回 `data:{}`
+        - 以下两种情形会收到一条 `player_clear`（`player` 为该播放器名，**不带**配对的 `player_switch`），且类型过滤 SSE 同步收到等价的 in-band 清除（`lyric_update` index:-1 / 空 `song_info_update`）：
+          1. **真停播**：进程在运行且已连上而当前没有可显示的歌曲（`waiting_song` 任意 `reason`，或 `standby` + `metadata_unavailable`），且专属出口此前显示过歌曲（未处于无活跃隐藏态；断开清空缓存后重连第一拍即无歌仍会推一次清除），`status_update` 在前、`player_clear` 在后。此时 HTTP 除 `status_update` 返回新状态外其余三端点返回 `data:{}`。**播放器退出与连接断开（`waiting_process`、`standby` 其余 `reason`）不发清除**，画面保持退出前的内容
+          2. **无活跃自动隐藏**：为该播放器开启「无活跃自动隐藏」（全局 `per-player-idle-hide` 或 `<player>-idle-hide` 覆盖，值 > 0）且其静默超过阈值时收到一条 `player_clear`，此时四个 HTTP 端点均返回 `data:{}`
         - 隐藏在该播放器的任何事件到达时解除。解除后，第一条表明有内容可显示的事件（状态为 `playing` / `loading` 的 `status_update`、`song_info_update`、`all_lyrics`、`lyric_update`、`playback_pause`、`playback_resume`）到达时，先补发一次与连接建立时相同的整套缓存（`status_update` → `song_info_update` → `all_lyrics` → `lyric_update`，只含已缓存的类型），再发该事件：它是 `status_update` 时照常再发一次；是 `song_info_update` / `all_lyrics` / `lyric_update` 且内容与整套里那条相同时不再重复；`playback_pause` / `playback_resume` 在整套之后。其余状态（如 `paused`、`standby`、`waiting_process`、`waiting_song`）与 `lyric_idle` 照常下发、不触发补发。隐藏期间新建的连接与隐藏前已在线的连接都会收到这次补发；`/{player}/lyric_update-SSE` 与 `/{player}/song_info-SSE` 各收到其中自己那一类
 
         连接建立时按顺序补发该播放器缓存中已有的事件：`status_update` → `song_info_update` → `all_lyrics` → `lyric_update`。只补发已缓存的类型，尚无缓存的不发（也不发 `data:{}`）。
@@ -1725,7 +1753,7 @@ webhooks:
         歌词行发生变化时推送。连接建立时，若已有缓存的歌词则补发一次，否则不发。
 
         **`index: -1` 纯音乐说明：**
-        当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`、`roma_text: ""`，而 **`progress` 照常反映播放进度**；`text` 不保证为空（cloudmusicv3 / kugou 保留平台提示语「纯音乐，请欣赏」，qqmusic / sodamusic 为 `""`；applemusic 未配到 TTML 时为 `""`，配到的 TTML 只有这一行提示语时保留它，按代码，未在真机见过；spotify 的 color-lyrics 返回零行时为 `""`，提示语归一逻辑同样生效；kuwo 为 `""`，在取词有结论之后发出）。wesing 不发 `index: -1`。
+        当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`、`roma_text: ""`、`text_detailed: {}`、`roma_text_detailed: {}`、`furigana: []`，而 **`progress` 照常反映播放进度**；`text` 不保证为空：平台给出无歌词提示语时原样保留提示原文（不含前置歌名行），没有提示语时为 `""`（共用识别对除 qqmusic 外的播放器生效；qqmusic 待阶段二改造，当前为 `""`；kuwo 在取词有结论之后发出）。wesing 不发 `index: -1`。
         对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达：applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 `index: -1`。
         客户端利用 `msg.data.index === -1` 识别纯音乐。
       requestBody:
@@ -1777,8 +1805,9 @@ webhooks:
                         - { timestamp: 16.555, play_time: 16.355, duration: 0.224, text: "The  " }
                         - { timestamp: 16.779, play_time: 16.578999, duration: 0.464, text: "spotlight  " }
                         - { timestamp: 17.243, play_time: 17.043, duration: 0.362, text: "filling  " }
+                    furigana: []
               无可用歌词:
-                summary: 平台未返回可用歌词。kugou / cloudmusicv3 对纯音乐会返回一行「纯音乐，请欣赏」，服务端把 index 归一为 -1 但保留该文本；qqmusic 返回零行、sodamusic 平台未给出 KRC、applemusic 扫不到 TTML、spotify 的 color-lyrics 返回零行时 text 为 ""。timestamp 恒为 0、play_time 恒为 0（无行可播出），而 position / progress 照常反映整曲播放位置。本例为 kugou 的真实录音（2026-11-13），与 count 为 0 的 all_lyrics 同一毫秒发出，歌刚开始，position 为 0。
+                summary: 平台未返回可用歌词。平台给出无歌词提示语时服务端把 index 归一为 -1 并原样保留提示原文（不含前置歌名行），没有提示语时 text 为 ""（qqmusic 待阶段二改造，当前为 ""）。timestamp 恒为 0、play_time 恒为 0（无行可播出），而 position / progress 照常反映整曲播放位置。本例为 kugou 的真实录音（2026-11-13），与 count 为 0 的 all_lyrics 同一毫秒发出，歌刚开始，position 为 0。
                 value:
                   type: lyric_update
                   player: kugou
@@ -1793,6 +1822,7 @@ webhooks:
                     progress: 0
                     text_detailed: {}
                     roma_text_detailed: {}
+                    furigana: []
               有歌词时（kugou，KRC 逐字 + 翻译 + 音译）:
                 summary: kugou（真实录音，2026-11-13），words 未裁剪。歌词正文从略——text、翻译 sub_text、音译 roma_text 与两处 words[].text 写作「…」，录音里这一行均非空，数值为原文。本行是韩文，roma_text 是 KRC 内嵌 type=0 轨的汉语谐音，片段数与字数相等，另带逐字音译；同一首歌的英文行 roma_text 为空串。录制时 offset 为 -430ms。
                 value:
@@ -1821,6 +1851,7 @@ webhooks:
                       words:
                         - { timestamp: 30.812, play_time: 30.382, duration: 0.454, text: "…" }
                         - { timestamp: 31.266, play_time: 30.836, duration: 0.529, text: "…" }
+                    furigana: []
               有歌词时（applemusic，逐行）:
                 summary: applemusic（真实录音，2026-11-13，`ws/22-kuwo-switch-182` 的根端点 /ws 录音 ms 327315）。歌词正文从略——text 写作「…」。这首歌只有逐行歌词、没有翻译，text_detailed 为 {}、sub_text 为空串，都是原值。同一毫秒先发了一条拖动进度条的 playback_resume（position 同为 259.602），这一行是拖到的位置所在的行，所以 position 比行时间戳晚约 16 秒。录制时 offset 为 -400ms。
                 value:
@@ -1837,6 +1868,7 @@ webhooks:
                     progress: 0.9304731
                     text_detailed: {}
                     roma_text_detailed: {}
+                    furigana: []
               有歌词时（applemusic，逐字 + 翻译）:
                 summary: applemusic（真实录音，2026-11-13，另一首歌）。words 已裁剪至 3 个，实际 7 个——只删元素不改值。歌词正文从略——text、翻译 sub_text 与 words[].text 写作「…」，录音里均非空。这首歌的正文是繁体中文，TTML 的译文轨是它的简体对照；这一行带逐字。录制时 offset 为 -400ms。
                 value:
@@ -1860,6 +1892,7 @@ webhooks:
                         - { timestamp: 50.558, play_time: 50.157997, duration: 0.43300247, text: "…" }
                         - { timestamp: 51.062, play_time: 50.662, duration: 0.91199875, text: "…" }
                     roma_text_detailed: {}
+                    furigana: []
               有歌词时（kuwo，lrcx 逐字 + 翻译）:
                 summary: kuwo（真实录音，2026-11-14，`ws/27-batch1-1114` ms 6978066）。words 已裁剪至 3 个，实际 5 个——只删元素不改值。歌词正文从略——text、翻译 sub_text 与 words[].text 写作「…」，录音里均非空。本行是英文，sub_text 是双语 lrcx 里的中文译文；kuwo 没有音译，roma_text 为空串、roma_text_detailed 为 {}。录制时 offset 为 -380ms。
                 value:
@@ -1883,6 +1916,7 @@ webhooks:
                         - { timestamp: 120.092, play_time: 119.712006, duration: 0.21, text: "…" }
                         - { timestamp: 120.302, play_time: 119.922005, duration: 0.326, text: "…" }
                     roma_text_detailed: {}
+                    furigana: []
               有歌词时（spotify，逐行）:
                 summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 160318）。歌词正文从略——text 写作「…」。spotify 只有逐行歌词，sub_text、roma_text 为空串，text_detailed、roma_text_detailed 为 {}，都是原值。录制时 offset 为 -200ms。
                 value:
@@ -1899,6 +1933,7 @@ webhooks:
                     progress: 0.04426873
                     text_detailed: {}
                     roma_text_detailed: {}
+                    furigana: []
               无可用歌词（applemusic）:
                 summary: applemusic（真实录音，2026-11-13）。宣告新歌 14.9 秒后（整曲位置 15.1 秒处）仍没找到歌词才发，text 为空串；宣告时已先发过一条 count 为 0 的 all_lyrics。
                 value:
@@ -1915,6 +1950,7 @@ webhooks:
                     progress: 0.06940273
                     text_detailed: {}
                     roma_text_detailed: {}
+                    furigana: []
               无可用歌词（spotify）:
                 summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 252148）。平台对这首歌答复 HTTP 404，宣告新歌 1.0 秒后、取词结束时发出，text 为空串；宣告时已先发过一条 count 为 0 的 all_lyrics。
                 value:
@@ -1931,6 +1967,7 @@ webhooks:
                     progress: 0.0039283526
                     text_detailed: {}
                     roma_text_detailed: {}
+                    furigana: []
       responses:
         "200":
           description: 事件已接收
@@ -1942,7 +1979,7 @@ webhooks:
       operationId: onAllLyrics
       description: |
         新歌曲开始播放时推送完整歌词列表。连接建立时，若已有缓存则补发一次，否则不发。
-        同一首歌也可能再推一次：qqmusic 换歌时歌曲 ID 尚未就绪、先推了一条空歌词的，补取到歌词时（播放中补取 8 秒；8 秒用尽时已暂停的，恢复播放后再补取 8 秒）或播放本地文件、取到其关联的歌词时，播放的本地文件被 QQ 音乐匹配成在线歌曲之后，认出 QQ 音乐仍在放关联表里的这个文件、晚于在线取词到达时，在 QQ 音乐里改了这首歌的歌词关联或时间偏移时，QQ 音乐写完这首歌的歌词缓存时，开播几秒内认出 QQ 音乐所用的关联与先前不同时，从另一个入口重开同一首、所用的关联随之改变时，以及换歌时 QQ 音乐所用的歌词（关联或它自己的歌词缓存）晚于在线取词到达的；kuwo 换歌时先推一条空歌词的，取到歌词时，以及时长或歌名、歌手变化时；sodamusic 时长晚到或音译补齐时、wesing 宣告的总时长被纠正时（播放中核实之后，最早约开播 6 秒，每首至多一次）、applemusic 歌词晚到时（换歌后头 3 秒约每 0.4 秒、到 15 秒约每 1.2 秒找一次，之后退避到最长 60 秒一次）、spotify 歌词取到时（换歌时不等取词、先推一条空歌词的；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止）、kugou 从酷狗读到这首歌的歌词与已推的不同时（换歌后 300 毫秒内没读到、先推了在线取词结果的；或播放中酷狗换了这首歌的歌词：手动关联、或首次播放时酷狗稍后写入歌词缓存；或换歌时沿用了同名上一首的歌词、随后确认酷狗里这份本地文件没有歌词，补发一条空歌词，并发一条 `index:-1` 的 `lyric_update`），各补发一条完整的 `all_lyrics`，前端以最新一条覆盖即可。
+        同一首歌也可能再推一次：qqmusic 换歌时歌曲 ID 尚未就绪、先推了一条空歌词的，补取到歌词时（播放中补取 8 秒；8 秒用尽时已暂停的，恢复播放后再补取 8 秒）或播放本地文件、取到其关联的歌词时，播放的本地文件被 QQ 音乐匹配成在线歌曲之后，认出 QQ 音乐仍在放关联表里的这个文件、晚于在线取词到达时，在 QQ 音乐里改了这首歌的歌词关联或时间偏移时，QQ 音乐写完这首歌的歌词缓存时，开播几秒内认出 QQ 音乐所用的关联与先前不同时，从另一个入口重开同一首、所用的关联随之改变时，以及换歌时 QQ 音乐所用的歌词（关联或它自己的歌词缓存）晚于在线取词到达的；kuwo 换歌时先推一条空歌词的，取到歌词时，以及时长或歌名、歌手变化时；sodamusic 时长晚到（无歌词曲目紧跟补发 `index:-1`）或音译补齐时、wesing 宣告的总时长被纠正时（播放中核实之后，最早约开播 6 秒，每首至多一次）、applemusic 歌词晚到时（换歌后头 3 秒约每 0.4 秒、到 15 秒约每 1.2 秒找一次，之后退避到最长 15 秒一次；若晚到的是仅含无歌词提示的 TTML，重发空 `all_lyrics` 并紧跟补发带提示原文的 `index:-1`）、spotify 歌词取到时（换歌时不等取词、先推一条空歌词的；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止）、kugou 从酷狗读到这首歌的歌词与已推的不同时（换歌后 300 毫秒内没读到、先推了在线取词结果的；或播放中酷狗换了这首歌的歌词：手动关联、或首次播放时酷狗稍后写入歌词缓存；或换歌时沿用了同名上一首的歌词、随后确认酷狗里这份本地文件没有歌词，补发一条空歌词，并发一条 `index:-1` 的 `lyric_update`），各补发一条完整的 `all_lyrics`，前端以最新一条覆盖即可。
       requestBody:
         required: true
         content:
@@ -1994,6 +2031,7 @@ webhooks:
                           words:
                             - { timestamp: 8.505, play_time: 8.305, duration: 0.794, text: "Hey  " }
                             - { timestamp: 9.299, play_time: 9.099, duration: 0.331, text: "u " }
+                        furigana: []
                       - index: 1
                         timestamp: 16.555
                         play_time: 16.355
@@ -2014,6 +2052,7 @@ webhooks:
                           words:
                             - { timestamp: 16.555, play_time: 16.355, duration: 0.224, text: "The  " }
                             - { timestamp: 16.779, play_time: 16.578999, duration: 0.464, text: "spotlight  " }
+                        furigana: []
               有歌词时（kugou，KRC 逐字 + 翻译 + 音译）:
                 summary: kugou（真实录音，2026-11-13）。示例已裁剪，只删元素不改值——lyrics 实际 118 行（此处留 index 20、21 两行），words 未裁剪，故 count 与数组长度对不上。歌词正文从略——text、翻译 sub_text、音译 roma_text 与 words[].text 凡非空的写作「…」，空串是原值，所以第 20 行（英文）有翻译而没有音译、第 21 行（韩文）翻译、音译与逐字音译都有，这一差别是真实的。position 是宣告那一刻的实时位置，这首从头开始播放，为 0。
                 value:
@@ -2041,6 +2080,7 @@ webhooks:
                             - { timestamp: 29.066, play_time: 28.636, duration: 0.344, text: "…" }
                             - { timestamp: 29.41, play_time: 28.98, duration: 0.526, text: "…" }
                         roma_text_detailed: {}
+                        furigana: []
                       - index: 21
                         timestamp: 30.812
                         play_time: 30.382
@@ -2061,6 +2101,7 @@ webhooks:
                           words:
                             - { timestamp: 30.812, play_time: 30.382, duration: 0.454, text: "…" }
                             - { timestamp: 31.266, play_time: 30.836, duration: 0.529, text: "…" }
+                        furigana: []
               有歌词时（applemusic，逐行）:
                 summary: applemusic（真实录音，2026-11-13，`ws/22-kuwo-switch-182` 的根端点 /ws 录音 ms 322978）。lyrics 实际 27 行（此处留 2），歌词正文从略——text 写作「…」。这首歌只有逐行歌词、没有翻译，27 行的 text_detailed 都为 {}、sub_text 都为空串，都是原值。宣告时歌词还没找到，先发了一条 count 为 0 的（ms 322522）；这一条是 0.46 秒后找到歌词补发的，position 是补发那一刻的实时位置。
                 value:
@@ -2073,8 +2114,8 @@ webhooks:
                     progress: 0.0018187677
                     count: 27
                     lyrics:
-                      - { index: 0, timestamp: 29.36, play_time: 28.960001, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
-                      - { index: 1, timestamp: 36.02, play_time: 35.62, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
+                      - { index: 0, timestamp: 29.36, play_time: 28.960001, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {}, furigana: [] }
+                      - { index: 1, timestamp: 36.02, play_time: 35.62, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {}, furigana: [] }
               有歌词时（applemusic，逐字 + 翻译）:
                 summary: applemusic（真实录音，2026-11-13）。lyrics 实际 28 行（此处留 2）、每行 words 只留前 2 个（实际均为 8 个），只删元素不改值。歌词正文从略——text、翻译 sub_text 与 words[].text 写作「…」，录音里 28 行均非空。这首歌的正文是繁体中文，TTML 的译文轨是它的简体对照；28 行都带逐字。
                 value:
@@ -2101,6 +2142,7 @@ webhooks:
                             - { timestamp: 27.089, play_time: 26.689001, duration: 2.0549984, text: "…" }
                             - { timestamp: 29.144, play_time: 28.744, duration: 0.5620003, text: "…" }
                         roma_text_detailed: {}
+                        furigana: []
                       - index: 1
                         timestamp: 34.735
                         play_time: 34.335
@@ -2115,6 +2157,7 @@ webhooks:
                             - { timestamp: 34.735, play_time: 34.335, duration: 1.9700012, text: "…" }
                             - { timestamp: 36.705, play_time: 36.305, duration: 0.5549965, text: "…" }
                         roma_text_detailed: {}
+                        furigana: []
               有歌词时（kuwo，lrcx 逐字 + 翻译）:
                 summary: kuwo（真实录音，2026-11-14，`ws/27-batch1-1114` ms 6967520）。示例已裁剪，只删元素不改值——lyrics 实际 64 行（此处留 index 39、40 两行）、每行 words 只留前 2 个（实际均为 5 个），故 count 与数组长度对不上。歌词正文从略——text、翻译 sub_text 与 words[].text 写作「…」，录音里均非空；整首逐字每行都有，61 行有翻译（没有的 3 行是开头的歌名行与词、曲作者行）。这是换歌之后补发的那一条——宣告时依次发出不带封面的 song_info_update、status_update（playing）与一条 count 为 0 的 all_lyrics（ms 6967418～6967419），约 0.1 秒后取到歌词补发这一条。position 是补发那一刻的实时位置，这首从头开始播放，为 0。
                 value:
@@ -2141,6 +2184,7 @@ webhooks:
                             - { timestamp: 116.048, play_time: 115.668, duration: 0.182, text: "…" }
                             - { timestamp: 116.23, play_time: 115.850006, duration: 0.11, text: "…" }
                         roma_text_detailed: {}
+                        furigana: []
                       - index: 40
                         timestamp: 119.908
                         play_time: 119.528
@@ -2155,6 +2199,7 @@ webhooks:
                             - { timestamp: 119.908, play_time: 119.528, duration: 0.184, text: "…" }
                             - { timestamp: 120.092, play_time: 119.712006, duration: 0.21, text: "…" }
                         roma_text_detailed: {}
+                        furigana: []
               有歌词时（spotify，逐行）:
                 summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 152645）。lyrics 实际 30 行（此处留 2），歌词正文从略——text 写作「…」。30 行的 sub_text、roma_text 都为空串，text_detailed、roma_text_detailed 都为 {}，都是原值。这是换歌之后补发的那一条——宣告时依次发出 status_update（playing）、一条 count 为 0 的 all_lyrics（ms 151239）与 cover_base64 为空串的 song_info_update（ms 151246），约 1.4 秒后取到歌词补发这一条。position 是补发那一刻的实时位置。
                 value:
@@ -2167,8 +2212,8 @@ webhooks:
                     progress: 0.009354208
                     count: 30
                     lyrics:
-                      - { index: 0, timestamp: 9.76, play_time: 9.56, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
-                      - { index: 1, timestamp: 19.795, play_time: 19.595, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {} }
+                      - { index: 0, timestamp: 9.76, play_time: 9.56, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {}, furigana: [] }
+                      - { index: 1, timestamp: 19.795, play_time: 19.595, text: "…", sub_text: "", roma_text: "", text_detailed: {}, roma_text_detailed: {}, furigana: [] }
               平台没有歌词（kugou 纯音乐）:
                 summary: kugou（真实录音，2026-11-13）。data 不是空对象——count 为 0、lyrics 为空数组，title / duration 照常有值。同一毫秒紧跟一条 index 为 -1、text 为「纯音乐，请欣赏」的 lyric_update。
                 value:
@@ -2363,13 +2408,13 @@ webhooks:
                     position: 116.778
                     progress: 0.5011931
               从暂停恢复（spotify）:
-                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 102933）。连上 Spotify 时它处于暂停（宣告的 all_lyrics 与 lyric_update 的 position 为 215.512），开始播放后发这一条，1 毫秒后发 status_update（playing）。这一条的 position 比暂停时的位置小 1 秒；下一条带位置的事件（ms 105261 的 lyric_update，position 为 217.8673）与从 215.512 起推算的位置相符，其间没有另发 playback_resume。
+                summary: spotify（真实录音，2026-11-24，`ws/32-spotify-184` ms 102933）。连上 Spotify 时它处于暂停（宣告的 all_lyrics 与 lyric_update 的 position 为 215.512），开始播放后发这一条，1 毫秒后发 status_update（playing）；录音早于 #241 修复，position 与 progress 按现行代码取暂停时的数值。
                 value:
                   type: playback_resume
                   player: spotify
                   data:
-                    position: 214.512
-                    progress: 0.6319697
+                    position: 215.512
+                    progress: 0.63491577
               前跳（spotify）:
                 summary: spotify（同一次录音 ms 164164）。位置从约 13.5 秒跳到 46.40 秒，之前没有配对的 playback_pause；3 毫秒后重发跳转后所在的行（第 5 行的 lyric_update）。
                 value:
@@ -2428,13 +2473,19 @@ webhooks:
   player_clear:
     post:
       tags: [WebSocket]
-      summary: 活跃播放器清除事件
+      summary: 清除显示事件
       operationId: onPlayerClear
       description: |
-        根路径：所有播放器都停止输出（全员 inert）时推送给根订阅者（`/ws`），且与 `player_switch`(to="") 配对发送（双重通知，向后兼容）。
-        per-player 通道：为该播放器开启「无活跃自动隐藏」（`per-player-idle-hide` 或 `<player>-idle-hide` > 0）且静默超阈值时，也会向该通道推一条 `player_clear`（`player` 为该播放器名，**不带**配对的 `player_switch`）；隐藏解除后服务端会补发整套缓存，见 `/{player}/ws`。
-        若客户端连入 `/ws` 时当前已经没有活跃播放器，也会立即收到这个初始事件。
-        前端应清空歌词、封面、进度等所有显示内容。
+        根路径：
+        - 所有播放器都停止输出（全员 inert）时推送给根订阅者（`/ws`），`player` 为 `""`，与 `player_switch`(to="") 配对发送（双重通知，向后兼容）；根 SSE 同步收到等价的 in-band 清除（`player: ""`、`index: -1` 的 `lyric_update` 与空 `song_info_update`）。
+        - 活跃播放器真停播（`waiting_song` 任意 `reason`，或 `standby` + `metadata_unavailable`）而另一家暂停保持使根仍停在它上面时，也会向根订阅者推一条 `player_clear`（`player` 为该播放器名，**不带**配对的 `player_switch`，紧随 `status_update`）；根 SSE 同步收到等价的 in-band 清除（`player` 为该播放器名）。
+        - 若客户端连入 `/ws` 时当前已经没有活跃播放器，也会立即收到这个初始事件（`player` 为 `""`）。
+
+        per-player 通道：
+        - 真停播（`waiting_song` 任意 `reason`，或 `standby` + `metadata_unavailable`）且此前显示过歌曲（未处于隐藏态）时，向该通道推一条 `player_clear`（`player` 为该播放器名，**不带**配对的 `player_switch`，紧随 `status_update`）；专属 SSE 同步收到等价的 in-band 清除。**播放器退出与连接断开（`waiting_process`、`standby` 其余 `reason`）不发清除**。
+        - 为该播放器开启「无活跃自动隐藏」（`per-player-idle-hide` 或 `<player>-idle-hide` > 0）且静默超阈值时，也会向该通道推一条 `player_clear`（`player` 为该播放器名，**不带**配对的 `player_switch`）；隐藏解除后服务端会补发整套缓存，见 `/{player}/ws`。
+
+        前端收到后应清空歌词、封面、进度等所有显示内容。
       requestBody:
         required: true
         content:
@@ -2448,7 +2499,7 @@ webhooks:
                   const: player_clear
                 player:
                   type: string
-                  description: 根订阅者收到时为空字符串；per-player 通道因无活跃自动隐藏收到时为该播放器名
+                  description: 路由清屏或连入无活跃播放器时为空字符串；真停播（专属通道或根仍停在该播放器上）或 per-player 无活跃自动隐藏时为该播放器名
                   example: ""
                 data:
                   type: object
@@ -2797,7 +2848,7 @@ components:
           example: ["wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic", "applemusic", "spotify", "kuwo"]
         player_running:
           type: array
-          description: 当前正在运行（非 offline / standby / waiting_process）的播放器列表
+          description: 进程在运行（非 offline / waiting_process）的播放器列表，按注册顺序。standby 计入，故它不表示能取到歌词
           items:
             type: string
             enum:
@@ -2814,7 +2865,7 @@ components:
           type: object
           description: |
             所有支持的播放器及其当前状态（按注册顺序）。
-            可能的状态值：`"offline"`（服务端兜底：该播放器从未上报过状态）/ `"waiting_process"` / `"waiting_song"` / `"playing"` / `"paused"` / `"standby"` / `"error"`（仅 kugou，故障终态）。`"loading"` 为保留值，当前版本不会出现。
+            可能的状态值：`"offline"`（服务端兜底：该播放器从未上报过状态）/ `"waiting_process"` / `"standby"` / `"waiting_song"` / `"playing"` / `"paused"`，含义见 StatusInfo 的 `status`。`"loading"` 与 `"error"` 为保留值，当前版本不会出现。
           additionalProperties:
             type: string
             enum: [offline, waiting_process, waiting_song, loading, playing, paused, standby, error]
@@ -2890,14 +2941,14 @@ components:
         status:
           type: string
           description: |
-            播放状态。可能的值：
-            - `"waiting_process"` - 播放器进程未启动。applemusic 为 `"Apple Music 未启动"`（`reason` 为 `process_not_running`）；spotify 为 `"Spotify 未启动或未连上"`（`reason` 为 `process_not_running`；进程在跑、但尚未连上 CEF 远程调试端口 9223 时也报它，播放态与进度读自页面 DOM）；进程在运行但本服务无权读取时也报此状态，`detail` 为 `"无权读取 Apple Music 进程（Apple Music 可能以管理员身份运行）"`（`reason` 为 `no_admin`）；wesing 为 `"K歌客户端未启动"`（`reason` 为 `process_not_running`）；kuwo 为 `"酷我尚未运行"`（`reason` 为 `process_not_running`），连不上时也报此状态而不报 `standby`：未带调试端口且不在自动重启白名单内为 `"酷我需要以调试端口 9224 启动；自动重启只对已验证的构建开放，请手动带 --remote-debugging-port=9224 启动酷我"`、其余连接失败为 `"酷我连接已断开，正在重试"`（两者 `reason` 均为 `cdp_disconnected`），网页桥版本、页面目录或播放核心未通过校验为 `"暂不支持此酷我播放核心"`（`reason` 为 `version_unsupported`），微软商店版为 `"酷我微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`）。cloudmusicv3、spotify、kugou、sodamusic、kuwo 的进程在运行而读不到其安装路径（多因它以管理员身份运行）时报 `"读不到<播放器名>的安装路径（<播放器名>可能以管理员身份运行）"`（`reason` 为 `no_admin`）：无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接
-            - `"waiting_song"` - 播放器已启动但未选择歌曲。applemusic 为 `"Apple Music 未在播放"`（`reason` 为 `no_song`），以下情况都报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒；换歌后 10 秒仍取不到新歌标题。wesing 为 `"K歌窗口未打开"`（`reason` 为 `window_not_open`）：进程在运行而 K 歌播放窗口未打开。kuwo 为 `"酷我当前没有歌曲"`（`reason` 为 `no_song`）：网页桥报告当前没有歌曲。还没宣告过歌曲时（如连上时即没有歌曲）当即报；已宣告过歌曲的，没有歌曲累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）。kugou 为 `"酷狗音乐当前没有歌曲"`（`reason` 为 `no_song`）：连上 CDP 之后、读到第一首歌之前（读到过歌之后再读到没有歌不报）。sodamusic 为 `"汽水音乐当前没有歌曲"`（`reason` 为 `no_song`）：取到的播放态里没有歌曲（如回到首页、清空播放列表）。还没宣告过歌曲时（如连上时即没有歌曲）当即报；已宣告过歌曲的，连续没有歌曲满 2 秒才报，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态。spotify 不产生此状态：连上后若没有曲目，它保持静默、不发状态，交给路由超时判 idle
-            - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
+            播放器所处的层次，各值的含义对所有播放器一致；原因看 `reason`，`detail` 只给人读。非歌名状态（`waiting_process`、`standby`、`waiting_song`）只在 `status`、`detail`、`reason` 三者之一变化时发出，状态不变期间不重发。可能的值：
+            - `"waiting_process"` - 播放器进程没在运行。`reason` 为 `process_not_running`（本次服务期间没见它运行过）或 `process_exited`（曾在运行、现已退出；保持到进程重新出现为止）。进程是否在运行先于一切判定：已知的读取受阻原因（如版本不受支持、微软商店版、未取得管理员权限）在进程不在运行时只写进 `detail`，进程启动后改报 `standby` 加该原因
+            - `"standby"` - 进程在运行，但本服务读不了它；只在进程在运行时出现。`reason` 为 `cdp_disconnected`（调试通道未就绪或已断开）、`version_unsupported`（版本不受支持，含微软商店版）、`no_admin`（无权读取进程或其安装路径，多因播放器以管理员身份运行；读不到安装路径时无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接）、`install_not_found`（未找到安装）或 `metadata_unavailable`（曲目在而读不到曲目信息）。版本不受支持等原因按间隔重查，条件满足即自动恢复、不必重启本服务；重查期间进程退出，在下一个常规轮次即改报 `waiting_process`，不等重查间隔
+            - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、spotify 当前不报，保留上一首。qqmusic 当前不产生此状态。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
             - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
             - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
-            - `"standby"` - 待机状态。`detail` 按播放器而异：cloudmusicv3 为 `"网易云音乐已退出"` 或 `"网易云音乐 v<版本号> 不支持（需 v3+）"`（后者表示进程仍在运行、仅版本过低，该状态每 30 秒重发一次且不去重，版本号为实际读到的值），装的是微软商店版时为 `"网易云音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，同样每 30 秒重发一次且不去重）；qqmusic 为 `"QQ音乐已退出"`；wesing 为 `"K歌客户端已退出"`；kugou 为 `"酷狗音乐 CDP 已断开"`，微软商店版为 `"酷狗音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，每 30 秒重发一次；不是终态，改装官网版后自动恢复）；sodamusic 为 `"汽水音乐 CDP 已断开"`，微软商店版为 `"汽水音乐微软商店版不支持（需官网安装版）"`（`reason` 为 `version_unsupported`，每 30 秒重发一次）；applemusic 为 `"Apple Music 已退出"`（进程退出；进程在而无歌时报的是 `waiting_song`，不是 `standby`）；spotify 为 `"Spotify CDP 已断开"`（`reason` 为 `cdp_disconnected`），这一版 Spotify 不支持远程调试端口时为 `"Spotify 版本不支持（无法打开远程调试端口）"`（`reason` 为 `version_unsupported`，每 30 秒重探一次），微软商店版为 `"Spotify 微软商店版不支持（需官网安装版）"`（同为 `version_unsupported`，每 30 秒重探一次）。kuwo 不产生此状态，断开与版本不受支持都报 `waiting_process`
-            - `"error"` - 故障终态，仅 kugou 会产生：`"未找到酷狗安装，已停止"`（只在酷狗正在运行、连续 5 次定位不到其安装时出现，酷狗未运行时先等它启动，状态保持 `waiting_process`）/ `"酷狗 libcef.dll 版本不受支持，已停止"` / `"未取得管理员权限，已停止自动修复"`。`detail` 为具体原因，此后该播放器停止自动修复、不再变更状态
+            - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
+            - `"error"` - 保留值：当前版本各播放器均不产出此状态，下游可不为它单独处理
           enum:
             - waiting_process
             - waiting_song
@@ -2919,6 +2970,7 @@ components:
           description: |
             稳定的机器可读状态码，**仅非歌名状态出现、永不本地化**。消费方按它做逻辑判断，
             取代对 `detail` 中文的字面量匹配。playing/paused 时省略（`reason` 非空 ⟺ 非歌名状态）。
+            各值的含义与可配的 `status` 见 `status` 的说明。
           enum:
             - process_not_running
             - process_exited
@@ -2928,6 +2980,7 @@ components:
             - install_not_found
             - no_admin
             - no_song
+            - metadata_unavailable
           example: process_exited
 
     SongInfo:
@@ -2966,13 +3019,13 @@ components:
 
     LyricUpdateData:
       type: object
-      required: [index, text, sub_text, roma_text, timestamp, play_time, position, progress, text_detailed, roma_text_detailed]
+      required: [index, text, sub_text, roma_text, timestamp, play_time, position, progress, text_detailed, roma_text_detailed, furigana]
       properties:
         index:
           type: integer
           description: |
             歌词行号。
-            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 与 `roma_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出），而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空（cloudmusicv3 与 kugou 保留平台的「纯音乐，请欣赏」提示语，qqmusic 与 sodamusic 为 `""`；applemusic 未配到 TTML 时为 `""`，配到的 TTML 只有这一行提示语时保留它，按代码，未在真机见过；spotify 的 color-lyrics 返回零行时为 `""`，提示语归一逻辑同样生效；kuwo 为 `""`，在取词有结论之后发出）。wesing 不发 `-1`。对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达（applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 -1）。
+            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 与 `roma_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出）、`text_detailed` 与 `roma_text_detailed` 为 `{}`、`furigana` 为 `[]`，而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空：平台给出无歌词提示语时原样保留提示原文（不含前置歌名行），没有提示语时为 `""`（共用识别对除 qqmusic 外的播放器生效；qqmusic 待阶段二改造，当前为 `""`；kuwo 在取词有结论之后发出）。wesing 不发 `-1`。对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达（applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 -1）。
             客户端用 `msg.data.index === -1` 判断有无歌词，不要依赖 `msg.data.text` 是否为空。
           example: 1
         text:
@@ -3013,10 +3066,22 @@ components:
           allOf:
             - $ref: "#/components/schemas/LyricTextDetailed"
           description: 逐字音译：`roma_text` 的逐音节时间轴，形状与 `text_detailed` 相同（timestamp、play_time、duration、words[]），没有时为空对象 `{}`。wesing、qqmusic、kugou、sodamusic 提供，cloudmusicv3 只在一字一音的歌（粤语）上提供：wesing 与 qqmusic 取音译轨自带的字级时间，kugou、sodamusic 与 cloudmusicv3 的时间取自主歌词的字（sodamusic 的音译借自酷狗，只有按字对齐上的行才有）。cloudmusicv3 的音译只有逐行的 romalrc / yromalrc、没有字级时间（2026-10-10 实测）；带逐字歌词的行里，每个逐字单元（纯空白的不计）恰为一个汉字、行级音译的音节数与汉字数相等且都是罗马字时，把音节按顺序配上各个字的时间；带逐字歌词的行里出现假名或谚文的歌（日文、韩文歌）整首为 `{}`，中英混排等对不上的行为 `{}`。applemusic、spotify 与 kuwo 无音译，恒为 `{}`。有 `roma_text` 的行不一定有它：音译的字级单元与行级音译对不上、或时间轴不合法的行为 `{}`。它是一条独立的数组，单元与 `text_detailed` 不一一对应（一个汉字可以拆成多个音节，空格可以单独占一个单元）；各单元的 `text` 拼起来、去掉首尾空白即 `roma_text`
+        furigana:
+          type: array
+          description: |
+            本行的振假名（汉字、`々` 或全角数字顶部假名注音）有序分段序列，绝不为 `null`；无注音行恒为空数组 `[]`（`all_lyrics` 的行与 `lyric_update` 取自同一份歌词）。
+            当前仅 `qqmusic` 在在线或本地关联/缓存主歌词携带有效 `[kana:]` 标签且通过全曲目标字符游标守恒校验时提供（翻译与音译轨残留的 `[kana:]` 会被忽略；无 `[kana:]` 曲目不加载本地词典兜底）；无 `[kana:]` 曲目、无注音行、`index: -1` 及其余七家播放器（`wesing`、`cloudmusicv3`、`kugou`、`sodamusic`、`applemusic`、`spotify`、`kuwo`）恒为空数组 `[]`。
+            与 `roma_text` / `roma_text_detailed`（整句音译）完全正交、互不覆盖，前端可独立开关。
+            非空时按阅读顺序覆盖整行，至少包含一个带 `ruby` 的片段，相邻无注音纯文本片段已合并（如 `[{"text":"こっち"},{"text":"向","ruby":"む"},{"text":"いて "},{"text":"一","ruby":"いっ"},{"text":"瞬","ruby":"しゅん"},{"text":"だけ"}]`，熟字训如 `[{"text":"明日","ruby":"あした"}]`）。
+            双模式前端拼接契约：
+            - 逐行渲染（未启用逐字扫光或 `text_detailed` 为 `{}`）：直接遍历 `furigana`（`ruby` 非空用 `<ruby>` + `<rt>`，否则纯文本），常规行满足 `furigana.map(s => s.text).join("").trim() === text`；合法 QRC 末行未换行紧贴 `"/>` XML 闭合尾壳时，与 `text_detailed.words` 一致、不含该 XML 尾壳。
+            - 逐字卡拉 OK 渲染（`text_detailed.words` 非空且 `furigana.length > 0`）：保证 `furigana.map(s => s.text).join("") === text_detailed.words.map(w => w.text).join("")` 逐字节严格相等（含词首词尾空白），前端可用单趟游标无歧义配对。
+          items:
+            $ref: "#/components/schemas/LyricFuriganaSegment"
 
     LyricLine:
       type: object
-      required: [index, timestamp, play_time, text, sub_text, roma_text, text_detailed, roma_text_detailed]
+      required: [index, timestamp, play_time, text, sub_text, roma_text, text_detailed, roma_text_detailed, furigana]
       properties:
         index:
           type: integer
@@ -3050,6 +3115,18 @@ components:
           allOf:
             - $ref: "#/components/schemas/LyricTextDetailed"
           description: 逐字音译：`roma_text` 的逐音节时间轴，形状与 `text_detailed` 相同（timestamp、play_time、duration、words[]），没有时为空对象 `{}`。wesing、qqmusic、kugou、sodamusic 提供，cloudmusicv3 只在一字一音的歌（粤语）上提供：wesing 与 qqmusic 取音译轨自带的字级时间，kugou、sodamusic 与 cloudmusicv3 的时间取自主歌词的字（sodamusic 的音译借自酷狗，只有按字对齐上的行才有）。cloudmusicv3 的音译只有逐行的 romalrc / yromalrc、没有字级时间（2026-10-10 实测）；带逐字歌词的行里，每个逐字单元（纯空白的不计）恰为一个汉字、行级音译的音节数与汉字数相等且都是罗马字时，把音节按顺序配上各个字的时间；带逐字歌词的行里出现假名或谚文的歌（日文、韩文歌）整首为 `{}`，中英混排等对不上的行为 `{}`。applemusic、spotify 与 kuwo 无音译，恒为 `{}`。有 `roma_text` 的行不一定有它：音译的字级单元与行级音译对不上、或时间轴不合法的行为 `{}`。它是一条独立的数组，单元与 `text_detailed` 不一一对应（一个汉字可以拆成多个音节，空格可以单独占一个单元）；各单元的 `text` 拼起来、去掉首尾空白即 `roma_text`
+        furigana:
+          type: array
+          description: |
+            本行的振假名（汉字、`々` 或全角数字顶部假名注音）有序分段序列，绝不为 `null`；无注音行恒为空数组 `[]`。
+            当前仅 `qqmusic` 在在线或本地关联/缓存主歌词携带有效 `[kana:]` 标签且通过全曲目标字符游标守恒校验时提供（翻译与音译轨残留的 `[kana:]` 会被忽略；无 `[kana:]` 曲目不加载本地词典兜底）；无 `[kana:]` 曲目、无注音行及其余七家播放器（`wesing`、`cloudmusicv3`、`kugou`、`sodamusic`、`applemusic`、`spotify`、`kuwo`）恒为空数组 `[]`。
+            与 `roma_text` / `roma_text_detailed`（整句音译）完全正交、互不覆盖，前端可独立开关。
+            非空时按阅读顺序覆盖整行，至少包含一个带 `ruby` 的片段，相邻无注音纯文本片段已合并（如 `[{"text":"こっち"},{"text":"向","ruby":"む"},{"text":"いて "},{"text":"一","ruby":"いっ"},{"text":"瞬","ruby":"しゅん"},{"text":"だけ"}]`，熟字训如 `[{"text":"明日","ruby":"あした"}]`）。
+            双模式前端拼接契约：
+            - 逐行渲染（未启用逐字扫光或 `text_detailed` 为 `{}`）：直接遍历 `furigana`（`ruby` 非空用 `<ruby>` + `<rt>`，否则纯文本），常规行满足 `furigana.map(s => s.text).join("").trim() === text`；合法 QRC 末行未换行紧贴 `"/>` XML 闭合尾壳时，与 `text_detailed.words` 一致、不含该 XML 尾壳。
+            - 逐字卡拉 OK 渲染（`text_detailed.words` 非空且 `furigana.length > 0`）：保证 `furigana.map(s => s.text).join("") === text_detailed.words.map(w => w.text).join("")` 逐字节严格相等（含词首词尾空白），前端可用单趟游标无歧义配对。
+          items:
+            $ref: "#/components/schemas/LyricFuriganaSegment"
 
     LyricTextDetailed:
       oneOf:
@@ -3105,6 +3182,20 @@ components:
           type: string
           description: 字/词文本
           example: "運"
+
+    LyricFuriganaSegment:
+      type: object
+      description: 行内振假名片段：按阅读顺序拼接还原整行文本；仅汉字、`々` 或全角数字等目标字符的注音基底段携带 `ruby`，无注音的纯文本段省略 `ruby`（相邻纯文本段已合并）。
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: 基底文本（带注音时为单个或多个连续目标字符，无注音时为纯文本片段）
+          example: "向"
+        ruby:
+          type: string
+          description: 汉字/目标字符上方的假名注音；纯文本段省略此键
+          example: "む"
 
     AllLyricsData:
       type: object

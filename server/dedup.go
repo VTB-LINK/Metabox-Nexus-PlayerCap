@@ -34,6 +34,7 @@ func hashEventData(evtType string, data interface{}) uint64 {
 					fmt.Fprintf(h, "\x00%.3f\x00%.3f\x00%.3f\x00%s", word.Timestamp, word.PlayTime, word.Duration, word.Text)
 				}
 				hashRomaDetailed(h, line.RomaTextDetailed)
+				hashFurigana(h, line.Furigana)
 			}
 		}
 	case player.EventLyricUpdate:
@@ -45,6 +46,7 @@ func hashEventData(evtType string, data interface{}) uint64 {
 				fmt.Fprintf(h, "\x00%.3f\x00%.3f\x00%.3f\x00%s", word.Timestamp, word.PlayTime, word.Duration, word.Text)
 			}
 			hashRomaDetailed(h, msg.RomaTextDetailed)
+			hashFurigana(h, msg.Furigana)
 		}
 	default:
 		// 未知类型使用 fmt 兜底（不应走到这里，status_update 不参与去重）
@@ -59,5 +61,14 @@ func hashRomaDetailed(h io.Writer, d player.LyricTextDetailed) {
 	fmt.Fprintf(h, "\x00%.3f\x00%d", d.Duration, len(d.Words))
 	for _, word := range d.Words {
 		fmt.Fprintf(h, "\x00%.3f\x00%.3f\x00%.3f\x00%s", word.Timestamp, word.PlayTime, word.Duration, word.Text)
+	}
+}
+
+// hashFurigana 把振假名分段序列（furigana）写进哈希：先写分段数，再逐段写入带字节长度前缀的
+// Text 与 Ruby，避免相邻字段拼接碰撞。
+func hashFurigana(h io.Writer, f player.LyricFurigana) {
+	fmt.Fprintf(h, "\x00%d", len(f))
+	for _, seg := range f {
+		fmt.Fprintf(h, "\x00%d:%s\x00%d:%s", len(seg.Text), seg.Text, len(seg.Ruby), seg.Ruby)
 	}
 }

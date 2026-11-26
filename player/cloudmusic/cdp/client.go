@@ -1,6 +1,7 @@
 package cdp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
+	"Metabox-Nexus-PlayerCap/player/wsdial"
 
 	"github.com/gorilla/websocket"
 )
@@ -246,15 +248,37 @@ const jsPayload = `(() => {
 	}
 })()`
 
+// connectTimeout 是一次 Connect（取 /json、读完响应体、WebSocket 握手）的上限。调用方 Start 跑在网易云的轮询 goroutine
+// 上：9222 端口接受连接而不完成响应时，没有上限它就永久停在这里，进程检查与停止都不再执行。
+const connectTimeout = 5 * time.Second
+
+// maxJSONBytes 是 /json 响应体的读取上限。实际只有几个页面的条目，远小于此。
+const maxJSONBytes = 1 << 20
+
 // Connect fetches the debugger URL and connects WebSocket
-func Connect() (*Client, error) {
-	resp, err := http.Get("http://127.0.0.1:9222/json")
+//
+// ctx 取消（调用方停止）即中止；此外整个过程不超过 connectTimeout。
+func Connect(ctx context.Context) (*Client, error) {
+	return connect(ctx, "http://127.0.0.1:9222", connectTimeout)
+}
+
+// connect 是 Connect 的实体：base 为 http://主机:端口，timeout 为整个过程的上限。测试经它连本地的测试服务。
+func connect(ctx context.Context, base string, timeout time.Duration) (*Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// 请求、读响应体与 WebSocket 握手都随 ctx 中止（握手见 wsdial）。
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/json", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +328,7 @@ func Connect() (*Client, error) {
 		}
 	}
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
+	conn, err := wsdial.Dial(ctx, wsUrl)
 	if err != nil {
 		return nil, err
 	}

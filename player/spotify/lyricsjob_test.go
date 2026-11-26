@@ -156,23 +156,27 @@ func mustParse(t *testing.T, body string) *lyric.Response {
 }
 
 const (
-	syncedBody   = `{"lyrics":{"syncType":"LINE_SYNCED","provider":"MusixMatch","lines":[{"startTimeMs":"1000","words":"第一行"},{"startTimeMs":"2500","words":"第二行"}]}}`
-	unsyncedBody = `{"lyrics":{"syncType":"UNSYNCED","lines":[{"startTimeMs":"0","words":"第一行"},{"startTimeMs":"0","words":"第二行"}]}}`
-	hintBody     = `{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"0","words":"纯音乐，请欣赏"}]}}`
-	twoLineHint  = `{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"0","words":"纯音乐，请欣赏"},{"startTimeMs":"3000","words":"第二行"}]}}`
-	zeroBody     = `{"lyrics":{"syncType":"LINE_SYNCED","lines":[]}}`
+	syncedBody    = `{"lyrics":{"syncType":"LINE_SYNCED","provider":"MusixMatch","lines":[{"startTimeMs":"1000","words":"第一行"},{"startTimeMs":"2500","words":"第二行"}]}}`
+	unsyncedBody  = `{"lyrics":{"syncType":"UNSYNCED","lines":[{"startTimeMs":"0","words":"第一行"},{"startTimeMs":"0","words":"第二行"}]}}`
+	hintBody      = `{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"0","words":"纯音乐，请欣赏"}]}}`
+	kuwoHintBody  = `{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"0","words":"此歌曲为没有填词的纯音乐，请您欣赏"}]}}`
+	twoLineHint   = `{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"0","words":"纯音乐，请欣赏"},{"startTimeMs":"3000","words":"第二行"}]}}`
+	titleKuwoHint = `{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"0","words":"Go Time-Mark Petrie"},{"startTimeMs":"1000","words":"该歌曲为纯音乐请欣赏"}]}}`
+	zeroBody      = `{"lyrics":{"syncType":"LINE_SYNCED","lines":[]}}`
 )
 
-// 变异自证：去掉 IsPureMusicOnly 的判断 → 两条「提示语」红；换歌那次不看 trackID 就开始补取 → 「没有 URI」红；
+// 变异自证：去掉 PureMusicHint 的判断 → 四条「提示语」红；换歌那次不看 trackID 就开始补取 → 「没有 URI」红；
 // 补取没拿到时不看 resp 一律停止 → 「补取仍失败」红；拿到歌词时不停止补取 → 两条「拿到」与「两行中的一行」红；
-// 换歌那次不看 resp、有 URI 就补取（改回旧写法）→ 换歌那次「提示语」「UNSYNCED」「零行」三例红（均实测）。
+// 换歌那次不看 resp、有 URI 就补取（改回旧写法）→ 换歌那次「提示语」「UNSYNCED」「零行」红（均实测）。
 // 不看 notFound（issue #111 之前的写法）→ 「换歌那次 404」「补取时 404」红；没取到响应的失败也当作已答复（加上 `r.diag != ""`）
 // → 两条 401 与两条 403 红（均实测）。
 func TestSettleLyrics(t *testing.T) {
 	synced := mustParse(t, syncedBody)
 	unsynced := mustParse(t, unsyncedBody)
 	hint := mustParse(t, hintBody)
+	kuwoHint := mustParse(t, kuwoHintBody)
 	hint2 := mustParse(t, twoLineHint)
+	titleHint := mustParse(t, titleKuwoHint)
 	zero := mustParse(t, zeroBody)
 
 	cases := []struct {
@@ -186,7 +190,10 @@ func TestSettleLyrics(t *testing.T) {
 		{"补取拿到", lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, lines: lyric.Parse(synced), resp: synced}, 2, "", false, true},
 		{"换歌那次只有提示语：按无歌词处理，平台已答复、不补取", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, lines: lyric.Parse(hint), resp: hint}, 0, "纯音乐，请欣赏", false, false},
 		{"补取时只有提示语：停止补取", lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, lines: lyric.Parse(hint), resp: hint}, 0, "纯音乐，请欣赏", false, true},
+		{"换歌那次只有 kuwo 形状提示语：按无歌词处理、保留原文", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, lines: lyric.Parse(kuwoHint), resp: kuwoHint}, 0, "此歌曲为没有填词的纯音乐，请您欣赏", false, false},
+		{"补取时只有 kuwo 形状提示语：停止补取、保留原文", lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, lines: lyric.Parse(kuwoHint), resp: kuwoHint}, 0, "此歌曲为没有填词的纯音乐，请您欣赏", false, true},
 		{"提示语只是两行中的一行：照常是歌词", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, lines: lyric.Parse(hint2), resp: hint2}, 2, "", false, true},
+		{"两行歌名加提示（settleLyrics 无标题传空串，只认一行）：照常是歌词", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, lines: lyric.Parse(titleHint), resp: titleHint}, 2, "", false, true},
 		{"换歌那次 UNSYNCED：平台已答复、不补取", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, resp: unsynced, diag: "x"}, 0, "", false, false},
 		{"换歌那次零行：平台已答复、不补取", lyricsResult{lyricsJob: lyricsJob{trackID: "a"}, resp: zero, diag: "x"}, 0, "", false, false},
 		{"补取时 UNSYNCED：停止补取", lyricsResult{lyricsJob: lyricsJob{retry: true, trackID: "a"}, resp: unsynced, diag: "x"}, 0, "", false, true},

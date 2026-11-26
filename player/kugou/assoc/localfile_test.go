@@ -99,7 +99,7 @@ func TestPickCarriesLocalFile(t *testing.T) {
 		"关联":      {collected{cands: []candidate{assocCand}, keyed: true, playedAt: 7, localFile: true}, KindFound},
 		"缓存":      {collected{cands: []candidate{cacheCand}, playedAt: 7, localFile: true}, KindFound},
 		"没有候选":    {collected{playedAt: 7, localFile: true}, KindNone},
-		"候选暂缺、没有": {collected{cands: []candidate{{`D:\missing.lrc`, SourceCache, 1}}, playedAt: 7, localFile: true}, KindNone},
+		"候选暂缺、没有": {collected{cands: []candidate{{Path: `D:\missing.lrc`, Source: SourceCache, UpdateTime: 1}}, playedAt: 7, localFile: true}, KindNone},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeRead{files: map[string]any{assocCand.Path: testLRC, cachePath: testLRC}}

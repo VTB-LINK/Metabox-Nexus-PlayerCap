@@ -10,6 +10,9 @@ package kugou
 
 import (
 	"errors"
+	"io"
+	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -54,21 +57,78 @@ func beats(file, hash string, n int) [][]*cdp.PlayInfo {
 	return rounds
 }
 
-// runFile 以 fetchTagged(block) 在线取词、轮询间隔 1 s 跑一次带假读取者的会话，并核对会话从 bubbleEpoch 开始。
-func runFile(t *testing.T, block map[string]time.Duration, replies map[string][]reply, rounds ...[]*cdp.PlayInfo) localRun {
+// delayedSource 包装 scriptedSource：在首次返回 delay 中登记的 hash 之前先阻塞对应时长，
+// 用于模拟 CDP/WebView 卡顿导致的换歌晚识别（#205 5s 界限测试；#250 起在线取词期间已不再阻塞换歌识别）。
+type delayedSource struct {
+	scriptedSource
+	delay map[string]time.Duration
+}
+
+func (s *delayedSource) GetPlayInfo() (*cdp.PlayInfo, error) {
+	if len(s.reads) == 0 {
+		return nil, errors.New("script exhausted")
+	}
+	r := s.reads[0]
+	s.reads = s.reads[1:]
+	if r != nil {
+		if d := s.delay[r.Hash]; d > 0 {
+			delete(s.delay, r.Hash)
+			time.Sleep(d)
+		}
+	}
+	return r, nil
+}
+
+// runFile 以 fetchTagged 在线取词、轮询间隔 1 s 跑一次带假读取者的会话，并核对会话从 bubbleEpoch 开始；
+// delay 非空时在首次切入指定 hash 的 GetPlayInfo() 返回前注入相应延迟，模拟 CDP 卡顿造成的晚识别。
+func runFile(t *testing.T, delay map[string]time.Duration, replies map[string][]reply, rounds ...[]*cdp.PlayInfo) localRun {
 	t.Helper()
-	run := runLocalWith(t, 1000, fetchTagged(block), replies, rounds...)
+	var run localRun
+	if len(delay) == 0 {
+		run = runLocalWith(t, 1000, fetchTagged(), replies, rounds...)
+	} else {
+		var reads []*cdp.PlayInfo
+		for _, r := range rounds {
+			reads = append(reads, r...)
+		}
+		origLyrics, origAPI := fetchLyrics, kugouAPIClient
+		kugouAPIClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}")), Header: http.Header{}, Request: r}, nil
+		})}
+		defer func() { fetchLyrics, kugouAPIClient = origLyrics, origAPI }()
+
+		synctest.Test(t, func(t *testing.T) {
+			p := New(localOffsetMs, 1000)
+			f := newFakeLocal(replies)
+			run.start = f.start
+			fetch := fetchTagged()
+			fetchLyrics = func(hash string, _ int, _, _ string) ([]klyric.Line, error) {
+				run.fetched = append(run.fetched, hash)
+				run.fetchAt = append(run.fetchAt, time.Since(f.start))
+				return fetch(hash)
+			}
+			src := &delayedSource{
+				scriptedSource: scriptedSource{reads: reads},
+				delay:          maps.Clone(delay),
+			}
+			p.runSession(src, f.starter())
+			if f.ctx == nil || f.ctx.Err() == nil || !f.ctxLive {
+				t.Errorf("读取者的 ctx 应在会话中未取消、会话返回时已取消（ctx=%v，会话中未取消=%v）", f.ctx, f.ctxLive)
+			}
+			synctest.Wait()
+			run.events = drainAll(p)
+			run.set, run.setAt = f.set, f.setAt
+		})
+	}
 	if !run.start.Equal(bubbleEpoch) {
 		t.Fatalf("会话开始于 %v，want %v（lpt 以它为零点）", run.start, bubbleEpoch)
 	}
 	return run
 }
 
-// fetchTagged 是这几组用例的在线取词：hash 以 X 开头取不到、以 E 开头出错，其余返回 lyricSet(hash)；block 里的 hash
-// 先阻塞相应时长（模拟换歌拍在线取词卡住轮询线程）。
-func fetchTagged(block map[string]time.Duration) func(string) ([]klyric.Line, error) {
+// fetchTagged 是这几组用例的在线取词：hash 以 X 开头取不到、以 E 开头出错，其余返回 lyricSet(hash)。
+func fetchTagged() func(string) ([]klyric.Line, error) {
 	return func(hash string) ([]klyric.Line, error) {
-		time.Sleep(block[hash])
 		switch {
 		case strings.HasPrefix(hash, "X"):
 			return nil, nil
@@ -227,13 +287,13 @@ func TestSessionLocalFileBound(t *testing.T) {
 	}
 }
 
-// 换歌识别晚于 B 开播逾 5 秒：A 的在线取词卡住 8 s，其间酷狗于 1 s 换到 B（与 A 同名的本地文件），B 于 9.1 s 才认出，
-// 收到的 P 为 1 s。B 的界限为 A 的 0 s，P 大于界限，但早于 B 的开始时刻减 5 秒，不属于这一次：照旧沿用，播放中再收到
-// 同样的结果也不清；B 也不给下一首 C 定界限，C 收到属于其这一次播放的「没有」仍沿用。
+// 换歌识别晚于 B 开播逾 5 秒：CDP/WebView 卡顿 8 s 导致切入 B（与 A 同名的本地文件）的 GetPlayInfo 延迟返回，
+// 其间酷狗已于 1 s 换到 B，会话于 9.1 s 才认出 B，收到的 P 为 1 s。B 的界限为 A 的 0 s，P 大于界限，但早于 B 的开始时刻减
+// 5 秒，不属于这一次：照旧沿用，播放中再收到同样的结果也不清；B 也不给下一首 C 定界限，C 收到属于其这一次播放的「没有」仍沿用。
 //
 // 变异自证：去掉 5 秒一条、换歌拍不记开始时刻，B 不沿用，红；界限不逐首相接、去掉「有界限」要求，C 不沿用，红。
 func TestSessionLocalFileLateRecognition(t *testing.T) {
-	run := runFile(t, map[string]time.Duration{"A": 8 * time.Second}, map[string][]reply{
+	run := runFile(t, map[string]time.Duration{"XB": 8 * time.Second}, map[string][]reply{
 		"A": {{100 * time.Millisecond, onlineNone("A", lpt(0))}},
 		"XB": {
 			{100 * time.Millisecond, diskNone("XB", lpt(time.Second))},
@@ -247,14 +307,14 @@ func TestSessionLocalFileLateRecognition(t *testing.T) {
 	checkLyricEvents(t, lyricEvents(run.events), slices.Concat(shown("A"), lyricsAt("0.00", "A"), lyricsAt("0.00", "A")))
 }
 
-// 轮询阻塞期间漏认中间几首：0 s 认出 X、P 为 0 s；X 的在线取词卡住 12 s，其间酷狗 2 s 播 A、4 s 播本地 H、11 s 重播 A
-// （未落盘）；12.1 s 认出 A，只收到 P 为 2 s 的结果；13.2 s 开伴唱回到 H（与 A 同名，hash 即 H 的），收到 P 为 4 s 的
-// 「没有」、带本地文件标记。A 的 2 s 大于其界限（0 s），但早于其开始时刻减 5 秒，不属于 A 这一次，伴奏没有界限：
-// 照旧沿用 A 的歌词，之后同样的结果也不清。
+// 轮询阻塞期间漏认中间几首：0 s 认出 X、P 为 0 s；随后 CDP/WebView 卡顿 11 s 导致切入 A 的 GetPlayInfo 延迟返回，
+// 其间酷狗 2 s 播 A、4 s 播本地 H、11 s 重播 A（未落盘）；12.1 s 认出 A，只收到 P 为 2 s 的结果；13.2 s 开伴唱回到 H
+// （与 A 同名，hash 即 H 的），收到 P 为 4 s 的「没有」、带本地文件标记。A 的 2 s 大于其界限（0 s），但早于其开始时刻减 5 秒，
+// 不属于 A 这一次，伴奏没有界限：照旧沿用 A 的歌词，之后同样的结果也不清。
 //
 // 变异自证：去掉 5 秒一条，伴奏不沿用，红。
 func TestSessionLocalFileMissedSongs(t *testing.T) {
-	run := runFile(t, map[string]time.Duration{"X0": 11 * time.Second}, map[string][]reply{
+	run := runFile(t, map[string]time.Duration{"A": 11 * time.Second}, map[string][]reply{
 		"X0": {{100 * time.Millisecond, onlineNone("X0", lpt(0))}},
 		"A":  {{100 * time.Millisecond, onlineNone("A", lpt(2*time.Second))}},
 		"XH": {
@@ -333,7 +393,7 @@ func TestSessionLocalFileAccompaniment(t *testing.T) {
 // 不走，各首都只有换歌拍的 all_lyrics。
 func TestSessionNoReaderStillCarries(t *testing.T) {
 	orig := fetchLyrics
-	fetchLyrics = func(hash string, _ int, _, _ string) ([]klyric.Line, error) { return fetchTagged(nil)(hash) }
+	fetchLyrics = func(hash string, _ int, _, _ string) ([]klyric.Line, error) { return fetchTagged()(hash) }
 	defer func() { fetchLyrics = orig }()
 	synctest.Test(t, func(t *testing.T) {
 		p := New(localOffsetMs, 0)

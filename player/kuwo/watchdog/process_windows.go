@@ -4,6 +4,9 @@ package watchdog
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,46 +17,69 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// runningFn 与 inspectProcFn 为包级 seam，供离线测试替换进程枚举与详情读取；生产恒指向真实实现。
+var (
+	runningFn     = launch.Running
+	inspectProcFn = inspectProcess
+)
+
 func scanProcesses(ctx context.Context) (instance, error) {
-	procs, err := process.ProcessesWithContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return instance{}, err
+	}
+	procs, err := runningFn(TargetProcessName)
 	if err != nil {
 		return instance{}, err
 	}
-	var found instance
-	for _, p := range procs {
-		if err := ctx.Err(); err != nil {
-			return instance{}, err
-		}
-		name, err := p.NameWithContext(ctx)
-		if err != nil || !strings.EqualFold(name, TargetProcessName) {
-			continue
-		}
-		if found.PID != 0 {
-			return instance{}, ErrAmbiguous
-		}
-		h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(p.Pid))
-		if err != nil {
-			return instance{}, err
-		}
-		exe, created, err := identity(h)
-		windows.CloseHandle(h)
-		if err != nil {
-			return instance{}, err
-		}
-		cmd, err := p.CmdlineWithContext(ctx)
-		if err != nil {
-			return instance{}, err
-		}
-		argv, err := windows.DecomposeCommandLine(cmd)
-		if err != nil || len(argv) == 0 || !strings.EqualFold(filepath.Clean(argv[0]), filepath.Clean(exe)) {
-			return instance{}, ErrAmbiguous
-		}
-		found = instance{PID: int(p.Pid), Exe: exe, Created: created, Args: argv[1:]}
+	if err := ctx.Err(); err != nil {
+		return instance{}, err
 	}
-	if found.PID == 0 {
+	switch len(procs) {
+	case 0:
 		return instance{}, ErrNotRunning
+	case 1:
+	default:
+		return instance{}, ErrAmbiguous
 	}
-	return found, nil
+	inst, err := inspectProcFn(ctx, procs[0].PID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return instance{}, ctx.Err()
+		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, os.ErrPermission) {
+			return instance{}, fmt.Errorf("%w: %w", launch.ErrExeUnknown, err)
+		}
+		return instance{}, err
+	}
+	return inst, nil
+}
+
+func inspectProcess(ctx context.Context, pid uint32) (instance, error) {
+	if err := ctx.Err(); err != nil {
+		return instance{}, err
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return instance{}, err
+	}
+	exe, created, err := identity(h)
+	windows.CloseHandle(h)
+	if err != nil {
+		return instance{}, err
+	}
+	p, err := process.NewProcessWithContext(ctx, int32(pid))
+	if err != nil {
+		return instance{}, err
+	}
+	cmd, err := p.CmdlineWithContext(ctx)
+	if err != nil {
+		return instance{}, err
+	}
+	argv, err := windows.DecomposeCommandLine(cmd)
+	if err != nil || len(argv) == 0 || !strings.EqualFold(filepath.Clean(argv[0]), filepath.Clean(exe)) {
+		return instance{}, ErrAmbiguous
+	}
+	return instance{PID: int(pid), Exe: exe, Created: created, Args: argv[1:]}, nil
 }
 
 func identity(h windows.Handle) (string, uint64, error) {

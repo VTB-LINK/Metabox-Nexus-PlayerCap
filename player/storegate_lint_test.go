@@ -65,7 +65,7 @@ var storeGateSites = map[string]map[string][]gateMatcher{
 		"ensure": {{fun: "m.ops.stop"}, {fun: "m.ops.start"}},
 	},
 	"kugou/watchdog/watchdog.go": {
-		"EnsurePatched": {{fun: "launchElevatedHelper"}, {fun: "killAndPatch"}, {fun: "launchKuGou"}},
+		"ensurePatched": {{fun: "launchElevatedHelper"}, {fun: "killAndPatch"}, {fun: "launchKuGou"}},
 		"killAndPatch":  {{fun: "kill"}},
 	},
 	// 酷狗等 CDP 的循环每轮连接之前都过门禁：连接本身不是侵入调用，但随后的取词会话在酷狗里执行脚本，而等待最长 90 秒，
@@ -83,8 +83,8 @@ var storeGateSites = map[string]map[string][]gateMatcher{
 //
 // 变异自证（均实测变红）：逐个登记函数删掉门禁调用；把门禁挪到侵入调用之后；把特效 injectShim 里的门禁挪到
 // shimInjectLoop 的循环之外（只核验一次）；把网易云 watchdog 的 gateAll 改名为不以 gate 开头的名字。酷狗
-// EnsurePatched 有两处门禁，只删开头那处本门禁不红（另一处仍在侵入调用之前），它先于「CDP 已可用」的早退由
-// kugou/watchdog 的 TestEnsurePatchedGateFirst 守；两处都删即红。
+// ensurePatched（EnsurePatched 与 EnsurePatchedNoElevate 的实体）有两处门禁，只删开头那处本门禁不红（另一处仍在侵入
+// 调用之前），它先于「CDP 已可用」的早退由 kugou/watchdog 的 TestEnsurePatchedGateFirst 守；两处都删即红。
 func TestStoreGateBeforeInvasiveCalls(t *testing.T) {
 	root, err := repoRoot()
 	if err != nil {

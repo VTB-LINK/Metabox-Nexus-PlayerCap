@@ -14,6 +14,8 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"golang.org/x/sys/windows"
+
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
@@ -25,7 +27,6 @@ var (
 	procProcess32Next      = modkernel32.NewProc("Process32NextW")
 	procModule32First      = modkernel32.NewProc("Module32FirstW")
 	procModule32Next       = modkernel32.NewProc("Module32NextW")
-	procOpenProcess        = modkernel32.NewProc("OpenProcess")
 	procCloseHandle        = modkernel32.NewProc("CloseHandle")
 	procReadProcessMemory  = modkernel32.NewProc("ReadProcessMemory")
 	procWriteProcessMemory = modkernel32.NewProc("WriteProcessMemory")
@@ -48,8 +49,14 @@ var (
 	procVerQueryValueW          = modversion.NewProc("VerQueryValueW")
 )
 
+// qqProcessAccess 是打开 QQ 音乐进程句柄申请的最小只读权限：
+// EnumProcessModulesEx(LIST_MODULES_ALL)（64 位枚举 32 位模块）、GetModuleBaseNameW、
+// GetModuleInformation 需要 QUERY_INFORMATION | VM_READ；VirtualQueryEx、GetExitCodeProcess、
+// QueryFullProcessImageNameW 需要 QUERY_INFORMATION；ReadProcessMemory 需要 VM_READ；
+// DuplicateHandle 以当前进程伪句柄复制相同权限子集，不需要 PROCESS_DUP_HANDLE。
+const qqProcessAccess = windows.PROCESS_QUERY_INFORMATION | windows.PROCESS_VM_READ
+
 const (
-	PROCESS_ALL_ACCESS     = 0x1F0FFF
 	TH32CS_SNAPPROCESS     = 0x00000002
 	TH32CS_SNAPMODULE      = 0x00000008
 	TH32CS_SNAPMODULE32    = 0x00000010
@@ -620,22 +627,141 @@ type QQMusicMem struct {
 	fallbackTo     string     // 非空=version 无偏移表、按 nearestKnownVersion 回退到的版本；用于上报歌名样本判断赌对没有
 }
 
+// Close 关闭进程句柄并置 0；可重复调用，对 nil 或未持有句柄的实例无操作。
+func (m *QQMusicMem) Close() {
+	if m == nil || m.hProcess == 0 {
+		return
+	}
+	h := m.hProcess
+	m.hProcess = 0
+	windows.CloseHandle(windows.Handle(h))
+}
+
 func (m *QQMusicMem) CheckValid() bool {
-	if m.hProcess == 0 {
+	if m == nil || m.hProcess == 0 {
 		return false
 	}
 	var exitCode uint32
-	syscall.GetExitCodeProcess(syscall.Handle(m.hProcess), &exitCode)
-	if exitCode != 259 { // STILL_ACTIVE is 259
-		m.hProcess = 0
+	err := windows.GetExitCodeProcess(windows.Handle(m.hProcess), &exitCode)
+	if err != nil || exitCode != 259 { // STILL_ACTIVE is 259
+		m.Close()
 		return false
 	}
 	return true
 }
 
-func ConnectQQMusic() (*QQMusicMem, error) {
-	mem := &QQMusicMem{}
+type attachOps struct {
+	openProcess   func(pid uint32) (windows.Handle, error)
+	closeHandle   func(h windows.Handle) error
+	probeModules  func(h windows.Handle) (dllBase, gfBase uintptr, gfSize uint32, k32Base uintptr, found bool)
+	detectVersion func(m *QQMusicMem)
+}
 
+var defaultAttachOps = attachOps{
+	openProcess: func(pid uint32) (windows.Handle, error) {
+		return windows.OpenProcess(qqProcessAccess, false, pid)
+	},
+	closeHandle:   windows.CloseHandle,
+	probeModules:  probeQQMusicModules,
+	detectVersion: (*QQMusicMem).detectVersion,
+}
+
+func probeQQMusicModules(hProcess windows.Handle) (dllBase, gfBase uintptr, gfSize uint32, k32Base uintptr, found bool) {
+	var modules [1024]uintptr
+	var cbNeeded uint32
+
+	retEnum, _, _ := procEnumProcessModulesEx.Call(
+		uintptr(hProcess),
+		uintptr(unsafe.Pointer(&modules[0])),
+		uintptr(unsafe.Sizeof(modules)),
+		uintptr(unsafe.Pointer(&cbNeeded)),
+		uintptr(LIST_MODULES_ALL),
+	)
+	if retEnum == 0 {
+		return 0, 0, 0, 0, false
+	}
+
+	// cbNeeded 是「**所需**字节数」不是「已写入字节数」：EnumProcessModulesEx 在缓冲区
+	// 不足时仍返回 TRUE，只把实际需要的大小写进 cbNeeded（MSDN 明确如此）。不截断的话，
+	// 进程模块数 > 1024 时 numModules > len(modules) → modules[i] 越界 panic。
+	// 而全仓 recover() 零命中 → 任一 goroutine panic = **整个进程死亡**，不只是取词停摆。
+	//
+	// 截断而非按 MSDN 的两遍模式重新分配：漏找几个 DLL 的降级后果是 ConnectQQMusic 返错
+	// → qqmusic 的重试循环继续转，已经够用；两遍模式要多一次动态分配 + 一次 syscall。
+	numModules := cbNeeded / uint32(unsafe.Sizeof(modules[0]))
+	if numModules > uint32(len(modules)) {
+		log.Warn("QQMusic.exe module count %d exceeds buffer %d; scanning only the first %d (missing DLL will trigger retry)",
+			numModules, len(modules), len(modules))
+		numModules = uint32(len(modules))
+	}
+	for i := uint32(0); i < numModules; i++ {
+		var name [256]uint16
+		procGetModuleBaseNameW.Call(uintptr(hProcess), modules[i], uintptr(unsafe.Pointer(&name[0])), uintptr(len(name)))
+		modName := syscall.UTF16ToString(name[:])
+		lowerName := strings.ToLower(modName)
+
+		if lowerName == "qqmusic.dll" {
+			dllBase = modules[i]
+			found = true
+		}
+		// v22.16: QQMusic_GFWrapper.dll, v22.22+: 仍存在但也新增 GF.dll
+		if lowerName == "qqmusic_gfwrapper.dll" || lowerName == "gf.dll" {
+			// 优先使用 GFWrapper（滑块 AOB 在其中），GF.dll 作为备选
+			if gfBase == 0 || lowerName == "qqmusic_gfwrapper.dll" {
+				gfBase = modules[i]
+				var minfo MODULEINFO
+				procGetModuleInformation.Call(uintptr(hProcess), modules[i], uintptr(unsafe.Pointer(&minfo)), uintptr(unsafe.Sizeof(minfo)))
+				gfSize = minfo.SizeOfImage
+			}
+		}
+		if lowerName == "kernel32.dll" {
+			k32Base = modules[i]
+		}
+	}
+	return dllBase, gfBase, gfSize, k32Base, found
+}
+
+func attachQQMusicPID(pid uint32, ops attachOps) *QQMusicMem {
+	h, err := ops.openProcess(pid)
+	if err != nil || h == 0 {
+		return nil
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			ops.closeHandle(h)
+		}
+	}()
+
+	dllBase, gfBase, gfSize, k32Base, found := ops.probeModules(h)
+	if !found {
+		return nil
+	}
+
+	mem := &QQMusicMem{
+		pid:            pid,
+		hProcess:       uintptr(h),
+		qqmusicDllBase: dllBase,
+		gfWrapperBase:  gfBase,
+		gfWrapperSize:  gfSize,
+		kernel32Base:   k32Base,
+	}
+	// 检测版本并加载偏移表
+	ops.detectVersion(mem)
+	keep = true
+	return mem
+}
+
+func attachQQMusic(pids []uint32, ops attachOps) (*QQMusicMem, error) {
+	for _, pid := range pids {
+		if mem := attachQQMusicPID(pid, ops); mem != nil {
+			return mem, nil
+		}
+	}
+	return nil, i18n.Errorf("QQMusic.dll not found in any QQMusic.exe process")
+}
+
+func ConnectQQMusic() (*QQMusicMem, error) {
 	// 1. Find process ID
 	hSnap, _, _ := procCreateToolhelp32.Call(uintptr(TH32CS_SNAPPROCESS), 0)
 	if hSnap == uintptr(syscall.InvalidHandle) {
@@ -660,77 +786,7 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 		return nil, i18n.Errorf("QQMusic.exe not found")
 	}
 
-	for _, pid := range pids {
-		hProcess, _, _ := procOpenProcess.Call(uintptr(PROCESS_ALL_ACCESS), 0, uintptr(pid))
-		if hProcess == 0 {
-			continue
-		}
-
-		var modules [1024]uintptr
-		var cbNeeded uint32
-
-		retEnum, _, _ := procEnumProcessModulesEx.Call(
-			hProcess,
-			uintptr(unsafe.Pointer(&modules[0])),
-			uintptr(unsafe.Sizeof(modules)),
-			uintptr(unsafe.Pointer(&cbNeeded)),
-			uintptr(LIST_MODULES_ALL),
-		)
-
-		foundDll := false
-		if retEnum != 0 {
-			// cbNeeded 是「**所需**字节数」不是「已写入字节数」：EnumProcessModulesEx 在缓冲区
-			// 不足时仍返回 TRUE，只把实际需要的大小写进 cbNeeded（MSDN 明确如此）。不截断的话，
-			// 进程模块数 > 1024 时 numModules > len(modules) → modules[i] 越界 panic。
-			// 而全仓 recover() 零命中 → 任一 goroutine panic = **整个进程死亡**，不只是取词停摆。
-			//
-			// 截断而非按 MSDN 的两遍模式重新分配：漏找几个 DLL 的降级后果是 ConnectQQMusic 返错
-			// → qqmusic 的重试循环继续转，已经够用；两遍模式要多一次动态分配 + 一次 syscall。
-			numModules := cbNeeded / uint32(unsafe.Sizeof(modules[0]))
-			if numModules > uint32(len(modules)) {
-				log.Warn("QQMusic.exe module count %d exceeds buffer %d; scanning only the first %d (missing DLL will trigger retry)",
-					numModules, len(modules), len(modules))
-				numModules = uint32(len(modules))
-			}
-			for i := uint32(0); i < numModules; i++ {
-				var name [256]uint16
-				procGetModuleBaseNameW.Call(hProcess, modules[i], uintptr(unsafe.Pointer(&name[0])), uintptr(len(name)))
-				modName := syscall.UTF16ToString(name[:])
-				lowerName := strings.ToLower(modName)
-
-				if lowerName == "qqmusic.dll" {
-					mem.qqmusicDllBase = modules[i]
-					foundDll = true
-				}
-				// v22.16: QQMusic_GFWrapper.dll, v22.22+: 仍存在但也新增 GF.dll
-				if lowerName == "qqmusic_gfwrapper.dll" || lowerName == "gf.dll" {
-					// 优先使用 GFWrapper（滑块 AOB 在其中），GF.dll 作为备选
-					if mem.gfWrapperBase == 0 || lowerName == "qqmusic_gfwrapper.dll" {
-						mem.gfWrapperBase = modules[i]
-						var minfo MODULEINFO
-						procGetModuleInformation.Call(hProcess, modules[i], uintptr(unsafe.Pointer(&minfo)), uintptr(unsafe.Sizeof(minfo)))
-						mem.gfWrapperSize = minfo.SizeOfImage
-					}
-				}
-				if lowerName == "kernel32.dll" {
-					mem.kernel32Base = modules[i]
-				}
-			}
-		}
-
-		if foundDll {
-			mem.pid = pid
-			mem.hProcess = hProcess
-
-			// 检测版本并加载偏移表
-			mem.detectVersion()
-
-			return mem, nil
-		}
-		procCloseHandle.Call(hProcess)
-	}
-
-	return nil, i18n.Errorf("QQMusic.dll not found in any QQMusic.exe process")
+	return attachQQMusic(pids, defaultAttachOps)
 }
 
 // detectVersion 从 QQMusic.exe 的 PE 版本资源中提取版本号并匹配偏移表
@@ -1537,7 +1593,7 @@ func extractSongMid(data []byte, durationMs uint32) string {
 }
 
 func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
-	if m.qqmusicDllBase == 0 {
+	if m.hProcess == 0 || m.qqmusicDllBase == 0 {
 		return nil, i18n.Errorf("process not attached")
 	}
 

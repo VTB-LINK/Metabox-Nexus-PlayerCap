@@ -1,6 +1,6 @@
 package kugou
 
-// 本文件只测 EnsurePatched 返回错误之后 Start 的处置：停用、等待重试还是照常等 CDP，以及等待重试时的提示
+// 本文件只测 EnsurePatched 返回错误之后 Start 的处置：停止修补（受阻、定时重查）、等待重试还是照常等 CDP，以及等待重试时的提示
 // 只打一次。
 
 import (
@@ -12,12 +12,12 @@ import (
 )
 
 // TestClassifyEnsureErr 钉死分流：找不到安装时，酷狗不在运行则等它启动后按进程定位（任意路径安装）；在运行时
-// 连续 maxRunningInstallMisses 轮（含本轮）仍找不到才停用，之前同样等待重试（找安装与查运行之间的竞态、短暂
-// 两个主进程）；版本指纹不认识无论是否在运行都停用（重试只会反复弹 UAC）；其余照常。按错误的身份判定
+// 连续 maxRunningInstallMisses 轮（含本轮）仍找不到才停止修补，之前同样等待重试（找安装与查运行之间的竞态、短暂
+// 两个主进程）；版本指纹不认识无论是否在运行都停止修补（立即重试只会反复弹 UAC）；其余照常。按错误的身份判定
 // （errors.Is），不按文案。nil 不在本函数的定义域内（EnsurePatched 成功时 Start 不调用它）。
 //
-// 变异自证（均实测变红）：ErrInstallNotFound 在运行时不看次数、一律停用（即改动之前的行为）；一律等待重试；
-// 次数比较写成 >（满 5 次不停用）；停用不看是否在运行；ErrVersionUnsupported 只认未包装的；按 err.Error()
+// 变异自证（均实测变红）：ErrInstallNotFound 在运行时不看次数、一律停止修补（即 #205 之前的行为）；一律等待重试；
+// 次数比较写成 >（满 5 次不停止修补）；停止修补不看是否在运行；ErrVersionUnsupported 只认未包装的；按 err.Error()
 // 的文案判定。
 func TestClassifyEnsureErr(t *testing.T) {
 	if maxRunningInstallMisses != 5 {
@@ -37,17 +37,17 @@ func TestClassifyEnsureErr(t *testing.T) {
 		{"找不到安装、在运行、0 次 → 等待重试", watchdog.ErrInstallNotFound, true, 0, ensureRetryLater},
 		{"找不到安装、在运行、第 1 次 → 等待重试", watchdog.ErrInstallNotFound, true, 1, ensureRetryLater},
 		{"找不到安装、在运行、4 次 → 等待重试", watchdog.ErrInstallNotFound, true, 4, ensureRetryLater},
-		{"找不到安装、在运行、满 5 次 → 停用", watchdog.ErrInstallNotFound, true, 5, ensureStop},
-		{"找不到安装、在运行、6 次 → 停用", watchdog.ErrInstallNotFound, true, 6, ensureStop},
+		{"找不到安装、在运行、满 5 次 → 停止修补", watchdog.ErrInstallNotFound, true, 5, ensureStop},
+		{"找不到安装、在运行、6 次 → 停止修补", watchdog.ErrInstallNotFound, true, 6, ensureStop},
 		{"被 %w 包装的找不到安装、未运行 → 等待重试", wrappedMissing, false, 0, ensureRetryLater},
 		{"被 %w 包装的找不到安装、在运行、4 次 → 等待重试", wrappedMissing, true, 4, ensureRetryLater},
-		{"被 %w 包装的找不到安装、在运行、满 5 次 → 停用", wrappedMissing, true, 5, ensureStop},
+		{"被 %w 包装的找不到安装、在运行、满 5 次 → 停止修补", wrappedMissing, true, 5, ensureStop},
 		{"启动的是另一份安装、在运行 → 等待重试", watchdog.ErrInstallChanged, true, 0, ensureRetryLater},
 		{"启动的是另一份安装、在运行、次数已满 → 次数只对找不到安装起作用，等待重试", watchdog.ErrInstallChanged, true, 5, ensureRetryLater},
 		{"被 %w 包装的启动的是另一份安装、未运行 → 等待重试", fmt.Errorf("%w: started D:\\KuGou.exe", watchdog.ErrInstallChanged), false, 0, ensureRetryLater},
-		{"版本不支持、未运行 → 停用", watchdog.ErrVersionUnsupported, false, 0, ensureStop},
-		{"版本不支持、在运行 → 停用", watchdog.ErrVersionUnsupported, true, 0, ensureStop},
-		{"被 %w 包装的版本不支持 → 停用", fmt.Errorf("%w: KuGou 10.1.94 is in the 10.x series", watchdog.ErrVersionUnsupported), false, 0, ensureStop},
+		{"版本不支持、未运行 → 停止修补", watchdog.ErrVersionUnsupported, false, 0, ensureStop},
+		{"版本不支持、在运行 → 停止修补", watchdog.ErrVersionUnsupported, true, 0, ensureStop},
+		{"被 %w 包装的版本不支持 → 停止修补", fmt.Errorf("%w: KuGou 10.1.94 is in the 10.x series", watchdog.ErrVersionUnsupported), false, 0, ensureStop},
 		{"反例：其他错误、未运行 → 照常", errors.New("x"), false, 0, ensureContinue},
 		{"反例：其他错误、在运行、次数已满 → 次数只对找不到安装起作用，照常", errors.New("x"), true, 5, ensureContinue},
 		{"反例：文案相同而身份不同的错误、在运行、次数已满 → 照常", errors.New(watchdog.ErrInstallNotFound.Error()), true, 5, ensureContinue},

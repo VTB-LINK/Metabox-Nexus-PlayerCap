@@ -78,6 +78,13 @@ func gateAll(procs []proc) error {
 	return nil
 }
 
+// IsRunning 报告是否有 cloudmusic.exe 在运行；枚举失败按在运行处理（不因一次失败改报未运行）。只按名字查进程快照，
+// 不读命令行、不过门禁，供外层循环每轮判一次。
+func IsRunning() bool {
+	procs, err := runningFn(TargetProcessName)
+	return err != nil || len(procs) > 0
+}
+
 // GateRunning 枚举全部 cloudmusic.exe 并逐个过门禁（issue #212），供不经 EnsureDebugMode、独立连接 9222 或
 // 操作网易云窗口的路径（特效的 shim 注入与泊车）在连接、操作之前调用。没有运行中的 cloudmusic.exe 时返回
 // launch.ErrExeUnknown：没有可核验的映像路径，调试端口上的不是可确认的网易云。

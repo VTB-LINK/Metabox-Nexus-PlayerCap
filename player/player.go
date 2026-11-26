@@ -33,6 +33,38 @@ func (d LyricTextDetailed) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(d))
 }
 
+// LyricFuriganaSegment 振假名片段：Text 为基底文本，Ruby 为上方假名注音（纯文本段为空且序列化时省略）。
+type LyricFuriganaSegment struct {
+	Text string `json:"text"`
+	Ruby string `json:"ruby,omitempty"`
+}
+
+// LyricFurigana 是一行歌词的振假名分段序列。
+// 零值（nil 或空切片）序列化为 []（绝不序列化为 null）；本行无任何振假名注音时恒为空。
+type LyricFurigana []LyricFuriganaSegment
+
+func (f LyricFurigana) MarshalJSON() ([]byte, error) {
+	if len(f) == 0 {
+		return []byte("[]"), nil
+	}
+	return json.Marshal([]LyricFuriganaSegment(f))
+}
+
+// UnmarshalJSON 将空数组（[]）与 null 统一归零为 nil，使零值 LyricLine / LyricUpdate
+// 经 MarshalJSON → json.Unmarshal 往返后仍与原零值相等。
+func (f *LyricFurigana) UnmarshalJSON(data []byte) error {
+	var segs []LyricFuriganaSegment
+	if err := json.Unmarshal(data, &segs); err != nil {
+		return err
+	}
+	if len(segs) == 0 {
+		*f = nil
+		return nil
+	}
+	*f = segs
+	return nil
+}
+
 // LyricLine 歌词行
 type LyricLine struct {
 	Index        int               `json:"index"`
@@ -50,6 +82,9 @@ type LyricLine struct {
 	// 拆成多个音节，空格可以单独占一个单元。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后
 	// 赋值（qqmusic、kugou、sodamusic、cloudmusicv3 共同的约定见 BuildRomaDetailed）。
 	RomaTextDetailed LyricTextDetailed `json:"roma_text_detailed"`
+	// Furigana 是本行的振假名分段序列，零值（nil 或空切片）序列化为 []；无注音行恒为空。
+	// BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后赋值（共同约定见 BuildFurigana）。
+	Furigana LyricFurigana `json:"furigana"`
 }
 
 // SongInfo 歌曲信息
@@ -72,16 +107,17 @@ type StatusInfo struct {
 }
 
 // StatusInfo.Reason 的取值。播放器无关（WSEvent.player 已标明是哪个播放器），
-// 各播放器同义状态共用同一码，便于消费方与运营按码聚合。
+// 各播放器同义状态共用同一码，便于消费方与运营按码聚合。各码可配的 status 见 status.go 开头的层次表。
 const (
-	ReasonProcessNotRunning  = "process_not_running" // 进程未启动或未连上
-	ReasonProcessExited      = "process_exited"      // 进程曾在跑、现已退出
-	ReasonCDPDisconnected    = "cdp_disconnected"    // CDP 调试通道已断开
-	ReasonWindowNotOpen      = "window_not_open"     // 进程在跑但目标窗口/页面未打开
-	ReasonVersionUnsupported = "version_unsupported" // 播放器版本不受支持
-	ReasonInstallNotFound    = "install_not_found"   // 未找到安装
-	ReasonNoAdmin            = "no_admin"            // 未取得管理员权限
-	ReasonNoSong             = "no_song"             // 进程在跑，但没有歌曲在播放或已加载
+	ReasonProcessNotRunning   = "process_not_running"  // 进程未运行，本次服务期间没见它运行过
+	ReasonProcessExited       = "process_exited"       // 进程曾在运行、现已退出
+	ReasonCDPDisconnected     = "cdp_disconnected"     // 进程在运行，调试通道未就绪或已断开
+	ReasonWindowNotOpen       = "window_not_open"      // 进程在跑但目标窗口/页面未打开
+	ReasonVersionUnsupported  = "version_unsupported"  // 播放器版本不受支持
+	ReasonInstallNotFound     = "install_not_found"    // 未找到安装
+	ReasonNoAdmin             = "no_admin"             // 权限不足：无权读取进程或其安装路径，或未取得管理员权限
+	ReasonNoSong              = "no_song"              // 进程在跑，但没有歌曲在播放或已加载
+	ReasonMetadataUnavailable = "metadata_unavailable" // 进程在运行、已连上，曲目在而读不到曲目信息
 )
 
 // LyricUpdate 歌词更新。
@@ -104,6 +140,9 @@ type LyricUpdate struct {
 	// 哪几家提供、时间取自哪里，同 LyricLine.RomaTextDetailed：all_lyrics 的行与 lyric_update 取自
 	// 同一份歌词。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后赋值。
 	RomaTextDetailed LyricTextDetailed `json:"roma_text_detailed"`
+	// Furigana 是本行的振假名分段序列，零值（nil 或空切片）序列化为 []；无注音行恒为空。
+	// all_lyrics 的行与 lyric_update 取自同一份歌词。BuildLyricLine / BuildLyricUpdate 不填它，由播放器构造后赋值。
+	Furigana LyricFurigana `json:"furigana"`
 }
 
 // PlaybackTimeInfo 播放暂停/恢复（含 seek）事件载荷。
@@ -243,14 +282,22 @@ func (b *BaseEmitter) emit(evtType string, data interface{}) bool {
 
 // EmitStatusIfChanged 发 status_update，但内容（Status、Detail、Reason）与本播放器最近一次成功发出的
 // 状态完全相同时不发，返回是否真的发出。用于「未运行」这类持续状态：播放器的外层循环每轮都要声明一次，
-// 不该每轮都推给订阅者（issue #119）。别的状态（经 Emit 发出的 playing、paused、standby 等）会让下一次
-// 比较判为有变化；通道满而丢弃的不记，下一次仍会发。**waiting_process 一律经它发**
-// （✅ player/waitingstatus_lint_test.go）。只应由播放器的轮询循环调用（与 Emit 的约定相同）。
+// 不该每轮都推给订阅者（issue #119）。别的状态（经 Emit 发出的 playing、paused）会让下一次
+// 比较判为有变化；通道满而丢弃的不记，下一次仍会发。**非歌名状态一律经它发**，且由 ProcessStatus 或
+// NoSongStatus 合成（✅ player/waitingstatus_lint_test.go）。只应由播放器的轮询循环调用（与 Emit 的约定相同）。
 func (b *BaseEmitter) EmitStatusIfChanged(info *StatusInfo) bool {
 	if last, ok := b.lastStatus.Load().(StatusInfo); ok && last == *info {
 		return false
 	}
 	return b.emit(EventStatusUpdate, info)
+}
+
+// LastStatus 返回本播放器最近一次成功入队的 status_update 的内容；还没有时 ok 为假。EmitStatusIfChanged 在内容相同
+// （被去重）与通道满（没入队）时都返回假，要据「服务端此刻的状态是不是它」决定下一步的调用方（sodamusic 的清空须排在
+// waiting_song 之后）用它区分。只应由播放器的轮询循环调用。
+func (b *BaseEmitter) LastStatus() (info StatusInfo, ok bool) {
+	info, ok = b.lastStatus.Load().(StatusInfo)
+	return info, ok
 }
 
 // PositionSampleInterval 是播放中相邻两条位置采样（EventPositionSample）的间隔。
@@ -403,29 +450,52 @@ func LyricPlayTime(lineTime float32, detailed LyricTextDetailed, offsetSec float
 	return AdjustLyricPlayTime(LyricDisplayStart(lineTime, detailed), offsetSec)
 }
 
-// pureMusicHints 各平台对「这首歌没有歌词」返回的提示语。
+// pureMusicHints 各平台对「这首歌没有歌词」返回的固定提示语。
 //
-// 网易云与酷狗**不返回空歌词**，而是返回一行「纯音乐，请欣赏」——两家一字不差。
-// QQ 音乐的 API 则直接返回零行。同一个语义、三种表达，若原样透传给下游，
-// `index: -1` 这个「无歌词」信号就只有 QQ 音乐会发，下游必须逐平台特判。
+// 网易云与酷狗对纯音乐不返回空歌词，而是返回一行「纯音乐，请欣赏」——两家一字不差。
+// 酷我还会给出「此歌曲为…欣赏」「该歌曲为…欣赏」（前面可能另带一行歌名行）。
+// 同一个语义若原样透传给下游，下游必须逐平台特判。
 //
-// 认定后仍**原样保留 text**：那七个字是平台的数据，我们只是搬运工；下游想显示、
-// 想换成 "Instrumental"、想直接忽略，都由它自己决定（lyric_page.html 选择忽略）。
+// 认定后仍**原样保留提示句进 text**：提示语是平台的数据，我们只是搬运工；下游判有无歌词
+// 一律看 index === -1，要不要显示 text 由下游自己决定。
 var pureMusicHints = map[string]bool{
 	"纯音乐，请欣赏": true,
 }
 
-// IsPureMusicOnly 判断这份歌词是不是「平台其实没有歌词，只给了一句提示语」。
+// PureMusicHint 判断 lines 是否只是平台的「没有歌词」提示（设计 §7.4），是则返回提示原文。
 //
-// **len(lyrics) == 1 那道闸是承重的**：没有它，这就成了纯关键词匹配——某首歌真的唱
-// 「纯音乐，请欣赏」时会被整首吞掉。加上它之后，误判需要「整首歌只有一行**且**那行
-// 恰好是这七个字」，可以忽略。
+// 提示句：恰为 pureMusicHints 中的说法，或以「此歌曲为」/「该歌曲为」开头、以「欣赏」结尾
+// （原 kuwo 形状规则，#201 已定范围，不追加新说法；精确匹配，不 trim 空白）。
 //
-// 平台若改文案，这里会失配 → 退回「按普通歌词处理」，即本函数引入前的行为。
-// 那是降级不是故障：下游看到的是一行歌词而非 index:-1，与今天的现状相同。
-func IsPureMusicOnly(lyrics []LyricLine) bool {
-	return len(lyrics) == 1 && pureMusicHints[lyrics[0].Text]
+// **形状闸门是承重的**：没有它，这就成了纯关键词匹配——某首歌真的唱到提示句时会被整首吞掉。
+//   - len(lines) == 1 且该行是提示句 → 返回 (lines[0].Text, true)；
+//   - len(lines) == 2 且 title 去空白后非空、第 0 行去空白后与之相等、第 1 行是提示句
+//     → 返回 (lines[1].Text, true)（提示句原文，不是歌名行）；
+//   - 其余一律返回 ("", false)。
+//
+// 平台若改文案，这里会失配 → 退回「按普通歌词处理」，那是降级不是故障。
+func PureMusicHint(lines []LyricLine, title string) (hint string, ok bool) {
+	switch len(lines) {
+	case 1:
+		if isPureMusicHintText(lines[0].Text) {
+			return lines[0].Text, true
+		}
+	case 2:
+		if t := squashSpace(title); t != "" && isPureMusicHintText(lines[1].Text) && squashSpace(lines[0].Text) == t {
+			return lines[1].Text, true
+		}
+	}
+	return "", false
 }
+
+func isPureMusicHintText(text string) bool {
+	if pureMusicHints[text] {
+		return true
+	}
+	return (strings.HasPrefix(text, "此歌曲为") || strings.HasPrefix(text, "该歌曲为")) && strings.HasSuffix(text, "欣赏")
+}
+
+func squashSpace(s string) string { return strings.Join(strings.Fields(s), "") }
 
 // BuildLyricUpdate 构造 lyric_update 载荷。**各播放器都必须经由它**。
 //
@@ -509,6 +579,57 @@ func BuildRomaDetailed(d LyricTextDetailed, romaText string) LyricTextDetailed {
 // 比较都为 false（理由见 ClampProgress）；NaN 与无穷大进了载荷，json.Marshal 会报错。
 func validDetailedTime(v float32) bool {
 	return v >= 0 && v <= math.MaxFloat32
+}
+
+// BuildFurigana 由候选的振假名分段 segments 与本行文本约束（lineText、wordsText）得出对外的 furigana。
+// 约定只写在这里：
+//
+//   - 忽略 Text 为空串的片段；
+//   - 相邻两个 Ruby 为空的纯文本片段合并为一个片段；
+//   - 合并后必须至少存在一个 Ruby 非空的片段（绝不为无注音行输出单段纯文本）；
+//   - 全部片段 Text 拼接为 joined：lineText 非空且 strings.TrimSpace(joined) == lineText；
+//     若 wordsText 非空，还须满足 joined == wordsText（逐字节相等，含词首词尾空白）。
+//
+// 任一条件不成立即返回 nil（序列化为 []）；成立时返回独立新分配的切片，不与入参共享底层数组。
+func BuildFurigana(segments []LyricFuriganaSegment, lineText, wordsText string) LyricFurigana {
+	if lineText == "" || len(segments) == 0 {
+		return nil
+	}
+	var out LyricFurigana
+	var joined strings.Builder
+	var plain strings.Builder
+	flushPlain := func() {
+		if plain.Len() > 0 {
+			out = append(out, LyricFuriganaSegment{Text: plain.String()})
+			plain.Reset()
+		}
+	}
+	hasRuby := false
+	for _, seg := range segments {
+		if seg.Text == "" {
+			continue
+		}
+		joined.WriteString(seg.Text)
+		if seg.Ruby != "" {
+			flushPlain()
+			hasRuby = true
+			out = append(out, seg)
+			continue
+		}
+		plain.WriteString(seg.Text)
+	}
+	if !hasRuby {
+		return nil
+	}
+	flushPlain()
+	full := joined.String()
+	if strings.TrimSpace(full) != lineText {
+		return nil
+	}
+	if wordsText != "" && full != wordsText {
+		return nil
+	}
+	return out
 }
 
 // ── 文本归一化工具（跨播放器共享） ──

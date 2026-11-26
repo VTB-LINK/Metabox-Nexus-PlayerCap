@@ -30,7 +30,7 @@ func TestCollectSkipsOverlongCachePath(t *testing.T) {
 		lyricRow{hex32("cc", 2), over, h, 9},
 		lyricRow{hex32("cc", 3), "b.lrc", h, 2},
 	))
-	wantCandidates(t, mustCollect(t, db, h), []candidate{{"b.lrc", SourceCache, 2}, {at, SourceCache, 1}})
+	wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: "b.lrc", Source: SourceCache, UpdateTime: 2}, {Path: at, Source: SourceCache, UpdateTime: 1}})
 }
 
 // 关联一级：LyricKey 指向的行 LyricPath 恰为上限的照常，多 1 字节的跳过；其余关联与缓存照常。
@@ -48,9 +48,9 @@ func TestCollectSkipsOverlongAssociationPath(t *testing.T) {
 		),
 	)
 	wantCandidates(t, mustCollect(t, db, h), []candidate{
-		{`D:\c.krc`, SourceAssociation, 2},
-		{at, SourceAssociation, 1},
-		{"cache.lrc", SourceCache, 5},
+		{Path: `D:\c.krc`, Source: SourceAssociation, UpdateTime: 2},
+		{Path: at, Source: SourceAssociation, UpdateTime: 1},
+		{Path: "cache.lrc", Source: SourceCache, UpdateTime: 5},
 	})
 }
 
@@ -75,7 +75,7 @@ func TestAssociationKeysSkipsOverlongKey(t *testing.T) {
 	if want := map[string]bool{normal: true, atKey: true}; !maps.Equal(keys, want) {
 		t.Fatalf("集合有 %d 个键（含超长键：%v），want 正常键与恰为上限的键共 2 个", len(keys), keys[overKey])
 	}
-	wantCandidates(t, mustCollect(t, db, h), []candidate{{`D:\normal.krc`, SourceAssociation, 1}})
+	wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: `D:\normal.krc`, Source: SourceAssociation, UpdateTime: 1}})
 }
 
 // 超长的行不计入两级的 64 条上限：本 hash 有 64 个正常 LyricKey 加 1 个超长的，关联一级照常取 64 条；

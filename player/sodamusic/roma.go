@@ -445,6 +445,9 @@ func normLyricRune(r rune) (rune, bool) {
 	return 0, false
 }
 
+// fetchKugouLyrics 是 klyric.Fetch 的可替换 seam：仅供会话离线测试阻断公网调用，生产恒为 klyric.Fetch。
+var fetchKugouLyrics = klyric.Fetch
+
 // fetchKugouRoma 异步向酷狗借音译并补进 sodaLines，把结果经 romaCh 交回主循环。每首歌一个。
 //
 // **绝不阻塞、绝不波及主歌词/翻译**：换歌分支已先把（音译为空的）主歌词与翻译发出，本 goroutine
@@ -465,7 +468,7 @@ func normLyricRune(r rune) (rune, bool) {
 func (p *SodaMusicPlayer) fetchKugouRoma(romaCh chan<- []krc.Line, sodaLines []krc.Line, name, singer string, durationMs int) {
 	defer telemetry.Guard()
 	// 传空 hash → 走 Tier 2/3（按歌手+歌名 catalog 搜 + ±5s 时长严格匹配），不依赖酷狗 hash。
-	kugouLines, err := klyric.Fetch("", durationMs, name, singer)
+	kugouLines, err := fetchKugouLyrics("", durationMs, name, singer)
 	if err != nil {
 		log.Detail("Borrowing romanization from KuGou failed: search for \"%s - %s\" errored: %v", singer, name, err)
 		return

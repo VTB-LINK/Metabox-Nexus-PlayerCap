@@ -60,7 +60,7 @@ func TestCollectSchemaErrors(t *testing.T) {
 func TestCollectLyricInfoOtherErrors(t *testing.T) {
 	h := hex32("aa", 1)
 	row := lyricRow{hex32("cc", 1), "cache.lrc", h, 1}
-	wantCandidates(t, mustCollect(t, newDB(withoutColumn("LyricType", row)), h), []candidate{{"cache.lrc", SourceCache, 1}})
+	wantCandidates(t, mustCollect(t, newDB(withoutColumn("LyricType", row)), h), []candidate{{Path: "cache.lrc", Source: SourceCache, UpdateTime: 1}})
 
 	corrupt := fmt.Errorf("%w: invalid record header", kgdb.ErrCorrupt)
 	readFail := errors.New("read failed")

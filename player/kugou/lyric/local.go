@@ -38,27 +38,47 @@ var onBoundedLRCLine = func() {}
 // 文件超过 MaxLocalFileBytes、KRC 明文或解析结果超限时返回 ErrLyricTooLarge。解不出行（含 krc1
 // 解密失败）时返回 nil, nil。
 func ParseLocal(b []byte) ([]Line, error) {
+	lines, _, _, err := ParseLocalWithOffset(b)
+	return lines, err
+}
+
+// ParseLocalWithOffset 同 ParseLocal，另从解码后的歌词明文提取 [offset:] 标签（见 krc.ParseOffsetTag）。
+// 返回的 lines 与 ParseLocal 完全一致，不将 lyricOffsetMs 套用到行或逐字时间戳。
+func ParseLocalWithOffset(b []byte) (lines []Line, lyricOffsetMs int, hasOffset bool, err error) {
 	if len(b) > MaxLocalFileBytes {
-		return nil, ErrLyricTooLarge
+		return nil, 0, false, ErrLyricTooLarge
 	}
 	if bytes.HasPrefix(b, []byte("krc1")) {
-		plain, err := DecryptKRC(b)
-		if errors.Is(err, ErrLyricTooLarge) {
-			return nil, err
+		plain, derr := DecryptKRC(b)
+		if errors.Is(derr, ErrLyricTooLarge) {
+			return nil, 0, false, derr
 		}
+		if derr != nil {
+			return nil, 0, false, nil
+		}
+		lines, err = parseKRCBounded(plain)
 		if err != nil {
-			return nil, nil
+			return nil, 0, false, err
 		}
-		return parseKRCBounded(plain)
+		lyricOffsetMs, hasOffset = krc.ParseOffsetTag(plain)
+		return lines, lyricOffsetMs, hasOffset, nil
 	}
-	text, err := player.DecodeLyricFileText(b)
+	text, derr := player.DecodeLyricFileText(b)
+	if derr != nil {
+		return nil, 0, false, nil
+	}
+	lines, err = parseKRCBounded(text)
 	if err != nil {
-		return nil, nil
+		return nil, 0, false, err
 	}
-	if lines, err := parseKRCBounded(text); err != nil || len(lines) > 0 {
-		return lines, err
+	if len(lines) == 0 {
+		lines, err = parseLRCBounded(text)
+		if err != nil {
+			return nil, 0, false, err
+		}
 	}
-	return parseLRCBounded(text)
+	lyricOffsetMs, hasOffset = krc.ParseOffsetTag(text)
+	return lines, lyricOffsetMs, hasOffset, nil
 }
 
 // parseKRCBounded 按 KRC 明文解析：行数与逐字总数在解析中由 krc.ParsePlainKRCBounded 限住，展开

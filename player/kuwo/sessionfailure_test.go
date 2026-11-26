@@ -30,7 +30,8 @@ func TestSessionFailureClearsState(t *testing.T) {
 				t.Fatal("failure swallowed")
 			}
 			e := drainEvents(p)
-			if len(e) != 2 || e[0].Type != player.EventClearSongData || e[1].Data.(*player.StatusInfo).Status != "waiting_process" {
+			st, ok := e[0].Data.(*player.StatusInfo)
+			if len(e) != 2 || e[0].Type != player.EventStatusUpdate || !ok || st.Status != "standby" || st.Reason != player.ReasonCDPDisconnected || e[1].Type != player.EventClearSongData {
 				t.Fatalf("stale state: %+v", e)
 			}
 		})

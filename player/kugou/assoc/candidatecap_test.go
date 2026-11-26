@@ -48,7 +48,11 @@ func manyKeysDB(h string, n, others int) *fakeTables {
 }
 
 func cacheTail() []candidate {
-	return []candidate{{"cache2.lrc", SourceCache, 2}, {"cache1.lrc", SourceCache, 1}, {"cache0.lrc", SourceCache, 0}}
+	return []candidate{
+		{Path: "cache2.lrc", Source: SourceCache, UpdateTime: 2},
+		{Path: "cache1.lrc", Source: SourceCache, UpdateTime: 1},
+		{Path: "cache0.lrc", Source: SourceCache, UpdateTime: 0},
+	}
 }
 
 func TestCollectTooManyKeysSkipsManual(t *testing.T) {
@@ -62,8 +66,8 @@ func TestCollectTooManyKeysSkipsManual(t *testing.T) {
 
 	// 64 个：64 条关联在前（最新的在最前），3 条缓存在后，不打日志。
 	out = captureLog(t, func() { got = mustCollect(t, manyKeysDB(h, 64, 0), h) })
-	if len(got) != 67 || got[0] != (candidate{`D:\assoc` + hex32("bb", 63) + ".krc", SourceAssociation, 1063}) ||
-		got[63] != (candidate{`D:\assoc` + hex32("bb", 0) + ".krc", SourceAssociation, 1000}) {
+	if len(got) != 67 || got[0] != (candidate{Path: `D:\assoc` + hex32("bb", 63) + ".krc", Source: SourceAssociation, UpdateTime: 1063}) ||
+		got[63] != (candidate{Path: `D:\assoc` + hex32("bb", 0) + ".krc", Source: SourceAssociation, UpdateTime: 1000}) {
 		t.Fatalf("64 个关联：候选 = %+v", got)
 	}
 	wantCandidates(t, got[64:], cacheTail())
@@ -89,7 +93,7 @@ func TestCollectDuplicateKeysCountOnce(t *testing.T) {
 		}
 	}
 	db := newDB(songTable("LocalFile", a...), songTable("RecentlyPlayedItem", b...), lyricInfo(lyricRow{k, `D:\assoc.krc`, "", 1}))
-	wantCandidates(t, mustCollect(t, db, h), []candidate{{`D:\assoc.krc`, SourceAssociation, 1}})
+	wantCandidates(t, mustCollect(t, db, h), []candidate{{Path: `D:\assoc.krc`, Source: SourceAssociation, UpdateTime: 1}})
 }
 
 // cacheRows 返回 hash h 的 n 条缓存，UpdateTime 为 0..n-1，第 i 行的 UpdateTime 为 order(i)。
@@ -108,7 +112,7 @@ func TestCollectCapsCache(t *testing.T) {
 	h := hex32("aa", 1)
 	var want []candidate
 	for ut := 99; ut >= 36; ut-- {
-		want = append(want, candidate{fmt.Sprintf("c%d.lrc", ut), SourceCache, int64(ut)})
+		want = append(want, candidate{Path: fmt.Sprintf("c%d.lrc", ut), Source: SourceCache, UpdateTime: int64(ut)})
 	}
 	shuffled := func(i int) int { return i * 37 % 100 } // 37 与 100 互素，是 0..99 的一个排列
 	orders := map[string]func(int) int{
@@ -138,5 +142,5 @@ func TestCollectCapsCache(t *testing.T) {
 	k := hex32("bb", 1)
 	db := newDB(songTable("LocalFile", songRow{h, k}),
 		lyricInfo(append(cacheRows(h, 100, shuffled), lyricRow{k, `D:\assoc.krc`, "", 0})...))
-	wantCandidates(t, mustCollect(t, db, h), append([]candidate{{`D:\assoc.krc`, SourceAssociation, 0}}, want...))
+	wantCandidates(t, mustCollect(t, db, h), append([]candidate{{Path: `D:\assoc.krc`, Source: SourceAssociation, UpdateTime: 0}}, want...))
 }

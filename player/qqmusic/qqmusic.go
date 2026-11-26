@@ -81,6 +81,8 @@ func (p *QQMusicPlayer) Start() {
 }
 
 func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
+	defer mem.Close()
+
 	// 滑块 AOB 探针已暂时关闭，详见 #39（含完整设计文档与恢复条件）。
 	//
 	// 为什么关：它的产出 SliderVal 全仓库零消费方（mem.go 里声明+赋值，无任何读取方），
@@ -93,9 +95,10 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	// 因为调用点在 84f4dc1 被删了、函数本体留到今天。写那句时的排查粒度是「按播放器
 	// 包」而非「按文件」，给一个函数写注释却没往下翻 20 行。
 	//
-	// 恢复：取消下面三行注释即可。InjectSliderAOB 及其逆向实现原样保留在 mem.go。
-	// 关闭期间 m.sliderPointer 保持 0，mem.go 的 `if m.sliderPointer != 0` 守卫会让
-	// sliderVal 停在 0，无其他副作用。
+	// 恢复：仅取消下面三行注释不够——ConnectQQMusic 已收窄为只读权限（PROCESS_QUERY_INFORMATION |
+	// PROCESS_VM_READ，#233），不再允许写外部进程内存；恢复注入需另行评估写权限。InjectSliderAOB 及其
+	// 逆向实现原样保留在 mem.go。关闭期间 m.sliderPointer 保持 0，mem.go 的 `if m.sliderPointer != 0`
+	// 守卫会让 sliderVal 停在 0，无其他副作用。
 	//
 	// **恢复后如何验证**（别重蹈覆辙）：不能用「同一个 QQ 音乐进程跑前后两轮」来做
 	// A/B —— E9 补丁与 codecave 写在 QQ 音乐地址空间里，本程序退出**不撤销**（全仓无
@@ -1245,21 +1248,23 @@ func (p *QQMusicPlayer) emitNoLyrics(title string, durationSec, positionSec, pro
 }
 
 // toLyricLines converts internal lyricLine to player.LyricLine
-// 逐字音译（RomaDetailed）进 roma_text_detailed：BuildLyricLine 不填它，这里赋值。
+// 逐字音译（RomaDetailed）进 roma_text_detailed、振假名（Furigana）进 furigana：BuildLyricLine 不填它们，这里赋值。
 func toLyricLines(lines []lyricLine, offsetSec float32) []player.LyricLine {
 	out := make([]player.LyricLine, len(lines))
 	for i, l := range lines {
 		out[i] = player.BuildLyricLine(l.Index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec)
 		out[i].RomaTextDetailed = l.RomaDetailed
+		out[i].Furigana = l.Furigana
 	}
 	return out
 }
 
 // lineUpdate 把一行歌词映射成 lyric_update 的载荷，字段口径同 toLyricLines：两者取自同一份
-// currentLyrics，同一行的逐字音译在 all_lyrics 与 lyric_update 里相同。
+// currentLyrics，同一行的逐字音译与振假名在 all_lyrics 与 lyric_update 里相同。
 func lineUpdate(index int, l lyricLine, offsetSec, playPos, duration float32) *player.LyricUpdate {
 	u := player.BuildLyricUpdate(index, l.Time, l.Text, l.SubText, l.RomaText, l.Detailed, offsetSec, playPos, duration)
 	u.RomaTextDetailed = l.RomaDetailed
+	u.Furigana = l.Furigana
 	return u
 }
 

@@ -13,8 +13,8 @@ package wesing
 // 门禁只查形状：本包非测试文件里 player.EventLyricIdle 与字面量 "lyric_idle" 只出现在 idleNotice 的 emit 方法里；
 // runSession 里含 startCoverFetch 调用语句的那个语句块（本首宣告所在的块）有一条顶层的 x.announced() 调用语句。
 // 经变量转手的事件类型、emit 的调用点在哪、调了几次都不查。调用处传入的须是返回入队结果的 TryEmit：emit 的
-// 参数类型带 bool 返回值，传 p.Emit 编译不过，门禁不另查。runSession 的状态机（lastPhase）不在序列测试之内，
-// 「会话开始时窗口未开不发」靠 lastPhase 的零值即 PhaseStandby（proc/memory.go 的 PlayPhase）。
+// 参数类型带 bool 返回值，传 p.Emit 编译不过，门禁不另查。runSession 连上时窗口已关即报 window_not_open 且不发
+// lyric_idle（lastPhase 初值为 PlayPhase(-1)，idle 初值为 idleNotice{sent: true}，#231），由 startstatus_test.go 守。
 
 import (
 	"fmt"

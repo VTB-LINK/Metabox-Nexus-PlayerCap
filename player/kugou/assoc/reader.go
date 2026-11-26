@@ -1,7 +1,8 @@
 package assoc
 
-// 本文件是后台读取者（设计 §6.7「读取者」）：每个酷狗会话一个 goroutine，承担确认（§6.2）、读库（§6.4）、
-// 解析（§6.5、§6.6）与播放中监视库文件的全部文件操作。会话的轮询线程只写入 hash、非阻塞地取结果，不做文件 IO。
+// 本文件是后台读取者（设计 §6.2～§6.7）：每个酷狗会话一个 goroutine，承担确认、内存只读快照、
+// 换歌双拍归属核验、单飞后台文件/队列表 I/O、以及降级后的数据库解析与监视。
+// 会话的轮询线程只写入 hash、非阻塞地取结果，不做文件或进程内存 I/O。
 
 import (
 	"context"
@@ -11,17 +12,19 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player/kugou/kgdb"
+	klyric "Metabox-Nexus-PlayerCap/player/kugou/lyric"
 	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
-// 读取者的节奏与上限（设计 §6.2「时机」、§6.7、§9 第 3 条）。
+// 读取者的节奏与上限（设计 §6.2、§6.3、§6.4.2、§6.7、§9 第 3 条）。
 const (
 	statEvery         = time.Second     // 确认之后 stat 库文件的间隔，也是库的（大小, 修改时间）须稳定的时长
 	retryEvery        = 5 * time.Second // 结果带 Retry 时重新解析的间隔
@@ -31,10 +34,53 @@ const (
 	maxNotReady       = 30               // 确认未就绪累计这么多次即放弃
 	maxDetailsPerSong = 4                // 每首歌至多打这么多条 Detail，同一原因只打一条
 	dbFileName        = "KGMusicV3.db"
+
+	memPollEvery   = 200 * time.Millisecond // 内存模式常规轮询间隔
+	memFastRetry   = 50 * time.Millisecond  // 内存未对齐/撕裂/搜词中/虚表异常的快速重试间隔
+	memSettleDelay = 25 * time.Millisecond  // 换歌归属双拍稳定窗口
+	playGrace      = 5 * time.Second        // PlayedAt 相对切歌时刻的容差
+	maxMemNotReady = 10                     // 打开进程内存未就绪的上限次数
+	maxBadVtable   = 3                      // 运行期连续虚表校验失败降级阈值
 )
+
+// cacheFileHashRe 匹配酷狗缓存歌词文件名：<name>-<32hex>-<digits>-<8hex>.(krc|lrc)。
+var cacheFileHashRe = regexp.MustCompile(`(?i)^.+-([0-9a-f]{32})-\d+-[0-9a-f]{8}\.(?:krc|lrc)$`)
+
+// fileTime 把时刻换算成 LastPlayTime 的单位：1601-01-01 UTC 起的 100 ns 计数。
+func fileTime(t time.Time) int64 {
+	const unixFrom1601 = 11644473600
+	return (t.Unix()+unixFrom1601)*10_000_000 + int64(t.Nanosecond()/100)
+}
+
+// cacheEmbeddedHash 判断 path 是否位于 lyricDir 之内且文件名符合酷狗缓存格式，若是则返回内嵌的 32 位 hex hash。
+func cacheEmbeddedHash(lyricDir, path string) (string, bool) {
+	if lyricDir == "" || path == "" {
+		return "", false
+	}
+	dir := filepath.Clean(lyricDir)
+	p := filepath.Clean(path)
+	if !filepath.IsAbs(dir) || !filepath.IsAbs(p) {
+		return "", false
+	}
+	prefix := strings.ToLower(dir)
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	if !strings.HasPrefix(strings.ToLower(p), prefix) {
+		return "", false
+	}
+	m := cacheFileHashRe.FindStringSubmatch(filepath.Base(p))
+	if len(m) != 2 {
+		return "", false
+	}
+	return m[1], true
+}
 
 // readers 是存活的读取者 goroutine 数，start 保证至多为 1。
 var readers atomic.Int32
+
+// diskIOActive 是全局存活的后台磁盘 I/O goroutine 数，全局同时至多为 1（设计 §6.6.1）。
+var diskIOActive atomic.Int32
 
 // reportOnce 即 telemetry.ReportOnce，测试替换以计数。
 var reportOnce = telemetry.ReportOnce
@@ -43,6 +89,8 @@ var reportOnce = telemetry.ReportOnce
 type deps struct {
 	confirm    func() (watchdog.Confirmed, error)
 	candidates func(ctx context.Context, dbPath, hash string) (collected, error)
+	playingRow func(ctx context.Context, dbPath, hash string) (playing, error)
+	openMem    func(pid uint32) (memSource, memOpenKind, string, error)
 	readFile   func(string) ([]byte, error)
 	stat       func(string) (int64, time.Time, error)
 }
@@ -100,6 +148,10 @@ func Start(ctx context.Context) *Reader {
 		candidates: func(ctx context.Context, dbPath, hash string) (collected, error) {
 			return readCandidates(ctx, dbPath, hash, realFS)
 		},
+		playingRow: func(ctx context.Context, dbPath, hash string) (playing, error) {
+			return readPlayingRow(ctx, dbPath, hash, realFS)
+		},
+		openMem:  openProcessMem,
 		readFile: readLyricFile,
 		stat:     statFile,
 	})
@@ -111,6 +163,17 @@ func statFile(path string) (int64, time.Time, error) {
 		return 0, time.Time{}, err
 	}
 	return fi.Size(), fi.ModTime(), nil
+}
+
+func statWith(fn func(string) (int64, time.Time, error), path string) fileStat {
+	if fn == nil {
+		return fileStat{}
+	}
+	size, mod, err := fn(path)
+	if err != nil {
+		return fileStat{}
+	}
+	return fileStat{size: size, mod: mod.UnixNano(), ok: true}
 }
 
 func start(ctx context.Context, d deps) *Reader {
@@ -135,43 +198,358 @@ type fileStat struct {
 	ok   bool
 }
 
+// settleState 是换歌归属双拍稳定窗口的基准快照。
+type settleState struct {
+	songItemPtr uintptr
+	clyricPtr   uintptr
+	taskID      uint32
+	unassoc     bool
+	assocPath   string
+	at          time.Time
+	armed       bool
+}
+
+// parsedCacheKey 标识内存模式下已解析的一份本地歌词文件。
+type parsedCacheKey struct {
+	clyricPtr uintptr
+	assocPath string
+	path      string
+}
+
+// parsedFileCache 是内存模式下的单文件解析缓存（零 stat 复用）。
+type parsedFileCache struct {
+	valid   bool
+	key     parsedCacheKey
+	lines   []klyric.Line
+	retry   bool
+	retryAt time.Time
+}
+
+// memSentSig 是内存模式上次发出的结果签名，用于 200ms 轮询去重。
+type memSentSig struct {
+	sent           bool
+	hash           string
+	kind           Kind
+	cacheKey       parsedCacheKey
+	linesLen       int
+	lyricOffsetMs  int
+	hasMemoryLyric bool
+	source         Source
+	retry          bool
+	playedAt       int64
+	localFile      bool
+}
+
+// dialogUnassocGuard 是磁盘降级模式下关联弹窗取消关联哨兵的代次锁存状态（设计 §6.4.3）。
+type dialogUnassocGuard struct {
+	hash            string
+	playedAt        int64
+	sawNonDialogKey bool
+	latched         bool
+}
+
+type fileIOReq struct {
+	gen  uint64
+	hash string
+	key  parsedCacheKey
+	path string
+}
+
+type dbIOReq struct {
+	gen        uint64
+	hash       string
+	dbPath     string
+	forceRead  bool
+	prevStat   fileStat
+	parsedStat fileStat
+}
+
+type diskIOEvent struct {
+	isFile bool
+
+	gen   uint64
+	hash  string
+	key   parsedCacheKey
+	lines []klyric.Line
+	retry bool
+
+	dbGen      uint64
+	dbHash     string
+	prevStat   fileStat
+	parsedStat fileStat
+	playing    playing
+	hasPlaying bool
+	dbFailed   bool
+}
+
+// diskIO 是内存模式下解耦磁盘 I/O 的单飞执行器：全局同时至多运行 1 个后台 goroutine，
+// 以两个覆盖槽承接歌词文件读取与队列表 stat/查询，避免失联网络盘阻塞纯内存轮询。
+type diskIO struct {
+	readFile   func(string) ([]byte, error)
+	stat       func(string) (int64, time.Time, error)
+	playingRow func(ctx context.Context, dbPath, hash string) (playing, error)
+
+	doneCh chan diskIOEvent
+
+	mu          sync.Mutex
+	pendingFile *fileIOReq
+	pendingDB   *dbIOReq
+	running     bool
+}
+
+func newDiskIO(d deps) *diskIO {
+	return &diskIO{
+		readFile:   d.readFile,
+		stat:       d.stat,
+		playingRow: d.playingRow,
+		doneCh:     make(chan diskIOEvent, 4),
+	}
+}
+
+func (io *diskIO) submitFile(ctx context.Context, req fileIOReq) bool {
+	io.mu.Lock()
+	if io.running {
+		io.pendingFile = &req
+		io.mu.Unlock()
+		return true
+	}
+	if !diskIOActive.CompareAndSwap(0, 1) {
+		io.pendingFile = nil
+		io.mu.Unlock()
+		return false
+	}
+	io.pendingFile = &req
+	io.running = true
+	io.mu.Unlock()
+	go func() {
+		defer telemetry.Guard()
+		io.run(ctx)
+	}()
+	return true
+}
+
+func (io *diskIO) clearPendingFile() {
+	io.mu.Lock()
+	io.pendingFile = nil
+	io.mu.Unlock()
+}
+
+func (io *diskIO) clearPendingDB() {
+	io.mu.Lock()
+	io.pendingDB = nil
+	io.mu.Unlock()
+}
+
+func (io *diskIO) submitDB(ctx context.Context, req dbIOReq) bool {
+	io.mu.Lock()
+	if io.running {
+		io.pendingDB = &req
+		io.mu.Unlock()
+		return true
+	}
+	if !diskIOActive.CompareAndSwap(0, 1) {
+		io.pendingDB = nil
+		io.mu.Unlock()
+		return false
+	}
+	io.pendingDB = &req
+	io.running = true
+	io.mu.Unlock()
+	go func() {
+		defer telemetry.Guard()
+		io.run(ctx)
+	}()
+	return true
+}
+
+func (io *diskIO) run(ctx context.Context) {
+	cleared := false
+	defer func() {
+		if !cleared {
+			io.mu.Lock()
+			io.running = false
+			diskIOActive.Add(-1)
+			io.mu.Unlock()
+		}
+	}()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		io.mu.Lock()
+		var fReq *fileIOReq
+		var dbReq *dbIOReq
+		if io.pendingFile != nil {
+			fReq = io.pendingFile
+			io.pendingFile = nil
+		} else if io.pendingDB != nil {
+			dbReq = io.pendingDB
+			io.pendingDB = nil
+		} else {
+			io.running = false
+			diskIOActive.Add(-1)
+			cleared = true
+			io.mu.Unlock()
+			return
+		}
+		io.mu.Unlock()
+
+		var ev diskIOEvent
+		if fReq != nil {
+			ev = io.execFile(ctx, *fReq)
+		} else {
+			ev = io.execDB(ctx, *dbReq)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case io.doneCh <- ev:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (io *diskIO) execFile(ctx context.Context, req fileIOReq) diskIOEvent {
+	ev := diskIOEvent{isFile: true, gen: req.gen, hash: req.hash, key: req.key}
+	if ctx.Err() != nil || io.readFile == nil {
+		return ev
+	}
+	b, err := io.readFile(req.path)
+	if ctx.Err() != nil {
+		return ev
+	}
+	if err != nil {
+		ev.retry = !errors.Is(err, klyric.ErrLyricTooLarge) && !errors.Is(err, errNotDiskFile)
+		return ev
+	}
+	lines, err := klyric.ParseLocal(b)
+	if err == nil && len(lines) > 0 {
+		ev.lines = lines
+	}
+	return ev
+}
+
+func (io *diskIO) execDB(ctx context.Context, req dbIOReq) diskIOEvent {
+	ev := diskIOEvent{
+		isFile:     false,
+		dbGen:      req.gen,
+		dbHash:     req.hash,
+		prevStat:   req.prevStat,
+		parsedStat: req.parsedStat,
+	}
+	if ctx.Err() != nil || io.playingRow == nil {
+		return ev
+	}
+	s := statWith(io.stat, req.dbPath)
+	needRead := req.forceRead || (s.ok && s == req.prevStat && s != req.parsedStat)
+	ev.prevStat = s
+	if !needRead {
+		return ev
+	}
+	p, err := io.playingRow(ctx, req.dbPath, req.hash)
+	if ctx.Err() != nil {
+		return ev
+	}
+	if err != nil {
+		ev.dbFailed = true
+		return ev
+	}
+	ev.parsedStat = s
+	ev.playing = p
+	ev.hasPlaying = true
+	return ev
+}
+
 // worker 是读取者 goroutine 的状态，只由该 goroutine 访问。
 //
-// 状态：未确认（conf 为 nil）→ 已确认，或停用（disabled）。未确认时启动即确认，此后每次写入 hash 与每
-// confirmEvery 各确认一次；已确认且有 hash 时每 statEvery stat 一次库文件，到 retryAt 重新解析当前 hash；
-// 停用后只对写入的 hash 回停用。没有 hash 时停用发出的结果 Hash 为空，会话按 hash 不符丢弃。
+// 状态：未确认（conf 为 nil）→ 已确认，或停用（disabled）。已确认后优先进入内存读取模式（mem != nil），
+// 不支持或连续虚表失败时自动降级回数据库读取模式（mem == nil）。
 type worker struct {
 	r *Reader
 	d deps
 
 	conf        *watchdog.Confirmed // 确认通过之前为 nil
 	dbPath      string
+	lastPID     uint32
 	notReady    int       // 确认未就绪的累计次数
 	lastConfirm time.Time // 上次确认返回的时刻
 	disabled    bool
 
 	hash     string        // 当前 hash；为空即会话还没写入过
-	parsed   fileStat      // 最近一次解析之前 stat 所得
-	prev     fileStat      // 最近一拍 stat 所得
-	nextStat time.Time     // 下一次 stat 的时刻
-	retryAt  time.Time     // 重新解析当前 hash 的时刻（待重试或暂时失败的退避）；零值即不重试
-	backoff  time.Duration // 最近一次暂时失败的退避；0 即下一次从 backoffMin 起
+	parsed   fileStat      // 最近一次解析之前 stat 所得（磁盘模式）
+	prev     fileStat      // 最近一拍 stat 所得（磁盘模式）
+	nextStat time.Time     // 下一次 stat 的时刻（磁盘模式）
+	retryAt  time.Time     // 重新解析当前 hash 的时刻（磁盘模式）；零值即不重试
+	backoff  time.Duration // 最近一次暂时失败的退避（磁盘模式）；0 即下一次从 backoffMin 起
 	logged   map[string]bool
+
+	dialogGuard dialogUnassocGuard
+
+	// 内存模式生命周期与换歌归属状态
+	mem            memSource
+	memUnsupported bool
+	memNotReady    int
+	badVtableCount int
+
+	prevHash            string
+	hashSettled         bool
+	settleBase          settleState
+	songStart           time.Time
+	prevSongPlayedAt    int64
+	curPlayedAt         int64
+	curLocalFile        bool
+	lastMemSent         memSentSig
+	lastMemSnap         memSnapshot
+	hasLastMemSnap      bool
+	memNextPoll         time.Time
+	memNextDBStat       time.Time
+	memPrevDBStat       fileStat
+	memParsedDBStat     fileStat
+	memDBGen            uint64
+	memDBInFlight       bool
+	memDBForcePending   bool
+	memDBBackoff        time.Duration
+	memNoLyricRequested bool
+
+	disk            *diskIO
+	memFileGen      uint64
+	memFileInFlight *fileIOReq
+	memParsedCache  parsedFileCache
 }
 
 func (w *worker) run(ctx context.Context) {
+	defer w.closeMem()
 	for {
 		var due <-chan time.Time
+		var timer *time.Timer
 		if at, ok := w.next(); ok {
-			due = time.After(time.Until(at))
+			timer = time.NewTimer(time.Until(at))
+			due = timer.C
+		}
+		var diskDone <-chan diskIOEvent
+		if w.disk != nil {
+			diskDone = w.disk.doneCh
 		}
 		select {
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return
 		case <-w.r.wake:
+			if timer != nil {
+				timer.Stop()
+			}
 			if h := w.r.take(); h != "" {
 				w.onHash(ctx, h)
 			}
+		case ev := <-diskDone:
+			if timer != nil {
+				timer.Stop()
+			}
+			w.onDiskIO(ctx, ev)
 		case <-due:
 			if h := w.r.take(); h != "" {
 				w.onHash(ctx, h) // 新 hash 优先，不再为旧 hash 做定时处理
@@ -192,37 +570,152 @@ func (w *worker) next() (time.Time, bool) {
 		return w.lastConfirm.Add(confirmEvery), true
 	case w.hash == "":
 		return time.Time{}, false
+	case w.mem != nil:
+		at := w.memNextPoll
+		if w.d.playingRow != nil && !w.memDBInFlight && !w.memNextDBStat.IsZero() && (at.IsZero() || w.memNextDBStat.Before(at)) {
+			at = w.memNextDBStat
+		}
+		return at, true
 	case !w.retryAt.IsZero() && w.retryAt.Before(w.nextStat):
 		return w.retryAt, true
 	}
 	return w.nextStat, true
 }
 
-// onHash 处理会话写入的新 hash：复位退避、待重试与日志额度，停用即回停用，未确认先确认，确认通过即解析。
+func (w *worker) closeMem() {
+	if w.mem != nil {
+		w.mem.Close()
+		w.mem = nil
+	}
+}
+
+func (w *worker) ensureDiskIO() *diskIO {
+	if w.disk == nil {
+		w.disk = newDiskIO(w.d)
+	}
+	return w.disk
+}
+
+func (w *worker) tryOpenMem() {
+	if w.conf == nil || w.memUnsupported || w.mem != nil || w.d.openMem == nil {
+		return
+	}
+	src, kind, fp, err := w.d.openMem(w.conf.PID)
+	switch kind {
+	case memOpenOK:
+		if src == nil {
+			return
+		}
+		w.mem = src
+		w.memNotReady = 0
+		w.badVtableCount = 0
+		log.Info("KuGou memory lyric reader enabled (KuGou %s, %s)", w.conf.Version, fp)
+	case memOpenUnsupported:
+		w.memUnsupported = true
+		log.Info("KuGou memory lyric reader does not recognize this version (KuGou %s, %s); falling back to database mode", w.conf.Version, fp)
+	case memOpenNotReady:
+		w.memNotReady++
+		if w.memNotReady >= maxMemNotReady {
+			w.memUnsupported = true
+		}
+	default: // memOpenFailed
+		if err != nil {
+			w.detailOnce("Failed to open KuGou process memory; using database mode: %v", err)
+		}
+	}
+}
+
+// onHash 处理会话写入的新 hash：复位退避、待重试与日志额度，停用即回停用，未确认先确认，确认通过即按当前模式启动。
 func (w *worker) onHash(ctx context.Context, h string) {
-	w.hash, w.retryAt, w.backoff, w.logged = h, time.Time{}, 0, nil
+	if h != w.hash {
+		if w.hash != "" {
+			w.prevHash = w.hash
+		}
+		w.hash = h
+		w.hashSettled = false
+		w.settleBase = settleState{}
+		w.songStart = time.Now()
+		w.prevSongPlayedAt = max(w.prevSongPlayedAt, w.curPlayedAt)
+		w.curPlayedAt = 0
+		w.curLocalFile = false
+		w.lastMemSent = memSentSig{}
+		w.lastMemSnap = memSnapshot{}
+		w.hasLastMemSnap = false
+		w.memNextPoll = time.Time{}
+		w.memFileGen++
+		w.memFileInFlight = nil
+		w.memParsedCache = parsedFileCache{}
+		w.memDBGen++
+		w.memDBInFlight = false
+		w.memDBForcePending = false
+		if w.disk != nil {
+			w.disk.clearPendingFile()
+			w.disk.clearPendingDB()
+		}
+		w.memNoLyricRequested = false
+		w.memNextDBStat = time.Time{}
+		w.memPrevDBStat = fileStat{}
+		w.memParsedDBStat = fileStat{}
+		w.memDBBackoff = 0
+	}
+	w.retryAt, w.backoff, w.logged = time.Time{}, 0, nil
 	switch {
 	case w.disabled:
 		w.r.send(Result{Hash: h, Kind: KindDisabled})
 	case w.conf != nil || w.confirm(ctx):
-		w.parse(ctx)
+		w.startHashInCurrentMode(ctx)
 	case !w.disabled && ctx.Err() == nil:
 		w.r.send(Result{Hash: h, Kind: KindNotConfirmed})
 	}
 }
 
-// onTimer 做到期的定时处理：未确认时再确认一次，通过且已有 hash 即解析（没有 hash 只记下确认结果、不发结果）；
-// 已确认时 stat 库文件，（大小, 修改时间）与上次解析时不同、且与上一拍相同即重新解析，到了 retryAt 同样重新解析。
+func (w *worker) startHashInCurrentMode(ctx context.Context) {
+	if w.mem == nil && !w.memUnsupported && w.d.openMem != nil {
+		w.tryOpenMem()
+	}
+	if w.mem != nil {
+		if w.d.playingRow != nil {
+			w.submitMemDB(ctx, true)
+		}
+		w.pollMem(ctx)
+		return
+	}
+	w.parse(ctx)
+}
+
+// onTimer 做到期的定时处理：未确认时再确认一次；内存模式下执行纯内存轮询与 1s 后台 DB stat 提交；
+// 磁盘模式下 stat 库文件，（大小, 修改时间）稳定变化或到 retryAt 时重新解析。
 func (w *worker) onTimer(ctx context.Context) {
 	if w.conf == nil {
 		if w.confirm(ctx) && w.hash != "" {
-			w.parse(ctx)
+			w.startHashInCurrentMode(ctx)
+		}
+		return
+	}
+	if w.mem != nil {
+		now := time.Now()
+		if w.d.playingRow != nil && !w.memDBInFlight && !w.memNextDBStat.IsZero() && !now.Before(w.memNextDBStat) {
+			force := w.memDBForcePending
+			w.memDBForcePending = false
+			if !w.submitMemDB(ctx, force) && force {
+				w.memDBForcePending = true
+			}
+		}
+		if w.memNextPoll.IsZero() || !now.Before(w.memNextPoll) {
+			w.pollMem(ctx)
 		}
 		return
 	}
 	now := time.Now()
 	due := !w.retryAt.IsZero() && !now.Before(w.retryAt)
 	if !now.Before(w.nextStat) {
+		if !w.memUnsupported && w.d.openMem != nil {
+			w.tryOpenMem()
+			if w.mem != nil {
+				w.startHashInCurrentMode(ctx)
+				return
+			}
+		}
 		s := w.stat()
 		w.nextStat = now.Add(statEvery)
 		due = due || (s.ok && s == w.prev && s != w.parsed)
@@ -231,6 +724,348 @@ func (w *worker) onTimer(ctx context.Context) {
 	if due {
 		w.parse(ctx)
 	}
+}
+
+func (w *worker) pollMem(ctx context.Context) {
+	if w.mem == nil || w.conf == nil || w.hash == "" {
+		return
+	}
+	snap, st := w.mem.ReadSnapshot()
+	now := time.Now()
+	switch st {
+	case memStatusProcessGone:
+		w.closeMem()
+		w.conf = nil
+		w.notReady = 0
+		w.memNotReady = 0
+		w.badVtableCount = 0
+		w.memUnsupported = false
+		w.hashSettled = false
+		w.settleBase = settleState{}
+		w.lastMemSnap = memSnapshot{}
+		w.hasLastMemSnap = false
+		w.lastMemSent = memSentSig{}
+		w.memNextPoll = time.Time{}
+		w.memNextDBStat = time.Time{}
+		w.memPrevDBStat = fileStat{}
+		w.memParsedDBStat = fileStat{}
+		w.memDBGen++
+		w.memDBInFlight = false
+		w.memDBForcePending = false
+		w.memDBBackoff = 0
+		w.memFileGen++
+		w.memFileInFlight = nil
+		w.memParsedCache = parsedFileCache{}
+		if w.disk != nil {
+			w.disk.clearPendingFile()
+			w.disk.clearPendingDB()
+		}
+		return
+	case memStatusBadVtable:
+		w.badVtableCount++
+		if w.badVtableCount >= maxBadVtable {
+			w.closeMem()
+			log.Warn("KuGou memory lyric reader vtable check failed %d times in a row; falling back to database mode", w.badVtableCount)
+			w.memUnsupported = true
+			w.hasLastMemSnap = false
+			w.memNextPoll = time.Time{}
+			w.memNextDBStat = time.Time{}
+			w.memDBGen++
+			w.memDBInFlight = false
+			w.memDBForcePending = false
+			w.memDBBackoff = 0
+			if w.disk != nil {
+				w.disk.clearPendingDB()
+			}
+			w.parse(ctx)
+			return
+		}
+		w.memNextPoll = now.Add(memFastRetry)
+		return
+	case memStatusNotReady, memStatusTorn:
+		w.badVtableCount = 0
+		w.memNextPoll = now.Add(memFastRetry)
+		return
+	}
+
+	w.badVtableCount = 0
+	targetHash := strings.TrimSpace(w.hash)
+
+	// 第一关：Hash 匹配与缓存内嵌 Hash 确定性证伪。
+	if snap.SongItemPtr == 0 || !strings.EqualFold(strings.TrimSpace(snap.CurrentSongHash), targetHash) {
+		w.settleBase = settleState{}
+		w.memNextPoll = now.Add(memFastRetry)
+		return
+	}
+	if !snap.IsUserUnassociated && snap.CLyricPtr != 0 && snap.KrcID != 0 {
+		if embeddedHash, ok := cacheEmbeddedHash(w.conf.LyricDir, snap.LyricFilePath); ok && !strings.EqualFold(embeddedHash, targetHash) {
+			w.hashSettled = false
+			w.settleBase = settleState{}
+			w.memNextPoll = now.Add(memFastRetry)
+			return
+		}
+	}
+
+	// 第二关：切歌进入的双拍稳定窗口启发式。
+	if w.prevHash != "" && !w.hashSettled {
+		if !w.settleBase.armed {
+			w.settleBase = settleState{
+				songItemPtr: snap.SongItemPtr,
+				clyricPtr:   snap.CLyricPtr,
+				taskID:      snap.TaskID,
+				unassoc:     snap.IsUserUnassociated,
+				assocPath:   snap.AssocPath,
+				at:          now,
+				armed:       true,
+			}
+			w.memNextPoll = now.Add(memSettleDelay)
+			return
+		}
+		same := w.settleBase.songItemPtr == snap.SongItemPtr &&
+			w.settleBase.clyricPtr == snap.CLyricPtr &&
+			w.settleBase.taskID == snap.TaskID &&
+			w.settleBase.unassoc == snap.IsUserUnassociated &&
+			w.settleBase.assocPath == snap.AssocPath
+		if !same {
+			w.settleBase = settleState{
+				songItemPtr: snap.SongItemPtr,
+				clyricPtr:   snap.CLyricPtr,
+				taskID:      snap.TaskID,
+				unassoc:     snap.IsUserUnassociated,
+				assocPath:   snap.AssocPath,
+				at:          now,
+				armed:       true,
+			}
+			w.memNextPoll = now.Add(memSettleDelay)
+			return
+		}
+		if deadline := w.settleBase.at.Add(memSettleDelay); now.Before(deadline) {
+			w.memNextPoll = deadline
+			return
+		}
+		w.hashSettled = true
+	}
+
+	w.lastMemSnap = snap
+	w.hasLastMemSnap = true
+	interval := w.evaluateMemSnap(ctx, snap, now)
+	w.memNextPoll = now.Add(interval)
+}
+
+func (w *worker) evaluateMemSnap(ctx context.Context, snap memSnapshot, now time.Time) time.Duration {
+	// 1. 取消关联最高优先：立即作废在飞文件读并清词，不受卡死文件 I/O 阻塞。
+	if snap.IsUserUnassociated || snap.AssocPath == "用户取消关联" {
+		if w.memFileInFlight != nil || !w.lastMemSent.sent || w.lastMemSent.kind != KindUnassociated {
+			w.memFileGen++
+			w.memFileInFlight = nil
+			if w.disk != nil {
+				w.disk.clearPendingFile()
+			}
+		}
+		w.sendMem(Result{
+			Hash:      w.hash,
+			Kind:      KindUnassociated,
+			PlayedAt:  w.curPlayedAt,
+			LocalFile: w.curLocalFile,
+		}, parsedCacheKey{})
+		return memPollEvery
+	}
+
+	// 2. 已加载 CLyric 且存在磁盘路径或内存行向量。
+	if snap.CLyricPtr != 0 && (snap.LyricFilePath != "" || snap.VecBegin != snap.VecEnd) {
+		off := clampLyricOffsetMs(snap.LyricOffsetMs)
+		src := SourceAssociation
+		if _, ok := cacheEmbeddedHash(w.conf.LyricDir, snap.LyricFilePath); ok {
+			src = SourceCache
+		}
+		if snap.LyricFilePath != "" {
+			key := parsedCacheKey{clyricPtr: snap.CLyricPtr, assocPath: snap.AssocPath, path: snap.LyricFilePath}
+			if w.memParsedCache.valid && w.memParsedCache.key == key {
+				if len(w.memParsedCache.lines) > 0 {
+					w.sendMem(Result{
+						Hash:          w.hash,
+						Kind:          KindFound,
+						Lines:         w.memParsedCache.lines,
+						LyricOffsetMs: off,
+						Source:        src,
+						PlayedAt:      w.curPlayedAt,
+						LocalFile:     w.curLocalFile,
+					}, key)
+				} else {
+					w.sendMem(Result{
+						Hash:           w.hash,
+						Kind:           KindNone,
+						LyricOffsetMs:  off,
+						HasMemoryLyric: snap.VecBegin != snap.VecEnd,
+						Retry:          w.memParsedCache.retry,
+						PlayedAt:       w.curPlayedAt,
+						LocalFile:      w.curLocalFile,
+					}, key)
+				}
+				if w.memParsedCache.retry && !now.Before(w.memParsedCache.retryAt) {
+					w.requestMemFile(ctx, key, snap.LyricFilePath)
+				}
+				return memPollEvery
+			}
+			w.requestMemFile(ctx, key, snap.LyricFilePath)
+			return memPollEvery
+		}
+		w.sendMem(Result{
+			Hash:           w.hash,
+			Kind:           KindNone,
+			LyricOffsetMs:  off,
+			HasMemoryLyric: true,
+			PlayedAt:       w.curPlayedAt,
+			LocalFile:      w.curLocalFile,
+		}, parsedCacheKey{})
+		return memPollEvery
+	}
+
+	// 3. 明确无歌词：立即发 KindNone，并触发一次队列读盘以补齐 PlayedAt/LocalFile。
+	if snap.NoLyricFound {
+		w.sendMem(Result{
+			Hash:      w.hash,
+			Kind:      KindNone,
+			PlayedAt:  w.curPlayedAt,
+			LocalFile: w.curLocalFile,
+		}, parsedCacheKey{})
+		if !w.memNoLyricRequested && w.d.playingRow != nil {
+			if w.submitMemDB(ctx, true) || w.memDBInFlight {
+				w.memNoLyricRequested = true
+			}
+		}
+		return memPollEvery
+	}
+
+	// 4. 其余（搜词进行中）：不发 KindNone，快速复检。
+	return memFastRetry
+}
+
+func (w *worker) requestMemFile(ctx context.Context, key parsedCacheKey, path string) {
+	if w.memFileInFlight != nil && w.memFileInFlight.gen == w.memFileGen && w.memFileInFlight.key == key {
+		return
+	}
+	if w.memFileInFlight != nil && w.memFileInFlight.key != key {
+		w.memFileGen++
+	}
+	req := fileIOReq{gen: w.memFileGen, hash: w.hash, key: key, path: path}
+	if w.ensureDiskIO().submitFile(ctx, req) {
+		w.memFileInFlight = &req
+	}
+}
+
+func (w *worker) submitMemDB(ctx context.Context, forceRead bool) bool {
+	if w.d.playingRow == nil || w.dbPath == "" || w.hash == "" {
+		return false
+	}
+	if w.memDBInFlight {
+		if forceRead {
+			w.memDBForcePending = true
+		}
+		return false
+	}
+	req := dbIOReq{
+		gen:        w.memDBGen,
+		hash:       w.hash,
+		dbPath:     w.dbPath,
+		forceRead:  forceRead,
+		prevStat:   w.memPrevDBStat,
+		parsedStat: w.memParsedDBStat,
+	}
+	if w.ensureDiskIO().submitDB(ctx, req) {
+		w.memDBInFlight = true
+		w.memNextDBStat = time.Time{}
+		return true
+	}
+	w.memNextDBStat = time.Now().Add(statEvery)
+	return false
+}
+
+func (w *worker) onDiskIO(ctx context.Context, ev diskIOEvent) {
+	if w.mem == nil || w.disabled || ctx.Err() != nil {
+		return
+	}
+	if ev.isFile {
+		if ev.gen != w.memFileGen || ev.hash != w.hash {
+			return
+		}
+		now := time.Now()
+		var retryAt time.Time
+		if ev.retry {
+			retryAt = now.Add(retryEvery)
+		}
+		w.memParsedCache = parsedFileCache{
+			valid:   true,
+			key:     ev.key,
+			lines:   ev.lines,
+			retry:   ev.retry,
+			retryAt: retryAt,
+		}
+		if w.memFileInFlight != nil && w.memFileInFlight.gen == ev.gen && w.memFileInFlight.key == ev.key {
+			w.memFileInFlight = nil
+		}
+		if w.hasLastMemSnap {
+			w.evaluateMemSnap(ctx, w.lastMemSnap, now)
+		}
+		return
+	}
+
+	if ev.dbGen != w.memDBGen || ev.dbHash != w.hash {
+		return
+	}
+	w.memDBInFlight = false
+	w.memPrevDBStat = ev.prevStat
+	if ev.dbFailed {
+		w.memDBBackoff = min(max(2*w.memDBBackoff, backoffMin), backoffMax)
+		w.memNextDBStat = time.Now().Add(w.memDBBackoff)
+		return
+	}
+	w.memParsedDBStat = ev.parsedStat
+	if ev.hasPlaying {
+		w.memDBBackoff = 0
+		p := ev.playing
+		if p.played > 0 &&
+			p.played > w.prevSongPlayedAt &&
+			p.played >= fileTime(w.songStart.Add(-playGrace)) &&
+			p.played > w.curPlayedAt {
+			w.curPlayedAt = p.played
+			w.curLocalFile = filepath.IsAbs(p.path)
+			if w.hasLastMemSnap {
+				w.evaluateMemSnap(ctx, w.lastMemSnap, time.Now())
+			}
+		}
+	}
+	if !w.memDBInFlight {
+		if w.memDBForcePending {
+			w.memDBForcePending = false
+			if !w.submitMemDB(ctx, true) {
+				w.memDBForcePending = true
+			}
+		} else {
+			w.memNextDBStat = time.Now().Add(statEvery)
+		}
+	}
+}
+
+func (w *worker) sendMem(res Result, cacheKey parsedCacheKey) {
+	sig := memSentSig{
+		sent:           true,
+		hash:           res.Hash,
+		kind:           res.Kind,
+		cacheKey:       cacheKey,
+		linesLen:       len(res.Lines),
+		lyricOffsetMs:  res.LyricOffsetMs,
+		hasMemoryLyric: res.HasMemoryLyric,
+		source:         res.Source,
+		retry:          res.Retry,
+		playedAt:       res.PlayedAt,
+		localFile:      res.LocalFile,
+	}
+	if sig == w.lastMemSent {
+		return
+	}
+	w.lastMemSent = sig
+	w.r.send(res)
 }
 
 // confirm 确认一次，返回是否已确认。未就绪累计到 maxNotReady 次、或不支持，即停用（停用时已对当前 hash 发停用）。
@@ -243,8 +1078,17 @@ func (w *worker) confirm(ctx context.Context) bool {
 	}
 	switch {
 	case err == nil:
-		w.conf, w.dbPath = &c, filepath.Join(c.DataDir, dbFileName)
+		if (w.mem != nil && c.PID != w.mem.PID()) || (w.lastPID != 0 && c.PID != w.lastPID) {
+			w.closeMem()
+			w.memUnsupported = false
+			w.memNotReady = 0
+			w.badVtableCount = 0
+		}
+		w.conf, w.dbPath, w.lastPID = &c, filepath.Join(c.DataDir, dbFileName), c.PID
 		log.Info("Local lyric association enabled (KuGou %s, data directory %s)", c.Version, c.DataDir)
+		if !w.memUnsupported && w.mem == nil && w.d.openMem != nil {
+			w.tryOpenMem()
+		}
 		return true
 	case errors.Is(err, watchdog.ErrConfirmUnsupported):
 		w.disable(err)
@@ -270,7 +1114,28 @@ func (w *worker) parse(ctx context.Context) {
 	var res Result
 	switch {
 	case err == nil:
-		res = pick(col, w.conf.LyricDir, w.readUnlessCanceled(ctx))
+		if col.playedAt > 0 {
+			g := &w.dialogGuard
+			if !strings.EqualFold(w.hash, g.hash) || col.playedAt != g.playedAt {
+				*g = dialogUnassocGuard{
+					hash:            w.hash,
+					playedAt:        col.playedAt,
+					sawNonDialogKey: col.pKey != unassocDialogKey,
+					latched:         false,
+				}
+			} else if col.pKey != unassocDialogKey {
+				g.sawNonDialogKey = true
+				g.latched = false
+			} else if g.sawNonDialogKey {
+				g.latched = true
+			}
+		}
+		if !col.menuUnassoc && col.pKey == unassocDialogKey && w.dialogGuard.latched &&
+			strings.EqualFold(w.hash, w.dialogGuard.hash) && col.playedAt == w.dialogGuard.playedAt {
+			res = Result{Kind: KindUnassociated, PlayedAt: col.playedAt, LocalFile: col.localFile}
+		} else {
+			res = pick(col, w.conf.LyricDir, w.readUnlessCanceled(ctx))
+		}
 		if ctx.Err() != nil {
 			// 取消之后 pick 把各候选的读取都记作暂缺（置 Retry）；结果不发，状态不改，无妨。
 			return
@@ -319,6 +1184,7 @@ func (w *worker) readUnlessCanceled(ctx context.Context) func(string) ([]byte, e
 // disable 停用本会话的读取：打一条 Warn，对当前 hash 发停用。此后只对写入的 hash 回停用。
 func (w *worker) disable(reason error) {
 	w.disabled = true
+	w.closeMem()
 	log.Warn("Local lyric association disabled: %v", reason)
 	w.r.send(Result{Hash: w.hash, Kind: KindDisabled})
 }
@@ -363,11 +1229,7 @@ func redactPaths(s, dataDir, lyricDir, home string) string {
 }
 
 func (w *worker) stat() fileStat {
-	size, mod, err := w.d.stat(w.dbPath)
-	if err != nil {
-		return fileStat{}
-	}
-	return fileStat{size: size, mod: mod.UnixNano(), ok: true}
+	return statWith(w.d.stat, w.dbPath)
 }
 
 // detailOnce 打一条 Detail，同一首歌里同一原因（错误文本）只打一条、至多 maxDetailsPerSong 条。

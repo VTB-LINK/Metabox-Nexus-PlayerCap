@@ -82,6 +82,35 @@ type PlayerState struct {
 	// UpdatePlayerState 在解除隐藏时置位；NotifySubscribers 遇到触发补发的事件（idleResumeTrigger）
 	// 时取走。其间到达的不触发的事件照常下发、不动它，故它可以跨多条事件保留。
 	IdleResumePending bool
+
+	// ShowsSong：专属出口可能仍显示歌曲（设计 §4.5 第 1 条）。song_info_update、all_lyrics、lyric_update 写缓存时置位，
+	// 解除无活跃隐藏补发含歌曲/歌词的整套缓存时同步置位；向该播放器的专属出口推过清除（派生清除或无活跃隐藏的清除）时复位；
+	// clear_song_data 清空缓存时不复位（以覆盖「断开清空缓存 → 重连即无歌」时仍须清除专属画面）。
+	ShowsSong bool
+	// RootShowsSong：根出口可能仍显示该播放器的歌曲。与 ShowsSong 正交维护，使专属通道无活跃隐藏复位 ShowsSong
+	// 时不影响根出口（即使随后断线清缓存再重连无歌，根仍能清屏）。song_info_update、all_lyrics、lyric_update 写缓存
+	// 以及根切入本播放器且缓存含歌曲/歌词（NotifySubscribersFullState）时置位；根切离或清空（SetActivePlayer）及
+	// 向根推过派生清除时复位；sweepIdleHide 与 clear_song_data 清空缓存时均不复位。
+	RootShowsSong bool
+	// stopClear：clear_song_data 判为真停播时记下清空之前的位置与推送资格，由 NotifySubscribers 取走推送；nil 表示不推。
+	stopClear *stopClearInfo
+}
+
+type stopClearInfo struct {
+	position      float32
+	progress      float32
+	perPlayer     bool // 清空前专属出口可能仍显示歌曲且未处于无活跃隐藏态
+	rootCandidate bool // 清空前根出口可能仍显示该播放器的歌曲（独立于专属无活跃隐藏与缓存清空）
+}
+
+// isTrueStop 报告缓存里的状态是否为真停播：waiting_song（任意 reason），或 standby 且 reason 为 metadata_unavailable。
+// 退出与断开（waiting_process、standby 其余 reason）及 playing/paused 均返回假（2026-10-22 决定，设计 §4.5）。
+func isTrueStop(st *StatusMessage) bool {
+	if st == nil {
+		return false
+	}
+	return st.Status == "waiting_song" ||
+		(st.Status == "standby" && st.Reason == player.ReasonMetadataUnavailable)
 }
 
 // livePosition 返回 now 时刻对外给出的 position 与 progress，供连接补发（buildInitEvents）与
@@ -150,6 +179,9 @@ type Server struct {
 	// 受 s.mu 保护；nil=未注入（本地/测试零副作用）。回调本身只向缓冲=1 的 channel 非阻塞投递、
 	// 不阻塞、不 panic、不回读 s.mu，故可在 SetActivePlayer 的 r.mu 主线上安全调用（§3.4）。
 	audioWake func()
+
+	// onStopClearBeforeSub 仅用于测试在推送真停播清除锁 s.subMu 前注入交错时序；生产代码恒为 nil。
+	onStopClearBeforeSub func()
 }
 
 // NewServer 创建统一服务器
@@ -224,8 +256,32 @@ var internalEvents = map[string]bool{
 // 该播放器的 per-player 通道解除无活跃隐藏后，在第一条触发补发的事件上先向其订阅者投整套缓存
 // （idleResumeTrigger、inFullState）；根订阅者不受影响。
 func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
-	// 内部事件不外发。调用方（router.Run）在此之前已调过 UpdatePlayerState，
-	// 缓存清空照常发生——这里拦掉的只是「广播」这一步。
+	// clear_song_data 本身仍不外发，但真停播时由 UpdatePlayerState 记下待推的派生清除。
+	// 在同一把 s.mu.Lock() 内完成 activePlayer 判定、状态复位与 notifyStopClearLocked 入队，
+	// 使之对 SetActivePlayer 原子，防止 watchExpire 在解锁空档切到新播放器并推完 FullState 后，
+	// 过时的清除再把新播放器清成空白。发送全为 select default 非阻塞、无网络 I/O；锁序
+	// r.mu → s.mu → s.subMu 与 sweepIdleHide 一致，无死锁。
+	if evt.Type == player.EventClearSongData {
+		s.mu.Lock()
+		if ps := s.playerStates[evt.PlayerName]; ps != nil && ps.stopClear != nil {
+			info := *ps.stopClear
+			ps.stopClear = nil
+			perPlayer := info.perPlayer && !ps.IdleHidden
+			toRoot := info.rootCandidate && s.activePlayer == evt.PlayerName
+			ps.ShowsSong = false
+			if toRoot || s.activePlayer != evt.PlayerName {
+				ps.RootShowsSong = false
+			}
+			if perPlayer || toRoot {
+				s.notifyStopClearLocked(evt.PlayerName, info, perPlayer, toRoot)
+			}
+		}
+		s.mu.Unlock()
+		return
+	}
+
+	// 其余内部事件不外发。调用方（router.Run）在此之前已调过 UpdatePlayerState，
+	// 缓存更新照常发生——这里拦掉的只是「广播」这一步。
 	if internalEvents[evt.Type] {
 		return
 	}
@@ -245,12 +301,16 @@ func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
 	}
 
 	// 该播放器的通道刚解除无活跃隐藏、本事件又触发补发：取走标志，稍后先投整套缓存（issue #69）。
+	// 缓存里有歌曲/歌词时同步置 ShowsSong，确保经 playback_resume 或 playing 恢复画面后，后续真停播仍能清屏。
 	s.mu.Lock()
 	active := s.activePlayer
 	resume := false
 	if ps := s.playerStates[evt.PlayerName]; ps != nil && ps.IdleResumePending && idleResumeTrigger(evt) {
 		ps.IdleResumePending = false
 		resume = true
+		if ps.SongInfo != nil || ps.AllLyrics != nil || ps.LyricUpdate != nil {
+			ps.ShowsSong = true
+		}
 	}
 	s.mu.Unlock()
 
@@ -354,6 +414,13 @@ func (s *Server) NotifySubscribersFullState(oldPlayer, newPlayer string) map[str
 	}
 
 	events := s.buildInitEvents(newPlayer, false) // 根切换：不看 per-player 隐藏态（§3.4）
+
+	// 根切入 newPlayer 且缓存含歌曲/歌词时置 RootShowsSong，确保切回曾被切走的播放器后真停播仍能清根。
+	s.mu.Lock()
+	if ps := s.playerStates[newPlayer]; ps != nil && (ps.SongInfo != nil || ps.AllLyrics != nil || ps.LyricUpdate != nil) {
+		ps.RootShowsSong = true
+	}
+	s.mu.Unlock()
 
 	// 收集实际包含的事件类型及其内容哈希
 	sentHashes := make(map[string]uint64, len(events))
@@ -473,8 +540,14 @@ func (s *Server) SetServiceInfo(info *ServiceInfo) {
 // SetActivePlayer 由 Router 调用，更新当前活跃播放器
 func (s *Server) SetActivePlayer(name string) {
 	s.mu.Lock()
-	changed := s.activePlayer != name
+	old := s.activePlayer
+	changed := old != name
 	s.activePlayer = name
+	if changed && old != "" {
+		if oldPS := s.playerStates[old]; oldPS != nil {
+			oldPS.RootShowsSong = false
+		}
+	}
 	wake := s.audioWake // 锁内快照，锁外调用：避免在 s.mu 内触发回调
 	s.mu.Unlock()
 	if changed {
@@ -507,9 +580,18 @@ func (s *Server) SetIdleHideResolver(fn func(playerName string) int) {
 	s.mu.Unlock()
 }
 
-// NotifySubscribersClear 向根订阅者推送活跃播放器清除通知
-// 发送 player_switch(to="") + player_clear 双重事件
+// NotifySubscribersClear 向根订阅者推送活跃播放器清除通知：
+//   - WS 与匹配 player_switch / player_clear 的全类型订阅者：player_switch(to="") + player_clear 双重事件，不收重复 in-band；
+//   - 按类型过滤的根 SSE：lyric_update-SSE 收 index:-1（带 oldPlayer 的 livePosition），song_info-SSE 收空 song_info_update；
+//   - 专属订阅者不受影响。全部发送非阻塞（§2.1）。
 func (s *Server) NotifySubscribersClear(oldPlayer string) {
+	var pos, prog float32
+	s.mu.RLock()
+	if ps := s.playerStates[oldPlayer]; ps != nil {
+		pos, prog = ps.livePosition(time.Now())
+	}
+	s.mu.RUnlock()
+
 	switchEvt := WSEvent{
 		Type:   player.EventPlayerSwitch,
 		Player: "",
@@ -520,6 +602,16 @@ func (s *Server) NotifySubscribersClear(oldPlayer string) {
 		Player: "",
 		Data:   struct{}{},
 	}
+	lyricClear := WSEvent{
+		Type:   player.EventLyricUpdate,
+		Player: "",
+		Data:   &LyricUpdate{Index: -1, Position: pos, Progress: prog},
+	}
+	songClear := WSEvent{
+		Type:   player.EventSongInfoUpdate,
+		Player: "",
+		Data:   struct{}{},
+	}
 
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
@@ -527,15 +619,33 @@ func (s *Server) NotifySubscribersClear(oldPlayer string) {
 		if sub.player != "" {
 			continue // 仅推送给根订阅者
 		}
+		sentControl := false
 		if sub.matchesType(switchEvt.Type) {
 			select {
 			case sub.ch <- switchEvt:
 			default:
 			}
+			sentControl = true
 		}
 		if sub.matchesType(clearEvt.Type) {
 			select {
 			case sub.ch <- clearEvt:
+			default:
+			}
+			sentControl = true
+		}
+		if sentControl {
+			continue
+		}
+		if sub.matchesType(player.EventLyricUpdate) {
+			select {
+			case sub.ch <- lyricClear:
+			default:
+			}
+		}
+		if sub.matchesType(player.EventSongInfoUpdate) {
+			select {
+			case sub.ch <- songClear:
 			default:
 			}
 		}
@@ -586,6 +696,7 @@ func (s *Server) sweepIdleHide(now time.Time) {
 			}
 			if now.Sub(ps.LastEventAt) >= time.Duration(thr)*time.Second {
 				ps.IdleHidden = true
+				ps.ShowsSong = false // 只清专属出口显示态，绝不动 RootShowsSong（per-player 隐藏不影响根，§3.4）
 				// 与根路径「清除活跃播放器」日志对齐：清屏是可见输出变化，需留现场证据（§1.2）。
 				serverLog.Info("per-player [%s] inactive for %ds, pushing clear-screen hide", name, thr)
 				// 带上停下那一刻的整曲位置与进度：SSE 清行的 lyric_update(index:-1) 与其余 lyric_update 一样
@@ -602,6 +713,30 @@ func (s *Server) sweepIdleHide(now time.Time) {
 	// 锁序 s.mu→subMu 与既有 NotifySubscribers* 一致，无死锁。
 	for _, tc := range toClear {
 		s.notifyPerPlayerIdleClear(tc.name, tc.position, tc.progress)
+	}
+}
+
+// sendClearToSub 按订阅者的事件过滤规则非阻塞投递清除事件（§2.1 承重不变量：全部 select default）：
+// WS / 全类型订阅者收一条 player_clear，类型过滤的 SSE 按订阅类型收对应的 in-band 清除。
+func sendClearToSub(sub *subscriber, clearEvt, lyricClear, songClear WSEvent) {
+	if sub.matchesType(player.EventPlayerClear) {
+		select {
+		case sub.ch <- clearEvt:
+		default:
+		}
+		return
+	}
+	if sub.matchesType(player.EventLyricUpdate) {
+		select {
+		case sub.ch <- lyricClear:
+		default:
+		}
+	}
+	if sub.matchesType(player.EventSongInfoUpdate) {
+		select {
+		case sub.ch <- songClear:
+		default:
+		}
 	}
 }
 
@@ -625,26 +760,26 @@ func (s *Server) notifyPerPlayerIdleClear(name string, position, progress float3
 		if sub.player != name {
 			continue
 		}
-		if sub.matchesType(player.EventPlayerClear) {
-			// WS / 全类型：一条 player_clear 即整体清屏
-			select {
-			case sub.ch <- clearEvt:
-			default:
-			}
-			continue
-		}
-		// 类型过滤的 SSE：按其过滤类型发对应的 in-band 清除
-		if sub.matchesType(player.EventLyricUpdate) {
-			select {
-			case sub.ch <- lyricClear:
-			default:
-			}
-		}
-		if sub.matchesType(player.EventSongInfoUpdate) {
-			select {
-			case sub.ch <- songClear:
-			default:
-			}
+		sendClearToSub(sub, clearEvt, lyricClear, songClear)
+	}
+}
+
+// notifyStopClearLocked 向 name 的专属出口（perPlayer 为真时）与根出口（toRoot 为真时）推真停播的清除，
+// 形状同 notifyPerPlayerIdleClear（Player 均为 name，不配 player_switch）。
+// 调用方须持 s.mu（锁序 s.mu → s.subMu，与 sweepIdleHide 一致）；全部非阻塞（§2.1）。
+func (s *Server) notifyStopClearLocked(name string, info stopClearInfo, perPlayer, toRoot bool) {
+	if s.onStopClearBeforeSub != nil {
+		s.onStopClearBeforeSub()
+	}
+	clearEvt := WSEvent{Type: player.EventPlayerClear, Player: name, Data: struct{}{}}
+	lyricClear := WSEvent{Type: player.EventLyricUpdate, Player: name, Data: &LyricUpdate{Index: -1, Position: info.position, Progress: info.progress}}
+	songClear := WSEvent{Type: player.EventSongInfoUpdate, Player: name, Data: struct{}{}}
+
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+	for sub := range s.subscribers {
+		if (perPlayer && sub.player == name) || (toRoot && sub.player == "") {
+			sendClearToSub(sub, clearEvt, lyricClear, songClear)
 		}
 	}
 }
@@ -702,6 +837,8 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 				Name: msg.Name, Singer: msg.Singer, Title: msg.Title,
 				Cover: msg.Cover, CoverBase64: msg.CoverBase64,
 			}
+			ps.ShowsSong = true
+			ps.RootShowsSong = true
 		}
 	case player.EventLyricUpdate:
 		if msg, ok := evt.Data.(*player.LyricUpdate); ok {
@@ -710,6 +847,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 				Timestamp: msg.Timestamp, PlayTime: msg.PlayTime,
 				Position: msg.Position, Progress: msg.Progress, TextDetailed: msg.TextDetailed,
 				RomaTextDetailed: msg.RomaTextDetailed,
+				Furigana:         msg.Furigana,
 			}
 			// 同步更新 Position 与 Progress 缓存，保持 FullState 时效性。
 			//
@@ -725,6 +863,8 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 			ps.Progress = msg.Progress
 			ps.PositionAt = now
 			ps.PositionFromPause = false
+			ps.ShowsSong = true
+			ps.RootShowsSong = true
 		}
 	case player.EventAllLyrics:
 		if msg, ok := evt.Data.(*player.AllLyricsData); ok {
@@ -736,6 +876,8 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 			ps.PositionAt = now
 			ps.PositionFromPause = false
 			ps.LyricUpdate = nil // 新歌词到达，旧 lyric_update 已失效；避免中途连入的客户端收到上一首的歌词行
+			ps.ShowsSong = true
+			ps.RootShowsSong = true
 		}
 	case player.EventPlaybackPause, player.EventPlaybackResume, player.EventPositionSample:
 		// 暂停、恢复与 seek（kugou 等以 playback_resume 报 seek）都带精确位置，同样是采样点。
@@ -751,6 +893,17 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 			ps.PositionFromPause = evt.Type == player.EventPlaybackPause
 		}
 	case player.EventClearSongData:
+		ps.stopClear = nil
+		if isTrueStop(ps.Status) && (ps.ShowsSong || ps.RootShowsSong) {
+			pos, prog := ps.livePosition(now)
+			ps.stopClear = &stopClearInfo{
+				position:      pos,
+				progress:      prog,
+				perPlayer:     ps.ShowsSong && !ps.IdleHidden,
+				rootCandidate: ps.RootShowsSong,
+			}
+		}
+		// ps.ShowsSong 与 ps.RootShowsSong 在此均不复位：断开清缓存时不清除画面，重连后即无歌时仍须靠它们触发清除（设计 §4.5）。
 		ps.SongInfo = nil
 		ps.LyricUpdate = nil
 		ps.AllLyrics = nil
@@ -941,7 +1094,8 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 			st = ps.Status.Status
 		}
 		playerStatus.Set(name, st)
-		if st != "offline" && st != "standby" && st != "waiting_process" {
+		// player_running 表示进程在运行（#231）：standby 是进程在运行而读不了，计入。
+		if st != "offline" && st != "waiting_process" {
 			playerRunning = append(playerRunning, name)
 		}
 	}

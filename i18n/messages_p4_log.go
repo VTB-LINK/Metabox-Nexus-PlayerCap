@@ -258,6 +258,9 @@ var p4LogMessages = map[string]string{
 
 	// —— applemusic：位置结构当信号源后的会话日志 ——
 	"Position structure invalid; rediscovering":                                "位置结构失效，重新发现",
+	"Position structure dropped (playing: %v, announced: %v, position %.2fs)":  "位置结构作废（playing: %v, announced: %v, 位置 %.2fs）",
+	"Position structure refound after %dms (same song)":                        "位置结构在 %dms 后找回（同一首）",
+	"Position structure refound after %dms (different duration)":               "位置结构在 %dms 后找回（不同时长）",
 	"Song still loading after %v; treating as no song":                         "歌曲加载超过 %v 仍未就绪，按没有歌处理",
 	"Song change: duration %.0fs":                                              "换歌：时长 %.0fs",
 	"Position structure stalled while another one advances; switching to @%#x": "位置结构停住而另一处在走，改用 @%#x",
@@ -442,6 +445,7 @@ var p4LogMessages = map[string]string{
 	"Cannot read the installation path of KuGou; auto-repair skipped. Run KuGou with the same privileges as this program":                                                                                                              "读不到酷狗音乐的安装路径，未自动修复；请以与本程序相同的权限运行酷狗音乐",
 	"Soda Music is the Microsoft Store version (%s) and its inspector cannot be opened; skipped Soda Music lyric capture. To use it, uninstall it and install the official installer version":                                          "汽水音乐为微软商店版（%s），无法开启调试接口，已跳过汽水取词；如需使用，请卸载后改用官网安装版",
 	"Cannot read the installation path of Soda Music; its inspector was not opened. Run Soda Music with the same privileges as this program":                                                                                           "读不到汽水音乐的安装路径，未开启调试接口；请以与本程序相同的权限运行汽水音乐",
+	"Cannot read the command line of the Soda Music main process; its inspector was not opened. Run Soda Music with the same privileges as this program":                                                                               "读不到汽水音乐主进程的命令行，未开启调试接口；请以与本程序相同的权限运行汽水音乐",
 	"Cannot read the installation path of Spotify; it was not restarted automatically. Run Spotify with the same privileges as this program":                                                                                           "读不到 Spotify 的安装路径，未自动重启；请以与本程序相同的权限运行 Spotify",
 
 	// —— 自动更新的下载层：低速、时限、大小与落盘（issue #213）——
@@ -559,4 +563,29 @@ var p4LogMessages = map[string]string{
 	// —— player/qqmusic：封面响应里核验不过的编号（songDetail.seen），在源头 i18n.T 后注入日志与错误（issue #218）——
 	"track id %s, mid %q, code %d": "track_info 的 id %s、mid %q，code %d",
 	"%d songs %v, code %d":         "%d 首 %v，code %d",
+
+	// —— player/qqmusic：主歌词 [kana:] 振假名解析与守恒对齐降级（issue #252）——
+	"Skipped QQ Music furigana: %s":                  "已跳过 QQ 音乐振假名：%s",
+	"Skipped QQ Music local furigana: %s":            "已跳过 QQ 音乐本地振假名：%s",
+	"Partially degraded QQ Music furigana: %s":       "已局部降级 QQ 音乐振假名：%s",
+	"Partially degraded QQ Music local furigana: %s": "已局部降级 QQ 音乐本地振假名：%s",
+	"unclosed [kana:] tag":                           "[kana:] 标签缺少闭合方括号",
+	"[kana:] tag exceeds size limit":                 "[kana:] 标签超出大小上限",
+	"malformed [kana:] tag":                          "[kana:] 标签语法非法",
+	"untimed lyric tail alters furigana targets":     "未打轴歌词尾部改变了振假名目标字符",
+	"kana entry misaligned with lyrics":              "[kana:] 词条与歌词目标字符不对齐",
+	"kana entry count mismatch":                      "[kana:] 词条数与全曲目标字符数不守恒",
+	"line text mismatch on some lines":               "部分歌词行文本与逐字不匹配",
+	"furigana exceeds local lyric size budget":       "振假名超出本地歌词规模上限",
+
+	// —— player/kugou/assoc：酷狗内存歌词读取与降级（issue #250、#251）——
+	"KuGou memory lyric reader enabled (KuGou %s, %s)":                                                        "酷狗内存歌词读取已启用（酷狗 %s，%s）",
+	"KuGou memory lyric reader does not recognize this version (KuGou %s, %s); falling back to database mode": "酷狗内存歌词读取未识别此版本（酷狗 %s，%s），已自动退回数据库读取模式",
+	"Failed to open KuGou process memory; using database mode: %v":                                            "打开酷狗进程内存失败，本次退回数据库读取模式：%v",
+	"KuGou memory lyric reader vtable check failed %d times in a row; falling back to database mode":          "酷狗内存歌词读取虚表校验连续失败 %d 次，已自动降级为数据库读取模式",
+
+	// —— player/kugou：会话取消关联、快慢偏移与重选恢复（issue #250、#251）——
+	"KuGou lyrics unassociated by user; lyrics cleared":             "酷狗已取消当前歌曲歌词关联，已清空歌词",
+	"KuGou lyric offset changed: %+dms":                             "酷狗歌词偏移已变更: %+dms",
+	"Lyrics recovered online in KuGou: %d lines; per-character: %s": "酷狗重新选词后已在线恢复歌词: %d 行；逐字：%s",
 }

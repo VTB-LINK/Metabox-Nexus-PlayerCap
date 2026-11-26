@@ -9,6 +9,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/kuwo/cdp"
+	"Metabox-Nexus-PlayerCap/player/kuwo/pos"
 )
 
 // On a switch the bridge reports no song (RID empty or Status 3) for a moment
@@ -168,10 +169,12 @@ func TestNoSongShortGapThenNextSong(t *testing.T) {
 	}
 }
 
-// No song for longer than the tolerance: one clear_song_data and one
-// waiting_song, clear first, not before the tolerance has passed and not
-// repeated after. status_3 is playback ending with no next song.
-// 变异自证：改回当拍 s.clear() 则两个子用例的下界变红；把清空条件改成恒假则等不到 waiting_song 而红（实测）。
+// No song for longer than the tolerance: one waiting_song and one
+// clear_song_data, status first (design §4.4, §4.5), not before the tolerance
+// has passed and not repeated after. status_3 is playback ending with no next
+// song.
+// 变异自证：改回当拍 s.clear() 则两个子用例的下界变红；把清空条件改成恒假则等不到 waiting_song 而红；
+// session.clear 改回先 clear_song_data 后状态则顺序断言变红（均实测）。
 func TestNoSongBeyondToleranceClearsOnce(t *testing.T) {
 	defer func(v time.Duration) { noSongTolerance = v }(noSongTolerance)
 	noSongTolerance = 300 * time.Millisecond
@@ -205,23 +208,30 @@ func TestNoSongBeyondToleranceClearsOnce(t *testing.T) {
 			}
 			after := got[a:]
 			if statusCount(after, "waiting_song") != 1 || typeCount(after, player.EventClearSongData) != 1 {
-				t.Fatalf("want one clear_song_data and one waiting_song: %v", eventTypes(after))
+				t.Fatalf("want one waiting_song and one clear_song_data: %v", eventTypes(after))
 			}
-			for _, e := range after {
+			wsIdx, clearIdx := -1, -1
+			for i, e := range after {
 				if si, ok := e.Data.(*player.StatusInfo); ok && si.Status == "waiting_song" {
-					t.Fatalf("waiting_song before clear_song_data: %v", eventTypes(after))
+					if si.Reason != player.ReasonNoSong {
+						t.Fatalf("waiting_song reason=%q want %q", si.Reason, player.ReasonNoSong)
+					}
+					wsIdx = i
 				}
 				if e.Type == player.EventClearSongData {
-					break
+					clearIdx = i
 				}
+			}
+			if wsIdx < 0 || clearIdx != wsIdx+1 {
+				t.Fatalf("want waiting_song immediately before clear_song_data (ws=%d clear=%d): %v", wsIdx, clearIdx, eventTypes(after))
 			}
 		})
 	}
 }
 
 // Counterexample: a session that has published no song reports waiting_song at
-// once, without the tolerance, and once.
-// 变异自证：去掉清空条件里的 s.rid == "" 则两个子用例都变红（实测）。
+// once, without the tolerance, and once; status goes out before clear_song_data.
+// 变异自证：去掉清空条件里的 s.rid == "" 则两个子用例都变红；session.clear 改回先 clear_song_data 后状态则顺序断言变红（均实测）。
 func TestNoSongAtSessionStartReportsAtOnce(t *testing.T) {
 	defer func(v time.Duration) { noSongTolerance = v }(noSongTolerance)
 	noSongTolerance = 2 * time.Second
@@ -239,8 +249,12 @@ func TestNoSongAtSessionStartReportsAtOnce(t *testing.T) {
 			if err := stop(); !errors.Is(err, context.Canceled) {
 				t.Fatalf("unexpected exit: %v", err)
 			}
-			if statusCount(got, "waiting_song") != 1 || typeCount(got, player.EventClearSongData) != 1 || typeCount(got, player.EventSongInfoUpdate) != 0 {
-				t.Fatalf("want one clear_song_data and one waiting_song only: %v", eventTypes(got))
+			if len(got) != 2 {
+				t.Fatalf("want waiting_song then clear_song_data only: %v", eventTypes(got))
+			}
+			si, ok := got[0].Data.(*player.StatusInfo)
+			if got[0].Type != player.EventStatusUpdate || !ok || si.Status != "waiting_song" || si.Reason != player.ReasonNoSong || got[1].Type != player.EventClearSongData {
+				t.Fatalf("want waiting_song/no_song before clear_song_data: %v", eventTypes(got))
 			}
 		})
 	}
@@ -303,7 +317,7 @@ func TestNoSongAndSettlingUseSeparateBudgets(t *testing.T) {
 				if _, n := src.errStats(); n != settle.calls {
 					t.Fatalf("settling phase was not exercised: %d error calls", n)
 				}
-				if statusCount(events, "waiting_song") != 0 || waitingProcessSeen(events) {
+				if statusCount(events, "waiting_song") != 0 || disconnectSeen(events) {
 					t.Fatalf("switch reported as no song or disconnect: %v", eventTypes(events))
 				}
 			})
@@ -334,7 +348,7 @@ func TestNoSongClockPausedWhileSettling(t *testing.T) {
 			if _, n := src.errStats(); n != 14 {
 				t.Fatalf("settling phase was not exercised: %d error calls", n)
 			}
-			if statusCount(events, "waiting_song") != 0 || waitingProcessSeen(events) {
+			if statusCount(events, "waiting_song") != 0 || disconnectSeen(events) {
 				t.Fatalf("switch reported as no song or disconnect: %v", eventTypes(events))
 			}
 			a, b := songAt(events, "A"), songAt(events, "B")
@@ -389,9 +403,11 @@ func TestNoSongAcrossSettlingStillClears(t *testing.T) {
 	}
 }
 
-// A disconnect within the tolerance takes the disconnect path as before:
-// clear_song_data then waiting_process, with no waiting_song.
-// 变异自证：改回当拍 s.clear() 则多出 waiting_song，两个子用例都变红（实测）。
+// A disconnect within the tolerance takes the disconnect path:
+// status_update (standby / cdp_disconnected) before clear_song_data, with no
+// waiting_song (design §3.3, §4.4, §4.5).
+// 变异自证：改回当拍 s.clear() 则多出 waiting_song；runSession defer 改回 waiting_process 或改回先清空后状态，
+// 两个子用例都变红（均实测）。
 func TestNoSongDisconnectTakesDisconnectPath(t *testing.T) {
 	defer func(v time.Duration) { noSongTolerance = v }(noSongTolerance)
 	noSongTolerance = 2 * time.Second
@@ -414,11 +430,149 @@ func TestNoSongDisconnectTakesDisconnectPath(t *testing.T) {
 				t.Fatalf("A never published: %v", eventTypes(got))
 			}
 			after := got[a:]
-			last, ok := after[len(after)-1].Data.(*player.StatusInfo)
+			if len(after) < 2 {
+				t.Fatalf("want disconnect status and clear_song_data: %v", eventTypes(after))
+			}
+			st, ok := after[len(after)-2].Data.(*player.StatusInfo)
 			if !ok || statusCount(after, "waiting_song") != 0 || typeCount(after, player.EventClearSongData) != 1 ||
-				after[len(after)-2].Type != player.EventClearSongData || last.Status != "waiting_process" || last.Reason != player.ReasonCDPDisconnected {
-				t.Fatalf("want the disconnect path only: %v", eventTypes(after))
+				after[len(after)-2].Type != player.EventStatusUpdate || st.Status != "standby" || st.Reason != player.ReasonCDPDisconnected ||
+				after[len(after)-1].Type != player.EventClearSongData {
+				t.Fatalf("want standby/cdp_disconnected before clear_song_data only: %v", eventTypes(after))
 			}
 		})
 	}
+}
+
+// fillEventCh 往 p.EventCh 填入占位事件直到剩余 leaveFree 个空槽。
+func fillEventCh(p *KuwoPlayer, leaveFree int) {
+	for len(p.EventCh) < cap(p.EventCh)-leaveFree {
+		p.EventCh <- player.Event{PlayerName: PlayerName, Type: "filler"}
+	}
+}
+
+// drainNonFiller 排空 p.EventCh，过滤掉 filler 占位事件。
+func drainNonFiller(p *KuwoPlayer) []player.Event {
+	var out []player.Event
+	for _, e := range drainEvents(p) {
+		if e.Type != "filler" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestNoSongQueueFullRetriesClear 守队列满或仅余 1 槽时 session.clear() 的非阻塞重试（#231 代码审 F1）：
+//   - 仅余 1 槽：waiting_song 入队、clear_song_data 被丢弃；排空后后续无歌拍补发恰好一条 clear_song_data，
+//     不重复发 waiting_song，之后再喂无歌不再发事件；
+//   - 0 槽：waiting_song 与 clear_song_data 都丢弃；排空后后续无歌拍补发 waiting_song 在前、clear_song_data 在后各一条，
+//     之后不再发事件；
+//   - 仅余 1 槽丢弃 clear_song_data 后，新歌先到来时 clearPending 被清掉，不向新歌多发旧待发清空。
+//
+// 变异自证（均实测变红）：session.clear 不保留 clearPending（两个满队列子例均红）；
+// 改用 EmitStatusIfChanged 返回值门控清空而非 LastStatus（「仅余 1 槽」在重试拍因去重返回 false 而永远不补发清空，变红）。
+func TestNoSongQueueFullRetriesClear(t *testing.T) {
+	publishSongA := func(p *KuwoPlayer, s *session) {
+		now := time.Now()
+		s.observe(songSnap("MUSIC_1", "A"), pos.Sample{
+			RID: "MUSIC_1", PositionMs: 1000, CoreMs: 1000, DurationMs: 200000, ObservedAt: now,
+		})
+		_ = drainEvents(p)
+	}
+
+	t.Run("仅余1槽：补发clear_song_data且不重发waiting_song", func(t *testing.T) {
+		p := New(0, 50)
+		s := newSession(p)
+		publishSongA(p, s)
+
+		fillEventCh(p, 1)
+		if !s.clear() {
+			t.Fatal("首次切入无歌应返回 true")
+		}
+		first := drainNonFiller(p)
+		if len(first) != 1 || first[0].Type != player.EventStatusUpdate {
+			t.Fatalf("仅余 1 槽时首拍应仅入队 waiting_song，got %v", eventTypes(first))
+		}
+		if si, ok := first[0].Data.(*player.StatusInfo); !ok || si.Status != "waiting_song" || si.Reason != player.ReasonNoSong {
+			t.Fatalf("首拍状态=%+v，期望 waiting_song/no_song", first[0].Data)
+		}
+
+		// 排空后下一无歌拍：不重复取消歌曲（返回 false），补发恰好一条 clear_song_data，不重发 waiting_song。
+		if s.clear() {
+			t.Fatal("重试拍不应再返回 true")
+		}
+		retry := drainNonFiller(p)
+		if len(retry) != 1 || retry[0].Type != player.EventClearSongData {
+			t.Fatalf("排空后重试应仅补发一条 clear_song_data，got %v", eventTypes(retry))
+		}
+
+		// 之后再喂无歌：不再发任何事件。
+		if s.clear() {
+			t.Fatal("补发完成后不应再返回 true")
+		}
+		if rest := drainNonFiller(p); len(rest) != 0 {
+			t.Fatalf("补发完成后不应再发事件，got %v", eventTypes(rest))
+		}
+	})
+
+	t.Run("0槽全满：排空后先发waiting_song再发clear_song_data", func(t *testing.T) {
+		p := New(0, 50)
+		s := newSession(p)
+		publishSongA(p, s)
+
+		fillEventCh(p, 0)
+		if !s.clear() {
+			t.Fatal("首次切入无歌应返回 true")
+		}
+		if first := drainNonFiller(p); len(first) != 0 {
+			t.Fatalf("0 槽时首拍不应有事件入队，got %v", eventTypes(first))
+		}
+
+		// 排空后下一无歌拍：先 waiting_song/no_song，后 clear_song_data，各恰好一条。
+		if s.clear() {
+			t.Fatal("重试拍不应再返回 true")
+		}
+		retry := drainNonFiller(p)
+		if len(retry) != 2 {
+			t.Fatalf("排空后应补发 waiting_song 与 clear_song_data 各一条，got %v", eventTypes(retry))
+		}
+		si, ok := retry[0].Data.(*player.StatusInfo)
+		if retry[0].Type != player.EventStatusUpdate || !ok || si.Status != "waiting_song" || si.Reason != player.ReasonNoSong ||
+			retry[1].Type != player.EventClearSongData {
+			t.Fatalf("排空后顺序应为 waiting_song/no_song 在前、clear_song_data 在后，got %v", eventTypes(retry))
+		}
+
+		// 之后再喂无歌：不再发任何事件。
+		if s.clear() {
+			t.Fatal("补发完成后不应再返回 true")
+		}
+		if rest := drainNonFiller(p); len(rest) != 0 {
+			t.Fatalf("补发完成后不应再发事件，got %v", eventTypes(rest))
+		}
+	})
+
+	t.Run("待发清空未重试前新歌到来：清掉clearPending不误清", func(t *testing.T) {
+		p := New(0, 50)
+		s := newSession(p)
+		publishSongA(p, s)
+
+		fillEventCh(p, 1)
+		if !s.clear() {
+			t.Fatal("首次切入无歌应返回 true")
+		}
+		_ = drainNonFiller(p)
+
+		// 新歌 B 到来，重置会话状态与 clearPending。
+		if !s.observe(songSnap("MUSIC_2", "B"), pos.Sample{
+			RID: "MUSIC_2", PositionMs: 500, CoreMs: 500, DurationMs: 200000, ObservedAt: time.Now(),
+		}) {
+			t.Fatal("新歌 B 应被识别为换歌")
+		}
+		ev := drainNonFiller(p)
+		if typeCount(ev, player.EventClearSongData) != 1 || ev[0].Type != player.EventClearSongData {
+			t.Fatalf("新歌 B 应仅发换歌开头的一次 clear_song_data，got %v", eventTypes(ev))
+		}
+		if s.clearPending || s.idle {
+			t.Fatalf("新歌到来后应清除 idle=%v clearPending=%v", s.idle, s.clearPending)
+		}
+	})
 }
