@@ -222,8 +222,9 @@ const maxRunningInstallMisses = 5
 //
 // 找不到安装：不在运行时等待重试——它可能装在注册表与常见路径之外，启动后 FindKuGouInstall 按运行中的进程
 // 定位（设计 §6.3）；在运行时同样等待重试，满 maxRunningInstallMisses 轮才停止修补。启动的是另一份安装
-// （ErrInstallChanged）：等待重试，下一轮按运行中的进程定位。版本指纹不认识：停止修补，立即重试只会反复弹 UAC。
-// 停止修补不是终态：Start 按 storeRecheck 重做修补检查，条件满足即恢复（#231，设计 §5）。其余照常等 CDP。
+// （ErrInstallChanged）或运行态尚未就绪（ErrRunningNotReady）：等待重试，下一轮按运行中的进程定位。版本指纹
+// 不认识：停止修补，立即重试只会反复弹 UAC。停止修补不是终态：Start 按 storeRecheck 重做修补检查，条件满足即
+// 恢复（#231，设计 §5）。其余照常等 CDP。
 func classifyEnsureErr(err error, kugouRunning bool, runningMisses int) ensureAction {
 	switch {
 	case errors.Is(err, watchdog.ErrInstallNotFound):
@@ -231,7 +232,7 @@ func classifyEnsureErr(err error, kugouRunning bool, runningMisses int) ensureAc
 			return ensureStop
 		}
 		return ensureRetryLater
-	case errors.Is(err, watchdog.ErrInstallChanged):
+	case errors.Is(err, watchdog.ErrInstallChanged), errors.Is(err, watchdog.ErrRunningNotReady):
 		return ensureRetryLater
 	case errors.Is(err, watchdog.ErrVersionUnsupported):
 		return ensureStop
@@ -370,7 +371,8 @@ func (p *KuGouPlayer) Start() {
 	var elevation elevationGate
 	var install installWait
 	var rs repairState
-	runningMisses := 0 // 酷狗在运行却找不到安装的连续轮数，见 maxRunningInstallMisses
+	var lastRetryWarn string // ensureRetryLater 非 ErrInstallNotFound 的上一条告警文本，用于每 2s 重试去重
+	runningMisses := 0       // 酷狗在运行却找不到安装的连续轮数，见 maxRunningInstallMisses
 	for {
 		select {
 		case <-p.StopCh:
@@ -380,6 +382,9 @@ func (p *KuGouPlayer) Start() {
 
 		// 酷狗是否在运行先于一切：受阻期间关掉或打开酷狗，本轮即改报，不等重查。
 		running := p.running()
+		if !running {
+			lastRetryWarn = ""
+		}
 		p.EmitStatusIfChanged(player.ProcessStatus(running, p.seen, kugouDetails(), rs.block))
 		p.Emit(player.EventClearSongData, nil)
 
@@ -410,6 +415,9 @@ func (p *KuGouPlayer) Start() {
 		}
 		// 受阻的原因与上一次相同（重查得出同一结论）时不再打日志，状态也不变。
 		prev := rs.block
+		// 仅 ensureRetryLater 的非 ErrInstallNotFound 错误保留去重状态；其余全部分支（含 nil 与 ErrInstallNotFound）均清零。
+		prevRetryWarn := lastRetryWarn
+		lastRetryWarn = ""
 		var packaged *launch.PackagedError
 		// startLocal 只在本轮修补检查返回 nil 时启用：返回其他错误而照常等 CDP 的会话不读本地歌词，
 		// 只在线取词（设计 §6.2「时机」）。读库之前读取者还要自行确认版本与补丁（watchdog.Confirm）。
@@ -478,9 +486,13 @@ func (p *KuGouPlayer) Start() {
 				}
 				continue
 			case ensureRetryLater:
-				// 找到（或重新确认）安装之前不去 waitForCDP，下一轮重新走修补检查。
-				if errors.Is(err, watchdog.ErrInstallChanged) {
-					log.Warn("%v; retrying", err)
+				// 找到（或重新确认）安装或运行态就绪之前不去 waitForCDP，下一轮重新走修补检查。
+				if !errors.Is(err, watchdog.ErrInstallNotFound) {
+					msg := err.Error()
+					lastRetryWarn = msg
+					if msg != prevRetryWarn {
+						log.Warn("%v; retrying", err)
+					}
 				} else if install.notify() {
 					log.Info("KuGou installation not found; waiting for KuGou to start")
 				}
@@ -604,6 +616,11 @@ func doFetchLyrics(ctx context.Context, hash string, durationMs int, name, singe
 	}
 	return fetchLyricsCtx(ctx, hash, durationMs, name, singer)
 }
+
+// localFoundRereadBudget 是换歌拍命中本地/缓存歌词（aw.found）后等待 CDP 重读的时间上限：
+// 正常本机 CDP 响应约 1~5ms（快路径照常刷新切歌过渡态与锚点），超时则跳出重读并按现有锚点
+// 立即发布首份本地歌词，在飞探针交由下一拍 nextPlayInfo 串行接管。
+const localFoundRereadBudget = 50 * time.Millisecond
 
 type cdpSample struct {
 	info *cdp.PlayInfo
@@ -973,6 +990,21 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 			lastLineIdx = -1
 			log.Info("KuGou has no lyrics for this local file; lyrics cleared")
 			currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, nil, offsetSec)
+		case pollRevokeMemNone:
+			onlineJobs.stop()
+			rawLines = nil
+			currentLyrics = nil
+			currentFP = lyricFingerprint(nil)
+			currentLyricOffsetMs = pl.lyricOffsetMs
+			lastLineIdx = -1
+			onlineJobs.attempted = false
+			if !pl.recoverOnline {
+				log.Info("KuGou has no lyrics for this local file; lyrics cleared")
+			}
+			currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, nil, offsetSec)
+			if pl.recoverOnline {
+				onlineJobs.start(localCtx, lastHash, int(currentDurationSec*1000), currentName, currentSinger)
+			}
 		case pollNone:
 			offsetChanged := pl.hasMemoryLyric && pl.lyricOffsetMs != currentLyricOffsetMs
 			if pl.hasMemoryLyric && unassociated {
@@ -1078,7 +1110,9 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 		default:
 		}
 
-		if client.IsClosed() {
+		// *cdp.Client.IsClosed() 与在飞 GetPlayInfo() 共用 c.mu；在飞期间跳过 IsClosed()，
+		// 交由 nextPlayInfo() 接管 probe.resCh，连接断开时 probe.resCh 返回非 nil err 照常退出会话。
+		if !probe.inFlight && client.IsClosed() {
 			if coverCancel != nil {
 				coverCancel()
 			}
@@ -1337,9 +1371,12 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 			}
 
 			// 取词是阻塞的网络请求，返回时本轮读到的进度与播放状态都已过时：其间可能暂停、恢复或拖动过。
-			// 仅在既未于 local.await/等待期被取消关联或本地歌词抢占、又无在飞 cdpProbe 时才同步重读（等待期
-			// 若已有 cdpProbe 采回的同歌样本则直接复用）；否则零等待跳过同步重读，以 LivePosition 当拍立即
-			// 发出清词或本地歌词，避免 CDP 读阻塞拖延清词（设计 §6.4.4）。
+			// 仅在既未于 local.await/等待期被取消关联或本地歌词抢占、又无在飞 cdpProbe 时才发起重读（等待期
+			// 若已有 cdpProbe 采回的同歌样本则直接复用；有本地读取者时经单飞 cdpProbe 发起并并发监听
+			// local.results() 与 StopCh，防止阻塞重读拖延取消关联、内存撤销或换词/偏移更新；若本拍已由
+			// local.await 命中本地/缓存歌词 aw.found，另设 localFoundRereadBudget 上限，快路径照常采纳
+			// 重读，超时即跳出并保留在飞探针交由下一拍 nextPlayInfo 串行接管，以现有锚点 LivePosition
+			// 立即发布首份本地歌词）；否则零等待跳过重读，以 LivePosition 当拍立即发出清词或本地歌词（设计 §6.4.4）。
 			//
 			// statusAtChange 是取词前的状态，即上面已发出（过渡态时压下未发）的那个。分支末尾记进
 			// lastStatus 的必须是它，不是重读到的：取词期间状态变了，紧接着的播放状态变化检测才会发出
@@ -1354,9 +1391,109 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				fresh, rerr, freshTime = waitRes.freshSample.info, waitRes.freshSample.err, waitRes.freshSample.at
 				haveFresh = true
 			} else if !aw.unassociated && !waitRes.preempted && !probe.inFlight {
-				fresh, rerr = client.GetPlayInfo()
-				freshTime = time.Now()
-				haveFresh = true
+				if local.r == nil {
+					fresh, rerr = client.GetPlayInfo()
+					freshTime = time.Now()
+					haveFresh = true
+				} else {
+					probe.start(client)
+					var budgetTimer *time.Timer
+					var budgetCh <-chan time.Time
+					if aw.found {
+						budgetTimer = time.NewTimer(localFoundRereadBudget)
+						budgetCh = budgetTimer.C
+					}
+				rereadLoop:
+					for {
+						select {
+						case <-p.StopCh:
+							if budgetTimer != nil {
+								budgetTimer.Stop()
+							}
+							coverCancel()
+							localCancel()
+							onlineJobs.stop()
+							return
+						case <-budgetCh:
+							break rereadLoop
+						case s := <-probe.resCh:
+							probe.inFlight = false
+							fresh, rerr, freshTime = s.info, s.err, s.at
+							haveFresh = true
+							break rereadLoop
+						case res := <-local.results():
+							pl := local.classify(lastHash, res)
+							switch pl.kind {
+							case pollEmpty:
+								continue
+							case pollUnassociated:
+								onlineJobs.stop()
+								unassociated = true
+								rawLines = nil
+								currentLyrics = nil
+								currentFP = lyricFingerprint(nil)
+								currentLyricOffsetMs = 0
+								log.Info("KuGou lyrics unassociated by user; lyrics cleared")
+								break rereadLoop
+							case pollRevokeMemNone:
+								onlineJobs.stop()
+								rawLines = nil
+								currentLyrics = nil
+								currentFP = lyricFingerprint(nil)
+								currentLyricOffsetMs = pl.lyricOffsetMs
+								onlineJobs.attempted = false
+								if !pl.recoverOnline {
+									log.Info("KuGou has no lyrics for this local file; lyrics cleared")
+								}
+								if pl.recoverOnline {
+									onlineJobs.start(localCtx, lastHash, int(currentDurationSec*1000), currentName, currentSinger)
+								}
+								break rereadLoop
+							case pollClearLocalNone:
+								onlineJobs.stop()
+								rawLines = nil
+								currentLyrics = nil
+								currentFP = lyricFingerprint(nil)
+								currentLyricOffsetMs = 0
+								log.Info("KuGou has no lyrics for this local file; lyrics cleared")
+								break rereadLoop
+							case pollFound:
+								nfp := lyricFingerprint(pl.lines)
+								if unassociated || nfp != currentFP || pl.lyricOffsetMs != currentLyricOffsetMs {
+									onlineJobs.stop()
+									contentChanged := unassociated || nfp != currentFP
+									unassociated = false
+									rawLines = cloneLines(pl.lines)
+									currentFP = nfp
+									currentLyricOffsetMs = pl.lyricOffsetMs
+									currentLyrics = buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
+									if contentChanged {
+										log.Info("Lyrics changed in KuGou; reloaded (%s): %d lines; per-character: %s", i18n.T(pl.src.String()), len(currentLyrics), detailedFlag(currentLyrics))
+									} else {
+										log.Info("KuGou lyric offset changed: %+dms", currentLyricOffsetMs)
+									}
+									break rereadLoop
+								}
+							case pollNone:
+								if pl.hasMemoryLyric && pl.lyricOffsetMs != currentLyricOffsetMs && len(rawLines) > 0 {
+									currentLyricOffsetMs = pl.lyricOffsetMs
+									currentLyrics = buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
+									log.Info("KuGou lyric offset changed: %+dms", currentLyricOffsetMs)
+									break rereadLoop
+								} else if !unassociated && len(rawLines) == 0 && pl.hasMemoryLyric {
+									currentLyricOffsetMs = pl.lyricOffsetMs
+									if !onlineJobs.attempted {
+										onlineJobs.start(localCtx, lastHash, int(currentDurationSec*1000), currentName, currentSinger)
+										break rereadLoop
+									}
+								}
+							}
+						}
+					}
+					if budgetTimer != nil {
+						budgetTimer.Stop()
+					}
+				}
 			}
 			if haveFresh && rereadSameSong(fresh, rerr, lastHash) {
 				sampleTime = freshTime

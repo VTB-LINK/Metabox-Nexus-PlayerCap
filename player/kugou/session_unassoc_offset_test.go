@@ -11,14 +11,22 @@ package kugou
 //   5. 播放中本地 KindFound 仅偏移变化、已有 rawLines 收到连续 KindNone 偏移变化均重发且不发 playback_resume；
 //      大额正偏移钳零后切入同名伴唱（新偏移 0ms）复用 rawLines 时首行恢复原时间戳；
 //   6. 接入真实内存模式 *assoc.Reader 到 runSession，验证历史旧 P 过滤、同名无词本地音频不沿用及迟到清词、
-//      以及单曲循环重播同 hash 本地文件变为无词时经持续 1s stat 检出并恰好清词一次。
+//      单曲循环重播同 hash 本地文件变为无词时经持续 1s stat 检出并恰好清词一次，以及超窗误采纳旧词后迟到
+//      MemoryNoLyric（NoLyricFound=true 与搜词中空向量）立即撤销旧词并恢复在线取词（对照组 MemoryNoLyric=false 保持原词）；
+//   7. 换歌拍命中本地歌词后慢重读阻塞 1s 期间：在 localFoundRereadBudget（50ms）窗口内可被取消关联/内存空词抢占，
+//      超时即跳出重读按现有锚点在 <=300ms 内发布首份本地歌词；在飞 probe.inFlight 期间跳过与 GetPlayInfo 共用 c.mu 的
+//      client.IsClosed()，避免锁阻塞拖延同阻塞期内的连续本地歌词操作，且全会话零并发 GetPlayInfo。
 //
 // 变异自证（均实测变红后还原）：
 //   - 去掉 localNone 的 !res.HasMemoryLyric → TestSessionLocalSongUnassociateThenMemoryLyricRecoveryWithBound/沿用旧词的本地歌收到HasMemoryLyric不被localNone误清且跟随偏移 红；
 //   - 去掉 local.results() 的 s.r == nil 判断 → TestSessionOnlineWaitHandlesReaderDisabled nil deref panic 红；
 //   - 将 pollNone 的 offsetChanged 挪到改写 currentLyricOffsetMs 之后 → TestSessionMidSongOffsetUpdatesForLocalAndMemoryLyrics/已有rawLines时连续KindNone偏移变化每次重发且不重取词 红；
 //   - buildDisplayLyrics 去掉 cloneLines → TestSessionMidSongOffsetUpdatesForLocalAndMemoryLyrics 后两个子用例与 TestShiftTimelineAndCloneLines 红；
-//   - 去掉 assoc/reader.go 的 p.played >= fileTime(w.songStart.Add(-playGrace)) → assoc.TestMemPlayedAtRejectsStaleHistoryAndTracksSameHashLoopReplay 红。
+//   - 去掉 assoc/reader.go 的 p.played >= fileTime(w.songStart.Add(-playGrace)) → assoc.TestMemPlayedAtRejectsStaleHistoryAndTracksSameHashLoopReplay 红；
+//   - 去掉 locallyrics.go 的 res.MemoryNoLyric && s.cur != 0 撤销分支 → TestSessionRevokesStaleMemFoundAndRecoversOnline 前两个子用例均红（停留在误采纳旧词歌A缓存一，未发 count:0/index:-1 与歌B在线恢复）；
+//   - 将 locallyrics.go 撤销条件去掉 res.MemoryNoLyric（误对 MemoryNoLyric == false 清词）→ TestSessionRevokesStaleMemFoundAndRecoversOnline/对照组_外部文件暂缺MemoryNoLyric=false保持本地关联歌词不清词 红（误清词并触发 1 次在线取词）；
+//   - 撤回 kugou.go 主循环 !probe.inFlight 守卫（仅留 R2）→ TestSessionInFlightProbeDoesNotBlockOnIsClosedLock 红（第二次重新关联延迟 820ms > 300ms）；
+//   - 撤回 kugou.go rereadLoop 的 aw.found 预算计时器（仅留 R1）→ TestSessionLocalFoundSlowRereadPublishesWithinBudget 红（首份本地歌词发布延迟 1s > 300ms）。
 
 import (
 	"context"
@@ -84,12 +92,16 @@ func timedLyrics(tag string, startSec float32) []klyric.Line {
 }
 
 // hookPlayInfoSource 是可精确控制每次 GetPlayInfo 行为与并发检测的桩。
+// clientLock 非 nil（须在 synctest 泡内建为容量 1 的 channel）时，模拟真实 *cdp.Client 的 c.mu：
+// GetPlayInfo 执行期间与 IsClosed 共用该互斥锁（synctest 下 sync.Mutex.Lock 非持久阻塞会阻止假时钟推进，故用容量 1 channel）。
 type hookPlayInfoSource struct {
 	mu            sync.Mutex
 	curConcurrent int
 	maxConcurrent int
 	callIndex     int
 	fn            func(call int) (*cdp.PlayInfo, error)
+	clientLock    chan struct{}
+	closed        bool
 }
 
 func (s *hookPlayInfoSource) GetPlayInfo() (*cdp.PlayInfo, error) {
@@ -101,6 +113,7 @@ func (s *hookPlayInfoSource) GetPlayInfo() (*cdp.PlayInfo, error) {
 		s.maxConcurrent = s.curConcurrent
 	}
 	fn := s.fn
+	lock := s.clientLock
 	s.mu.Unlock()
 
 	defer func() {
@@ -108,10 +121,20 @@ func (s *hookPlayInfoSource) GetPlayInfo() (*cdp.PlayInfo, error) {
 		s.curConcurrent--
 		s.mu.Unlock()
 	}()
+	if lock != nil {
+		lock <- struct{}{}
+		defer func() { <-lock }()
+	}
 	return fn(call)
 }
 
-func (s *hookPlayInfoSource) IsClosed() bool { return false }
+func (s *hookPlayInfoSource) IsClosed() bool {
+	if s.clientLock != nil {
+		s.clientLock <- struct{}{}
+		defer func() { <-s.clientLock }()
+	}
+	return s.closed
+}
 
 func (s *hookPlayInfoSource) maxConcurrency() int {
 	s.mu.Lock()
@@ -1190,7 +1213,7 @@ func TestSessionMemoryReaderPreservesLocalFileNoReuseClearAndSingleLoop(t *testi
 		synctest.Test(t, func(t *testing.T) {
 			var mu sync.Mutex
 			curSnap := assoc.MemTestSnapshot{
-				SongItemPtr:     0x100,
+				ListPtr:         0x100,
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				TaskID:          1,
@@ -1263,7 +1286,7 @@ func TestSessionMemoryReaderPreservesLocalFileNoReuseClearAndSingleLoop(t *testi
 					rows[hashB] = assoc.MemTestPlayingRow{PlayedAt: fileTime(time.Now()), Path: audioB}
 					dbMtime = 1002
 					curSnap = assoc.MemTestSnapshot{
-						SongItemPtr:     0x200,
+						ListPtr:         0x200,
 						CurrentSongHash: hashB,
 						NoLyricFound:    true,
 					}
@@ -1277,7 +1300,7 @@ func TestSessionMemoryReaderPreservesLocalFileNoReuseClearAndSingleLoop(t *testi
 					rows[hashA] = assoc.MemTestPlayingRow{PlayedAt: fileTime(time.Now()), Path: "歌手 - 同名歌.mp3"}
 					dbMtime = 1003
 					curSnap = assoc.MemTestSnapshot{
-						SongItemPtr:     0x300,
+						ListPtr:         0x300,
 						CurrentSongHash: hashA,
 						CLyricPtr:       0x20000,
 						TaskID:          2,
@@ -1291,7 +1314,7 @@ func TestSessionMemoryReaderPreservesLocalFileNoReuseClearAndSingleLoop(t *testi
 					// 切到同名无词本地音频 C：换歌拍库内尚无 C 的 P（模拟酷狗延迟写库），换歌拍先沿用 A。
 					mu.Lock()
 					curSnap = assoc.MemTestSnapshot{
-						SongItemPtr:     0x400,
+						ListPtr:         0x400,
 						CurrentSongHash: hashC,
 						NoLyricFound:    true,
 					}
@@ -1348,7 +1371,7 @@ func TestSessionMemoryReaderPreservesLocalFileNoReuseClearAndSingleLoop(t *testi
 		synctest.Test(t, func(t *testing.T) {
 			var mu sync.Mutex
 			curSnap := assoc.MemTestSnapshot{
-				SongItemPtr:     0x100,
+				ListPtr:         0x100,
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				TaskID:          1,
@@ -1407,7 +1430,7 @@ func TestSessionMemoryReaderPreservesLocalFileNoReuseClearAndSingleLoop(t *testi
 					rows[hashB] = assoc.MemTestPlayingRow{PlayedAt: fileTime(time.Now()), Path: audioB}
 					dbMtime = 2001
 					curSnap = assoc.MemTestSnapshot{
-						SongItemPtr:     0x200,
+						ListPtr:         0x200,
 						CurrentSongHash: hashB,
 						CLyricPtr:       0x20000,
 						TaskID:          2,
@@ -1423,7 +1446,7 @@ func TestSessionMemoryReaderPreservesLocalFileNoReuseClearAndSingleLoop(t *testi
 					rows[hashB] = assoc.MemTestPlayingRow{PlayedAt: fileTime(time.Now()), Path: audioB}
 					dbMtime = 2002
 					curSnap = assoc.MemTestSnapshot{
-						SongItemPtr:     0x200,
+						ListPtr:         0x200,
 						CurrentSongHash: hashB,
 						NoLyricFound:    true,
 					}
@@ -1725,5 +1748,916 @@ func TestSessionSteadyPlaybackResponsiveDuringBlockingCDPAndPollWait(t *testing.
 				t.Fatalf("pollInterval=1000ms 内取消关联延迟 = %v，want <= 300ms", delay)
 			}
 		})
+	})
+}
+
+func TestSessionRevokesStaleMemFoundAndRecoversOnline(t *testing.T) {
+	runOnlineMemRevokeCase := func(t *testing.T, noLyricOnEmpty bool) {
+		t.Helper()
+		stubEmptyCoverAPI(t)
+		hashA := hex32Hash(0xaa, 31)
+		hashB := hex32Hash(0xbb, 32)
+		const (
+			fileA = "歌手A - 歌A"
+			fileB = "歌手B - 歌B"
+		)
+		cachePathA := `C:\KuGouLyric\歌手A - 歌A-` + hashA + `-100001-00000000.lrc`
+
+		var bFetchCalls atomic.Int32
+		stubFetchCtx(t, func(_ context.Context, hash string, _ int, _, _ string) ([]klyric.Line, error) {
+			if hash == hashB {
+				bFetchCalls.Add(1)
+				return timedLyrics("歌B在线", 1.0), nil
+			}
+			return nil, nil
+		})
+
+		synctest.Test(t, func(t *testing.T) {
+			var mu sync.Mutex
+			curSnap := assoc.MemTestSnapshot{
+				SongID:          1,
+				ListIdx:         0,
+				ListPtr:         0x10000,
+				CurrentSongHash: hashA,
+				CLyricPtr:       0x20000,
+				TaskID:          1,
+				KrcID:           100001,
+				LyricFilePath:   cachePathA,
+			}
+			rows := map[string]assoc.MemTestPlayingRow{
+				hashA: {PlayedAt: fileTime(time.Now()), Path: "歌手A - 歌A.mp3"},
+			}
+			dbMtime := int64(3000)
+			var sawSecondPlayedAt atomic.Bool
+
+			starter := func(ctx context.Context) localLyrics {
+				r := assoc.StartMemoryForTest(ctx, assoc.MemTestConfig{
+					Snapshot: func() assoc.MemTestSnapshot {
+						mu.Lock()
+						defer mu.Unlock()
+						return curSnap
+					},
+					PlayingRow: func(hash string) (assoc.MemTestPlayingRow, error) {
+						mu.Lock()
+						row := rows[hash]
+						mu.Unlock()
+						if hash == hashB && row.PlayedAt > 0 {
+							sawSecondPlayedAt.Store(true)
+						}
+						return row, nil
+					},
+					ReadFile: func(path string) ([]byte, error) {
+						if path == cachePathA {
+							return []byte("[00:01.00]歌A缓存一\n[00:30.00]歌A缓存二\n"), nil
+						}
+						return nil, fs.ErrNotExist
+					},
+					StatDB: func() (int64, time.Time, error) {
+						mu.Lock()
+						sec := dbMtime
+						mu.Unlock()
+						return 1 << 20, time.Unix(sec, 0), nil
+					},
+				})
+				if r == nil {
+					return nil
+				}
+				return r
+			}
+
+			atFile := func(hash, filename string, sec float64) *cdp.PlayInfo {
+				r := read(hash, "playing", sec, 200)
+				r.Filename = filename
+				return r
+			}
+
+			p := New(0, 1000)
+			call := 0
+			src := &hookPlayInfoSource{fn: func(_ int) (*cdp.PlayInfo, error) {
+				call++
+				switch {
+				case call == 1 || call == 2:
+					// 歌 A 换歌拍与重读，采纳缓存歌词 A。
+					return atFile(hashA, fileA, 2.0), nil
+				case call == 3:
+					return atFile(hashA, fileA, 3.0), nil
+				case call == 4:
+					// 切到不同名在线歌 B：Overlay 已变为 B，而 CLyric 保持 A 逾 25ms，令 A 的缓存歌词被超窗暂时采纳。
+					mu.Lock()
+					curSnap = assoc.MemTestSnapshot{
+						SongID:          2,
+						ListIdx:         1,
+						ListPtr:         0x20000,
+						CurrentSongHash: hashB,
+						CLyricPtr:       0x20000,
+						TaskID:          1,
+						KrcID:           100001,
+						LyricFilePath:   cachePathA,
+					}
+					mu.Unlock()
+					return atFile(hashB, fileB, 2.0), nil
+				case call == 5:
+					// B 换歌拍重读（此时已完成 25ms 双拍窗并暂时采纳 A 的缓存歌词）。
+					return atFile(hashB, fileB, 2.0), nil
+				case call == 6:
+					// 迟到的 OnSongChanged(B) 落地：CLyric 切换为 B 的新空 CLyric（空路径 + 空向量）。
+					mu.Lock()
+					curSnap = assoc.MemTestSnapshot{
+						SongID:          2,
+						ListIdx:         1,
+						ListPtr:         0x20000,
+						CurrentSongHash: hashB,
+						CLyricPtr:       0x30000,
+						TaskID:          2,
+						NoLyricFound:    noLyricOnEmpty,
+					}
+					mu.Unlock()
+					return atFile(hashB, fileB, 3.0), nil
+				case call == 7:
+					return atFile(hashB, fileB, 4.0), nil
+				case call == 8:
+					// 队列表 PlayedAt 落盘（在线相对路径，LocalFile=false），触发第二次 KindNone{MemoryNoLyric: true}。
+					mu.Lock()
+					curSnap.NoLyricFound = true
+					rows[hashB] = assoc.MemTestPlayingRow{PlayedAt: fileTime(time.Now()), Path: "歌手B - 歌B.mp3"}
+					dbMtime = 3001
+					mu.Unlock()
+					return atFile(hashB, fileB, 5.0), nil
+				case call >= 9 && call <= 13:
+					// 推进 5 拍确保 1s stat 检出稳定落盘并送出第二次 KindNone{MemoryNoLyric: true}。
+					return atFile(hashB, fileB, float64(call-3)), nil
+				default:
+					return nil, errors.New("done")
+				}
+			}}
+
+			p.runSession(src, starter)
+			synctest.Wait()
+			evts := drainAll(p)
+
+			if !sawSecondPlayedAt.Load() {
+				t.Fatal("测试前置条件未达成：未触发第二次 PlayedAt 落盘重读")
+			}
+
+			var bEvents []string
+			inB := false
+			for _, e := range evts {
+				switch d := e.Data.(type) {
+				case *player.AllLyricsData:
+					if d.Title == fileB {
+						inB = true
+					} else if inB {
+						inB = false
+					}
+					if inB {
+						if d.Count == 0 {
+							bEvents = append(bEvents, "all_lyrics:0")
+						} else {
+							bEvents = append(bEvents, "all_lyrics:"+strconv.Itoa(d.Count)+":"+d.Lyrics[0].Text)
+						}
+					}
+				case *player.LyricUpdate:
+					if inB {
+						if d.Index == -1 {
+							bEvents = append(bEvents, "lyric_update:-1")
+						} else {
+							bEvents = append(bEvents, "lyric_update:"+strconv.Itoa(d.Index)+":"+d.Text)
+						}
+					}
+				}
+			}
+
+			want := []string{
+				"all_lyrics:2:歌A缓存一",
+				"lyric_update:0:歌A缓存一",
+				"all_lyrics:0",
+				"lyric_update:-1",
+				"all_lyrics:2:歌B在线一",
+				"lyric_update:0:歌B在线一",
+			}
+			if !slices.Equal(bEvents, want) {
+				t.Fatalf("歌 B 歌词事件序列 = %q，want %q（全量事件=%q）", bEvents, want, lyricEvents(evts))
+			}
+			if got := bFetchCalls.Load(); got != 1 {
+				t.Fatalf("歌 B 在线取词次数 = %d，want 1（第二次 KindNone{MemoryNoLyric:true} 不得重复拉取）", got)
+			}
+		})
+	}
+
+	t.Run("NoLyricFound=true迟到无词撤销旧词并恢复在线且PlayedAt落盘不误清", func(t *testing.T) {
+		runOnlineMemRevokeCase(t, true)
+	})
+
+	t.Run("搜词中空向量NoLyricFound=false迟到置空撤销旧词并恢复在线", func(t *testing.T) {
+		runOnlineMemRevokeCase(t, false)
+	})
+
+	t.Run("对照组_外部文件暂缺MemoryNoLyric=false保持本地关联歌词不清词", func(t *testing.T) {
+		stubEmptyCoverAPI(t)
+		var fetchCalls atomic.Int32
+		stubFetchCtx(t, func(_ context.Context, _ string, _ int, _, _ string) ([]klyric.Line, error) {
+			fetchCalls.Add(1)
+			return timedLyrics("在线", 1.0), nil
+		})
+
+		synctest.Test(t, func(t *testing.T) {
+			p := New(0, 1000)
+			f := newFakeLocal(map[string][]reply{
+				"A": {
+					{100 * time.Millisecond, playedAt(foundAssoc("A", timedLyrics("本地关联", 1.0)), lpt(0))},
+					// 同次播放中外部歌词文件暂缺或不可读：MemoryNoLyric=false 且 AssocSkipped=true，按 #205「2甲」保持原词。
+					{1500 * time.Millisecond, assoc.Result{
+						Hash:          "A",
+						Kind:          assoc.KindNone,
+						MemoryNoLyric: false,
+						AssocSkipped:  true,
+						Retry:         true,
+						PlayedAt:      lpt(0),
+						LocalFile:     true,
+					}},
+					{2500 * time.Millisecond, assoc.Result{
+						Hash:          "A",
+						Kind:          assoc.KindNone,
+						MemoryNoLyric: false,
+						AssocSkipped:  true,
+						Retry:         false,
+						PlayedAt:      lpt(0),
+						LocalFile:     true,
+					}},
+				},
+			})
+
+			reads := slices.Concat(
+				twice(read("A", "playing", 2.0, 200)),
+				once(read("A", "playing", 3.0, 200)),
+				once(read("A", "playing", 4.0, 200)),
+				once(read("A", "playing", 5.0, 200)),
+			)
+			p.runSession(&scriptedSource{reads: reads}, f.starter())
+			synctest.Wait()
+			evts := drainAll(p)
+
+			if got := fetchCalls.Load(); got != 0 {
+				t.Fatalf("对照组不应触发在线取词，实得 %d 次", got)
+			}
+			var all []*player.AllLyricsData
+			for _, e := range evts {
+				switch d := e.Data.(type) {
+				case *player.AllLyricsData:
+					all = append(all, d)
+				case *player.LyricUpdate:
+					if d.Index == -1 {
+						t.Fatalf("MemoryNoLyric=false 不应发出 index:-1 清词事件（事件=%q）", lyricEvents(evts))
+					}
+				}
+			}
+			if len(all) != 1 || all[0].Count != 2 || all[0].Lyrics[0].Text != "本地关联一" {
+				t.Fatalf("MemoryNoLyric=false 应保持原有本地关联歌词不变，实得 all_lyrics=%+v（事件=%q）", all, lyricEvents(evts))
+			}
+		})
+	})
+}
+
+type delayConsumeLocal struct {
+	inner  localLyrics
+	paused atomic.Bool
+}
+
+func (d *delayConsumeLocal) SetHash(h string) { d.inner.SetHash(h) }
+
+func (d *delayConsumeLocal) Results() <-chan assoc.Result {
+	if d.paused.Load() {
+		return nil
+	}
+	return d.inner.Results()
+}
+
+func TestSessionRevokePreservedWhenOverwrittenByMemoryLyric(t *testing.T) {
+	stubEmptyCoverAPI(t)
+	hashA := hex32Hash(0xaa, 41)
+	hashB := hex32Hash(0xbb, 42)
+	const (
+		fileA = "歌手A - 歌A"
+		fileB = "歌手B - 歌B"
+	)
+	cachePathA := `C:\KuGouLyric\歌手A - 歌A-` + hashA + `-200001-00000000.lrc`
+
+	var bFetchCalls atomic.Int32
+	stubFetchCtx(t, func(_ context.Context, hash string, _ int, _, _ string) ([]klyric.Line, error) {
+		if hash == hashB {
+			bFetchCalls.Add(1)
+			return timedLyrics("歌B在线", 5.0), nil
+		}
+		return nil, nil
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		curSnap := assoc.MemTestSnapshot{
+			SongID:          1,
+			ListIdx:         0,
+			ListPtr:         0x10000,
+			CurrentSongHash: hashA,
+			CLyricPtr:       0x20000,
+			TaskID:          1,
+			KrcID:           200001,
+			LyricFilePath:   cachePathA,
+		}
+		var emptyReads, memVecReads atomic.Int32
+		var wrapped *delayConsumeLocal
+
+		starter := func(ctx context.Context) localLyrics {
+			r := assoc.StartMemoryForTest(ctx, assoc.MemTestConfig{
+				Snapshot: func() assoc.MemTestSnapshot {
+					mu.Lock()
+					s := curSnap
+					mu.Unlock()
+					if s.CurrentSongHash == hashB && s.CLyricPtr == 0x30000 {
+						if s.VecBegin == s.VecEnd && s.LyricFilePath == "" {
+							emptyReads.Add(1)
+						} else if s.VecBegin != s.VecEnd && s.LyricFilePath == "" {
+							memVecReads.Add(1)
+						}
+					}
+					return s
+				},
+				ReadFile: func(path string) ([]byte, error) {
+					if path == cachePathA {
+						return []byte("[00:05.00]歌A缓存一\n[00:30.00]歌A缓存二\n"), nil
+					}
+					return nil, fs.ErrNotExist
+				},
+			})
+			if r == nil {
+				return nil
+			}
+			wrapped = &delayConsumeLocal{inner: r}
+			return wrapped
+		}
+
+		atFile := func(hash, filename string, sec float64) *cdp.PlayInfo {
+			r := read(hash, "playing", sec, 200)
+			r.Filename = filename
+			return r
+		}
+
+		p := New(0, 1000)
+		src := &hookPlayInfoSource{fn: func(call int) (*cdp.PlayInfo, error) {
+			switch call {
+			case 1, 2:
+				return atFile(hashA, fileA, 2.0), nil
+			case 3:
+				return atFile(hashA, fileA, 3.0), nil
+			case 4:
+				// 切到 B：CLyric 保持 A 逾 25ms，令 B 误采纳 A 的缓存歌词。
+				mu.Lock()
+				curSnap = assoc.MemTestSnapshot{
+					SongID:          2,
+					ListIdx:         1,
+					ListPtr:         0x20000,
+					CurrentSongHash: hashB,
+					CLyricPtr:       0x20000,
+					TaskID:          1,
+					KrcID:           200001,
+					LyricFilePath:   cachePathA,
+				}
+				mu.Unlock()
+				return atFile(hashB, fileB, 2.0), nil
+			case 5:
+				// 重读返回前暂停消费 r.Results()，确保后续两拍连续覆盖容量 1 的结果槽。
+				wrapped.paused.Store(true)
+				return atFile(hashB, fileB, 2.0), nil
+			case 6:
+				// 延迟消费期间依次发生：1) 空 CLyric；2) 50ms 后变为纯内存有向量+空路径（偏移 +1200ms）。
+				mu.Lock()
+				curSnap = assoc.MemTestSnapshot{
+					SongID:          2,
+					ListIdx:         1,
+					ListPtr:         0x20000,
+					CurrentSongHash: hashB,
+					CLyricPtr:       0x30000,
+					TaskID:          2,
+					NoLyricFound:    false,
+				}
+				mu.Unlock()
+				time.Sleep(250 * time.Millisecond)
+
+				mu.Lock()
+				curSnap = assoc.MemTestSnapshot{
+					SongID:          2,
+					ListIdx:         1,
+					ListPtr:         0x20000,
+					CurrentSongHash: hashB,
+					CLyricPtr:       0x30000,
+					TaskID:          2,
+					VecBegin:        0x50000,
+					VecEnd:          0x50100,
+					LyricFilePath:   "",
+					LyricOffsetMs:   1200,
+				}
+				mu.Unlock()
+				time.Sleep(100 * time.Millisecond)
+
+				// 释放消费，让会话收到被覆盖后的唯一一条结果。
+				wrapped.paused.Store(false)
+				return atFile(hashB, fileB, 4.0), nil
+			case 7:
+				return atFile(hashB, fileB, 5.0), nil
+			case 8:
+				// 后续调偏移至 +1800ms，应正常重发而不误清。
+				mu.Lock()
+				curSnap.LyricOffsetMs = 1800
+				mu.Unlock()
+				return atFile(hashB, fileB, 6.0), nil
+			case 9, 10:
+				return atFile(hashB, fileB, float64(call-2)), nil
+			default:
+				return nil, errors.New("done")
+			}
+		}}
+
+		p.runSession(src, starter)
+		synctest.Wait()
+		evts := drainAll(p)
+
+		if emptyReads.Load() == 0 || memVecReads.Load() == 0 {
+			t.Fatalf("测试前置条件未达成：emptyReads=%d memVecReads=%d", emptyReads.Load(), memVecReads.Load())
+		}
+		if got := bFetchCalls.Load(); got != 1 {
+			t.Fatalf("歌 B 在线取词次数 = %d，want 1", got)
+		}
+
+		type bAll struct {
+			count int
+			text  string
+			ts    float32
+		}
+		var bAlls []bAll
+		var bMinusOnes int
+		inB := false
+		for _, e := range evts {
+			switch d := e.Data.(type) {
+			case *player.AllLyricsData:
+				if d.Title == fileB {
+					inB = true
+				} else if inB {
+					inB = false
+				}
+				if inB {
+					var text string
+					var ts float32
+					if len(d.Lyrics) > 0 {
+						text = d.Lyrics[0].Text
+						ts = d.Lyrics[0].Timestamp
+					}
+					bAlls = append(bAlls, bAll{count: d.Count, text: text, ts: ts})
+				}
+			case *player.LyricUpdate:
+				if inB && d.Index == -1 {
+					bMinusOnes++
+				}
+			}
+		}
+
+		if bMinusOnes != 1 {
+			t.Fatalf("歌 B index:-1 清词次数 = %d，want 1（全量事件=%q）", bMinusOnes, lyricEvents(evts))
+		}
+		if len(bAlls) != 4 {
+			t.Fatalf("歌 B all_lyrics 序列 = %+v（len=%d），want 4 条（误采纳A -> 清词 -> +1200ms在线恢复 -> +1800ms偏移重发）；全量事件=%q",
+				bAlls, len(bAlls), lyricEvents(evts))
+		}
+		if bAlls[0].count != 2 || bAlls[0].text != "歌A缓存一" {
+			t.Fatalf("第 1 条 B all_lyrics = %+v，want 误采纳歌A缓存一", bAlls[0])
+		}
+		if bAlls[1].count != 0 {
+			t.Fatalf("第 2 条 B all_lyrics = %+v，want count:0 撤销旧词", bAlls[1])
+		}
+		if bAlls[2].count != 2 || bAlls[2].text != "歌B在线一" || !approxEq(bAlls[2].ts, 3.8) {
+			t.Fatalf("第 3 条 B all_lyrics = %+v，want 歌B在线一 @ 3.80s（+1200ms 偏移）", bAlls[2])
+		}
+		if bAlls[3].count != 2 || bAlls[3].text != "歌B在线一" || !approxEq(bAlls[3].ts, 3.2) {
+			t.Fatalf("第 4 条 B all_lyrics = %+v，want 歌B在线一 @ 3.20s（+1800ms 偏移，不得误清）", bAlls[3])
+		}
+	})
+}
+
+func TestSessionSwitchRereadDoesNotBlockLocalEvents(t *testing.T) {
+	t.Run("换歌拍命中KindFound后重读阻塞1s_取消关联在300ms内清词且零并发GetPlayInfo", func(t *testing.T) {
+		stubEmptyCoverAPI(t)
+		var fetchCalls atomic.Int32
+		stubFetchCtx(t, func(context.Context, string, int, string, string) ([]klyric.Line, error) {
+			fetchCalls.Add(1)
+			return timedLyrics("不应拉取在线", 5.0), nil
+		})
+
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			p := New(0, 100)
+			f := newFakeLocal(map[string][]reply{
+				"A": {{20 * time.Millisecond, found("A", timedLyrics("歌A本地", 5.0))}},
+			})
+
+			rereadStarted := make(chan struct{})
+			rereadDone := make(chan struct{})
+			var sendAtNS, clearedAtNS atomic.Int64
+			var gotCountZero, gotMinusOne, gotNonEmpty atomic.Bool
+
+			src := &hookPlayInfoSource{fn: func(call int) (*cdp.PlayInfo, error) {
+				switch call {
+				case 1:
+					return read("A", "playing", 2.0, 200), nil
+				case 2:
+					// 换歌拍 local.await 命中 KindFound 后的重读 GetPlayInfo 阻塞 1s。
+					close(rereadStarted)
+					time.Sleep(time.Second)
+					close(rereadDone)
+					return read("A", "playing", 3.0, 200), nil
+				case 3, 4:
+					return read("A", "playing", float64(call+1), 200), nil
+				default:
+					return nil, errors.New("done")
+				}
+			}}
+
+			evtDone := make(chan struct{})
+			go func() {
+				defer close(evtDone)
+				for {
+					select {
+					case e := <-p.EventCh:
+						switch d := e.Data.(type) {
+						case *player.AllLyricsData:
+							if d.Count == 0 {
+								if !gotCountZero.Swap(true) {
+									clearedAtNS.Store(int64(time.Since(start)))
+								}
+							} else {
+								gotNonEmpty.Store(true)
+							}
+						case *player.LyricUpdate:
+							if d.Index == -1 {
+								gotMinusOne.Store(true)
+							} else {
+								gotNonEmpty.Store(true)
+							}
+						}
+					case <-p.StopCh:
+						return
+					}
+				}
+			}()
+
+			sendDone := make(chan struct{})
+			go func() {
+				defer close(sendDone)
+				<-rereadStarted
+				// 在 localFoundRereadBudget（50ms）窗口内触发，验证 rereadLoop 的抢占清词路径。
+				time.Sleep(20 * time.Millisecond)
+				sendAtNS.Store(int64(time.Since(start)))
+				f.send(assoc.Result{Hash: "A", Kind: assoc.KindUnassociated})
+			}()
+
+			p.runSession(src, f.starter())
+			<-rereadDone
+			<-sendDone
+			p.Stop()
+			<-evtDone
+			synctest.Wait()
+
+			if !gotCountZero.Load() || !gotMinusOne.Load() {
+				t.Fatalf("应发出 count:0 与 index:-1，实际 countZero=%v minusOne=%v", gotCountZero.Load(), gotMinusOne.Load())
+			}
+			if gotNonEmpty.Load() {
+				t.Fatal("重读阻塞期间已取消关联，不应发出非空歌词")
+			}
+			if delay := time.Duration(clearedAtNS.Load() - sendAtNS.Load()); delay < 0 || delay > 300*time.Millisecond {
+				t.Fatalf("重读阻塞 1s 期间取消关联清词延迟 = %v，want <= 300ms", delay)
+			}
+			if got := fetchCalls.Load(); got != 0 {
+				t.Fatalf("取消关联不应触发在线取词，实际 %d 次", got)
+			}
+			if mc := src.maxConcurrency(); mc != 1 {
+				t.Fatalf("GetPlayInfo 最大并发数 = %d，want 1（须由 nextPlayInfo 串行接管）", mc)
+			}
+		})
+	})
+
+	t.Run("换歌拍命中KindFound后重读阻塞1s_MemoryNoLyric在300ms内清词并触发在线恢复且零并发GetPlayInfo", func(t *testing.T) {
+		stubEmptyCoverAPI(t)
+		var fetchCalls atomic.Int32
+		stubFetchCtx(t, func(_ context.Context, hash string, _ int, _, _ string) ([]klyric.Line, error) {
+			if hash == "A" {
+				fetchCalls.Add(1)
+				time.Sleep(50 * time.Millisecond)
+				return timedLyrics("歌A在线恢复", 5.0), nil
+			}
+			return nil, nil
+		})
+
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			p := New(0, 100)
+			f := newFakeLocal(map[string][]reply{
+				"A": {{20 * time.Millisecond, found("A", timedLyrics("误采纳旧词", 5.0))}},
+			})
+
+			rereadStarted := make(chan struct{})
+			rereadDone := make(chan struct{})
+			var sendAtNS, clearedAtNS, recoveredAtNS atomic.Int64
+			var gotCountZero, gotMinusOne, gotStale, gotRecovered atomic.Bool
+			var recoveredTS atomic.Int64
+
+			src := &hookPlayInfoSource{fn: func(call int) (*cdp.PlayInfo, error) {
+				switch call {
+				case 1:
+					return read("A", "playing", 2.0, 200), nil
+				case 2:
+					close(rereadStarted)
+					time.Sleep(time.Second)
+					close(rereadDone)
+					return read("A", "playing", 3.0, 200), nil
+				case 3, 4:
+					return read("A", "playing", float64(call+1), 200), nil
+				default:
+					return nil, errors.New("done")
+				}
+			}}
+
+			evtDone := make(chan struct{})
+			go func() {
+				defer close(evtDone)
+				for {
+					select {
+					case e := <-p.EventCh:
+						switch d := e.Data.(type) {
+						case *player.AllLyricsData:
+							if d.Count == 0 {
+								if !gotCountZero.Swap(true) {
+									clearedAtNS.Store(int64(time.Since(start)))
+								}
+							} else if len(d.Lyrics) > 0 && d.Lyrics[0].Text == "误采纳旧词一" {
+								gotStale.Store(true)
+							} else if len(d.Lyrics) > 0 && d.Lyrics[0].Text == "歌A在线恢复一" {
+								if !gotRecovered.Swap(true) {
+									recoveredAtNS.Store(int64(time.Since(start)))
+									recoveredTS.Store(int64(d.Lyrics[0].Timestamp * 1000))
+								}
+							}
+						case *player.LyricUpdate:
+							if d.Index == -1 {
+								gotMinusOne.Store(true)
+							}
+						}
+					case <-p.StopCh:
+						return
+					}
+				}
+			}()
+
+			sendDone := make(chan struct{})
+			go func() {
+				defer close(sendDone)
+				<-rereadStarted
+				// 在 localFoundRereadBudget（50ms）窗口内触发，验证 rereadLoop 的内存空词撤销路径。
+				time.Sleep(20 * time.Millisecond)
+				sendAtNS.Store(int64(time.Since(start)))
+				f.send(assoc.Result{
+					Hash:           "A",
+					Kind:           assoc.KindNone,
+					MemoryNoLyric:  true,
+					HasMemoryLyric: true,
+					LyricOffsetMs:  1200,
+				})
+			}()
+
+			p.runSession(src, f.starter())
+			<-rereadDone
+			<-sendDone
+			p.Stop()
+			<-evtDone
+			synctest.Wait()
+
+			if !gotCountZero.Load() || !gotMinusOne.Load() {
+				t.Fatalf("应发出 count:0 与 index:-1，实际 countZero=%v minusOne=%v", gotCountZero.Load(), gotMinusOne.Load())
+			}
+			if gotStale.Load() {
+				t.Fatal("重读阻塞期间收到 MemoryNoLyric，不应发出误采纳旧词")
+			}
+			if delay := time.Duration(clearedAtNS.Load() - sendAtNS.Load()); delay < 0 || delay > 300*time.Millisecond {
+				t.Fatalf("重读阻塞 1s 期间 MemoryNoLyric 清词延迟 = %v，want <= 300ms", delay)
+			}
+			if !gotRecovered.Load() {
+				t.Fatal("MemoryNoLyric 后应触发在线恢复并广播歌A在线恢复歌词")
+			}
+			if recDelay := time.Duration(recoveredAtNS.Load() - sendAtNS.Load()); recDelay < 0 || recDelay > 300*time.Millisecond {
+				t.Fatalf("重读阻塞期间在线恢复延迟 = %v，want <= 300ms", recDelay)
+			}
+			if tsMs := recoveredTS.Load(); tsMs < 3790 || tsMs > 3810 {
+				t.Fatalf("在线恢复首行时间戳 = %dms，want 3800ms（套用 +1200ms 偏移）", tsMs)
+			}
+			if got := fetchCalls.Load(); got != 1 {
+				t.Fatalf("在线恢复取词次数 = %d，want 1", got)
+			}
+			if mc := src.maxConcurrency(); mc != 1 {
+				t.Fatalf("GetPlayInfo 最大并发数 = %d，want 1（须由 nextPlayInfo 串行接管）", mc)
+			}
+		})
+	})
+}
+
+func TestSessionInFlightProbeDoesNotBlockOnIsClosedLock(t *testing.T) {
+	stubEmptyCoverAPI(t)
+	var fetchCalls atomic.Int32
+	stubFetchCtx(t, func(context.Context, string, int, string, string) ([]klyric.Line, error) {
+		fetchCalls.Add(1)
+		return timedLyrics("不应拉取在线", 5.0), nil
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		p := New(0, 100)
+		f := newFakeLocal(map[string][]reply{
+			"A": {{20 * time.Millisecond, found("A", timedLyrics("歌A初始", 5.0))}},
+		})
+
+		rereadStarted := make(chan struct{})
+		rereadDone := make(chan struct{})
+		var unassocAtNS, clearedAtNS atomic.Int64
+		var reassocAtNS, newLyricsAtNS atomic.Int64
+		var rereadDoneAtNS atomic.Int64
+		var gotClear, gotMinusOne, gotNewLyrics atomic.Bool
+
+		src := &hookPlayInfoSource{
+			clientLock: make(chan struct{}, 1),
+			fn: func(call int) (*cdp.PlayInfo, error) {
+				switch call {
+				case 1:
+					return read("A", "playing", 2.0, 200), nil
+				case 2:
+					// 模拟真实 *cdp.Client：GetPlayInfo 持 c.mu 阻塞 1s（[20ms, 1020ms]）。
+					close(rereadStarted)
+					time.Sleep(time.Second)
+					rereadDoneAtNS.Store(int64(time.Since(start)))
+					close(rereadDone)
+					return read("A", "playing", 3.0, 200), nil
+				case 3, 4:
+					return read("A", "playing", float64(call+1), 200), nil
+				default:
+					return nil, errors.New("done")
+				}
+			},
+		}
+
+		evtDone := make(chan struct{})
+		go func() {
+			defer close(evtDone)
+			for {
+				select {
+				case e := <-p.EventCh:
+					switch d := e.Data.(type) {
+					case *player.AllLyricsData:
+						if d.Count == 0 {
+							if !gotClear.Swap(true) {
+								clearedAtNS.Store(int64(time.Since(start)))
+							}
+						} else if len(d.Lyrics) > 0 && d.Lyrics[0].Text == "歌A新关联一" {
+							if !gotNewLyrics.Swap(true) {
+								newLyricsAtNS.Store(int64(time.Since(start)))
+							}
+						}
+					case *player.LyricUpdate:
+						if d.Index == -1 {
+							gotMinusOne.Store(true)
+						}
+					}
+				case <-p.StopCh:
+					return
+				}
+			}
+		}()
+
+		sendDone := make(chan struct{})
+		go func() {
+			defer close(sendDone)
+			<-rereadStarted
+			// t=70ms：在 1s GetPlayInfo 持锁阻塞期内触发取消关联。
+			time.Sleep(50 * time.Millisecond)
+			unassocAtNS.Store(int64(time.Since(start)))
+			f.send(assoc.Result{Hash: "A", Kind: assoc.KindUnassociated})
+
+			// t=200ms（仍在同一次 1s GetPlayInfo 持锁阻塞期内，且已过 100ms pollInterval 回到主循环顶部）：
+			// 再次关联新歌词，验证主循环不会阻塞在 client.IsClosed() 的互斥锁上。
+			time.Sleep(130 * time.Millisecond)
+			reassocAtNS.Store(int64(time.Since(start)))
+			f.send(found("A", timedLyrics("歌A新关联", 5.0)))
+		}()
+
+		p.runSession(src, f.starter())
+		<-rereadDone
+		<-sendDone
+		synctest.Wait()
+		p.Stop()
+		<-evtDone
+		synctest.Wait()
+
+		if !gotClear.Load() || !gotMinusOne.Load() {
+			t.Fatalf("应发出取消关联清词 count:0 与 index:-1，实际 clear=%v minusOne=%v", gotClear.Load(), gotMinusOne.Load())
+		}
+		if delay := time.Duration(clearedAtNS.Load() - unassocAtNS.Load()); delay < 0 || delay > 300*time.Millisecond {
+			t.Fatalf("第 1 次取消关联清词延迟 = %v，want <= 300ms", delay)
+		}
+		if !gotNewLyrics.Load() {
+			t.Fatal("第 2 次重新关联歌词未发出新 all_lyrics")
+		}
+		if delay := time.Duration(newLyricsAtNS.Load() - reassocAtNS.Load()); delay < 0 || delay > 300*time.Millisecond {
+			t.Fatalf("同一次 1s GetPlayInfo 持锁阻塞期内第 2 次重新关联延迟 = %v（newLyricsAt=%v, reassocAt=%v, rereadDoneAt=%v），want <= 300ms（不得阻塞于 client.IsClosed()）",
+				delay, time.Duration(newLyricsAtNS.Load()), time.Duration(reassocAtNS.Load()), time.Duration(rereadDoneAtNS.Load()))
+		}
+		if got := fetchCalls.Load(); got != 0 {
+			t.Fatalf("不应触发在线取词，实际 %d 次", got)
+		}
+		if mc := src.maxConcurrency(); mc != 1 {
+			t.Fatalf("GetPlayInfo 最大并发数 = %d，want 1（须由 nextPlayInfo 串行接管）", mc)
+		}
+	})
+}
+
+func TestSessionLocalFoundSlowRereadPublishesWithinBudget(t *testing.T) {
+	stubEmptyCoverAPI(t)
+	var fetchCalls atomic.Int32
+	stubFetchCtx(t, func(context.Context, string, int, string, string) ([]klyric.Line, error) {
+		fetchCalls.Add(1)
+		return timedLyrics("不应拉取在线", 5.0), nil
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		p := New(0, 100)
+		foundAt := 20 * time.Millisecond
+		f := newFakeLocal(map[string][]reply{
+			"A": {{foundAt, found("A", timedLyrics("歌A首份本地", 5.0))}},
+		})
+
+		rereadDone := make(chan struct{})
+		var firstAllAtNS, rereadDoneAtNS atomic.Int64
+		var allLyricsCount atomic.Int32
+
+		src := &hookPlayInfoSource{
+			clientLock: make(chan struct{}, 1),
+			fn: func(call int) (*cdp.PlayInfo, error) {
+				switch call {
+				case 1:
+					return read("A", "playing", 2.0, 200), nil
+				case 2:
+					// 换歌拍 local.await 命中 KindFound 后的重读 GetPlayInfo 持锁阻塞 1s，且后续无其他本地事件。
+					time.Sleep(time.Second)
+					rereadDoneAtNS.Store(int64(time.Since(start)))
+					close(rereadDone)
+					return read("A", "playing", 3.0, 200), nil
+				case 3, 4:
+					return read("A", "playing", float64(call+1), 200), nil
+				default:
+					return nil, errors.New("done")
+				}
+			},
+		}
+
+		evtDone := make(chan struct{})
+		go func() {
+			defer close(evtDone)
+			for {
+				select {
+				case e := <-p.EventCh:
+					if d, ok := e.Data.(*player.AllLyricsData); ok && d.Count > 0 && len(d.Lyrics) > 0 && d.Lyrics[0].Text == "歌A首份本地一" {
+						if allLyricsCount.Add(1) == 1 {
+							firstAllAtNS.Store(int64(time.Since(start)))
+						}
+					}
+				case <-p.StopCh:
+					return
+				}
+			}
+		}()
+
+		p.runSession(src, f.starter())
+		<-rereadDone
+		synctest.Wait()
+		p.Stop()
+		<-evtDone
+		synctest.Wait()
+
+		if got := allLyricsCount.Load(); got != 1 {
+			t.Fatalf("应恰好发出 1 次首份非空本地歌词 all_lyrics，实际 %d 次", got)
+		}
+		if delay := time.Duration(firstAllAtNS.Load()) - foundAt; delay < 0 || delay > 300*time.Millisecond {
+			t.Fatalf("KindFound 后慢重读阻塞 1s 时首份 all_lyrics 发布延迟 = %v（firstAllAt=%v, foundAt=%v, rereadDoneAt=%v），want <= 300ms",
+				delay, time.Duration(firstAllAtNS.Load()), foundAt, time.Duration(rereadDoneAtNS.Load()))
+		}
+		if got := fetchCalls.Load(); got != 0 {
+			t.Fatalf("本地已命中歌词，不应触发在线取词，实际 %d 次", got)
+		}
+		if mc := src.maxConcurrency(); mc != 1 {
+			t.Fatalf("GetPlayInfo 最大并发数 = %d，want 1（超时跳出重读后须由 nextPlayInfo 串行接管）", mc)
+		}
 	})
 }

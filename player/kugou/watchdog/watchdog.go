@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,14 +51,28 @@ var ErrElevationFailed = i18n.Sentinel("Administrator rights not obtained")
 // EnsurePatchedNoElevate 走到要弹 UAC 的分支时返回它，不调用 launchElevatedHelper。
 var ErrElevationNeeded = i18n.Sentinel("libcef.dll needs repair, but elevation is disabled for this run")
 
+// ErrRunningNotReady 表示酷狗进程正在运行但尚未就绪（外层启动器交接中、主进程未唯一确认、
+// 尚无 CEF 子进程或路径瞬时不可读）。运行态绝不回退注册表/磁盘预选，由上层稍后重试。
+var ErrRunningNotReady = i18n.Sentinel("KuGou is running but not ready yet")
+
 const (
-	TargetProcessName = "KuGou.exe"
-	cdpPort           = 12233
+	TargetProcessName   = "KuGou.exe"
+	HDTargetProcessName = "HD_KuGou.exe"
+	cdpPort             = 12233
 
 	// knownVersion is the KuGou.exe FileVersion the patches were reverse-engineered against.
 	// Patches may work on other versions but are not guaranteed.
 	knownVersion = "20.1.22.27795"
 )
+
+// TargetProcessNames 是酷狗主/子进程允许使用的精确映像文件名白名单（顺序：先主壳 HD_KuGou.exe、后 KuGou.exe，供结束进程时先停父进程）。
+var TargetProcessNames = []string{HDTargetProcessName, TargetProcessName}
+
+// isKuGouProcessName 报告 name 是否精确匹配酷狗允许的映像文件名白名单（大小写不敏感）。
+// 严禁使用前缀、后缀、子串或正则匹配，防止误触酷狗直播、酷狗概念版、酷狗唱唱等其他程序。
+func isKuGouProcessName(name string) bool {
+	return strings.EqualFold(name, TargetProcessName) || strings.EqualFold(name, HDTargetProcessName)
+}
 
 // patchEntry describes one patch at a disk offset in libcef.dll.
 //
@@ -166,58 +181,60 @@ func classifyLibcef(r io.ReaderAt, warn bool) (allPatched bool, canAutoFix bool,
 
 // FindKuGouInstall locates the KuGou executable and the libcef.dll it actually loads.
 //
-// libcef.dll 必须是 KuGou.exe 实际加载的那一份。酷狗把不同版本的 CEF 放在以版本号命名
-// 的子目录里，升级后旧目录常残留，选错版本就会拿不匹配的偏移把 DLL 写坏。
-//
-// 酷狗在运行时以运行中的进程为准（设计 §6.3）：它可以装在任意路径，注册表可能是旧数据或指向另一份安装。
-// 进程只取一次快照，KuGou.exe 与 libcef.dll 出自同一份快照。KuGou.exe 的选址见 findKuGouExe；libcef.dll 三级：
-//  1. 运行中主进程的 CEF 子进程映像所在目录（与 Confirm 同一来源，设计 §6.2）。只在子进程恰好一个目录、
-//     其下有 libcef.dll 时采用（与 KuGou8 同一守卫）；没有子进程（酷狗刚启动）、分处多个目录时不取其一，往下走。
-//  2. 注册表 KuGou8 —— 酷狗自己维护、指向当前版本目录的指针。但它会变（实测有的机器/时刻
-//     指向 KuGou.exe 而非目录），故用 IsDir + 有 libcef.dll 守卫（kugou8LibcefIfDir），指文件即视为不可用。
-//     KuGou.exe 取自运行中的进程时，还须在 KuGou.exe 的目录之下（underDir），否则不用。
-//  3. 拿不到才按 KuGou.exe 的 FileVersion 推导版本目录（findLibcefForExe）。
-//
-// 早先的 951a361 直接删掉了 KuGou8、只留 exe 版本推导，是过度修复：当时确实读到 KuGou8
-// 指向 exe（真实观测），但正确动作是守卫而非删除——KuGou8 大多数时候（含本机现在）就是
-// 正确答案，删掉它把选址压在「exe 版本号 == CEF 目录名」这个未必成立的假设上。
-//
-// 选址只决定读哪份文件；能不能写由 9 处字节指纹决定（CheckPatchStatus），哪一级选出的都一样要过。
+// 运行态与冷态严格分离：
+//   - 酷狗正在运行时（runningKuGouFn 返回 nil）：经 resolveRunningInstall 仅认运行中 CEF 子进程所在的唯一目录，
+//     绝不回退注册表 KuGou8 或按版本目录猜测；
+//   - 确知没有任何酷狗进程运行时（errors.Is(rerr, ErrNotRunning)）：经 findColdInstall 按磁盘与注册表预选；
+//   - 其余运行态瞬态/异常（多主进程、启动器交接中、路径查询失败）：返回包装 ErrRunningNotReady 的错误，绝不退回冷态。
 func FindKuGouInstall() (exePath, libcefPath string, err error) {
 	run, rerr := runningKuGouFn()
-	if rerr != nil {
-		run = runningKuGou{} // 未运行、主进程不止一个或映像路径取不到：不用它的任何内容
+	if rerr == nil {
+		return resolveRunningInstall(run)
 	}
-	return findInstallWith(run)
+	if errors.Is(rerr, ErrNotRunning) {
+		return findColdInstall()
+	}
+	return "", "", i18n.Errorf("%w: %v", ErrRunningNotReady, rerr)
 }
 
-// locateRunningInstall 只按运行中的进程定位安装，供修补前重新确认（killAndPatch）：runningKuGouFn 出错时原样返回
-// 错误，不像 FindKuGouInstall 那样退回注册表——快照时某个子进程恰好退出、映像路径取不到，退回注册表就会拿到修补前
-// 按注册表预选的那份，比较通过，结束主播启动的另一份安装。
+// locateRunningInstall 只按运行中的进程定位安装，供修补前重新确认（killAndPatch）：
+// runningKuGouFn 出错时原样返回错误，绝不退回注册表或版本目录推导。
 func locateRunningInstall() (string, string, error) {
 	run, err := runningKuGouFn()
 	if err != nil {
 		return "", "", err
 	}
-	return findInstallWith(run)
+	return resolveRunningInstall(run)
 }
 
-// findInstallWith 是 FindKuGouInstall 的选址本体：run 是运行中的酷狗，不在运行或定位不了时为零值。
-func findInstallWith(run runningKuGou) (exePath, libcefPath string, err error) {
-	exePath = findKuGouExe(run.ExePath)
+// resolveRunningInstall 根据运行中的酷狗进程快照解析安装路径与 libcef.dll：
+// 零注册表/版本目录回退，只认运行中 CEF 子进程实际所在的唯一目录（与 Confirm 同源）。
+func resolveRunningInstall(run runningKuGou) (exePath, libcefPath string, err error) {
+	switch len(run.ChildDirs) {
+	case 0:
+		return "", "", i18n.Errorf("%w: KuGou (PID %d) has no CEF child process yet", ErrRunningNotReady, run.PID)
+	case 1:
+	default:
+		return "", "", i18n.Errorf("%w: the CEF child processes of KuGou run from different directories: %s", ErrVersionUnsupported, strings.Join(run.ChildDirs, "; "))
+	}
+	lc := kugou8LibcefIfDir(run.ChildDirs[0])
+	if lc == "" {
+		return "", "", i18n.Errorf("%w: libcef.dll not found in %s", ErrInstallNotFound, run.ChildDirs[0])
+	}
+	return run.ExePath, lc, nil
+}
+
+// findColdInstall 在确知没有任何酷狗进程运行时按磁盘与注册表预选安装：
+// KuGou.exe 取注册表 AppPath 或常见安装根；libcef.dll 首选注册表 KuGou8（须经 underDir 守卫同属该安装目录），
+// 不可用时再按 KuGou.exe 版本推导。
+func findColdInstall() (exePath, libcefPath string, err error) {
+	exePath = findKuGouExe("")
 	if exePath == "" {
 		return "", "", ErrInstallNotFound
 	}
-	if len(run.ChildDirs) == 1 {
-		libcefPath = kugou8LibcefIfDir(run.ChildDirs[0])
-	}
-	if libcefPath == "" {
-		libcefPath = libcefFromKuGou8()
-		// exe 取自运行中的进程时，KuGou8 须在 exe 目录之下才用：它可能是旧数据或指向另一份安装，用了它 exe 与
-		// libcef.dll 就分属两份安装，补丁打到不在运行的那一份。不在其下就在 exe 目录下按版本推导。
-		if run.ExePath != "" && !underDir(libcefPath, filepath.Dir(exePath)) {
-			libcefPath = ""
-		}
+	libcefPath = libcefFromKuGou8()
+	if !underDir(libcefPath, filepath.Dir(exePath)) {
+		libcefPath = ""
 	}
 	if libcefPath == "" {
 		libcefPath = findLibcefForExe(filepath.Dir(exePath), readExeVersion(exePath))
@@ -271,7 +288,7 @@ func libcefFromKuGou8() string {
 }
 
 // kugou8LibcefIfDir 是 KuGou8 的守卫（抽出以便不碰注册表做单测），运行中子进程的目录也经它：dir 必须是
-// 一个存在的目录、且其下有 libcef.dll，才返回该 libcef.dll 路径。KuGou8 已知会被改写成 KuGou.exe
+// 一个存在的目录、且其下存在普通文件 libcef.dll，才返回该 libcef.dll 路径。KuGou8 已知会被改写成 KuGou.exe
 // （文件），此时返回空，让调用方回落 exe 版本推导。
 func kugou8LibcefIfDir(dir string) string {
 	if dir == "" {
@@ -282,7 +299,8 @@ func kugou8LibcefIfDir(dir string) string {
 		return ""
 	}
 	lc := filepath.Join(dir, "libcef.dll")
-	if _, err := os.Stat(lc); err != nil {
+	lfi, err := os.Stat(lc)
+	if err != nil || !lfi.Mode().IsRegular() {
 		return ""
 	}
 	return lc
@@ -349,10 +367,33 @@ func findLibcefForExe(base, ver string) string {
 			best, bestName, bestVer = lc, name, v
 		}
 	}
-	if best != "" && ver != "" {
+	if best != "" && ver != "" && !isStubToV20(ver, bestVer) {
 		log.Warn("No libcef.dll directory matching KuGou.exe version %q; falling back to the highest version %q", ver, bestName)
 	}
 	return best
+}
+
+// isStubToV20 报告 exeVer 是否为外层 8.x/低版本启动器壳（首段 < 10）且对应子目录版本为 20.x 及以上（首段 >= 20）。
+// 酷狗 10.x 首段为 10，绝不命中此条件。
+func isStubToV20(exeVer string, targetVer []uint64) bool {
+	ev, ok := parseVersion(exeVer)
+	return ok && len(ev) > 0 && ev[0] < 10 && len(targetVer) > 0 && targetVer[0] >= 20
+}
+
+// effectiveKuGouVersion 核准用于日志、遥测与大版本黑名单判定的酷狗版本号：
+// 当 exeVer 为空时回落 libcef.dll 所在目录名；当冷态预选的外层启动器壳为低版本（首段 < 10，如 8.9.8.9）
+// 且同安装目录下的 libcef.dll 目录名为合法 20.x+ 版本号时，采用该子目录真实版本号（10.x 绝不被覆盖）。
+func effectiveKuGouVersion(exeVer, exePath, libcefPath string) string {
+	dirVer := filepath.Base(filepath.Dir(libcefPath))
+	if exeVer == "" {
+		return dirVer
+	}
+	if underDir(libcefPath, filepath.Dir(exePath)) {
+		if dv, ok := parseVersion(dirVer); ok && isStubToV20(exeVer, dv) {
+			return dirVer
+		}
+	}
+	return exeVer
 }
 
 // parseVersion 把点分的版本目录名拆成各段数值。有空段、或某段不是十进制纯数字（含正负号）时 ok 为 false。
@@ -384,16 +425,16 @@ func compareVersion(a, b []uint64) int {
 	return 0
 }
 
-// gateRunningFn 核验全部运行中的 KuGou.exe（商店版门禁，issue #212）；测试替换。
+// gateRunningFn 核验全部运行中的酷狗进程（KuGou.exe 与 HD_KuGou.exe，商店版门禁，issue #212）；测试替换。
 var gateRunningFn = func() error { return gateKuGou(snapshotProcs, imagePath) }
 
-// GateRunning 对全部运行中的 KuGou.exe 过商店版门禁（issue #212），供上层连接 CDP 之前核验：EnsurePatched 返回之后
+// GateRunning 对全部运行中的酷狗进程过商店版门禁（issue #212），供上层连接 CDP 之前核验：EnsurePatched 返回之后
 // 等 CDP 的那段时间里，用户启动的可能是商店版或读不到路径的实例。没有在运行的返回 nil。
 func GateRunning() error { return gateRunningFn() }
 
-// gateKuGou 在进程快照里找出全部 KuGou.exe（主进程与 CEF 子进程，映像名不分大小写），逐个读映像路径并过
-// launch.Gate：任一读不到或在 WindowsApps 下即返回该错误，没有在运行的返回 nil。killKuGou 以 taskkill /IM 按名字
-// 结束全部 KuGou.exe，只核验其中一个不能授权结束其余的（例如另一用户会话里的商店版）。快照取不到时按路径未知拒绝。
+// gateKuGou 在进程快照里找出全部精确命中白名单的酷狗进程（KuGou.exe 与 HD_KuGou.exe，不分大小写），逐个读映像
+// 路径并过 launch.Gate：任一读不到或在 WindowsApps 下即返回该错误，没有在运行的返回 nil。killKuGou 以 taskkill /IM
+// 结束全部同名进程，只核验其中一个不能授权结束其余的（例如另一用户会话里的商店版）。快照取不到时按路径未知拒绝。
 // shortcut: 快照之后才退出的进程取不到路径，同样按路径未知拒绝；这一轮作罢、下一轮重来，不区分「已退出」与「无权」。
 func gateKuGou(snapshot func() ([]proc, error), imagePath func(uint32) (string, error)) error {
 	procs, err := snapshot()
@@ -401,7 +442,7 @@ func gateKuGou(snapshot func() ([]proc, error), imagePath func(uint32) (string, 
 		return i18n.Errorf("%w: take a process snapshot: %w", launch.ErrExeUnknown, err)
 	}
 	for _, p := range procs {
-		if !strings.EqualFold(p.Name, TargetProcessName) {
+		if !isKuGouProcessName(p.Name) {
 			continue
 		}
 		exe, _ := imagePath(p.PID) // 读不到时为空串，门禁按路径未知拒绝
@@ -412,27 +453,41 @@ func gateKuGou(snapshot func() ([]proc, error), imagePath func(uint32) (string, 
 	return nil
 }
 
-// killKuGou terminates all running KuGou.exe processes and waits for them to exit.
+// snapshotProcsFn、killImageFn 与 killPollStep 为进程存活查询与结束进程的可替换 seam；测试替换。
+var (
+	snapshotProcsFn = snapshotProcs
+	killImageFn     = func(name string) { _ = exec.Command("taskkill", "/F", "/IM", name).Run() }
+	killPollStep    = 300 * time.Millisecond
+)
+
+// killKuGou 按 TargetProcessNames 顺序依次结束主壳 HD_KuGou.exe 与子进程 KuGou.exe，
+// 并轮询 IsKuGouRunning 确认全部退出（至多 10 次 × 300ms）后再写补丁。
 func killKuGou() {
 	log.Info("Terminating KuGou process...")
-	exec.Command("taskkill", "/F", "/IM", TargetProcessName).Run() //nolint
-	// Poll until all instances exit (max 5s)
+	for _, name := range TargetProcessNames {
+		killImageFn(name)
+	}
 	for i := 0; i < 10; i++ {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(killPollStep)
 		if !IsKuGouRunning() {
 			return
 		}
 	}
-	log.Warn("KuGou process did not fully exit within 5s; continuing...")
+	log.Warn("KuGou process did not fully exit within 3s; continuing...")
 }
 
-// IsKuGouRunning returns true if any KuGou.exe process is alive.
+// IsKuGouRunning returns true if any KuGou.exe or HD_KuGou.exe process is alive.
 func IsKuGouRunning() bool {
-	out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq "+TargetProcessName, "/NH").Output()
+	procs, err := snapshotProcsFn()
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(out), TargetProcessName)
+	for _, p := range procs {
+		if isKuGouProcessName(p.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 // launchKuGou 以 KuGou.exe 所在目录为工作目录、经 launch.Detached 拉起酷狗，不直接 Start：直接启动的酷狗
@@ -1105,8 +1160,13 @@ func awaitKuGou(stopCh <-chan struct{}, interval time.Duration, helperRunning, k
 	}
 }
 
+// errHelperExited 返回提权 helper 在结束酷狗前已退出的错误（与 readyToKill 同构）。
+func errHelperExited() error {
+	return i18n.Errorf("elevated patch helper exited before KuGou was stopped; KuGou was left running and the repair will be retried")
+}
+
 // readyToKill 根据等酷狗的结论决定能否结束酷狗去修补，返回 nil 才可以。酷狗出现之后再查一次 helper：
-// awaitKuGou 看过 helper 之后还要跑一次 tasklist 才看到酷狗，helper 可能在其间退出；不在就不结束酷狗，
+// awaitKuGou 看过 helper 之后还要查进程快照才看到酷狗，helper 可能在其间退出；不在就不结束酷狗，
 // 返回错误交上层重试（issue #141）。
 func readyToKill(w kugouWait, helperRunning func() bool) error {
 	switch w {
@@ -1117,30 +1177,129 @@ func readyToKill(w kugouWait, helperRunning func() bool) error {
 			return nil
 		}
 	}
-	return i18n.Errorf("elevated patch helper exited before KuGou was stopped; KuGou was left running and the repair will be retried")
+	return errHelperExited()
 }
 
-// killAndPatch 在等到酷狗启动、readyToKill 通过之后调用：先经 locate（生产为 locateRunningInstall，只按运行中的
-// 进程定位）重新定位安装，与修补前预选的 exePath、libcefPath 比较（Clean 后不分大小写），都相同才 kill 结束
-// 酷狗、trigger 触发 helper 写入。不同或重新定位出错时两者都不调用，返回包装 ErrInstallChanged 的错误，由调用方
-// 关闭 helper（写 CANCEL，helper 不写 DLL）、稍后重试：预选是在酷狗没运行时按注册表做的，等到的只是「任意
-// KuGou.exe 出现」，主播打开的若是另一份安装，照旧修补就会结束它、给预选那份打补丁、再启动预选那份。
-// helper 的写入目标在弹 UAC 时已写进它的命令行，不能改，故不改用新定位的路径。
+// checkReadyToKill 在执行不可逆终止酷狗之前非阻塞复查停止信号与提权 helper 存活：
+// stopCh 已关闭返回停止错误，helper 已退出返回 errHelperExited()，否则返回 nil（issue #141）。
+func checkReadyToKill(stopCh <-chan struct{}, helperAlive func() bool) error {
+	select {
+	case <-stopCh:
+		return i18n.Errorf("stopped")
+	default:
+	}
+	if helperAlive != nil && !helperAlive() {
+		return errHelperExited()
+	}
+	return nil
+}
+
+const (
+	// runningReadyStep 与 runningReadyMaxWait 是冷态提权 helper 等待运行态交接及 CEF 子进程就绪的轮询节奏与上限。
+	runningReadyStep    = 250 * time.Millisecond
+	runningReadyMaxWait = 15 * time.Second
+)
+
+// waitUntilRunningReady 在已持有提权 helper 且看到酷狗出现后，有界等待启动器交接与 CEF 子进程就绪：
+// 瞬态错误（ErrRunningNotReady、ErrConfirmNotReady）期间保活 helper、不发 CANCEL、不杀进程；
+// 每次等待前以及 locate 返回成功前均复查 stopCh 与 helperAlive，严守「结束酷狗之前再查一次 helper」（#141）。
+// 遇到非瞬态错误或超过 maxWait，原样返回最后一次错误交 killAndPatch 包装 ErrInstallChanged。
+func waitUntilRunningReady(stopCh <-chan struct{}, helperAlive func() bool, step, maxWait time.Duration, locate func() (string, string, error)) (string, string, error) {
+	deadline := time.Now().Add(maxWait)
+	for {
+		select {
+		case <-stopCh:
+			return "", "", i18n.Errorf("stopped")
+		default:
+		}
+		exe, lc, err := locate()
+		if err == nil {
+			if err := checkReadyToKill(stopCh, helperAlive); err != nil {
+				return "", "", err
+			}
+			return exe, lc, nil
+		}
+		if !errors.Is(err, ErrRunningNotReady) && !errors.Is(err, ErrConfirmNotReady) {
+			return "", "", err
+		}
+		if helperAlive != nil && !helperAlive() {
+			return "", "", errHelperExited()
+		}
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return "", "", err
+		}
+		wait := step
+		if wait > rem {
+			wait = rem
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-stopCh:
+			timer.Stop()
+			return "", "", i18n.Errorf("stopped")
+		case <-timer.C:
+		}
+	}
+}
+
+// isRegularFileFn 报告 path 是否存在且为普通文件；测试替换。
+var isRegularFileFn = func(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// resolveLaunchExe 决定修补完成后重启酷狗的入口并做前置门禁与存在性校验：
+// 非 HD_KuGou.exe 过 launch.Gate 后原样返回；HD_KuGou.exe 要求同目录存在普通文件 KuGou.exe 且过 launch.Gate，
+// 缺失时绝不回退直启 HD_KuGou.exe，返回包装 ErrInstallNotFound 的错误。
+func resolveLaunchExe(exePath string, isRegular func(string) bool) (string, error) {
+	if !strings.EqualFold(filepath.Base(exePath), HDTargetProcessName) {
+		if err := launch.Gate(exePath); err != nil {
+			return "", err
+		}
+		return exePath, nil
+	}
+	launcher := filepath.Join(filepath.Dir(exePath), TargetProcessName)
+	if err := launch.Gate(launcher); err != nil {
+		return "", err
+	}
+	if !isRegular(launcher) {
+		return "", i18n.Errorf("%w: KuGou launcher %s not found for restarting %s", ErrInstallNotFound, launcher, exePath)
+	}
+	return launcher, nil
+}
+
+// killAndPatch 在等到酷狗启动、readyToKill 通过之后调用：先经 locate（生产为经 waitUntilRunningReady 包装的
+// locateRunningInstall，只按运行中的进程定位）重新定位安装，与修补前预选的 exePath、libcefPath 比较（exe 允许
+// 同安装目录在 KuGou.exe 与 HD_KuGou.exe 之间切换），都匹配、过商店版门禁、确认重启入口可用且所有 preKill
+// 复查通过后才 kill 结束酷狗、trigger 触发 helper 写入。不同或重新定位出错时两者都不调用，返回包装
+// ErrInstallChanged 的错误，由调用方关闭 helper（写 CANCEL，helper 不写 DLL）、稍后重试。
 //
-// kill 之前再对全部运行中的 KuGou.exe 过一次商店版门禁（issue #212，gateRunningFn）：EnsurePatched 开头核验之后，
-// 隔着 UAC 与等酷狗启动，运行中的可能已换成另一份安装；locate 只看主进程，kill 结束的是全部同名进程。门禁不过时
-// 原样返回它的错误，不结束、不触发。
-func killAndPatch(exePath, libcefPath string, locate func() (string, string, error), kill func(), trigger func() error) error {
+// kill 之前再对全部运行中的酷狗进程过一次商店版门禁（issue #212，gateRunningFn），对运行态 exe 做启动器预检
+// （resolveLaunchExe），最后执行可选 preKill 复查（生产经 checkReadyToKill 复查 stopCh 与 helper.running，
+// 封堵最终预检期间的退出窗口）：任一不过时原样返回其错误，不结束、不触发。
+func killAndPatch(exePath, libcefPath string, locate func() (string, string, error), kill func(), trigger func() error, preKill ...func() error) error {
 	exe, lc, err := locate()
 	if err != nil {
 		// 内层错误按 %v 带出、不按 %w：不得被认作 ErrInstallNotFound，否则上层按找不到安装分流
 		return i18n.Errorf("%w: locating KuGou again after it started failed: %v", ErrInstallChanged, err)
 	}
-	if !samePath(exe, exePath) || !samePath(lc, libcefPath) {
+	if !sameKuGouExe(exe, exePath) || !samePath(lc, libcefPath) {
 		return i18n.Errorf("%w: started %s with %s; prepared %s with %s", ErrInstallChanged, exe, lc, exePath, libcefPath)
 	}
 	if err := gateRunningFn(); err != nil {
 		return err
+	}
+	if _, err := resolveLaunchExe(exe, isRegularFileFn); err != nil {
+		return err
+	}
+	for _, check := range preKill {
+		if check == nil {
+			continue
+		}
+		if err := check(); err != nil {
+			return err
+		}
 	}
 	log.Info("KuGou detected; stopping it and repairing the DLL...")
 	kill()
@@ -1151,7 +1310,7 @@ func killAndPatch(exePath, libcefPath string, locate func() (string, string, err
 }
 
 // awaitPatchedKuGou 是 DLL 已修补时的收尾：wait 等到酷狗启动之后（生产为 waitForKuGou(stopCh, nil)），对全部运行中的
-// KuGou.exe 再过一次商店版门禁（issue #212），门禁的错误原样返回。EnsurePatched 开头核验时酷狗可能还没运行（门禁放行），
+// 酷狗进程再过一次商店版门禁（issue #212），门禁的错误原样返回。EnsurePatched 开头核验时酷狗可能还没运行（门禁放行），
 // 等来的可能是商店版或读不到路径的实例。
 func awaitPatchedKuGou(wait func() kugouWait) error {
 	if wait() == kugouWaitStopped {
@@ -1165,6 +1324,18 @@ func samePath(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
+// sameKuGouExe 报告 a 与 b 是否指向同一酷狗安装目录的可执行文件：路径相同，或位于同一目录且基名均在酷狗精确白名单内
+// （允许冷态预选根目录 KuGou.exe 后，运行态交接落定为同目录 HD_KuGou.exe）。
+func sameKuGouExe(a, b string) bool {
+	if samePath(a, b) {
+		return true
+	}
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	return samePath(filepath.Dir(a), filepath.Dir(b)) &&
+		isKuGouProcessName(filepath.Base(a)) &&
+		isKuGouProcessName(filepath.Base(b))
+}
+
 // EnsurePatched is the main entry point called by the player before connecting to CDP.
 //
 // New workflow (like NetEase Cloud Music):
@@ -1172,13 +1343,13 @@ func samePath(a, b string) bool {
 //  2. Locate installation, log version
 //  3. DLL already patched → wait for KuGou process to appear, then return
 //  4. DLL not patched →
-//     a. UAC UPFRONT: launch elevated helper that waits for a trigger
+//     a. Precheck restart launcher, then UAC UPFRONT: launch elevated helper that waits for a trigger
 //     b. Wait for KuGou to appear in process list (user starts KuGou)
-//     c. Kill KuGou, trigger helper to patch (no second UAC)；helper 已退出时不结束酷狗，返回错误交上层重试；
-//     启动的不是预选的那份安装时同样不结束酷狗，返回 ErrInstallChanged（killAndPatch）
-//     d. Verify, re-launch KuGou
+//     c. Wait for launcher handoff/CEF ready (keeping helper alive), kill KuGou, trigger helper to patch (no second UAC)；
+//     helper 已退出时不结束酷狗，返回错误交上层重试；启动的不是预选的那份安装时同样不结束酷狗，返回 ErrInstallChanged（killAndPatch）
+//     d. Verify, re-launch KuGou via resolved launcher
 //
-// 商店版门禁（issue #212）在开头，先于「CDP 已可用」的早退与一切提权、结束、修补、拉起：全部运行中的 KuGou.exe
+// 商店版门禁（issue #212）在开头，先于「CDP 已可用」的早退与一切提权、结束、修补、拉起：全部运行中的酷狗进程
 // 逐个核验，选定安装之后再核验预选的 exe（酷狗不在运行时它取自注册表或常见安装根，修补、拉起的都是它）；DLL 已修补、
 // 只等酷狗启动时，等到之后再核验一次（awaitPatchedKuGou），要修补时 killAndPatch 在结束之前再核验一次。门禁不过时原样
 // 返回它的错误。
@@ -1188,6 +1359,12 @@ func EnsurePatched(stopCh <-chan struct{}) error { return ensurePatched(stopCh, 
 // 上层放弃提权之后一律以此调用（设计 doc/design/converge-player-behavior-231-design.md §5.3）：DLL 已修补或 CDP 已可用时
 // 照常返回 nil，这两种情形都不需要提权。
 func EnsurePatchedNoElevate(stopCh <-chan struct{}) error { return ensurePatched(stopCh, false) }
+
+// isCDPAvailableFn 与 checkPatchStatusFn 为 ensurePatched 的离线测试 seam；生产恒为 isCDPAvailable 与 checkPatchStatus。
+var (
+	isCDPAvailableFn   = isCDPAvailable
+	checkPatchStatusFn = checkPatchStatus
+)
 
 // installLogged 与 fingerprintWarned 是 ensurePatched 的日志去重：上层在修补受阻期间每 30 秒重走一次判定（kugou.go 的
 // storeRecheck），安装目录与版本（键为 KuGou.exe 路径与版本）、指纹不认识的警告（键为 libcef.dll 路径与版本）各只在键与上一次
@@ -1199,7 +1376,7 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 	if err := gateRunningFn(); err != nil {
 		return err
 	}
-	if isCDPAvailable() {
+	if isCDPAvailableFn() {
 		log.Detail("CDP already available; skipping patch check")
 		return nil
 	}
@@ -1215,10 +1392,7 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 	// 版本号不作**正向**判据——「能不能打」由 libcef.dll 的字节指纹决定（见
 	// CheckPatchStatus）。KuGou.exe 的版本号与它 vendored 的 CEF 版本相互独立，拿前者当
 	// 正向闸门既会误伤（同 CEF 的点版本被拒）又会漏放（CEF 热修但 exe 版本不变）。
-	ver := readExeVersion(exePath)
-	if ver == "" {
-		ver = filepath.Base(filepath.Dir(libcefPath))
-	}
+	ver := effectiveKuGouVersion(readExeVersion(exePath), exePath, libcefPath)
 	if key := exePath + "|" + ver; key != installLogged {
 		installLogged = key
 		log.Info("KuGou install directory: %s", filepath.Dir(exePath))
@@ -1247,7 +1421,7 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 	}
 
 	fingerprint := libcefPath + "|" + ver
-	allPatched, canAutoFix, err := checkPatchStatus(libcefPath, fingerprint != fingerprintWarned)
+	allPatched, canAutoFix, err := checkPatchStatusFn(libcefPath, fingerprint != fingerprintWarned)
 	if err != nil {
 		return i18n.Errorf("check patch status: %w", err)
 	}
@@ -1275,7 +1449,11 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 		return awaitPatchedKuGou(func() kugouWait { return waitForKuGou(stopCh, nil) })
 	}
 
-	// DLL 未 patch：先弹 UAC 获取提权（helper 在后台等待触发指令）。上层已放弃提权时到此为止。
+	// DLL 未 patch：先确认重启启动器可用，再弹 UAC 获取提权（缺失时不弹 UAC、不结束酷狗）。
+	launchTarget, err := resolveLaunchExe(exePath, isRegularFileFn)
+	if err != nil {
+		return err
+	}
 	if !allowElevate {
 		return ErrElevationNeeded
 	}
@@ -1291,8 +1469,18 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 		return err
 	}
 
-	// 检测到酷狗、helper 仍在：确认启动的仍是预选的那份安装，再停止酷狗并触发 patch（无需再次 UAC）
-	if err := killAndPatch(exePath, libcefPath, locateRunningInstall, killKuGou, helper.TriggerAndWait); err != nil {
+	// 检测到酷狗、helper 仍在：等待启动器交接与 CEF 子进程就绪（保活 helper），确认启动的仍是预选的那份安装，再停止酷狗并触发 patch（无需再次 UAC）
+	var startedExe string
+	locate := func() (string, string, error) {
+		exe, lc, err := waitUntilRunningReady(stopCh, helper.running, runningReadyStep, runningReadyMaxWait, locateRunningInstall)
+		if err == nil {
+			startedExe = exe
+		}
+		return exe, lc, err
+	}
+	if err := killAndPatch(exePath, libcefPath, locate, killKuGou, helper.TriggerAndWait, func() error {
+		return checkReadyToKill(stopCh, helper.running)
+	}); err != nil {
 		return err
 	}
 
@@ -1314,7 +1502,15 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 	}
 
 	log.Success("libcef.dll patch complete. Restarting KuGou...")
-	if err := launchKuGou(exePath); err != nil {
+	if startedExe != "" {
+		resolved, rerr := resolveLaunchExe(startedExe, isRegularFileFn)
+		if rerr != nil {
+			log.Warn("Failed to start KuGou: %v (please start it manually)", rerr)
+			return nil
+		}
+		launchTarget = resolved
+	}
+	if err := launchKuGou(launchTarget); err != nil {
 		log.Warn("Failed to start KuGou: %v (please start it manually)", err)
 	}
 	return nil

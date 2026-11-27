@@ -21,6 +21,9 @@ import (
 // 查询失败等），稍后可重试。
 var ErrConfirmNotReady = i18n.Sentinel("KuGou is not ready for reading its lyric database")
 
+// ErrNotRunning 表示进程快照中没有任何酷狗进程（KuGou.exe 或 HD_KuGou.exe）在运行。
+var ErrNotRunning = i18n.Sentinel("KuGou is not running")
+
 // ErrConfirmUnsupported 表示这个酷狗不支持读库（版本读不出或在黑名单、实际加载的 libcef.dll 缺失、
 // 不认识或未全部打上补丁），本会话不再尝试。
 var ErrConfirmUnsupported = i18n.Sentinel("reading the KuGou lyric database is not supported for this KuGou")
@@ -260,16 +263,21 @@ type runningKuGou struct {
 	ChildDirs []string
 }
 
-// findRunningKuGou 在进程快照里定位酷狗主进程：映像名为 KuGou.exe（大小写不敏感）、父进程不是同名进程者。
-// 没有或不止一个（含主进程已退出、子进程成了孤儿）返回未就绪，不取 PID 最小者（与 procscan.MainPID 不同）。
-// 父 PID 为主进程的同名进程即 CEF 子进程；任一进程取不到映像路径、或映像名已不是 KuGou.exe（快照之后
-// PID 被复用）同样返回未就绪。没有子进程不算错误，ChildDirs 为空。
+// findRunningKuGou 在进程快照里定位酷狗主进程：映像名精确命中双名白名单（KuGou.exe 或 HD_KuGou.exe，
+// 大小写不敏感）、父进程不在同进程族中者。没有任何酷狗进程时返回同时包装 ErrConfirmNotReady 与
+// ErrNotRunning 的错误；有酷狗进程但主进程数为 0 或不止一个、或外层启动器正在交接给 HD_KuGou.exe（直接
+// 子进程为 HD_KuGou.exe）时返回仅包装 ErrConfirmNotReady 的错误，不取 PID 最小者。父 PID 为主进程的
+// 同进程族成员即 CEF 子进程；任一进程取不到映像路径或映像名不再属于白名单（PID 被复用）同样返回未就绪。
+// 没有子进程不算错误，ChildDirs 为空。
 func findRunningKuGou(procs []proc, imagePath func(pid uint32) (string, error)) (runningKuGou, error) {
 	same := make(map[uint32]bool)
 	for _, p := range procs {
-		if strings.EqualFold(p.Name, TargetProcessName) {
+		if isKuGouProcessName(p.Name) {
 			same[p.PID] = true
 		}
+	}
+	if len(same) == 0 {
+		return runningKuGou{}, i18n.Errorf("%w: %w", ErrConfirmNotReady, ErrNotRunning)
 	}
 	var mains []uint32
 	for _, p := range procs {
@@ -298,6 +306,9 @@ func findRunningKuGou(procs []proc, imagePath func(pid uint32) (string, error)) 
 		if err != nil {
 			return runningKuGou{}, err
 		}
+		if strings.EqualFold(filepath.Base(exe), HDTargetProcessName) {
+			return runningKuGou{}, i18n.Errorf("%w: KuGou launcher is handing off to HD_KuGou.exe", ErrConfirmNotReady)
+		}
 		dir := filepath.Dir(exe)
 		if !slices.ContainsFunc(r.ChildDirs, func(c string) bool { return strings.EqualFold(c, dir) }) {
 			r.ChildDirs = append(r.ChildDirs, dir)
@@ -306,13 +317,13 @@ func findRunningKuGou(procs []proc, imagePath func(pid uint32) (string, error)) 
 	return r, nil
 }
 
-// kugouImage 取 pid 的映像路径，并核对映像名仍是 KuGou.exe。
+// kugouImage 取 pid 的映像路径，并核对映像名仍在酷狗双进程名白名单内。
 func kugouImage(imagePath func(uint32) (string, error), pid uint32) (string, error) {
 	exe, err := imagePath(pid)
 	if err != nil {
 		return "", i18n.Errorf("%w: query the image path of KuGou.exe (PID %d): %w", ErrConfirmNotReady, pid, err)
 	}
-	if !strings.EqualFold(filepath.Base(exe), TargetProcessName) {
+	if !isKuGouProcessName(filepath.Base(exe)) {
 		return "", i18n.Errorf("%w: PID %d is no longer KuGou.exe (image %s)", ErrConfirmNotReady, pid, exe)
 	}
 	return exe, nil

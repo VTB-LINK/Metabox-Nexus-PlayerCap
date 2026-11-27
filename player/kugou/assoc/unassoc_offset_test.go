@@ -1,17 +1,24 @@
 package assoc
 
-// 本文件测磁盘模式的取消关联哨兵、代次锁存与偏移优先级（#250/#251，设计 §6.4.3、§6.5）：
+// 本文件测磁盘模式的取消关联哨兵、代次锁存、偏移优先级与多音质/MV Hash 列匹配（#250/#251，设计 §6.4.2、§6.4.3、§6.5）：
 //   - 右键菜单取消关联哨兵（419721cb...）在当首与切走重播均产出 KindUnassociated；
 //   - 关联弹窗取消关联哨兵（a9695a2f...）仅在同一次播放从非弹窗键跃迁时产出 KindUnassociated，
 //     切走重播（PlayedAt 变大）解除锁存并回落返回 SourceCache；
 //   - 非 P 历史表中的任一哨兵键既不误判 KindUnassociated 也不误置 AssocSkipped；
 //   - 文件 [offset:] 优先于 LyricInfo.RealOffset（含 [offset:0] 防双重叠加），无文件标签回落 RealOffset，
-//     两者均钳位在 [-600_000, +600_000]，缺 RealOffset 列时兼容返回 0。
+//     两者均钳位在 [-600_000, +600_000]，缺 RealOffset 列时兼容返回 0；
+//   - playingRow/associationKeys 经 LastPlayedMusicHash、MVFileHash、LastPlayedMVHash 命中高品与 MV 行，
+//     空串/全 '0' 查询 Hash 绝不误命中音频行全 '0' 的 LastPlayedMVHash，P 无关联键时 collect 经 P.MusicFileHash 兜底缓存。
+//
+// 变异自证（均实测变红后还原）：
+//   - resolve.go 去掉 playingRow 的 LastPlayedMusicHash 列匹配 → TestMultiQualityAndMVHashResolution 中「非零高品与MV列准确命中playingRow与associationKeys」（playingRow(hqHash) 返回零值）与「P无关联键时collect经P的MusicFileHash命中默认音质缓存行」（playedAt=0）均红；
+//   - resolve.go 去掉 playingRow/associationKeys 入口全 '0' 拦截 → TestMultiQualityAndMVHashResolution/空串与全0查询Hash绝不误命中音频行全0的LastPlayedMVHash 红（playingRow("0000...0000") 误命中音频行 played=9999）。
 
 import (
 	"bytes"
 	"compress/zlib"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -367,4 +374,205 @@ func TestReadPlayingRowTwoPassConsistent(t *testing.T) {
 	if mZero.opens != 0 {
 		t.Fatalf("全 0 hash 开了 %d 次库，want 0", mZero.opens)
 	}
+}
+
+func TestMultiQualityAndMVHashResolution(t *testing.T) {
+	const (
+		defaultHash = "fde806ac112233445566778899aabbcc"
+		hqHash      = "17da13c9529cbbb7203d813abe616b61"
+		mvFileHash  = "11223344556677889900aabbccddeeff"
+		lastMVHash  = "ffeeddccbbaa00998877665544332211"
+	)
+	assocKeyHQ := hex32("b1", 1)
+	assocKeyMV := hex32("b2", 2)
+	assocKeyLastMV := hex32("b3", 3)
+	assocKeyOtherFile := hex32("b4", 4)
+
+	multiCols := []string{
+		"MusicFileHash", "LastPlayedMusicHash", "MVFileHash", "LastPlayedMVHash",
+		"LyricKey", "MusicFilePath", "LastPlayTime",
+	}
+
+	t.Run("空串与全0查询Hash绝不误命中音频行全0的LastPlayedMVHash", func(t *testing.T) {
+		for _, bad := range []string{"", "   \t", zeroKey, " " + zeroKey + "\t", "0000"} {
+			db := newDB(
+				&fakeTable{
+					name: "PlayQueueAssistItem_0",
+					cols: multiCols,
+					rows: [][]kgdb.Value{
+						{text(defaultHash), text(hqHash), text(""), text(zeroKey), text(assocKeyHQ), text("JLS - Beat Again.mp3"), integer(9999)},
+						{text(""), text(""), text(""), text("0000"), text(assocKeyMV), text("empty.mp3"), integer(8888)},
+					},
+				},
+				&fakeTable{
+					name: "RecentlyPlayedItem",
+					cols: multiCols,
+					rows: [][]kgdb.Value{
+						{text(defaultHash), text(hqHash), text(""), text(zeroKey), text(assocKeyHQ), text(`D:\Music\a.flac`), integer(9999)},
+					},
+				},
+			)
+			p, err := playingRow(db, bad)
+			if err != nil {
+				t.Fatalf("playingRow(%q) err=%v", bad, err)
+			}
+			if p != (playing{}) {
+				t.Fatalf("playingRow(%q) = %+v，want 空 playing{}（绝不误命中全 0 LastPlayedMVHash）", bad, p)
+			}
+			if len(db.scanned) != 0 {
+				t.Fatalf("playingRow(%q) 扫了 %v，want 零扫描", bad, db.scanned)
+			}
+
+			keys, p2, err := associationKeys(db, bad)
+			if err != nil {
+				t.Fatalf("associationKeys(%q) err=%v", bad, err)
+			}
+			if len(keys) != 0 || p2 != (playing{}) || len(db.scanned) != 0 {
+				t.Fatalf("associationKeys(%q) = (%v, %+v), scanned=%v，want 全空且零扫描", bad, keys, p2, db.scanned)
+			}
+		}
+	})
+
+	t.Run("非零高品与MV列准确命中playingRow与associationKeys", func(t *testing.T) {
+		over64 := strings.Repeat("a", 65)
+		queueTbl := &fakeTable{
+			name: "PlayQueueAssistItem_0",
+			cols: multiCols,
+			rows: [][]kgdb.Value{
+				// 1. 高品流式音频行（MusicFileHash 为默认音质，LastPlayedMusicHash 为高品，LastPlayedMVHash 为全 0）
+				{text(" " + defaultHash + " "), text(hqHash), text(""), text(zeroKey), text(assocKeyHQ), text("JLS - Beat Again.mp3"), integer(5000)},
+				// 2. MV 行经 MVFileHash 命中（MusicFileHash 为全 0，musicHash 须置空）
+				{text(zeroKey), text(""), text(mvFileHash), text(""), text(assocKeyMV), text("MV - Song.mp4"), integer(6000)},
+				// 3. MV 行经 LastPlayedMVHash 命中（MusicFileHash 超过 64 字节，musicHash 须置空）
+				{text(over64), text(""), text(""), text(lastMVHash), text(assocKeyLastMV), text("MV2 - Song.mp4"), integer(7000)},
+			},
+		}
+
+		// playingRow 分别经 3 个可选列命中（含大小写与空白差异）。
+		pHQ, err := playingRow(newDB(queueTbl), " "+strings.ToUpper(hqHash)+"\t")
+		if err != nil {
+			t.Fatalf("playingRow(hqHash): %v", err)
+		}
+		if pHQ.played != 5000 || pHQ.key != assocKeyHQ || pHQ.path != "JLS - Beat Again.mp3" || pHQ.musicHash != defaultHash {
+			t.Fatalf("playingRow(hqHash) = %+v，want played=5000 key=%s musicHash=%s", pHQ, assocKeyHQ, defaultHash)
+		}
+
+		pMV, err := playingRow(newDB(queueTbl), mvFileHash)
+		if err != nil {
+			t.Fatalf("playingRow(mvFileHash): %v", err)
+		}
+		if pMV.played != 6000 || pMV.key != assocKeyMV || pMV.musicHash != "" {
+			t.Fatalf("playingRow(mvFileHash) = %+v，want played=6000 key=%s musicHash=\"\"", pMV, assocKeyMV)
+		}
+
+		pLastMV, err := playingRow(newDB(queueTbl), lastMVHash)
+		if err != nil {
+			t.Fatalf("playingRow(lastMVHash): %v", err)
+		}
+		if pLastMV.played != 7000 || pLastMV.key != assocKeyLastMV || pLastMV.musicHash != "" {
+			t.Fatalf("playingRow(lastMVHash) = %+v，want played=7000 key=%s musicHash=\"\"", pLastMV, assocKeyLastMV)
+		}
+
+		// associationKeys 无 P 时扫非队列歌曲条目表，经 LastPlayedMusicHash / MVFileHash / LastPlayedMVHash 命中。
+		historyTbl := &fakeTable{
+			name: "RecentlyPlayedItem",
+			cols: multiCols,
+			rows: [][]kgdb.Value{
+				{text(defaultHash), text(hqHash), text(""), text(zeroKey), text(assocKeyHQ), text(`D:\Music\hq.flac`), integer(100)},
+				{text(zeroKey), text(""), text(mvFileHash), text(""), text(assocKeyMV), text(`D:\MV\mv1.mp4`), integer(200)},
+				{text(zeroKey), text(""), text(""), text(lastMVHash), text(assocKeyLastMV), text(`D:\MV\mv2.mp4`), integer(300)},
+			},
+		}
+		for _, tc := range []struct {
+			name    string
+			query   string
+			wantKey string
+		}{
+			{"LastPlayedMusicHash", strings.ToUpper(hqHash), assocKeyHQ},
+			{"MVFileHash", mvFileHash, assocKeyMV},
+			{"LastPlayedMVHash", lastMVHash, assocKeyLastMV},
+		} {
+			t.Run("无P非队列表_"+tc.name, func(t *testing.T) {
+				keys, p, err := associationKeys(newDB(historyTbl), tc.query)
+				if err != nil {
+					t.Fatalf("associationKeys(%s): %v", tc.name, err)
+				}
+				if p.played != 0 || len(keys) != 1 || !keys[tc.wantKey] {
+					t.Fatalf("associationKeys(%s) = (%v, %+v)，want keys={%s}", tc.name, keys, p, tc.wantKey)
+				}
+			})
+		}
+
+		// 有 P（空 LyricKey）时，跨不同路径歌曲条目表亦经 LastPlayedMusicHash 命中关联键。
+		dbOtherPath := newDB(
+			&fakeTable{
+				name: "PlayQueueAssistItem_0",
+				cols: multiCols,
+				rows: [][]kgdb.Value{
+					{text(defaultHash), text(hqHash), text(""), text(zeroKey), text(""), text(`D:\Music\cur.flac`), integer(8000)},
+				},
+			},
+			&fakeTable{
+				name: "LocalFile",
+				cols: multiCols,
+				rows: [][]kgdb.Value{
+					{text(defaultHash), text(hqHash), text(""), text(zeroKey), text(assocKeyOtherFile), text(`E:\Other\copy.flac`), integer(0)},
+				},
+			},
+		)
+		keys, p, err := associationKeys(dbOtherPath, hqHash)
+		if err != nil {
+			t.Fatalf("associationKeys(otherPath): %v", err)
+		}
+		if p.played != 8000 || p.musicHash != defaultHash || len(keys) != 1 || !keys[assocKeyOtherFile] {
+			t.Fatalf("有 P 无键时 associationKeys = (%v, %+v)，want keys={%s} musicHash=%s", keys, p, assocKeyOtherFile, defaultHash)
+		}
+	})
+
+	t.Run("P无关联键时collect经P的MusicFileHash命中默认音质缓存行", func(t *testing.T) {
+		db := newDB(
+			&fakeTable{
+				name: "PlayQueueAssistItem_0",
+				cols: multiCols,
+				rows: [][]kgdb.Value{
+					{text(defaultHash), text(hqHash), text(""), text(zeroKey), text(""), text("JLS - Beat Again.mp3"), integer(5000)},
+				},
+			},
+			lyricInfoWithOffsets(
+				struct {
+					row        lyricRow
+					realOffset int64
+				}{lyricRow{hex32("c1", 1), "JLS - Beat Again-default.krc", defaultHash, 200}, 1200},
+				struct {
+					row        lyricRow
+					realOffset int64
+				}{lyricRow{hex32("c2", 2), `D:\unrelated_manual.lrc`, zeroKey, 999}, 500},
+			),
+		)
+		col := mustResolve(t, db, hqHash)
+		if col.keyed || col.playedAt != 5000 {
+			t.Fatalf("collect(hqHash) keyed=%v playedAt=%d，want false / 5000", col.keyed, col.playedAt)
+		}
+		wantCandidates(t, col.cands, []candidate{
+			{Path: "JLS - Beat Again-default.krc", Source: SourceCache, UpdateTime: 200, RealOffsetMs: 1200},
+		})
+
+		// 若 P 自身 MusicFileHash 为全 0（如纯 MV 行），collect 绝不误把 SongHash=zeroKey 的手动关联行当作缓存。
+		dbMVZero := newDB(
+			&fakeTable{
+				name: "PlayQueueAssistItem_0",
+				cols: multiCols,
+				rows: [][]kgdb.Value{
+					{text(zeroKey), text(""), text(mvFileHash), text(""), text(""), text("MV - Song.mp4"), integer(6000)},
+				},
+			},
+			lyricInfo(
+				lyricRow{hex32("c3", 3), `D:\manual_zero.lrc`, zeroKey, 999},
+			),
+		)
+		colMV := mustResolve(t, dbMVZero, mvFileHash)
+		if len(colMV.cands) != 0 {
+			t.Fatalf("纯 MV 行 MusicFileHash 全 0 时不应误收 SongHash=zeroKey 行，实得 %+v", colMV.cands)
+		}
+	})
 }

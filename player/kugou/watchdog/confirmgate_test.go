@@ -153,3 +153,81 @@ func TestConfirmDoesNotFallBackToRegistryLibcef(t *testing.T) {
 		t.Fatalf("子进程目录无 libcef.dll 却查了补丁：%q", m.patchCalls)
 	}
 }
+
+// TestConfirmHDMainProcess 覆盖酷狗 20.1.61.28014 主进程为 HD_KuGou.exe、CEF 子进程为 20.1.61.28014\KuGou.exe 的确认流程，
+// 以及外层启动器交接给 HD_KuGou.exe 的瞬态拦截。
+func TestConfirmHDMainProcess(t *testing.T) {
+	const (
+		hdPID    uint32 = 25940
+		hdExe           = stubInstall + `\HD_KuGou.exe`
+		hdVer           = "20.1.61.28014"
+		hdVerDir        = stubInstall + `\` + hdVer
+		hdLibcef        = hdVerDir + `\libcef.dll`
+		hdSubExe        = hdVerDir + `\KuGou.exe`
+	)
+
+	t.Run("HD_KuGou.exe 主进程 + 5 个版本子目录 KuGou.exe 子进程 → Confirm 通过", func(t *testing.T) {
+		m := newFakeMachine()
+		m.procs = []proc{
+			{PID: 4, PPID: 0, Name: "System"},
+			{PID: 3532, PPID: 4, Name: "explorer.exe"},
+			{PID: hdPID, PPID: 3532, Name: HDTargetProcessName},
+			{PID: 15876, PPID: hdPID, Name: TargetProcessName},
+			{PID: 26100, PPID: hdPID, Name: TargetProcessName},
+			{PID: 26200, PPID: hdPID, Name: TargetProcessName},
+			{PID: 26300, PPID: hdPID, Name: TargetProcessName},
+			{PID: 26400, PPID: hdPID, Name: TargetProcessName},
+			{PID: 27000, PPID: hdPID, Name: "KGService.exe"},
+		}
+		m.images = map[uint32]string{
+			hdPID: hdExe,
+			15876: hdSubExe,
+			26100: hdSubExe,
+			26200: hdSubExe,
+			26300: hdSubExe,
+			26400: hdSubExe,
+		}
+		m.version = map[string]string{pathKey(hdExe): hdVer}
+		m.existing[pathKey(hdLibcef)] = true
+		m.holders[pathKey(stubDB)] = []uint32{5555, hdPID}
+
+		got, err := confirmWith(m.deps())
+		if err != nil {
+			t.Fatalf("confirmWith 失败: %v", err)
+		}
+		want := Confirmed{
+			PID:        hdPID,
+			ExePath:    hdExe,
+			Version:    hdVer,
+			LibcefPath: hdLibcef,
+			DataDir:    stubDataDir,
+			LyricDir:   stubLyricDir,
+		}
+		if got != want {
+			t.Fatalf("got  %+v\nwant %+v", got, want)
+		}
+		if len(m.patchCalls) != 1 || m.patchCalls[0] != hdLibcef {
+			t.Fatalf("checkPatch 调用 = %q，应只以 %q 调用一次", m.patchCalls, hdLibcef)
+		}
+	})
+
+	t.Run("启动器交接瞬态（父 KuGou.exe + 子 HD_KuGou.exe）→ ErrConfirmNotReady 且不触碰补丁与数据库", func(t *testing.T) {
+		m := newFakeMachine()
+		m.procs = []proc{
+			{PID: 4, PPID: 0, Name: "System"},
+			{PID: 3532, PPID: 4, Name: "explorer.exe"},
+			{PID: 1000, PPID: 3532, Name: TargetProcessName},
+			{PID: hdPID, PPID: 1000, Name: HDTargetProcessName},
+		}
+		m.images = map[uint32]string{
+			1000:  stubExe,
+			hdPID: hdExe,
+		}
+		_, err := confirmWith(m.deps())
+		wantKind(t, err, ErrConfirmNotReady)
+		wantNoDBAccess(t, m)
+		if len(m.patchCalls) != 0 {
+			t.Fatalf("交接瞬态不应检查补丁：%q", m.patchCalls)
+		}
+	})
+}

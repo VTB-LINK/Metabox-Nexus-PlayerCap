@@ -9,7 +9,10 @@ import (
 
 // MemTestSnapshot 是跨包会话集成测试向真实内存模式 *Reader 注入的酷狗内存状态快照，字段与内部 memSnapshot 对齐。
 type MemTestSnapshot struct {
-	SongItemPtr        uintptr
+	SongID             uint32
+	ListIdx            uint32
+	ListPtr            uintptr
+	IsMV               bool
 	CurrentSongHash    string
 	CLyricPtr          uintptr
 	TaskID             uint32
@@ -52,7 +55,12 @@ func (s *funcMemSource) ReadSnapshot() (memSnapshot, memStatus) {
 	}
 	ms := s.fn()
 	return memSnapshot{
-		SongItemPtr:        ms.SongItemPtr,
+		Handle: songHandle{
+			SongID:  ms.SongID,
+			ListIdx: ms.ListIdx,
+			ListPtr: ms.ListPtr,
+		},
+		IsMV:               ms.IsMV,
 		CurrentSongHash:    ms.CurrentSongHash,
 		CLyricPtr:          ms.CLyricPtr,
 		TaskID:             ms.TaskID,

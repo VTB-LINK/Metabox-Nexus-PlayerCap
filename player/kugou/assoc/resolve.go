@@ -96,6 +96,7 @@ type Result struct {
 	Lines          []klyric.Line
 	LyricOffsetMs  int  // 酷狗侧歌词偏移（毫秒，正数提前、负数延后，钳位在 [-600_000, +600_000]）
 	HasMemoryLyric bool // 内存模式下酷狗 CLyric 已加载歌词行但磁盘路径为空或不可读，供会话触发在线恢复
+	MemoryNoLyric  bool // 内存模式下酷狗 CLyric 已置空或明确判定无歌词（区别于外部磁盘文件暂缺），供会话撤销双拍超窗误采纳的旧词并恢复在线取词
 	Source         Source
 	Retry          bool
 	AssocSkipped   bool
@@ -196,7 +197,7 @@ func collect(db tables, hash string) (collected, error) {
 			delete(keys, k) // Key 是主键；库异常时同一 Key 有多行也只取第一行，关联一级不超过 maxCandidates 条
 			c.Source = SourceAssociation
 			manual = append(manual, c)
-		} else if sameHash(row[2], h) {
+		} else if sameHash(row[2], h) || (p.played > 0 && p.musicHash != "" && sameHash(row[2], p.musicHash)) {
 			c.Source = SourceCache
 			cache = keepLatest(cache, c)
 			cacheRows++
@@ -220,16 +221,64 @@ func collect(db tables, hash string) (collected, error) {
 }
 
 // playing 是正在播放的队列行 P（设计 §6.5 第 1 步）。played 为其 LastPlayTime，为 0 即没有 P；key 为其
-// LyricKey（经 lyricKey 规范化），空即不带关联；path 为其 MusicFilePath（经 filePath 规范化）。
+// LyricKey（经 lyricKey 规范化），空即不带关联；path 为其 MusicFilePath（经 filePath 规范化）；
+// musicHash 为其规范化非零 MusicFileHash（长度 <= 64），空即无有效默认音质 Hash。
 type playing struct {
 	played    int64
 	key, path string
+	musicHash string
 }
 
-// playingRow 扫各播放队列表定出 P：MusicFileHash 与 h 相符、LastPlayTime 最大且大于 0 的行，并列时取先扫到的。
+const maxHashBytes = 64
+
+// extraHashCols 是歌曲条目表中除 MusicFileHash 之外用于多音质/MV 流式播放的可选 Hash 列。
+var extraHashCols = [...]string{"LastPlayedMusicHash", "MVFileHash", "LastPlayedMVHash"}
+
+// appendExtraHashCols 按需把 cols 中存在的可选多音质/MV Hash 列追加进 scanCols，返回可选列起始下标。
+func appendExtraHashCols(scanCols, cols []string) ([]string, int) {
+	start := len(scanCols)
+	for _, name := range extraHashCols {
+		if hasColumn(cols, name) {
+			scanCols = append(scanCols, name)
+		}
+	}
+	return scanCols, start
+}
+
+// rowMatchesHash 判断 row[0]（MusicFileHash）或 row[extraStart:]（可选多音质/MV 列）任一列与已规范化的 h 相符。
+func rowMatchesHash(row []kgdb.Value, extraStart int, h string) bool {
+	if sameHash(row[0], h) {
+		return true
+	}
+	for _, v := range row[extraStart:] {
+		if sameHash(v, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// normMusicHash 把 P 的 MusicFileHash 规范为去两端空白的非零串（长度 <= 64）；空串、全 0 或超长返回空串。
+func normMusicHash(v kgdb.Value) string {
+	if len(v.Bytes) > maxPathBytes {
+		return ""
+	}
+	mh := strings.TrimSpace(v.String())
+	if len(mh) > maxHashBytes || strings.Trim(mh, "0") == "" {
+		return ""
+	}
+	return mh
+}
+
+// playingRow 扫各播放队列表定出 P：MusicFileHash 或可选多音质/MV 列与 h 相符、LastPlayTime 最大且大于 0 的行，
+// 并列时取先扫到的。空串或全 0 的 h 直接返回零值，避免与音频行全 0 的 LastPlayedMVHash 误匹配。
 // 没有 LastPlayTime 列的队列表各行按 0，不扫；非整数（含 NULL）按 0。表里没有 MusicFilePath 列时 P 的路径为空。
-// LyricKey 超过 maxPathBytes 的行跳过（设计 §6.10）。只留 P 的一个键与一条路径，工作集不随行数增长。
+// LyricKey 超过 maxPathBytes 的行跳过（设计 §6.10）。只留 P 的一个键、一条路径与默认 Hash，工作集不随行数增长。
 func playingRow(db tables, h string) (playing, error) {
+	h = strings.TrimSpace(h)
+	if strings.Trim(h, "0") == "" {
+		return playing{}, nil
+	}
 	var p playing
 	err := eachSongTable(db, true, func(t string, cols []string) (bool, error) {
 		if !hasColumn(cols, "LastPlayTime") {
@@ -240,12 +289,13 @@ func playingRow(db tables, h string) (playing, error) {
 		if withPath {
 			scanCols = append(scanCols, "MusicFilePath")
 		}
+		scanCols, extraStart := appendExtraHashCols(scanCols, cols)
 		return true, db.Scan(t, scanCols, func(row []kgdb.Value) bool {
-			if len(row[1].Bytes) > maxPathBytes || !sameHash(row[0], h) {
+			if len(row[1].Bytes) > maxPathBytes || !rowMatchesHash(row, extraStart, h) {
 				return true
 			}
 			if played := row[2].Int64(); played > p.played {
-				p = playing{played: played, key: lyricKey(row[1])}
+				p = playing{played: played, key: lyricKey(row[1]), musicHash: normMusicHash(row[0])}
 				if withPath {
 					p.path = filePath(row[3])
 				}
@@ -263,13 +313,17 @@ func playingRow(db tables, h string) (playing, error) {
 //   - 有 P、P 不带关联：扫各歌曲条目表，只收与 P 不是同一文件的行的键（用户决定「1甲」）。同一文件指
 //     MusicFilePath 去两端空白后不分大小写相同；任一方为空、或该表没有 MusicFilePath 列，按同一文件算、不收：
 //     酷狗此时显示缓存，不用同一文件其余各行上的关联。
-//   - 没有 P：收全部 MusicFileHash 与 h 相符的行的键。
+//   - 没有 P：收全部 MusicFileHash 或可选多音质/MV Hash 列与 h 相符的行的键。
 //
 // 另返回 P（没有 P 为零值）；出错时为零值。
 //
 // LyricKey 超过 maxPathBytes 的行跳过、不计数。超过 maxCandidates 个即停扫，打一条 Detail 并返回 nil 的集合。
 // 找表与扫表出错的处理见 eachSongTable。
 func associationKeys(db tables, h string) (keys map[string]bool, p playing, err error) {
+	h = strings.TrimSpace(h)
+	if strings.Trim(h, "0") == "" {
+		return nil, playing{}, nil
+	}
 	p, err = playingRow(db, h)
 	if err != nil {
 		return nil, playing{}, err
@@ -292,12 +346,13 @@ func associationKeys(db tables, h string) (keys map[string]bool, p playing, err 
 			}
 			scanCols = append(scanCols, "MusicFilePath")
 		}
+		scanCols, extraStart := appendExtraHashCols(scanCols, cols)
 		err := db.Scan(t, scanCols, func(row []kgdb.Value) bool {
 			if len(row[1].Bytes) > maxPathBytes {
 				return true
 			}
 			k := lyricKey(row[1])
-			if k == "" || k == unassocMenuKey || k == unassocDialogKey || !sameHash(row[0], h) {
+			if k == "" || k == unassocMenuKey || k == unassocDialogKey || !rowMatchesHash(row, extraStart, h) {
 				return true
 			}
 			if p.played > 0 {

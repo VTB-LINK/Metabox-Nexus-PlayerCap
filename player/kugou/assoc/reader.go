@@ -43,8 +43,8 @@ const (
 	maxBadVtable   = 3                      // 运行期连续虚表校验失败降级阈值
 )
 
-// cacheFileHashRe 匹配酷狗缓存歌词文件名：<name>-<32hex>-<digits>-<8hex>.(krc|lrc)。
-var cacheFileHashRe = regexp.MustCompile(`(?i)^.+-([0-9a-f]{32})-\d+-[0-9a-f]{8}\.(?:krc|lrc)$`)
+// cacheFileRe 匹配酷狗缓存歌词文件名：<name>-<32hex>-<digits>-<8hex>.(krc|lrc)。
+var cacheFileRe = regexp.MustCompile(`(?i)^.+-[0-9a-f]{32}-\d+-[0-9a-f]{8}\.(?:krc|lrc)$`)
 
 // fileTime 把时刻换算成 LastPlayTime 的单位：1601-01-01 UTC 起的 100 ns 计数。
 func fileTime(t time.Time) int64 {
@@ -52,28 +52,24 @@ func fileTime(t time.Time) int64 {
 	return (t.Unix()+unixFrom1601)*10_000_000 + int64(t.Nanosecond()/100)
 }
 
-// cacheEmbeddedHash 判断 path 是否位于 lyricDir 之内且文件名符合酷狗缓存格式，若是则返回内嵌的 32 位 hex hash。
-func cacheEmbeddedHash(lyricDir, path string) (string, bool) {
+// isCacheLyricPath 判断 path 是否位于 lyricDir 之内且文件名符合酷狗缓存命名格式（不校验内嵌 32hex 是否等于当前流式 Hash）。
+func isCacheLyricPath(lyricDir, path string) bool {
 	if lyricDir == "" || path == "" {
-		return "", false
+		return false
 	}
 	dir := filepath.Clean(lyricDir)
 	p := filepath.Clean(path)
 	if !filepath.IsAbs(dir) || !filepath.IsAbs(p) {
-		return "", false
+		return false
 	}
 	prefix := strings.ToLower(dir)
 	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
 		prefix += string(filepath.Separator)
 	}
 	if !strings.HasPrefix(strings.ToLower(p), prefix) {
-		return "", false
+		return false
 	}
-	m := cacheFileHashRe.FindStringSubmatch(filepath.Base(p))
-	if len(m) != 2 {
-		return "", false
-	}
-	return m[1], true
+	return cacheFileRe.MatchString(filepath.Base(p))
 }
 
 // readers 是存活的读取者 goroutine 数，start 保证至多为 1。
@@ -200,13 +196,13 @@ type fileStat struct {
 
 // settleState 是换歌归属双拍稳定窗口的基准快照。
 type settleState struct {
-	songItemPtr uintptr
-	clyricPtr   uintptr
-	taskID      uint32
-	unassoc     bool
-	assocPath   string
-	at          time.Time
-	armed       bool
+	handle    songHandle
+	clyricPtr uintptr
+	taskID    uint32
+	unassoc   bool
+	assocPath string
+	at        time.Time
+	armed     bool
 }
 
 // parsedCacheKey 标识内存模式下已解析的一份本地歌词文件。
@@ -234,6 +230,7 @@ type memSentSig struct {
 	linesLen       int
 	lyricOffsetMs  int
 	hasMemoryLyric bool
+	memoryNoLyric  bool
 	source         Source
 	retry          bool
 	playedAt       int64
@@ -495,6 +492,8 @@ type worker struct {
 
 	prevHash            string
 	hashSettled         bool
+	memFoundPtr         uintptr
+	memRevoked          bool
 	settleBase          settleState
 	songStart           time.Time
 	prevSongPlayedAt    int64
@@ -633,6 +632,8 @@ func (w *worker) onHash(ctx context.Context, h string) {
 		}
 		w.hash = h
 		w.hashSettled = false
+		w.memFoundPtr = 0
+		w.memRevoked = false
 		w.settleBase = settleState{}
 		w.songStart = time.Now()
 		w.prevSongPlayedAt = max(w.prevSongPlayedAt, w.curPlayedAt)
@@ -741,6 +742,8 @@ func (w *worker) pollMem(ctx context.Context) {
 		w.badVtableCount = 0
 		w.memUnsupported = false
 		w.hashSettled = false
+		w.memFoundPtr = 0
+		w.memRevoked = false
 		w.settleBase = settleState{}
 		w.lastMemSnap = memSnapshot{}
 		w.hasLastMemSnap = false
@@ -767,6 +770,8 @@ func (w *worker) pollMem(ctx context.Context) {
 			w.closeMem()
 			log.Warn("KuGou memory lyric reader vtable check failed %d times in a row; falling back to database mode", w.badVtableCount)
 			w.memUnsupported = true
+			w.memFoundPtr = 0
+			w.memRevoked = false
 			w.hasLastMemSnap = false
 			w.memNextPoll = time.Time{}
 			w.memNextDBStat = time.Time{}
@@ -791,50 +796,42 @@ func (w *worker) pollMem(ctx context.Context) {
 	w.badVtableCount = 0
 	targetHash := strings.TrimSpace(w.hash)
 
-	// 第一关：Hash 匹配与缓存内嵌 Hash 确定性证伪。
-	if snap.SongItemPtr == 0 || !strings.EqualFold(strings.TrimSpace(snap.CurrentSongHash), targetHash) {
+	// 第一关：当前播放句柄有效且流式 Hash 精确匹配（跨音质缓存不再比对内嵌 <32hex>）。
+	if snap.Handle.ListPtr == 0 || !strings.EqualFold(strings.TrimSpace(snap.CurrentSongHash), targetHash) {
 		w.settleBase = settleState{}
 		w.memNextPoll = now.Add(memFastRetry)
 		return
-	}
-	if !snap.IsUserUnassociated && snap.CLyricPtr != 0 && snap.KrcID != 0 {
-		if embeddedHash, ok := cacheEmbeddedHash(w.conf.LyricDir, snap.LyricFilePath); ok && !strings.EqualFold(embeddedHash, targetHash) {
-			w.hashSettled = false
-			w.settleBase = settleState{}
-			w.memNextPoll = now.Add(memFastRetry)
-			return
-		}
 	}
 
 	// 第二关：切歌进入的双拍稳定窗口启发式。
 	if w.prevHash != "" && !w.hashSettled {
 		if !w.settleBase.armed {
 			w.settleBase = settleState{
-				songItemPtr: snap.SongItemPtr,
-				clyricPtr:   snap.CLyricPtr,
-				taskID:      snap.TaskID,
-				unassoc:     snap.IsUserUnassociated,
-				assocPath:   snap.AssocPath,
-				at:          now,
-				armed:       true,
+				handle:    snap.Handle,
+				clyricPtr: snap.CLyricPtr,
+				taskID:    snap.TaskID,
+				unassoc:   snap.IsUserUnassociated,
+				assocPath: snap.AssocPath,
+				at:        now,
+				armed:     true,
 			}
 			w.memNextPoll = now.Add(memSettleDelay)
 			return
 		}
-		same := w.settleBase.songItemPtr == snap.SongItemPtr &&
+		same := w.settleBase.handle == snap.Handle &&
 			w.settleBase.clyricPtr == snap.CLyricPtr &&
 			w.settleBase.taskID == snap.TaskID &&
 			w.settleBase.unassoc == snap.IsUserUnassociated &&
 			w.settleBase.assocPath == snap.AssocPath
 		if !same {
 			w.settleBase = settleState{
-				songItemPtr: snap.SongItemPtr,
-				clyricPtr:   snap.CLyricPtr,
-				taskID:      snap.TaskID,
-				unassoc:     snap.IsUserUnassociated,
-				assocPath:   snap.AssocPath,
-				at:          now,
-				armed:       true,
+				handle:    snap.Handle,
+				clyricPtr: snap.CLyricPtr,
+				taskID:    snap.TaskID,
+				unassoc:   snap.IsUserUnassociated,
+				assocPath: snap.AssocPath,
+				at:        now,
+				armed:     true,
 			}
 			w.memNextPoll = now.Add(memSettleDelay)
 			return
@@ -852,16 +849,22 @@ func (w *worker) pollMem(ctx context.Context) {
 	w.memNextPoll = now.Add(interval)
 }
 
+func (w *worker) cancelMemFileIO() {
+	if w.memFileInFlight != nil {
+		w.memFileGen++
+		w.memFileInFlight = nil
+	}
+	if w.disk != nil {
+		w.disk.clearPendingFile()
+	}
+}
+
 func (w *worker) evaluateMemSnap(ctx context.Context, snap memSnapshot, now time.Time) time.Duration {
 	// 1. 取消关联最高优先：立即作废在飞文件读并清词，不受卡死文件 I/O 阻塞。
 	if snap.IsUserUnassociated || snap.AssocPath == "用户取消关联" {
-		if w.memFileInFlight != nil || !w.lastMemSent.sent || w.lastMemSent.kind != KindUnassociated {
-			w.memFileGen++
-			w.memFileInFlight = nil
-			if w.disk != nil {
-				w.disk.clearPendingFile()
-			}
-		}
+		w.cancelMemFileIO()
+		w.memFoundPtr = 0
+		w.memRevoked = false
 		w.sendMem(Result{
 			Hash:      w.hash,
 			Kind:      KindUnassociated,
@@ -875,13 +878,15 @@ func (w *worker) evaluateMemSnap(ctx context.Context, snap memSnapshot, now time
 	if snap.CLyricPtr != 0 && (snap.LyricFilePath != "" || snap.VecBegin != snap.VecEnd) {
 		off := clampLyricOffsetMs(snap.LyricOffsetMs)
 		src := SourceAssociation
-		if _, ok := cacheEmbeddedHash(w.conf.LyricDir, snap.LyricFilePath); ok {
+		if snap.KrcID != 0 && isCacheLyricPath(w.conf.LyricDir, snap.LyricFilePath) {
 			src = SourceCache
 		}
 		if snap.LyricFilePath != "" {
 			key := parsedCacheKey{clyricPtr: snap.CLyricPtr, assocPath: snap.AssocPath, path: snap.LyricFilePath}
 			if w.memParsedCache.valid && w.memParsedCache.key == key {
 				if len(w.memParsedCache.lines) > 0 {
+					w.memFoundPtr = snap.CLyricPtr
+					w.memRevoked = false
 					w.sendMem(Result{
 						Hash:          w.hash,
 						Kind:          KindFound,
@@ -892,11 +897,16 @@ func (w *worker) evaluateMemSnap(ctx context.Context, snap memSnapshot, now time
 						LocalFile:     w.curLocalFile,
 					}, key)
 				} else {
+					if w.memFoundPtr != 0 && snap.CLyricPtr != w.memFoundPtr {
+						w.memFoundPtr = 0
+						w.memRevoked = true
+					}
 					w.sendMem(Result{
 						Hash:           w.hash,
 						Kind:           KindNone,
 						LyricOffsetMs:  off,
 						HasMemoryLyric: snap.VecBegin != snap.VecEnd,
+						MemoryNoLyric:  w.memRevoked,
 						Retry:          w.memParsedCache.retry,
 						PlayedAt:       w.curPlayedAt,
 						LocalFile:      w.curLocalFile,
@@ -910,24 +920,35 @@ func (w *worker) evaluateMemSnap(ctx context.Context, snap memSnapshot, now time
 			w.requestMemFile(ctx, key, snap.LyricFilePath)
 			return memPollEvery
 		}
+		if w.memFoundPtr != 0 {
+			w.memFoundPtr = 0
+			w.memRevoked = true
+		}
 		w.sendMem(Result{
 			Hash:           w.hash,
 			Kind:           KindNone,
 			LyricOffsetMs:  off,
 			HasMemoryLyric: true,
+			MemoryNoLyric:  w.memRevoked,
 			PlayedAt:       w.curPlayedAt,
 			LocalFile:      w.curLocalFile,
 		}, parsedCacheKey{})
 		return memPollEvery
 	}
 
-	// 3. 明确无歌词：立即发 KindNone，并触发一次队列读盘以补齐 PlayedAt/LocalFile。
+	// 3. 明确无歌词：作废在飞文件读取，立即发 MemoryNoLyric=true 的 KindNone，并触发一次队列读盘以补齐 PlayedAt/LocalFile。
 	if snap.NoLyricFound {
+		w.cancelMemFileIO()
+		if w.memFoundPtr != 0 {
+			w.memFoundPtr = 0
+			w.memRevoked = true
+		}
 		w.sendMem(Result{
-			Hash:      w.hash,
-			Kind:      KindNone,
-			PlayedAt:  w.curPlayedAt,
-			LocalFile: w.curLocalFile,
+			Hash:          w.hash,
+			Kind:          KindNone,
+			MemoryNoLyric: true,
+			PlayedAt:      w.curPlayedAt,
+			LocalFile:     w.curLocalFile,
 		}, parsedCacheKey{})
 		if !w.memNoLyricRequested && w.d.playingRow != nil {
 			if w.submitMemDB(ctx, true) || w.memDBInFlight {
@@ -937,7 +958,21 @@ func (w *worker) evaluateMemSnap(ctx context.Context, snap memSnapshot, now time
 		return memPollEvery
 	}
 
-	// 4. 其余（搜词进行中）：不发 KindNone，快速复检。
+	// 4. 其余（搜词进行中）：若本首已发过 KindFound 或处于已撤销态，发 MemoryNoLyric=true 撤销误采纳旧词，并继续快速复检。
+	if w.memFoundPtr != 0 || w.memRevoked {
+		if w.memFoundPtr != 0 {
+			w.cancelMemFileIO()
+			w.memFoundPtr = 0
+			w.memRevoked = true
+		}
+		w.sendMem(Result{
+			Hash:          w.hash,
+			Kind:          KindNone,
+			MemoryNoLyric: true,
+			PlayedAt:      w.curPlayedAt,
+			LocalFile:     w.curLocalFile,
+		}, parsedCacheKey{})
+	}
 	return memFastRetry
 }
 
@@ -1056,6 +1091,7 @@ func (w *worker) sendMem(res Result, cacheKey parsedCacheKey) {
 		linesLen:       len(res.Lines),
 		lyricOffsetMs:  res.LyricOffsetMs,
 		hasMemoryLyric: res.HasMemoryLyric,
+		memoryNoLyric:  res.MemoryNoLyric,
 		source:         res.Source,
 		retry:          res.Retry,
 		playedAt:       res.PlayedAt,
@@ -1083,6 +1119,8 @@ func (w *worker) confirm(ctx context.Context) bool {
 			w.memUnsupported = false
 			w.memNotReady = 0
 			w.badVtableCount = 0
+			w.memFoundPtr = 0
+			w.memRevoked = false
 		}
 		w.conf, w.dbPath, w.lastPID = &c, filepath.Join(c.DataDir, dbFileName), c.PID
 		log.Info("Local lyric association enabled (KuGou %s, data directory %s)", c.Version, c.DataDir)

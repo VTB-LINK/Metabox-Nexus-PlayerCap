@@ -253,7 +253,7 @@ var p4LogMessages = map[string]string{
 	"KuGou started; waiting for initialization...":                                                    "酷狗已启动，等待初始化...",
 	"KuGou version: %s (recommended version is %s; the libcef.dll byte fingerprint is authoritative)": "酷狗版本: %s（推荐版本为 %s，实际以 libcef.dll 字节指纹为准）",
 	"KuGou version: %s (recommended)":                                                                 "酷狗版本: %s（推荐版本）",
-	"KuGou process did not fully exit within 5s; continuing...":                                       "酷狗进程未在 5s 内完全退出，继续...",
+	"KuGou process did not fully exit within 3s; continuing...":                                       "酷狗进程未在 3s 内完全退出，继续...",
 	"retried Redux ID successfully: %s":                                                               "重试获取 Redux ID 成功: %s",
 
 	// —— applemusic：位置结构当信号源后的会话日志 ——

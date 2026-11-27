@@ -3,6 +3,8 @@
 package procscan
 
 import (
+	"slices"
+
 	"Metabox-Nexus-PlayerCap/player/applemusic"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic"
 	cmwd "Metabox-Nexus-PlayerCap/player/cloudmusic/watchdog"
@@ -35,3 +37,17 @@ var PlayerProcess = map[string]string{
 
 // Players 是稳定顺序的播放器名列表（供 manager 遍历门控）。
 var Players = []string{wesing.PlayerName, cloudmusic.PlayerName, qqmusic.PlayerName, kugou.PlayerName, sodamusic.PlayerName, applemusic.PlayerName, spotify.PlayerName, kuwo.PlayerName}
+
+// PlayerProcesses 返回播放器对应的精确进程名白名单（供 MainPIDAny / AliveAny 使用）。
+// 酷狗在默认映射未被覆写时返回双进程名副本（先 HD_KuGou.exe、后 KuGou.exe），避免外部改动污染共享切片；
+// 其余播放器或临时覆写映射返回单元素切片；未映射或空串返回 nil。
+func PlayerProcesses(player string) []string {
+	proc := PlayerProcess[player]
+	if proc == "" {
+		return nil
+	}
+	if player == kugou.PlayerName && proc == kugouwd.TargetProcessName {
+		return slices.Clone(kugouwd.TargetProcessNames)
+	}
+	return []string{proc}
+}

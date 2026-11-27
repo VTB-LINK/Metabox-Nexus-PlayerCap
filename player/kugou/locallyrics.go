@@ -215,6 +215,7 @@ const (
 	pollUnassociated                   // 用户显式取消关联：清空歌词且禁止回退
 	pollFound                          // 收到新的本地/缓存歌词或偏移变化候选（已过防关联降级守卫）
 	pollClearLocalNone                 // #205 本地文件确实无歌词：清掉沿用或不同 PlayedAt 的旧本地歌词
+	pollRevokeMemNone                  // 内存模式 CLyric 置空或明确无歌词：撤销此前采纳的旧词，非 localNone 时触发在线恢复
 	pollNone                           // 其余 KindNone：供会话按设计 §6.4.4 解除取消关联、重算偏移或触发异步在线恢复
 )
 
@@ -225,9 +226,14 @@ type localPoll struct {
 	src            assoc.Source
 	lyricOffsetMs  int
 	hasMemoryLyric bool
+	recoverOnline  bool
 }
 
 // classify 按设计 §6.4.4 与 #205 规则分类一条播放中收到的本地读取者结果，并返回待执行动作。
+//
+// 迟到内存空词撤销（设计 §6.4.4 KindNone 第 1 步）：收到 MemoryNoLyric 为真的 KindNone 且当前歌词采纳自本地读取者
+// （cur != 0）时，清零来源、curPlayedAt 与沿用标记，返回 pollRevokeMemNone（非 localNone 时置 recoverOnline 以启动
+// 在线取词恢复）；磁盘文件暂缺（MemoryNoLyric == false）或在线来源（cur == 0）不进本支。
 //
 // 防关联降级守卫（设计 §6.7「播放中」）：当前歌词来自关联、新结果不是关联且带 AssocSkipped 标记、且 PlayedAt 与
 // 采纳当前歌词时记下的相同（同一次播放）时忽略，保持当前歌词到下一首；其余情形照常更新来源与 PlayedAt 并返回
@@ -261,6 +267,15 @@ func (s *localSession) classify(hash string, res assoc.Result) localPoll {
 			lyricOffsetMs: res.LyricOffsetMs,
 		}
 	case assoc.KindNone:
+		if res.MemoryNoLyric && s.cur != 0 {
+			recoverOnline := !s.localNone(res)
+			s.cur, s.curPlayedAt, s.carried = 0, 0, false
+			return localPoll{
+				kind:          pollRevokeMemNone,
+				lyricOffsetMs: res.LyricOffsetMs,
+				recoverOnline: recoverOnline,
+			}
+		}
 		if s.localNone(res) && (s.carried || (s.cur != 0 && res.PlayedAt != s.curPlayedAt)) {
 			s.cur, s.curPlayedAt, s.carried = 0, res.PlayedAt, false
 			return localPoll{kind: pollClearLocalNone}

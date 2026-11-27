@@ -342,13 +342,13 @@ func (m *Manager) reconcile() {
 	}
 	desired := desiredCaptures(procscan.Players, hasRoot, playing, m.sink.HasSubscribers)
 
-	// 4. desired → want = map[player]pid：键始终是播放器名，仅在此把播放器名映射到进程名去
-	//    MainPID 求主进程、Alive 复核（防 PID 复用 TOCTOU）。
+	// 4. desired → want = map[player]pid：键始终是播放器名，仅在此把播放器名映射到进程名族去
+	//    MainPIDAny 求主进程、AliveAny 复核（防 PID 复用 TOCTOU）。
 	want := map[string]uint32{}
 	for player := range desired {
-		proc := procscan.PlayerProcess[player]
-		pid, ok := procscan.MainPID(snap, proc)
-		if !ok || !procscan.Alive(pid, proc) {
+		procs := procscan.PlayerProcesses(player)
+		pid, ok := procscan.MainPIDAny(snap, procs...)
+		if !ok || !procscan.AliveAny(pid, procs...) {
 			continue // 进程刚退出 / PID 已复用 → 本轮不抓，下轮再看
 		}
 		want[player] = pid

@@ -2,10 +2,16 @@ package assoc
 
 // 本文件用 testing/synctest 与内存桩测双源融合状态机（#250/#251，设计 §6.2、§6.3、§6.4.2、§6.6）：
 //   - 地址复用与取消关联分支在 25ms 双拍稳定窗口后放行，绝不永久 Pending；
-//   - 观测缺口下的内嵌缓存 Hash 确定性拦截，与无内嵌 Hash 时的延后及超时覆盖自愈；
+//   - 高品/跨音质 LyricDir 缓存放行（KrcID!=0 标 SourceCache、KrcID==0 标 SourceAssociation）、
+//     连续 10 拍 Torn/NotReady 不降级、已发 KindFound 后 CLyric 置空发 MemoryNoLyric=true（文件失败发 false）、
+//     以及经 LastPlayedMusicHash 更新高品队列行 PlayedAt；
+//   - 观察者间隙下双拍变更延至第 3 拍放行，以及停顿超窗后的下一拍覆盖自愈；
 //   - PlayedAt 拒绝过旧历史 P，以及单曲循环重播时经 1s 持续 stat 检出新 PlayedAt；
 //   - 同文件连续调偏移零重读/零 stat 歌词文件，且卡死网络盘读文件不阻塞取消关联、后台 I/O 单飞；
 //   - PID 变更重连新进程，以及连续 3 次 BadVtable 自动关闭句柄降级至磁盘模式。
+//
+// 变异自证（均实测变红后还原）：
+//   - reader.go 恢复 cacheEmbeddedHash != targetHash 拦截 → TestMemBarrierCrossQualityCacheAllowed 中「高品跨音质LyricDir缓存KrcID非零放行标SourceCache_KrcID为0标SourceAssociation」「连续10拍Torn或NotReady不触发maxBadVtable降级」「readPlayingRow经LastPlayedMusicHash命中高品队列行更新PlayedAt」三个子用例均红（结果通道为空）。
 
 import (
 	"context"
@@ -17,8 +23,13 @@ import (
 	"testing/synctest"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/player/kugou/kgdb"
 	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
 )
+
+func testHandle(id uint32) songHandle {
+	return songHandle{SongID: id, ListIdx: 0, ListPtr: 0x10000 + uintptr(id)*0x100}
+}
 
 type stubMemSource struct {
 	mu       sync.Mutex
@@ -76,7 +87,7 @@ func TestMemOwnershipAddressReuseAndCancelBranch(t *testing.T) {
 	src := &stubMemSource{
 		pid: okConfirmed.PID,
 		snap: memSnapshot{
-			SongItemPtr:     0x100,
+			Handle:          testHandle(1),
 			CurrentSongHash: hashA,
 			CLyricPtr:       0x10000,
 			TaskID:          7,
@@ -108,7 +119,7 @@ func TestMemOwnershipAddressReuseAndCancelBranch(t *testing.T) {
 
 		// 切入 B 后立即切入 C（漏采 B），C 复用 0x10000 且走右键取消关联保持 taskID=7。
 		src.set(memSnapshot{
-			SongItemPtr:        0x300,
+			Handle:             testHandle(3),
 			CurrentSongHash:    hashC,
 			CLyricPtr:          0x10000,
 			TaskID:             7,
@@ -129,19 +140,23 @@ func TestMemOwnershipAddressReuseAndCancelBranch(t *testing.T) {
 	})
 }
 
-func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
+func TestMemBarrierCrossQualityCacheAllowed(t *testing.T) {
+	const (
+		hqHash      = "17da13c9529cbbb7203d813abe616b61"
+		defaultHash = "fde806ac112233445566778899aabbcc"
+		crossCache  = `C:\KuGou\Lyric\JLS - Beat Again-26e262bae05e44835b478b981152a07b-135403302-00000000.krc`
+		pathA       = `D:\a.lrc`
+		pathNew     = `D:\new.lrc`
+		missingPath = `D:\missing.lrc`
+	)
 	hashA := hex32("aa", 1)
-	hashB := hex32("bb", 2)
-	hashC := hex32("cc", 3)
-	const pathA = `D:\a.lrc`
-	cacheB := okConfirmed.LyricDir + `\歌手 - 歌B-` + hashB + `-123-00000000.krc`
-	cacheC := okConfirmed.LyricDir + `\歌手 - 歌C-` + hashC + `-456-00000000.krc`
+	krcBytes := encodeTestKRC(t, "[1000,2000]<0,500,0>跨<500,500,0>音质\n")
 
-	t.Run("内嵌缓存Hash确定性拦截旧歌缓存直至100ms切换到C", func(t *testing.T) {
+	t.Run("高品跨音质LyricDir缓存KrcID非零放行标SourceCache_KrcID为0标SourceAssociation", func(t *testing.T) {
 		src := &stubMemSource{
 			pid: okConfirmed.PID,
 			snap: memSnapshot{
-				SongItemPtr:     0x100,
+				Handle:          testHandle(1),
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				TaskID:          1,
@@ -151,16 +166,14 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 		}
 		f := &fakeDeps{
 			openMemFn: func(pid uint32) (memSource, memOpenKind, string, error) {
-				return src, memOpenOK, "fp-test", nil
+				return src, memOpenOK, "fp-hq", nil
 			},
 			readFn: func(_ time.Duration, path string) ([]byte, error) {
 				switch path {
 				case pathA:
 					return []byte("[00:01.00]歌A\n"), nil
-				case cacheB:
-					return []byte("[00:01.00]歌B缓存\n"), nil
-				case cacheC:
-					return []byte("[00:01.00]歌C缓存\n"), nil
+				case crossCache:
+					return krcBytes, nil
 				}
 				return nil, fs.ErrNotExist
 			},
@@ -170,45 +183,329 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 			r.SetHash(hashA)
 			wantKind(t, latest(t, r), hashA, KindFound)
 
-			// 切到 C，但 CLyric 仍指向 B 的缓存文件（KrcID != 0，文件名内嵌 hashB）。
+			// 切入高品歌曲 hqHash，CLyric 加载不同 <32hex> 的 LyricDir 缓存文件且 KrcID != 0。
 			src.set(memSnapshot{
-				SongItemPtr:     0x300,
-				CurrentSongHash: hashC,
-				CLyricPtr:       0x10000,
-				KrcID:           123,
-				TaskID:          2,
-				LyricFilePath:   cacheB,
-			}, memStatusOK)
-			r.SetHash(hashC)
-
-			// +25ms、+50ms、+99ms 均被内嵌缓存 Hash 确定性拦截，绝不发布 B。
-			time.Sleep(25 * time.Millisecond)
-			noResult(t, r)
-			time.Sleep(74 * time.Millisecond)
-			noResult(t, r)
-
-			// +100ms 切换为 C 的缓存文件。
-			time.Sleep(time.Millisecond)
-			src.set(memSnapshot{
-				SongItemPtr:     0x300,
-				CurrentSongHash: hashC,
+				Handle:          testHandle(2),
+				CurrentSongHash: hqHash,
 				CLyricPtr:       0x20000,
-				KrcID:           456,
-				TaskID:          3,
-				LyricFilePath:   cacheC,
+				KrcID:           135403302,
+				TaskID:          2,
+				LyricOffsetMs:   25,
+				LyricFilePath:   crossCache,
 			}, memStatusOK)
+			r.SetHash(hqHash)
 
-			// 等待下一轮快速重试 + 25ms 双拍稳定后发布 C。
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(memSettleDelay)
 			res := latest(t, r)
-			wantKind(t, res, hashC, KindFound)
-			if res.Source != SourceCache || len(res.Lines) != 1 || res.Lines[0].Text != "歌C缓存" {
-				t.Fatalf("结果 %+v，want SourceCache / 歌C缓存", res)
+			wantKind(t, res, hqHash, KindFound)
+			if res.Source != SourceCache || res.LyricOffsetMs != 25 || len(res.Lines) != 1 || res.Lines[0].Text != "跨音质" {
+				t.Fatalf("跨音质缓存结果 %+v，want SourceCache / offset=25 / 跨音质", res)
+			}
+
+			// 同路径但 KrcID == 0（用户手动关联 LyricDir 内文件）：放行并标为 SourceAssociation。
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hqHash,
+				CLyricPtr:       0x20000,
+				KrcID:           0,
+				TaskID:          2,
+				LyricOffsetMs:   25,
+				LyricFilePath:   crossCache,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res = latest(t, r)
+			wantKind(t, res, hqHash, KindFound)
+			if res.Source != SourceAssociation {
+				t.Fatalf("KrcID==0 结果 Source=%v，want SourceAssociation", res.Source)
 			}
 		})
 	})
 
-	t.Run("无内嵌Hash第2拍变更延至第3拍放行", func(t *testing.T) {
+	t.Run("连续10拍Torn或NotReady不触发maxBadVtable降级", func(t *testing.T) {
+		var candsCalls atomic.Int32
+		src := &stubMemSource{
+			pid: okConfirmed.PID,
+			onRead: func(n int) (memSnapshot, memStatus) {
+				switch {
+				case n <= 5:
+					return memSnapshot{}, memStatusTorn
+				case n <= 10:
+					return memSnapshot{}, memStatusNotReady
+				default:
+					return memSnapshot{
+						Handle:          testHandle(1),
+						CurrentSongHash: hqHash,
+						CLyricPtr:       0x20000,
+						KrcID:           135403302,
+						LyricFilePath:   crossCache,
+					}, memStatusOK
+				}
+			},
+		}
+		f := &fakeDeps{
+			openMemFn: func(pid uint32) (memSource, memOpenKind, string, error) {
+				return src, memOpenOK, "fp-10", nil
+			},
+			candsFn: func(_ int, _ string) ([]candidate, error) {
+				candsCalls.Add(1)
+				return []candidate{{Path: "a.lrc", Source: SourceCache, UpdateTime: 1}}, nil
+			},
+			readFn: func(_ time.Duration, path string) ([]byte, error) {
+				if path == crossCache {
+					return krcBytes, nil
+				}
+				return nil, fs.ErrNotExist
+			},
+		}
+
+		runReader(t, f, func(t *testing.T, r *Reader) {
+			r.SetHash(hqHash)
+			synctest.Wait()
+			for step := 1; step <= 10; step++ {
+				if src.isClosed() || candsCalls.Load() != 0 {
+					t.Fatalf("第 %d 拍 Torn/NotReady 后不应降级：closed=%v candsCalls=%d", step, src.isClosed(), candsCalls.Load())
+				}
+				noResult(t, r)
+				if step < 10 {
+					time.Sleep(memFastRetry)
+					synctest.Wait()
+				}
+			}
+			// 第 11 拍 OK，正常产出 KindFound。
+			time.Sleep(memFastRetry)
+			res := latest(t, r)
+			wantKind(t, res, hqHash, KindFound)
+			if src.isClosed() || candsCalls.Load() != 0 {
+				t.Fatalf("第 11 拍恢复后不应降级：closed=%v candsCalls=%d", src.isClosed(), candsCalls.Load())
+			}
+		})
+	})
+
+	t.Run("已发KindFound后CLyric置空发MemoryNoLyric_搜词中与NoLyricFound均触发_文件读取失败发false", func(t *testing.T) {
+		hashSearch := hex32("bb", 2)
+		hashNoLyric := hex32("cc", 3)
+		hashReadFail := hex32("dd", 4)
+		hashFreshSearch := hex32("ee", 5)
+
+		src := &stubMemSource{pid: okConfirmed.PID, status: memStatusOK}
+		f := &fakeDeps{
+			openMemFn: func(pid uint32) (memSource, memOpenKind, string, error) {
+				return src, memOpenOK, "fp-nolyric", nil
+			},
+			readFn: func(_ time.Duration, path string) ([]byte, error) {
+				switch path {
+				case pathA:
+					return []byte("[00:01.00]旧歌A\n"), nil
+				case pathNew:
+					return []byte("[00:01.00]新歌词\n"), nil
+				}
+				return nil, fs.ErrNotExist
+			},
+		}
+
+		runReader(t, f, func(t *testing.T, r *Reader) {
+			// 1. 首首歌未发过 KindFound 即处于空 CLyric 搜词中：不提前发 KindNone。
+			src.set(memSnapshot{
+				Handle:          testHandle(1),
+				CurrentSongHash: hashFreshSearch,
+				CLyricPtr:       0x10000,
+				NoLyricFound:    false,
+			}, memStatusOK)
+			r.SetHash(hashFreshSearch)
+			time.Sleep(2 * memFastRetry)
+			noResult(t, r)
+
+			// 2. 切入 hashSearch：先发 KindFound，随后内存 CLyric 置空进入搜词中（NoLyricFound=false）。
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hashSearch,
+				CLyricPtr:       0x10000,
+				TaskID:          1,
+				LyricFilePath:   pathA,
+			}, memStatusOK)
+			r.SetHash(hashSearch)
+			time.Sleep(memSettleDelay)
+			res := latest(t, r)
+			wantKind(t, res, hashSearch, KindFound)
+			if res.MemoryNoLyric {
+				t.Fatalf("KindFound 不应置 MemoryNoLyric=true：%+v", res)
+			}
+
+			// CLyric 变为空路径 + 空向量且 NoLyricFound=false（迟到 OnSongChanged 进入搜词）。
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hashSearch,
+				CLyricPtr:       0x20000,
+				TaskID:          2,
+				NoLyricFound:    false,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res = latest(t, r)
+			wantKind(t, res, hashSearch, KindNone)
+			if !res.MemoryNoLyric || res.HasMemoryLyric {
+				t.Fatalf("已发 KindFound 后 CLyric 置空搜词结果 %+v，want MemoryNoLyric=true / HasMemoryLyric=false", res)
+			}
+
+			// 仍排 memFastRetry（50ms），新歌搜词落地后快速产出新 KindFound。
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hashSearch,
+				CLyricPtr:       0x20000,
+				TaskID:          2,
+				LyricFilePath:   pathNew,
+			}, memStatusOK)
+			time.Sleep(memFastRetry)
+			res = latest(t, r)
+			wantKind(t, res, hashSearch, KindFound)
+			if len(res.Lines) != 1 || res.Lines[0].Text != "新歌词" {
+				t.Fatalf("搜词落地后结果 %+v，want 新歌词", res)
+			}
+
+			// 3. 切入 hashNoLyric：先发 KindFound，随后内存置 NoLyricFound=true。
+			src.set(memSnapshot{
+				Handle:          testHandle(3),
+				CurrentSongHash: hashNoLyric,
+				CLyricPtr:       0x30000,
+				TaskID:          3,
+				LyricFilePath:   pathA,
+			}, memStatusOK)
+			r.SetHash(hashNoLyric)
+			time.Sleep(memSettleDelay)
+			wantKind(t, latest(t, r), hashNoLyric, KindFound)
+
+			src.set(memSnapshot{
+				Handle:          testHandle(3),
+				CurrentSongHash: hashNoLyric,
+				CLyricPtr:       0x30001,
+				TaskID:          4,
+				NoLyricFound:    true,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res = latest(t, r)
+			wantKind(t, res, hashNoLyric, KindNone)
+			if !res.MemoryNoLyric {
+				t.Fatalf("NoLyricFound=true 结果 %+v，want MemoryNoLyric=true", res)
+			}
+
+			// 4. 切入 hashReadFail：先发 KindFound，随后同 CLyric 读盘暂缺保持 MemoryNoLyric=false，
+			// 换新 CLyric 读盘失败则置 MemoryNoLyric=true。
+			src.set(memSnapshot{
+				Handle:          testHandle(4),
+				CurrentSongHash: hashReadFail,
+				CLyricPtr:       0x40000,
+				TaskID:          5,
+				LyricFilePath:   pathA,
+			}, memStatusOK)
+			r.SetHash(hashReadFail)
+			time.Sleep(memSettleDelay)
+			wantKind(t, latest(t, r), hashReadFail, KindFound)
+
+			src.set(memSnapshot{
+				Handle:          testHandle(4),
+				CurrentSongHash: hashReadFail,
+				CLyricPtr:       0x40000,
+				TaskID:          5,
+				LyricFilePath:   missingPath,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res = latest(t, r)
+			if res.Hash != hashReadFail || res.Kind != KindNone || res.MemoryNoLyric || !res.Retry {
+				t.Fatalf("同 CLyric 磁盘缺失文件结果 %+v，want KindNone / MemoryNoLyric=false / Retry=true", res)
+			}
+
+			src.set(memSnapshot{
+				Handle:          testHandle(4),
+				CurrentSongHash: hashReadFail,
+				CLyricPtr:       0x40001,
+				TaskID:          6,
+				LyricFilePath:   missingPath,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res = latest(t, r)
+			if res.Hash != hashReadFail || res.Kind != KindNone || !res.MemoryNoLyric || !res.Retry {
+				t.Fatalf("换新 CLyric 磁盘缺失文件结果 %+v，want KindNone / MemoryNoLyric=true / Retry=true", res)
+			}
+		})
+	})
+
+	t.Run("readPlayingRow经LastPlayedMusicHash命中高品队列行更新PlayedAt", func(t *testing.T) {
+		var mu sync.Mutex
+		var queuePlayed int64
+		dbMtime := int64(3000)
+
+		src := &stubMemSource{
+			pid: okConfirmed.PID,
+			snap: memSnapshot{
+				Handle:          testHandle(9),
+				CurrentSongHash: hqHash,
+				CLyricPtr:       0x90000,
+				KrcID:           135403302,
+				LyricFilePath:   crossCache,
+			},
+			status: memStatusOK,
+		}
+		f := &fakeDeps{
+			openMemFn: func(pid uint32) (memSource, memOpenKind, string, error) {
+				return src, memOpenOK, "fp-hq-db", nil
+			},
+			playingRowFn: func(_ context.Context, _ string, hash string) (playing, error) {
+				mu.Lock()
+				pt := queuePlayed
+				mu.Unlock()
+				qTbl := &fakeTable{
+					name: "PlayQueueAssistItem_0",
+					cols: []string{"MusicFileHash", "LastPlayedMusicHash", "LastPlayedMVHash", "LyricKey", "MusicFilePath", "LastPlayTime"},
+					rows: [][]kgdb.Value{
+						{text(defaultHash), text(hqHash), text(zeroKey), text(""), text("JLS - Beat Again.mp3"), integer(pt)},
+					},
+				}
+				return playingRow(newDB(qTbl), hash)
+			},
+			statFn: func(_ time.Duration) (int64, time.Time, error) {
+				mu.Lock()
+				sec := dbMtime
+				mu.Unlock()
+				return 1 << 20, time.Unix(sec, 0), nil
+			},
+			readFn: func(_ time.Duration, path string) ([]byte, error) {
+				if path == crossCache {
+					return krcBytes, nil
+				}
+				return nil, fs.ErrNotExist
+			},
+		}
+
+		runReader(t, f, func(t *testing.T, r *Reader) {
+			r.SetHash(hqHash)
+			res := latest(t, r)
+			wantKind(t, res, hqHash, KindFound)
+			if res.Source != SourceCache || res.PlayedAt != 0 {
+				t.Fatalf("首拍结果 %+v，want SourceCache / PlayedAt=0", res)
+			}
+
+			// 酷狗将高品播放时间戳刷入 PlayQueueAssistItem_0（仅 LastPlayedMusicHash == hqHash）。
+			t1 := fileTime(time.Now())
+			mu.Lock()
+			queuePlayed = t1
+			dbMtime = 3001
+			mu.Unlock()
+
+			time.Sleep(2500 * time.Millisecond)
+			res = latest(t, r)
+			wantKind(t, res, hqHash, KindFound)
+			if res.PlayedAt != t1 || res.LocalFile {
+				t.Fatalf("高品队列行更新后结果 %+v，want PlayedAt=%d / LocalFile=false", res, t1)
+			}
+		})
+	})
+}
+
+func TestMemOwnershipObserverGap(t *testing.T) {
+	hashA := hex32("aa", 1)
+	hashC := hex32("cc", 3)
+	const pathA = `D:\a.lrc`
+
+	t.Run("双拍稳定窗口内第2拍变更延至第3拍放行", func(t *testing.T) {
 		const (
 			manualOld = `D:\manual_old.lrc`
 			manualC   = `D:\manual_c.lrc`
@@ -216,7 +513,7 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 		src := &stubMemSource{
 			pid: okConfirmed.PID,
 			snap: memSnapshot{
-				SongItemPtr:     0x100,
+				Handle:          testHandle(1),
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				TaskID:          1,
@@ -246,7 +543,7 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 			wantKind(t, latest(t, r), hashA, KindFound)
 
 			src.set(memSnapshot{
-				SongItemPtr:     0x300,
+				Handle:          testHandle(3),
 				CurrentSongHash: hashC,
 				CLyricPtr:       0x10000,
 				TaskID:          2,
@@ -258,7 +555,7 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 			// 在第 2 拍（+25ms）到来前改变 CLyricPtr 为新对象。
 			time.Sleep(20 * time.Millisecond)
 			src.set(memSnapshot{
-				SongItemPtr:     0x300,
+				Handle:          testHandle(3),
 				CurrentSongHash: hashC,
 				CLyricPtr:       0x20000,
 				TaskID:          3,
@@ -279,7 +576,7 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 		})
 	})
 
-	t.Run("无内嵌Hash停顿100ms超出25ms窗口后下一拍覆盖自愈为C", func(t *testing.T) {
+	t.Run("停顿100ms超出25ms窗口后下一拍覆盖自愈为C", func(t *testing.T) {
 		const (
 			manualOld = `D:\manual_old.lrc`
 			manualC   = `D:\manual_c.lrc`
@@ -287,7 +584,7 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 		src := &stubMemSource{
 			pid: okConfirmed.PID,
 			snap: memSnapshot{
-				SongItemPtr:     0x100,
+				Handle:          testHandle(1),
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				TaskID:          1,
@@ -317,7 +614,7 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 			wantKind(t, latest(t, r), hashA, KindFound)
 
 			src.set(memSnapshot{
-				SongItemPtr:     0x300,
+				Handle:          testHandle(3),
 				CurrentSongHash: hashC,
 				CLyricPtr:       0x10000,
 				TaskID:          2,
@@ -336,7 +633,7 @@ func TestMemOwnershipObserverGapAndEmbeddedCacheHash(t *testing.T) {
 			// +100ms 时 UI 才更新为 C。
 			time.Sleep(75 * time.Millisecond)
 			src.set(memSnapshot{
-				SongItemPtr:     0x300,
+				Handle:          testHandle(3),
 				CurrentSongHash: hashC,
 				CLyricPtr:       0x20000,
 				TaskID:          3,
@@ -401,7 +698,7 @@ func TestMemPlayedAtRejectsStaleHistoryAndTracksSameHashLoopReplay(t *testing.T)
 		curPlaying[hashA] = playing{played: staleT, path: "歌手 - A.mp3"}
 		mu.Unlock()
 		src.set(memSnapshot{
-			SongItemPtr:     0x100,
+			Handle:          testHandle(1),
 			CurrentSongHash: hashA,
 			CLyricPtr:       0x10000,
 			LyricFilePath:   pathA,
@@ -436,7 +733,7 @@ func TestMemPlayedAtRejectsStaleHistoryAndTracksSameHashLoopReplay(t *testing.T)
 		dbMtime = 1002
 		mu.Unlock()
 		src.set(memSnapshot{
-			SongItemPtr:     0x200,
+			Handle:          testHandle(2),
 			CurrentSongHash: hashB,
 			CLyricPtr:       0x20000,
 			LyricFilePath:   pathB,
@@ -458,7 +755,7 @@ func TestMemPlayedAtRejectsStaleHistoryAndTracksSameHashLoopReplay(t *testing.T)
 		dbMtime = 1003
 		mu.Unlock()
 		src.set(memSnapshot{
-			SongItemPtr:     0x200,
+			Handle:          testHandle(2),
 			CurrentSongHash: hashB,
 			NoLyricFound:    true,
 		}, memStatusOK)
@@ -485,7 +782,7 @@ func TestMemUnassociateNotBlockedByStuckFileIOAndCacheZeroStat(t *testing.T) {
 		src := &stubMemSource{
 			pid: okConfirmed.PID,
 			snap: memSnapshot{
-				SongItemPtr:     0x100,
+				Handle:          testHandle(1),
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				AssocPath:       lyricPath,
@@ -542,7 +839,7 @@ func TestMemUnassociateNotBlockedByStuckFileIOAndCacheZeroStat(t *testing.T) {
 			// 连续 5 次调节 LyricOffsetMs（500 -> 1000 -> 1500 -> 2000 -> 2500）。
 			for _, off := range []int{500, 1000, 1500, 2000, 2500} {
 				src.set(memSnapshot{
-					SongItemPtr:     0x100,
+					Handle:          testHandle(1),
 					CurrentSongHash: hashA,
 					CLyricPtr:       0x10000,
 					AssocPath:       lyricPath,
@@ -582,7 +879,7 @@ func TestMemUnassociateNotBlockedByStuckFileIOAndCacheZeroStat(t *testing.T) {
 		src := &stubMemSource{
 			pid: okConfirmed.PID,
 			snap: memSnapshot{
-				SongItemPtr:     0x100,
+				Handle:          testHandle(1),
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				AssocPath:       stuckPath,
@@ -625,7 +922,7 @@ func TestMemUnassociateNotBlockedByStuckFileIOAndCacheZeroStat(t *testing.T) {
 
 			// 内存切换为取消关联；worker 必须在 <= 300ms 内立即发出 KindUnassociated。
 			src.set(memSnapshot{
-				SongItemPtr:        0x100,
+				Handle:             testHandle(1),
 				CurrentSongHash:    hashA,
 				CLyricPtr:          0,
 				IsUserUnassociated: true,
@@ -662,7 +959,7 @@ func TestMemPIDChangeAndBadVtableFallback(t *testing.T) {
 		src1 := &stubMemSource{
 			pid: 101,
 			snap: memSnapshot{
-				SongItemPtr:     0x100,
+				Handle:          testHandle(1),
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				LyricFilePath:   path101,
@@ -672,7 +969,7 @@ func TestMemPIDChangeAndBadVtableFallback(t *testing.T) {
 		src2 := &stubMemSource{
 			pid: 202,
 			snap: memSnapshot{
-				SongItemPtr:     0x200,
+				Handle:          testHandle(2),
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x20000,
 				LyricFilePath:   path202,
@@ -826,7 +1123,7 @@ func TestMemPIDChangeAndBadVtableFallback(t *testing.T) {
 					return memSnapshot{}, memStatusNotReady
 				default:
 					return memSnapshot{
-						SongItemPtr:     0x100,
+						Handle:          testHandle(1),
 						CurrentSongHash: hashA,
 						CLyricPtr:       0x10000,
 						LyricFilePath:   memPath,
@@ -936,7 +1233,7 @@ func TestMemPIDChangeAndBadVtableFallback(t *testing.T) {
 		src := &stubMemSource{
 			pid: okConfirmed.PID,
 			snap: memSnapshot{
-				SongItemPtr:     0x100,
+				Handle:          testHandle(1),
 				CurrentSongHash: hashA,
 				CLyricPtr:       0x10000,
 				VecBegin:        0x20000,
@@ -972,7 +1269,7 @@ func TestMemDBPlayingRowTransientRetryBackoff(t *testing.T) {
 	src := &stubMemSource{
 		pid: okConfirmed.PID,
 		snap: memSnapshot{
-			SongItemPtr:     0x100,
+			Handle:          testHandle(1),
 			CurrentSongHash: hashA,
 			CLyricPtr:       0x10000,
 			LyricFilePath:   pathA,
@@ -1076,7 +1373,7 @@ func TestMemDBPlayingRowSlowFailureRespectsBackoff(t *testing.T) {
 	src := &stubMemSource{
 		pid: okConfirmed.PID,
 		snap: memSnapshot{
-			SongItemPtr:     0x100,
+			Handle:          testHandle(1),
 			CurrentSongHash: hashA,
 			CLyricPtr:       0x10000,
 			LyricFilePath:   pathA,
@@ -1217,7 +1514,7 @@ func TestMemDiskIOGlobalSingleFlightAcrossSessions(t *testing.T) {
 		src1 := &stubMemSource{
 			pid: okConfirmed.PID,
 			snap: memSnapshot{
-				SongItemPtr:     0x100,
+				Handle:          testHandle(1),
 				CurrentSongHash: hash1,
 				CLyricPtr:       0x10000,
 				AssocPath:       stuckPath,
@@ -1262,7 +1559,7 @@ func TestMemDiskIOGlobalSingleFlightAcrossSessions(t *testing.T) {
 		src2 := &stubMemSource{
 			pid: okConfirmed.PID,
 			snap: memSnapshot{
-				SongItemPtr:     0x200,
+				Handle:          testHandle(2),
 				CurrentSongHash: hash2,
 				CLyricPtr:       0x20000,
 				AssocPath:       s2Path,
@@ -1302,7 +1599,7 @@ func TestMemDiskIOGlobalSingleFlightAcrossSessions(t *testing.T) {
 
 		// 旧 I/O 阻塞期间，会话 2 仍须在 <= 300ms 内响应内存 KindUnassociated。
 		src2.set(memSnapshot{
-			SongItemPtr:        0x200,
+			Handle:             testHandle(2),
 			CurrentSongHash:    hash2,
 			CLyricPtr:          0,
 			IsUserUnassociated: true,
@@ -1320,7 +1617,7 @@ func TestMemDiskIOGlobalSingleFlightAcrossSessions(t *testing.T) {
 
 		// 恢复会话 2 为本地文件，下一次轮询自动拉起文件读取并产出 KindFound。
 		src2.set(memSnapshot{
-			SongItemPtr:     0x200,
+			Handle:          testHandle(2),
 			CurrentSongHash: hash2,
 			CLyricPtr:       0x20000,
 			AssocPath:       s2Path,
@@ -1356,7 +1653,7 @@ func TestMemFileRetryBlockedStillPublishesOffsetUpdates(t *testing.T) {
 	src := &stubMemSource{
 		pid: okConfirmed.PID,
 		snap: memSnapshot{
-			SongItemPtr:     0x100,
+			Handle:          testHandle(1),
 			CurrentSongHash: hashA,
 			CLyricPtr:       0x10000,
 			VecBegin:        0x20000,
@@ -1409,7 +1706,7 @@ func TestMemFileRetryBlockedStillPublishesOffsetUpdates(t *testing.T) {
 
 		// 文件重读阻塞期间内存偏移改为 1500ms：<= 300ms 内仍须发布最新偏移。
 		src.set(memSnapshot{
-			SongItemPtr:     0x100,
+			Handle:          testHandle(1),
 			CurrentSongHash: hashA,
 			CLyricPtr:       0x10000,
 			VecBegin:        0x20000,
@@ -1434,5 +1731,225 @@ func TestMemFileRetryBlockedStillPublishesOffsetUpdates(t *testing.T) {
 		if res.LyricOffsetMs != 1500 || len(res.Lines) != 1 || res.Lines[0].Text != "重读恢复歌词" {
 			t.Fatalf("门闩释放后结果 %+v，want KindFound{LyricOffsetMs:1500, 文本:重读恢复歌词}", res)
 		}
+	})
+}
+
+func TestMemRevokePreservedAcrossOverwriteAndNewCLyricReadFail(t *testing.T) {
+	const (
+		pathA       = `D:\a.lrc`
+		pathNew     = `D:\new.lrc`
+		missingPath = `D:\missing.lrc`
+	)
+
+	t.Run("先置空再快速变纯内存非空向量覆盖结果槽仍保留MemoryNoLyric并带最新偏移", func(t *testing.T) {
+		hashA := hex32("aa", 11)
+		hashB := hex32("bb", 12)
+		src := &stubMemSource{
+			pid: okConfirmed.PID,
+			snap: memSnapshot{
+				Handle:          testHandle(1),
+				CurrentSongHash: hashA,
+				CLyricPtr:       0x10000,
+				TaskID:          1,
+				LyricFilePath:   pathA,
+			},
+			status: memStatusOK,
+		}
+		f := &fakeDeps{
+			openMemFn: func(pid uint32) (memSource, memOpenKind, string, error) {
+				return src, memOpenOK, "fp-revoke-overwrite", nil
+			},
+			readFn: func(_ time.Duration, path string) ([]byte, error) {
+				switch path {
+				case pathA:
+					return []byte("[00:01.00]旧歌A\n"), nil
+				case pathNew:
+					return []byte("[00:01.00]新歌B\n"), nil
+				}
+				return nil, fs.ErrNotExist
+			},
+		}
+
+		runReader(t, f, func(t *testing.T, r *Reader) {
+			r.SetHash(hashA)
+			wantKind(t, latest(t, r), hashA, KindFound)
+
+			// 切入 B 超窗误采纳 A 的 KindFound（CLyricPtr=0x10000）。
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x10000,
+				TaskID:          1,
+				LyricFilePath:   pathA,
+			}, memStatusOK)
+			r.SetHash(hashB)
+			time.Sleep(memSettleDelay)
+			wantKind(t, latest(t, r), hashB, KindFound)
+
+			// CLyric 先置空发出 MemoryNoLyric=true，但故意不消费 r.Results()。
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x20000,
+				TaskID:          2,
+				NoLyricFound:    false,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			synctest.Wait()
+
+			// 50ms 后 B 变为纯内存非空向量+空路径（偏移 +1200ms），经 r.send 覆盖容量 1 的结果槽。
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x20000,
+				TaskID:          2,
+				VecBegin:        0x50000,
+				VecEnd:          0x50100,
+				LyricFilePath:   "",
+				LyricOffsetMs:   1200,
+			}, memStatusOK)
+			time.Sleep(memFastRetry)
+
+			res := latest(t, r)
+			if res.Hash != hashB || res.Kind != KindNone || !res.MemoryNoLyric || !res.HasMemoryLyric || res.LyricOffsetMs != 1200 {
+				t.Fatalf("覆盖后的最终结果 %+v，want KindNone / MemoryNoLyric=true / HasMemoryLyric=true / LyricOffsetMs=1200", res)
+			}
+
+			// 之后落地新 KindFound 应清除撤销态，且对新 CLyric 同对象读盘暂缺保持 MemoryNoLyric=false。
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x20000,
+				TaskID:          2,
+				LyricFilePath:   pathNew,
+				LyricOffsetMs:   1200,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res = latest(t, r)
+			wantKind(t, res, hashB, KindFound)
+			if res.MemoryNoLyric || res.LyricOffsetMs != 1200 {
+				t.Fatalf("新 KindFound 结果 %+v，want MemoryNoLyric=false / LyricOffsetMs=1200", res)
+			}
+
+			src.set(memSnapshot{
+				Handle:          testHandle(2),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x20000,
+				TaskID:          2,
+				LyricFilePath:   missingPath,
+				LyricOffsetMs:   1200,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res = latest(t, r)
+			if res.Hash != hashB || res.Kind != KindNone || res.MemoryNoLyric || !res.Retry {
+				t.Fatalf("新 KindFound 后同 CLyric 读盘暂缺结果 %+v，want MemoryNoLyric=false / Retry=true", res)
+			}
+		})
+	})
+
+	t.Run("不经空态直接切到新CLyric读盘失败带MemoryNoLyric_同CLyric暂缺保持false", func(t *testing.T) {
+		hashB := hex32("bb", 13)
+		src := &stubMemSource{
+			pid: okConfirmed.PID,
+			snap: memSnapshot{
+				Handle:          testHandle(1),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x40000,
+				TaskID:          1,
+				LyricFilePath:   pathA,
+			},
+			status: memStatusOK,
+		}
+		f := &fakeDeps{
+			openMemFn: func(pid uint32) (memSource, memOpenKind, string, error) {
+				return src, memOpenOK, "fp-new-clyric-fail", nil
+			},
+			readFn: func(_ time.Duration, path string) ([]byte, error) {
+				if path == pathA {
+					return []byte("[00:01.00]歌A\n"), nil
+				}
+				return nil, fs.ErrNotExist
+			},
+		}
+
+		runReader(t, f, func(t *testing.T, r *Reader) {
+			r.SetHash(hashB)
+			wantKind(t, latest(t, r), hashB, KindFound)
+
+			// 同 CLyricPtr=0x40000 文件读取暂缺：保持 MemoryNoLyric=false（不破坏 #205「2甲」）。
+			src.set(memSnapshot{
+				Handle:          testHandle(1),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x40000,
+				TaskID:          1,
+				LyricFilePath:   missingPath,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res := latest(t, r)
+			if res.Hash != hashB || res.Kind != KindNone || res.MemoryNoLyric || !res.Retry {
+				t.Fatalf("同 CLyric 读盘暂缺结果 %+v，want MemoryNoLyric=false / Retry=true", res)
+			}
+
+			// 不经空态直接切到新 CLyricPtr=0x40001 且读盘失败：必须带 MemoryNoLyric=true。
+			src.set(memSnapshot{
+				Handle:          testHandle(1),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x40001,
+				TaskID:          2,
+				LyricFilePath:   missingPath,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res = latest(t, r)
+			if res.Hash != hashB || res.Kind != KindNone || !res.MemoryNoLyric || !res.Retry {
+				t.Fatalf("不经空态切新 CLyric 读盘失败结果 %+v，want MemoryNoLyric=true / Retry=true", res)
+			}
+		})
+	})
+
+	t.Run("不经空态直接变纯内存非空向量空路径带MemoryNoLyric与偏移", func(t *testing.T) {
+		hashB := hex32("bb", 14)
+		src := &stubMemSource{
+			pid: okConfirmed.PID,
+			snap: memSnapshot{
+				Handle:          testHandle(1),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x50000,
+				TaskID:          1,
+				LyricFilePath:   pathA,
+			},
+			status: memStatusOK,
+		}
+		f := &fakeDeps{
+			openMemFn: func(pid uint32) (memSource, memOpenKind, string, error) {
+				return src, memOpenOK, "fp-direct-memvec", nil
+			},
+			readFn: func(_ time.Duration, path string) ([]byte, error) {
+				if path == pathA {
+					return []byte("[00:01.00]歌A\n"), nil
+				}
+				return nil, fs.ErrNotExist
+			},
+		}
+
+		runReader(t, f, func(t *testing.T, r *Reader) {
+			r.SetHash(hashB)
+			wantKind(t, latest(t, r), hashB, KindFound)
+
+			src.set(memSnapshot{
+				Handle:          testHandle(1),
+				CurrentSongHash: hashB,
+				CLyricPtr:       0x50001,
+				TaskID:          2,
+				VecBegin:        0x60000,
+				VecEnd:          0x60100,
+				LyricFilePath:   "",
+				LyricOffsetMs:   -500,
+			}, memStatusOK)
+			time.Sleep(memPollEvery)
+			res := latest(t, r)
+			if res.Hash != hashB || res.Kind != KindNone || !res.MemoryNoLyric || !res.HasMemoryLyric || res.LyricOffsetMs != -500 {
+				t.Fatalf("直接切纯内存非空向量结果 %+v，want MemoryNoLyric=true / HasMemoryLyric=true / LyricOffsetMs=-500", res)
+			}
+		})
 	})
 }

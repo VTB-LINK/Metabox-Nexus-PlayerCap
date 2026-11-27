@@ -3,7 +3,6 @@
 package procscan
 
 import (
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -40,16 +39,33 @@ func Snapshot() ([]Proc, error) {
 	return procs, nil
 }
 
-// Alive 复核 pid 在当前快照里仍存在且名字匹配（大小写不敏感），防 PID 复用 TOCTOU。
-func Alive(pid uint32, name string) bool {
+// AliveAny 复核 pid 在当前快照里仍存在且映像名精确匹配 names 中任一非空项（大小写不敏感），防 PID 复用 TOCTOU。
+// 忽略空串名称，无有效名称时返回 false。
+func AliveAny(pid uint32, names ...string) bool {
+	hasName := false
+	for _, n := range names {
+		if n != "" {
+			hasName = true
+			break
+		}
+	}
+	if !hasName {
+		return false
+	}
 	procs, err := Snapshot()
 	if err != nil {
 		return false
 	}
 	for _, p := range procs {
 		if p.PID == pid {
-			return strings.EqualFold(p.Name, name)
+			return matchesAny(p.Name, names)
 		}
 	}
 	return false
+}
+
+// Alive 复核 pid 在当前快照里仍存在且名字匹配（大小写不敏感），防 PID 复用 TOCTOU。
+// 空串返回 false。
+func Alive(pid uint32, name string) bool {
+	return AliveAny(pid, name)
 }

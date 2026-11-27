@@ -174,14 +174,14 @@ func TestFindKuGouInstallRealMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindKuGouInstall 失败: %v", err)
 	}
-	ver := readExeVersion(exePath)
+	ver := effectiveKuGouVersion(readExeVersion(exePath), exePath, libcefPath)
 	if ver == "" {
 		t.Skip("readExeVersion 返回空，无法断言版本匹配")
 	}
-	// libcef.dll 的父目录名必须等于 exe 版本 —— 即选中了酷狗实际加载的那一份
+	// libcef.dll 的父目录名必须等于有效版本 —— 即选中了酷狗实际加载的那一份
 	gotDir := filepath.Base(filepath.Dir(libcefPath))
 	if gotDir != ver {
-		t.Errorf("选中的 libcef.dll 版本目录 %q 与 KuGou.exe 版本 %q 不符（可能又选了旧版残留目录）", gotDir, ver)
+		t.Errorf("选中的 libcef.dll 版本目录 %q 与酷狗有效版本 %q 不符（可能又选了旧版残留目录）", gotDir, ver)
 	}
 	if !strings.HasSuffix(strings.ToLower(libcefPath), "libcef.dll") {
 		t.Errorf("libcefPath 不是 libcef.dll: %q", libcefPath)
@@ -226,153 +226,186 @@ func wantInstall(t *testing.T, exe, libcef string) {
 	}
 }
 
-// notRunning 是 runningKuGouFn 在酷狗没在运行时返回的错误形状。
-var notRunning = errors.Join(ErrConfirmNotReady, errors.New("KuGou.exe main process not found"))
+// notRunning 是 runningKuGouFn 在没有任何酷狗进程运行时返回的错误形状（同时满足 ErrConfirmNotReady 与 ErrNotRunning）。
+var notRunning = errors.Join(ErrConfirmNotReady, ErrNotRunning)
 
-// TestFindLibcefPrefersRunningChildDir 钉死「以运行中的进程为准」：酷狗在运行时，KuGou.exe 取主进程的映像，
-// libcef.dll 取它唯一的 CEF 子进程目录下的那份，注册表指向别处也不用（注册表可能是旧数据，或指向另一份安装）。
-// 子进程目录不可用（没有、不止一个、其下没有 libcef.dll）时退回现行顺序，不放宽任何一级的守卫；此时 KuGou8
-// 须在运行中 KuGou.exe 的目录之下才用（Clean 后逐段比较、不分大小写），否则在该目录下按版本推导，免得 exe 与
-// libcef.dll 分属两份安装。
-//
-// 运行中的安装 B 有 20.1.22.27795 与 20.1.23.1 两个版本目录（假 KuGou.exe 读不出版本，按版本推导取最大即
-// 20.1.23.1），注册表指向的安装 A 有 20.1.22.27795：三级各自选出的路径互不相同，用例能分辨用的是哪一级。
-//
-// 变异自证（均实测变红）：libcef.dll 先看 KuGou8、再看子进程目录；子进程目录不止一个时取第一个；
-// 子进程目录不检查 libcef.dll 是否存在；KuGou.exe 先看 AppPath、再看运行中的映像；去掉 KuGou8 须在 exe 目录
-// 之下的限制；判「在其下」时区分大小写；判「在其下」时只比字符串前缀、不看路径分隔符。
+// TestFindLibcefPrefersRunningChildDir 钉死「以运行中的进程为准」：酷狗在运行时，exe 取主进程的映像（支持 KuGou.exe
+// 与 HD_KuGou.exe），libcef.dll 只取其唯一的 CEF 子进程目录下的那份，注册表指向别处也不用。
 func TestFindLibcefPrefersRunningChildDir(t *testing.T) {
 	setup := func(t *testing.T) (a, b string) {
 		root := t.TempDir()
 		a, b = filepath.Join(root, "A"), filepath.Join(root, "B")
 		mkInstall(t, a, "20.1.22.27795")
-		mkInstall(t, b, "20.1.22.27795", "20.1.23.1")
+		mkInstall(t, b, "20.1.22.27795", "20.1.61.28014")
 		return a, b
 	}
-	// reg 构造注册表：AppPath 指向 A，KuGou8 指向 kugou8。
 	reg := func(a, kugou8 string) map[string]string {
 		return map[string]string{"AppPath": a, "KuGou8": kugou8}
 	}
-	runningB := func(b string, childDirs ...string) runningKuGou {
-		return runningKuGou{PID: 100, ExePath: filepath.Join(b, "KuGou.exe"), ChildDirs: childDirs}
+	runningB := func(b, exeName string, childDirs ...string) runningKuGou {
+		return runningKuGou{PID: 100, ExePath: filepath.Join(b, exeName), ChildDirs: childDirs}
 	}
-	inB8 := func(b string) string { return filepath.Join(b, "20.1.22.27795") }               // KuGou8 指向 B 下的版本目录
-	derivedB := func(b string) string { return filepath.Join(b, "20.1.23.1", "libcef.dll") } // B 下按版本推导的结果
 
 	t.Run("子进程目录有 libcef.dll、注册表指向另一份安装 → 选运行中的那份", func(t *testing.T) {
 		a, b := setup(t)
-		stubLocate(t, runningB(b, filepath.Join(b, "20.1.22.27795")), nil, reg(a, filepath.Join(a, "20.1.22.27795")))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), filepath.Join(b, "20.1.22.27795", "libcef.dll"))
+		stubLocate(t, runningB(b, TargetProcessName, filepath.Join(b, "20.1.22.27795")), nil, reg(a, filepath.Join(a, "20.1.22.27795")))
+		wantInstall(t, filepath.Join(b, TargetProcessName), filepath.Join(b, "20.1.22.27795", "libcef.dll"))
+	})
+
+	t.Run("HD_KuGou.exe 主进程 + 唯一版本子目录 → 选运行中的那份", func(t *testing.T) {
+		a, b := setup(t)
+		stubLocate(t, runningB(b, HDTargetProcessName, filepath.Join(b, "20.1.61.28014")), nil, reg(a, filepath.Join(a, "20.1.22.27795")))
+		wantInstall(t, filepath.Join(b, HDTargetProcessName), filepath.Join(b, "20.1.61.28014", "libcef.dll"))
 	})
 
 	t.Run("注册表与写死路径都没有（任意路径安装）→ 全取自运行中的进程", func(t *testing.T) {
 		_, b := setup(t)
-		stubLocate(t, runningB(b, filepath.Join(b, "20.1.22.27795")), nil, nil)
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), filepath.Join(b, "20.1.22.27795", "libcef.dll"))
-	})
-
-	t.Run("反例：子进程目录下没有 libcef.dll → 退回注册表 KuGou8（在酷狗目录下）", func(t *testing.T) {
-		a, b := setup(t)
-		empty := filepath.Join(b, "21.0.0.1")
-		if err := os.MkdirAll(empty, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		stubLocate(t, runningB(b, empty), nil, reg(a, inB8(b)))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), filepath.Join(inB8(b), "libcef.dll"))
-	})
-
-	t.Run("反例：子进程目录不存在 → 退回注册表 KuGou8（在酷狗目录下）", func(t *testing.T) {
-		a, b := setup(t)
-		stubLocate(t, runningB(b, filepath.Join(b, "gone")), nil, reg(a, inB8(b)))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), filepath.Join(inB8(b), "libcef.dll"))
-	})
-
-	t.Run("反例：子进程分处两个目录 → 不取其一，退回注册表 KuGou8（在酷狗目录下）", func(t *testing.T) {
-		a, b := setup(t)
-		stubLocate(t, runningB(b, filepath.Join(b, "20.1.23.1"), filepath.Join(b, "20.1.22.27795")), nil, reg(a, inB8(b)))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), filepath.Join(inB8(b), "libcef.dll"))
-	})
-
-	t.Run("尚无子进程、KuGou8 指向酷狗目录下的版本目录 → 照用", func(t *testing.T) {
-		a, b := setup(t)
-		stubLocate(t, runningB(b), nil, reg(a, inB8(b)))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), filepath.Join(inB8(b), "libcef.dll"))
-	})
-
-	t.Run("尚无子进程、KuGou8 与酷狗目录只差大小写 → 仍算在其下，照用", func(t *testing.T) {
-		a, b := setup(t)
-		upper := filepath.Join(strings.ToUpper(b), "20.1.22.27795")
-		stubLocate(t, runningB(b), nil, reg(a, upper))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), filepath.Join(upper, "libcef.dll"))
-	})
-
-	t.Run("反例：尚无子进程、KuGou8 指向另一份安装 → 不用，在酷狗目录下按版本推导", func(t *testing.T) {
-		a, b := setup(t)
-		stubLocate(t, runningB(b), nil, reg(a, filepath.Join(a, "20.1.22.27795")))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), derivedB(b))
-	})
-
-	t.Run("反例：尚无子进程、KuGou8 在名字以酷狗目录为前缀的兄弟目录（B 与 B2）→ 不算在其下", func(t *testing.T) {
-		a, b := setup(t)
-		b2 := b + "2"
-		mkInstall(t, b2, "20.1.22.27795")
-		stubLocate(t, runningB(b), nil, reg(a, filepath.Join(b2, "20.1.22.27795")))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), derivedB(b))
-	})
-
-	t.Run("反例：子进程目录不可用、KuGou8 指向另一份安装 → 不用，在酷狗目录下按版本推导", func(t *testing.T) {
-		a, b := setup(t)
-		stubLocate(t, runningB(b, filepath.Join(b, "gone")), nil, reg(a, filepath.Join(a, "20.1.22.27795")))
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), derivedB(b))
-	})
-
-	t.Run("尚无子进程、注册表也没有 → 在运行中映像的目录下按版本推导", func(t *testing.T) {
-		_, b := setup(t)
-		mkVersionDir(t, b, "10.1.94.25498") // 旧版残留：推导取最大，不取它
-		stubLocate(t, runningB(b), nil, nil)
-		wantInstall(t, filepath.Join(b, "KuGou.exe"), derivedB(b))
+		stubLocate(t, runningB(b, HDTargetProcessName, filepath.Join(b, "20.1.61.28014")), nil, nil)
+		wantInstall(t, filepath.Join(b, HDTargetProcessName), filepath.Join(b, "20.1.61.28014", "libcef.dll"))
 	})
 }
 
-// TestFindLibcefFallsBackWhenNotRunning 钉死酷狗不在运行（或运行中的主进程定位不了）时沿用现行顺序：
-// KuGou.exe 取注册表 AppPath、再取写死的安装根；libcef.dll 取注册表 KuGou8（守卫）、再按版本推导。
-// 结果与 TestKugou8LibcefIfDir、TestFindLibcefForExe 的现行用例一致。runningKuGouFn 报错时不用它一并
-// 返回的任何内容。
+// TestFindInstallRunningReadiness 钉死运行态与冷态严格分离（设计 §5.3）：酷狗在运行时绝不回退注册表 KuGou8 或按版本
+// 目录猜测，避免启动器交接或 CEF 子进程尚未就绪时误选残留旧目录、反复弹 UAC 或提前结束启动器。
 //
-// 变异自证（均实测变红）：runningKuGouFn 报错时仍用其 ExePath 或 ChildDirs；AppPath 不检查其下有无 KuGou.exe；
-// 都找不到时返回空路径而不是 ErrInstallNotFound；exe 不是取自进程时也要求 KuGou8 在 exe 目录之下。
+// 变异自证（实测变红）：resolveRunningInstall 在 len(ChildDirs) == 0 时退回 libcefFromKuGou8() →
+// KuGou.exe 与 HD_KuGou.exe 两条「运行态尚无 CEF 子进程」子用例均红。
+func TestFindInstallRunningReadiness(t *testing.T) {
+	setup := func(t *testing.T) (a, b string) {
+		root := t.TempDir()
+		a, b = filepath.Join(root, "A"), filepath.Join(root, "B")
+		mkInstall(t, a, "20.1.22.27795")
+		mkInstall(t, b, "20.1.22.27795", "20.1.61.28014")
+		return a, b
+	}
+	regBoth := func(a, b string) map[string]string {
+		return map[string]string{"AppPath": a, "KuGou8": filepath.Join(b, "20.1.22.27795")}
+	}
+
+	for _, exeName := range []string{TargetProcessName, HDTargetProcessName} {
+		t.Run("运行态尚无 CEF 子进程（"+exeName+"）→ 零回退，返回 ErrRunningNotReady", func(t *testing.T) {
+			a, b := setup(t)
+			run := runningKuGou{PID: 25940, ExePath: filepath.Join(b, exeName)}
+			stubLocate(t, run, nil, regBoth(a, b), a, b)
+
+			for _, fn := range []struct {
+				name string
+				call func() (string, string, error)
+			}{
+				{"FindKuGouInstall", FindKuGouInstall},
+				{"locateRunningInstall", locateRunningInstall},
+			} {
+				exe, lc, err := fn.call()
+				if !errors.Is(err, ErrRunningNotReady) || exe != "" || lc != "" {
+					t.Fatalf("%s = (%q, %q, %v)，应返回空路径与 ErrRunningNotReady", fn.name, exe, lc, err)
+				}
+			}
+		})
+	}
+
+	t.Run("运行态 CEF 子进程分处两个目录 → 零回退，返回 ErrVersionUnsupported", func(t *testing.T) {
+		a, b := setup(t)
+		run := runningKuGou{
+			PID:       25940,
+			ExePath:   filepath.Join(b, HDTargetProcessName),
+			ChildDirs: []string{filepath.Join(b, "20.1.22.27795"), filepath.Join(b, "20.1.61.28014")},
+		}
+		stubLocate(t, run, nil, regBoth(a, b), a, b)
+
+		for _, fn := range []struct {
+			name string
+			call func() (string, string, error)
+		}{
+			{"FindKuGouInstall", FindKuGouInstall},
+			{"locateRunningInstall", locateRunningInstall},
+		} {
+			exe, lc, err := fn.call()
+			if !errors.Is(err, ErrVersionUnsupported) || exe != "" || lc != "" {
+				t.Fatalf("%s = (%q, %q, %v)，应返回空路径与 ErrVersionUnsupported", fn.name, exe, lc, err)
+			}
+		}
+	})
+
+	t.Run("运行态唯一子进程目录缺少普通文件 libcef.dll → 零回退，返回 ErrInstallNotFound", func(t *testing.T) {
+		a, b := setup(t)
+		emptyDir := filepath.Join(b, "21.0.0.1")
+		if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dirAsFile := filepath.Join(b, "21.0.0.2")
+		if err := os.MkdirAll(filepath.Join(dirAsFile, "libcef.dll"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, childDir := range []string{emptyDir, dirAsFile, filepath.Join(b, "gone")} {
+			run := runningKuGou{PID: 25940, ExePath: filepath.Join(b, HDTargetProcessName), ChildDirs: []string{childDir}}
+			stubLocate(t, run, nil, regBoth(a, b), a, b)
+			for _, fn := range []struct {
+				name string
+				call func() (string, string, error)
+			}{
+				{"FindKuGouInstall", FindKuGouInstall},
+				{"locateRunningInstall", locateRunningInstall},
+			} {
+				exe, lc, err := fn.call()
+				if !errors.Is(err, ErrInstallNotFound) || exe != "" || lc != "" {
+					t.Fatalf("%s(childDir=%q) = (%q, %q, %v)，应返回空路径与 ErrInstallNotFound", fn.name, childDir, exe, lc, err)
+				}
+			}
+		}
+	})
+
+	t.Run("运行态定位报错（非 ErrNotRunning：多主进程/交接中/路径查询失败）→ 绝不退回冷态，返回 ErrRunningNotReady", func(t *testing.T) {
+		a, b := setup(t)
+		garbage := runningKuGou{PID: 100, ExePath: filepath.Join(b, TargetProcessName), ChildDirs: []string{filepath.Join(b, "20.1.22.27795")}}
+		for _, rerr := range []error{
+			errors.Join(ErrConfirmNotReady, errors.New("2 KuGou.exe main processes are running")),
+			errors.Join(ErrConfirmNotReady, errors.New("KuGou launcher is handing off to HD_KuGou.exe")),
+			errors.Join(ErrConfirmNotReady, errors.New("access denied")),
+		} {
+			stubLocate(t, garbage, rerr, map[string]string{"AppPath": a, "KuGou8": filepath.Join(a, "20.1.22.27795")}, a)
+			exe, lc, err := FindKuGouInstall()
+			if !errors.Is(err, ErrRunningNotReady) || exe != "" || lc != "" {
+				t.Fatalf("rerr=%v 时 FindKuGouInstall = (%q, %q, %v)，应返回空路径与 ErrRunningNotReady", rerr, exe, lc, err)
+			}
+		}
+	})
+}
+
+// TestFindLibcefFallsBackWhenNotRunning 钉死仅在确知没有任何酷狗进程运行（ErrNotRunning）时进入冷态预选：
+// KuGou.exe 取注册表 AppPath、再取写死的安装根；libcef.dll 取注册表 KuGou8（须经 underDir 守卫，同属该安装目录）、
+// 不可用时再按版本推导。
 func TestFindLibcefFallsBackWhenNotRunning(t *testing.T) {
-	t.Run("注册表 AppPath 与 KuGou8 → 用注册表", func(t *testing.T) {
+	t.Run("注册表 AppPath 与同目录 KuGou8 → 用注册表", func(t *testing.T) {
 		a := filepath.Join(t.TempDir(), "A")
 		mkInstall(t, a, "10.1.94.25498", "20.1.22.27795")
 		stubLocate(t, runningKuGou{}, notRunning, map[string]string{"AppPath": a, "KuGou8": filepath.Join(a, "20.1.22.27795")})
 		wantInstall(t, filepath.Join(a, "KuGou.exe"), filepath.Join(a, "20.1.22.27795", "libcef.dll"))
 	})
 
-	t.Run("KuGou8 不在 AppPath 之下 → 照用（exe 不是取自运行中的进程，不加「须在 exe 目录之下」的限制）", func(t *testing.T) {
+	t.Run("冷态 KuGou8 与 exe 目录仅差大小写 → 仍算在其下，照用", func(t *testing.T) {
+		a := filepath.Join(t.TempDir(), "A")
+		mkInstall(t, a, "20.1.22.27795", "20.1.23.1")
+		upper := filepath.Join(strings.ToUpper(a), "20.1.22.27795")
+		stubLocate(t, runningKuGou{}, notRunning, map[string]string{"AppPath": a, "KuGou8": upper})
+		wantInstall(t, filepath.Join(a, "KuGou.exe"), filepath.Join(upper, "libcef.dll"))
+	})
+
+	t.Run("反例：冷态 KuGou8 不在 AppPath 之下（另一安装或兄弟前缀目录 A2）→ underDir 拒绝，退回按版本推导", func(t *testing.T) {
 		root := t.TempDir()
-		a, d := filepath.Join(root, "A"), filepath.Join(root, "D")
+		a, d, a2 := filepath.Join(root, "A"), filepath.Join(root, "D"), filepath.Join(root, "A2")
 		mkInstall(t, a, "20.1.23.1")
 		mkVersionDir(t, d, "20.1.22.27795")
-		stubLocate(t, runningKuGou{}, notRunning, map[string]string{"AppPath": a, "KuGou8": filepath.Join(d, "20.1.22.27795")})
-		wantInstall(t, filepath.Join(a, "KuGou.exe"), filepath.Join(d, "20.1.22.27795", "libcef.dll"))
+		mkInstall(t, a2, "20.1.22.27795")
+		for _, other := range []string{filepath.Join(d, "20.1.22.27795"), filepath.Join(a2, "20.1.22.27795")} {
+			stubLocate(t, runningKuGou{}, notRunning, map[string]string{"AppPath": a, "KuGou8": other})
+			wantInstall(t, filepath.Join(a, "KuGou.exe"), filepath.Join(a, "20.1.23.1", "libcef.dll"))
+		}
 	})
 
 	t.Run("KuGou8 指向 KuGou.exe（文件）→ 按版本推导，取最大而非旧版残留", func(t *testing.T) {
 		a := filepath.Join(t.TempDir(), "A")
 		mkInstall(t, a, "10.1.94.25498", "20.1.22.27795")
 		stubLocate(t, runningKuGou{}, notRunning, map[string]string{"AppPath": a, "KuGou8": filepath.Join(a, "KuGou.exe")})
-		wantInstall(t, filepath.Join(a, "KuGou.exe"), filepath.Join(a, "20.1.22.27795", "libcef.dll"))
-	})
-
-	t.Run("反例：运行中的主进程定位不了（报错）→ 不用它一并返回的路径", func(t *testing.T) {
-		root := t.TempDir()
-		a, b := filepath.Join(root, "A"), filepath.Join(root, "B")
-		mkInstall(t, a, "20.1.22.27795")
-		mkInstall(t, b, "20.1.22.27795")
-		garbage := runningKuGou{PID: 100, ExePath: filepath.Join(b, "KuGou.exe"), ChildDirs: []string{filepath.Join(b, "20.1.22.27795")}}
-		stubLocate(t, garbage, errors.Join(ErrConfirmNotReady, errors.New("2 KuGou.exe main processes are running")),
-			map[string]string{"AppPath": a, "KuGou8": filepath.Join(a, "20.1.22.27795")})
 		wantInstall(t, filepath.Join(a, "KuGou.exe"), filepath.Join(a, "20.1.22.27795", "libcef.dll"))
 	})
 
@@ -405,4 +438,51 @@ func TestFindLibcefFallsBackWhenNotRunning(t *testing.T) {
 			t.Fatalf("FindKuGouInstall = (%q, %q, %v)，应为 ErrInstallNotFound", exe, lc, err)
 		}
 	})
+}
+
+// TestEffectiveKuGouVersion 钉死冷态外层启动器壳（如 8.9.8.9）的版本核准规则，并确保 10.x 黑名单不被绕过。
+func TestEffectiveKuGouVersion(t *testing.T) {
+	const (
+		exe   = `C:\Program Files\KuGou\KGMusic\KuGou.exe`
+		lc20  = `C:\Program Files\KuGou\KGMusic\20.1.61.28014\libcef.dll`
+		lc10  = `C:\Program Files\KuGou\KGMusic\10.1.94.25498\libcef.dll`
+		lcOut = `D:\Other\20.1.61.28014\libcef.dll`
+		lcBad = `C:\Program Files\KuGou\KGMusic\backup\libcef.dll`
+	)
+	cases := []struct {
+		name   string
+		exeVer string
+		exe    string
+		lc     string
+		want   string
+	}{
+		{"8.9.8.9 外层启动器壳 + 同目录 20.1.61.28014 → 采用子目录版本", "8.9.8.9", exe, lc20, "20.1.61.28014"},
+		{"大小写不同的同目录 8.9.8.9 + 20.x → 采用子目录版本", "8.9.8.9", exe, `c:\program files\kugou\kgmusic\20.1.61.28014\libcef.dll`, "20.1.61.28014"},
+		{"10.x 黑名单绝不被 20.x 目录覆盖", "10.1.94.25498", exe, lc20, "10.1.94.25498"},
+		{"20.x 主程序版本保持自身版本", "20.1.22.27795", exe, lc20, "20.1.22.27795"},
+		{"8.x 启动器 + 10.x 目录（首段 < 20）→ 不覆盖", "8.9.8.9", exe, lc10, "8.9.8.9"},
+		{"8.x 启动器 + 异目录 20.x → 不覆盖", "8.9.8.9", exe, lcOut, "8.9.8.9"},
+		{"8.x 启动器 + 非版本号目录 → 不覆盖", "8.9.8.9", exe, lcBad, "8.9.8.9"},
+		{"读不出 exe 版本（空串）→ 回落子目录名", "", exe, lc20, "20.1.61.28014"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := effectiveKuGouVersion(c.exeVer, c.exe, c.lc)
+			if got != c.want {
+				t.Fatalf("effectiveKuGouVersion(%q, %q, %q) = %q，应为 %q", c.exeVer, c.exe, c.lc, got, c.want)
+			}
+		})
+	}
+	if !isUnsupportedMajor(effectiveKuGouVersion("10.1.94.25498", exe, lc20)) {
+		t.Fatal("10.x 经过 effectiveKuGouVersion 后仍必须命中 isUnsupportedMajor 黑名单")
+	}
+
+	// 顺带核对 findLibcefForExe 在 8.9.8.9 启动器壳下能选到 20.1.61.28014\libcef.dll。
+	base := t.TempDir()
+	mkVersionDir(t, base, "10.1.94.25498")
+	mkVersionDir(t, base, "20.1.61.28014")
+	want := filepath.Join(base, "20.1.61.28014", "libcef.dll")
+	if got := findLibcefForExe(base, "8.9.8.9"); got != want {
+		t.Fatalf("findLibcefForExe(%q, \"8.9.8.9\") = %q，应为 %q", base, got, want)
+	}
 }

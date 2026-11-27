@@ -1,11 +1,12 @@
 package assoc
 
 // 本文件实现酷狗进程内存的只读一致性快照器（仅依赖 golang.org/x/sys/windows 的 10 个只读标识符，
-// 由 player/kugoumemreadonly_lint_test.go 强制守卫）。通过 ReadProcessMemory 校验 kugou.dll 与
-// deferred.dll 的 PE32+ 头指纹，再以两遍一致性读取与三虚表校验提取当前歌词与歌曲状态。
+// 由 player/kugoumemreadonly_lint_test.go 强制守卫）。通过 ReadProcessMemory 校验 kugou.dll 的
+// PE32+ 头指纹，再以两遍一致性读取与六虚表校验提取当前播放覆盖层与歌词管理器状态。
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"unicode/utf16"
@@ -35,9 +36,19 @@ const (
 	memStatusProcessGone
 )
 
+type songHandle struct {
+	SongID  uint32
+	ListIdx uint32
+	ListPtr uintptr
+}
+
 type memSnapshot struct {
-	ConfigMgrPtr       uintptr
-	SongItemPtr        uintptr
+	PlayMgrPtr         uintptr
+	PlayCorePtr        uintptr
+	QCorePtr           uintptr
+	OverlayPtr         uintptr
+	Handle             songHandle
+	IsMV               bool
 	CurrentSongHash    string
 	ImplPtr            uintptr
 	TaskID             uint32
@@ -73,40 +84,43 @@ const (
 	maxLfanew     = 0x1000
 	ntHeaderSize  = 0x108
 
-	cfgMgrBufSize = 0x1C0
-	implBufSize   = 0x2D8
-	cLyricBufSize = 0x1A8
+	playMgrBufSize  = 0x28
+	playCoreBufSize = 0x78
+	qCoreBufSize    = 0xE0
+	overlayBufSize  = 0xF0
+	implBufSize     = 0x2D8
+	cLyricBufSize   = 0x1A8
 
-	maxSongHashSize = 64
-	maxSongHashCap  = 4096
-	maxWStringSize  = 32767
-	maxWStringCap   = 65536
+	maxWStringSize = 32767
+	maxWStringCap  = 65536
 )
 
 type kugouMemSpec struct {
-	kgTimeDateStamp  uint32
-	kgSizeOfImage    uint32
-	defTimeDateStamp uint32
-	defSizeOfImage   uint32
-	lyricMgrRVA      uintptr
-	vtPrimaryRVA     uintptr
-	vtSecondaryRVA   uintptr
-	lyricStorageRVA  uintptr
-	vtConfigMgrRVA   uintptr
+	kgTimeDateStamp uint32
+	kgSizeOfImage   uint32
+	playMgrRVA      uintptr
+	vtPlayMgrRVA    uintptr
+	vtPlayCoreRVA   uintptr
+	vtQCoreRVA      uintptr
+	vtOverlayRVA    uintptr
+	lyricMgrRVA     uintptr
+	vtPrimaryRVA    uintptr
+	vtSecondaryRVA  uintptr
 }
 
 var knownKuGouSpecs = []kugouMemSpec{
 	{
 		// 酷狗 20.1.22.27795（64 位 PE32+）
-		kgTimeDateStamp:  0x6A2A1FAD,
-		kgSizeOfImage:    0x0248D000,
-		defTimeDateStamp: 0x6A0180FC,
-		defSizeOfImage:   0x0011F000,
-		lyricMgrRVA:      0x22CDB50,
-		vtPrimaryRVA:     0x1C66D60,
-		vtSecondaryRVA:   0x1C66D98,
-		lyricStorageRVA:  0x22CF5E8,
-		vtConfigMgrRVA:   0xDE0E8,
+		kgTimeDateStamp: 0x6A2A1FAD,
+		kgSizeOfImage:   0x0248D000,
+		playMgrRVA:      0x22CF6F8,
+		vtPlayMgrRVA:    0x1DCA7F0,
+		vtPlayCoreRVA:   0x1D12730,
+		vtQCoreRVA:      0x1DC5418,
+		vtOverlayRVA:    0x1D086A0,
+		lyricMgrRVA:     0x22CDB50,
+		vtPrimaryRVA:    0x1C66D60,
+		vtSecondaryRVA:  0x1C66D98,
 	},
 }
 
@@ -161,8 +175,8 @@ var realMemSys = memSys{
 	},
 }
 
-// openProcessMem 以只读权限打开 pid，校验 kugou.dll 与 deferred.dll 的 PE32+ 头指纹。
-// 第 3 返回值 fingerprint 在 memOpenOK 与 memOpenUnsupported 时填写两模块指纹摘要，其余情况为空串。
+// openProcessMem 以只读权限打开 pid，校验 kugou.dll 的 PE32+ 头指纹。
+// 第 3 返回值 fingerprint 在 memOpenOK 与 memOpenUnsupported 时填写 kugou.dll 指纹摘要，其余情况为空串。
 func openProcessMem(pid uint32) (memSource, memOpenKind, string, error) {
 	return openProcessMemWith(pid, realMemSys)
 }
@@ -186,7 +200,7 @@ func openProcessMemWith(pid uint32, sys memSys) (memSource, memOpenKind, string,
 	if err != nil {
 		return nil, memOpenNotReady, "", err
 	}
-	var kgBase, defBase uintptr
+	var kgBase uintptr
 	for _, mod := range mods {
 		if mod == 0 {
 			continue
@@ -195,17 +209,13 @@ func openProcessMemWith(pid uint32, sys memSys) (memSource, memOpenKind, string,
 		if err != nil {
 			continue
 		}
-		if kgBase == 0 && strings.EqualFold(name, "kugou.dll") {
+		if strings.EqualFold(name, "kugou.dll") {
 			kgBase = uintptr(mod)
-		} else if defBase == 0 && strings.EqualFold(name, "deferred.dll") {
-			defBase = uintptr(mod)
-		}
-		if kgBase != 0 && defBase != 0 {
 			break
 		}
 	}
-	if kgBase == 0 || defBase == 0 {
-		return nil, memOpenNotReady, "", i18n.Errorf("kugou.dll or deferred.dll not loaded yet")
+	if kgBase == 0 {
+		return nil, memOpenNotReady, "", i18n.Errorf("kugou.dll not loaded yet")
 	}
 
 	kgTS, kgSize, kgBad, err := readPEFingerprint(sys, h, kgBase)
@@ -215,26 +225,17 @@ func openProcessMemWith(pid uint32, sys memSys) (memSource, memOpenKind, string,
 		}
 		return nil, memOpenNotReady, "", err
 	}
-	defTS, defSize, defBad, err := readPEFingerprint(sys, h, defBase)
-	if err != nil {
-		if defBad {
-			return nil, memOpenUnsupported, "", err
-		}
-		return nil, memOpenNotReady, "", err
-	}
 
-	fp := fmt.Sprintf("kugou.dll(ts=0x%08X,size=0x%08X), deferred.dll(ts=0x%08X,size=0x%08X)", kgTS, kgSize, defTS, defSize)
+	fp := fmt.Sprintf("kugou.dll(ts=0x%08X,size=0x%08X)", kgTS, kgSize)
 	for _, spec := range knownKuGouSpecs {
-		if spec.kgTimeDateStamp == kgTS && spec.kgSizeOfImage == kgSize &&
-			spec.defTimeDateStamp == defTS && spec.defSizeOfImage == defSize {
+		if spec.kgTimeDateStamp == kgTS && spec.kgSizeOfImage == kgSize {
 			keep = true
 			return &processMem{
-				pid:     pid,
-				h:       h,
-				kgBase:  kgBase,
-				defBase: defBase,
-				spec:    spec,
-				sys:     sys,
+				pid:    pid,
+				h:      h,
+				kgBase: kgBase,
+				spec:   spec,
+				sys:    sys,
 			}, memOpenOK, fp, nil
 		}
 	}
@@ -301,12 +302,11 @@ func readPEFingerprint(sys memSys, h windows.Handle, base uintptr) (ts, sizeOfIm
 }
 
 type processMem struct {
-	pid     uint32
-	h       windows.Handle
-	kgBase  uintptr
-	defBase uintptr
-	spec    kugouMemSpec
-	sys     memSys
+	pid    uint32
+	h      windows.Handle
+	kgBase uintptr
+	spec   kugouMemSpec
+	sys    memSys
 }
 
 func (m *processMem) PID() uint32 { return m.pid }
@@ -341,27 +341,83 @@ func (m *processMem) ReadSnapshot() (memSnapshot, memStatus) {
 func (m *processMem) readOnce() (memSnapshot, memStatus) {
 	var snap memSnapshot
 
-	// ILyricConfigManager 5 跳链：
-	// [kgBase + lyricStorageRVA] -> storageHost -> storagePtr -> svcWrap -> svcPtr -> configMgrPtr
-	cfgMgrPtr, st := m.derefChain(m.kgBase+m.spec.lyricStorageRVA, 5)
+	// 1. PlayMgr -> PlayCore -> PlayQueueCore -> Overlay 播放覆盖层链。
+	playMgrPtr, st := m.derefChain(m.kgBase+m.spec.playMgrRVA, 1)
 	if st != memStatusOK {
 		return memSnapshot{}, st
 	}
-	var cfgBuf [cfgMgrBufSize]byte
-	if err := m.sys.readMemory(m.h, cfgMgrPtr, cfgBuf[:]); err != nil {
+	var pmBuf [playMgrBufSize]byte
+	if err := m.sys.readMemory(m.h, playMgrPtr, pmBuf[:]); err != nil {
 		return memSnapshot{}, m.classifyReadFailure()
 	}
-	if binary.LittleEndian.Uint64(cfgBuf[0x00:0x08]) != uint64(m.defBase+m.spec.vtConfigMgrRVA) {
+	if binary.LittleEndian.Uint64(pmBuf[0x00:0x08]) != uint64(m.kgBase+m.spec.vtPlayMgrRVA) {
 		return memSnapshot{}, memStatusBadVtable
 	}
-	snap.ConfigMgrPtr = cfgMgrPtr
-	snap.SongItemPtr = uintptr(binary.LittleEndian.Uint64(cfgBuf[0x170:0x178]))
-	snap.CurrentSongHash, st = m.readStdString(cfgBuf[0x198:0x1B8])
-	if st != memStatusOK {
-		return memSnapshot{}, st
+	playCorePtr := uintptr(binary.LittleEndian.Uint64(pmBuf[0x20:0x28]))
+	if playCorePtr < minUserPtr {
+		return memSnapshot{}, memStatusNotReady
 	}
 
-	// LyricManagerImpl 3 跳链：
+	var pcBuf [playCoreBufSize]byte
+	if err := m.sys.readMemory(m.h, playCorePtr, pcBuf[:]); err != nil {
+		return memSnapshot{}, m.classifyReadFailure()
+	}
+	if binary.LittleEndian.Uint64(pcBuf[0x00:0x08]) != uint64(m.kgBase+m.spec.vtPlayCoreRVA) {
+		return memSnapshot{}, memStatusBadVtable
+	}
+	qCorePtr := uintptr(binary.LittleEndian.Uint64(pcBuf[0x70:0x78]))
+	if qCorePtr < minUserPtr {
+		return memSnapshot{}, memStatusNotReady
+	}
+
+	var qcBuf [qCoreBufSize]byte
+	if err := m.sys.readMemory(m.h, qCorePtr, qcBuf[:]); err != nil {
+		return memSnapshot{}, m.classifyReadFailure()
+	}
+	if binary.LittleEndian.Uint64(qcBuf[0x00:0x08]) != uint64(m.kgBase+m.spec.vtQCoreRVA) {
+		return memSnapshot{}, memStatusBadVtable
+	}
+	playHandle := decodeSongHandle(qcBuf[0x68:0x78])
+	curHandle := decodeSongHandle(qcBuf[0xC8:0xD8])
+	overlayPtr := uintptr(binary.LittleEndian.Uint64(qcBuf[0xC0:0xC8]))
+	if curHandle.ListPtr < minUserPtr || playHandle.ListPtr < minUserPtr || overlayPtr < minUserPtr {
+		return memSnapshot{}, memStatusNotReady
+	}
+	if curHandle != playHandle {
+		return memSnapshot{}, memStatusTorn
+	}
+
+	var ovBuf [overlayBufSize]byte
+	if err := m.sys.readMemory(m.h, overlayPtr, ovBuf[:]); err != nil {
+		return memSnapshot{}, m.classifyReadFailure()
+	}
+	if binary.LittleEndian.Uint64(ovBuf[0x00:0x08]) != uint64(m.kgBase+m.spec.vtOverlayRVA) {
+		return memSnapshot{}, memStatusBadVtable
+	}
+	if ovBuf[0x08] == 0 {
+		return memSnapshot{}, memStatusNotReady
+	}
+	ovHandle := decodeSongHandle(ovBuf[0x10:0x20])
+	if ovHandle != curHandle {
+		return memSnapshot{}, memStatusTorn
+	}
+
+	isMV := ovBuf[0x2C] != 0
+	rawHash := ovBuf[0x58:0x68]
+	if isMV {
+		rawHash = ovBuf[0xE0:0xF0]
+	}
+	snap.PlayMgrPtr = playMgrPtr
+	snap.PlayCorePtr = playCorePtr
+	snap.QCorePtr = qCorePtr
+	snap.OverlayPtr = overlayPtr
+	snap.Handle = curHandle
+	snap.IsMV = isMV
+	if !allZeroBytes(rawHash) {
+		snap.CurrentSongHash = hex.EncodeToString(rawHash)
+	}
+
+	// 2. LyricManagerImpl 3 跳链：
 	// [kgBase + lyricMgrRVA] -> singletonPtr -> wrapPtr -> implPtr
 	implPtr, st := m.derefChain(m.kgBase+m.spec.lyricMgrRVA, 3)
 	if st != memStatusOK {
@@ -390,6 +446,7 @@ func (m *processMem) readOnce() (memSnapshot, memStatus) {
 		return memSnapshot{}, st
 	}
 
+	// 3. CLyric 状态读取。
 	if snap.CLyricPtr != 0 {
 		if snap.CLyricPtr < minUserPtr {
 			return memSnapshot{}, memStatusTorn
@@ -410,6 +467,23 @@ func (m *processMem) readOnce() (memSnapshot, memStatus) {
 	}
 
 	return snap, memStatusOK
+}
+
+func decodeSongHandle(raw []byte) songHandle {
+	return songHandle{
+		SongID:  binary.LittleEndian.Uint32(raw[0x00:0x04]),
+		ListIdx: binary.LittleEndian.Uint32(raw[0x04:0x08]),
+		ListPtr: uintptr(binary.LittleEndian.Uint64(raw[0x08:0x10])),
+	}
+}
+
+func allZeroBytes(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *processMem) derefChain(addr uintptr, hops int) (uintptr, memStatus) {
@@ -436,37 +510,6 @@ func (m *processMem) classifyReadFailure() memStatus {
 		return memStatusProcessGone
 	}
 	return memStatusTorn
-}
-
-func (m *processMem) readStdString(raw []byte) (string, memStatus) {
-	size := binary.LittleEndian.Uint64(raw[0x10:0x18])
-	capVal := binary.LittleEndian.Uint64(raw[0x18:0x20])
-	if size > capVal || size > maxSongHashSize || capVal > maxSongHashCap {
-		return "", memStatusTorn
-	}
-	if size == 0 {
-		return "", memStatusOK
-	}
-	var data []byte
-	if capVal <= 15 {
-		data = raw[:size]
-	} else {
-		ptr := uintptr(binary.LittleEndian.Uint64(raw[0x00:0x08]))
-		if ptr < minUserPtr {
-			return "", memStatusTorn
-		}
-		data = make([]byte, size)
-		if err := m.sys.readMemory(m.h, ptr, data); err != nil {
-			return "", m.classifyReadFailure()
-		}
-	}
-	for i, b := range data {
-		if b == 0 {
-			data = data[:i]
-			break
-		}
-	}
-	return string(data), memStatusOK
 }
 
 func (m *processMem) readStdWString(raw []byte) (string, memStatus) {
