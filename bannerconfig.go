@@ -40,6 +40,7 @@ var bannerGlobalLines = []struct {
 	{"   Per-player idle auto-hide: %s\n", []string{"per-player-idle-hide"}},
 	{"   Audio normalization: %s\n", []string{"audio-normalize", "audio-normalize-target", "audio-normalize-max-gain"}},
 	{"   Audio waveform frame rate: %s\n", []string{"audio-frame-rate"}},
+	{"   Keep first song name & singer: %s\n", []string{"song-info-keep-first"}},
 }
 
 // bannerUnits 是横幅上各项取值的单位，按横幅上的名字（每播放器键为去掉播放器前缀后的名字）查；

@@ -21,6 +21,7 @@ jobs:
   release:
     needs: gates
     runs-on: [windows, X64]
+    timeout-minutes: 45
     # 发布用 build-production，演练用 build-dev。environment 取不到 env 上下文，判据只能在这里
     # 再写一遍，须与下面的 PUBLISH 一致（releaseworkflow_test.go 核对两处）。
     environment:
@@ -112,7 +113,7 @@ jobs:
           # 不依赖镜像预装：每次下载钉死版本的官方 zip，按官方 checksums 校验（出处见作业级 env）。
           $ProgressPreference = 'SilentlyContinue'
           $zip = Join-Path $env:RUNNER_TEMP "gh_${env:GH_CLI_VERSION}_windows_amd64.zip"
-          Invoke-WebRequest -Uri "https://github.com/cli/cli/releases/download/v${env:GH_CLI_VERSION}/gh_${env:GH_CLI_VERSION}_windows_amd64.zip" -OutFile $zip
+          Invoke-WebRequest -Uri "https://github.com/cli/cli/releases/download/v${env:GH_CLI_VERSION}/gh_${env:GH_CLI_VERSION}_windows_amd64.zip" -OutFile $zip -TimeoutSec 120
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
           if ($hash -ne $env:GH_CLI_SHA256) {
             Write-Output "::error::gh zip SHA-256 mismatch: got ${hash}, want ${env:GH_CLI_SHA256}"
@@ -376,37 +377,140 @@ jobs:
           }
           $api = "https://gitee.com/api/v5/repos/${env:GITEE_OWNER}/${env:GITEE_REPO_NAME}/releases"
 
+          # 令牌经请求头传，不进 URL。Gitee 不读 multipart 里的文本字段（实测 access_token 报 40001、其余报
+          # missing），故建发行版用 urlencoded 表单（-Body 传哈希表），只有上传附件用 multipart。
+          $auth = @{ Authorization = "token ${env:GITEE_TOKEN}" }
+
           # 已有发行版即失败、不覆盖：dotcom 发布之后重跑会以另一次构建替换这里的文件，与 dotcom 的
           # digest 对不上，国内客户端更新校验失败。没有发行版时接口返回 200、正文为 null。
-          $existing = Invoke-RestMethod -Uri "${api}/tags/${env:TAG_NAME}"
+          $existing = Invoke-RestMethod -Uri "${api}/tags/${env:TAG_NAME}" -Headers $auth -TimeoutSec 60
           if ($null -ne $existing) {
             Write-Output "::error::Gitee already has a release for ${env:TAG_NAME}. If it was left by an earlier failed run, delete it on Gitee and rerun."
             exit 1
           }
 
-          # 令牌经请求头传，不进 URL。Gitee 不读 multipart 里的文本字段（实测 access_token 报 40001、其余报
-          # missing），故建发行版用 urlencoded 表单（-Body 传哈希表），只有上传附件用 multipart。
-          $auth = @{ Authorization = "token ${env:GITEE_TOKEN}" }
+          $createMarker = "[//]: # (gitee-release-run:$([guid]::NewGuid().ToString('N')))"
+          $rawBody = Get-Content -Raw -Encoding utf8 -LiteralPath 'gitee-release-notes.md'
+          $releaseBody = if ($null -ne $rawBody) { $rawBody.TrimEnd("`r", "`n") + "`n`n${createMarker}`n" } else { "${createMarker}`n" }
+          $release = $null
+          $createAttempted = $false
+          $createRejected = $false
 
           # 标题同 dotcom 取 tag_name；-force 只在 dotcom 上手改（网关读 dotcom）。
-          $release = Invoke-RestMethod -Method Post -Uri $api -Headers $auth -Body @{
-            tag_name         = $env:TAG_NAME
-            name             = $env:TAG_NAME
-            body             = Get-Content -Raw -Encoding utf8 -LiteralPath 'gitee-release-notes.md'
-            target_commitish = 'main'
-          }
-          Write-Output "Gitee release ${env:TAG_NAME}: id $($release.id)"
+          # 创建发行版与单附件上传均纳入回滚保护；上传设整体时间预算，避免反复超时耗尽作业超时而无机会回滚（#256）。
+          try {
+            try {
+              $createAttempted = $true
+              $release = Invoke-RestMethod -Method Post -Uri $api -Headers $auth -TimeoutSec 60 -Body @{
+                tag_name         = $env:TAG_NAME
+                name             = $env:TAG_NAME
+                body             = $releaseBody
+                target_commitish = 'main'
+              }
+            } catch {
+              $statusCode = $null
+              if ($null -ne $_.Exception -and $null -ne $_.Exception.Response -and $null -ne $_.Exception.Response.StatusCode) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+              } elseif ($null -ne $_.Exception -and $null -ne $_.Exception.StatusCode) {
+                $statusCode = [int]$_.Exception.StatusCode
+              }
+              if ($null -ne $statusCode -and $statusCode -ge 400 -and $statusCode -lt 500) {
+                $createRejected = $true
+              }
+              throw
+            }
+            if ($null -eq $release -or -not $release.id) {
+              throw "Gitee release creation returned no release id for ${env:TAG_NAME}."
+            }
+            Write-Output "Gitee release ${env:TAG_NAME}: id $($release.id)"
 
-          # 与 dotcom draft 的附件相同。
-          foreach ($f in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html', 'README.html') {
-            $asset =Invoke-RestMethod -Method Post -Uri "${api}/$($release.id)/attach_files" -Headers $auth -Form @{
-              file = Get-Item -LiteralPath $f
+            # 作业上限 45m：前置 ≤10m + 建版 2m + 预算 18m + 尾次 POST ≤5m + 最坏回滚 8m = 43m < 45m。
+            $uploadDeadline = [datetimeoffset]::UtcNow.AddMinutes(18)
+
+            # 与 dotcom draft 的附件相同。
+            foreach ($f in $env:DOTCOM_ARCHIVE_NAME, $env:EXE_NAME, $env:HTML_FILE_NAME, 'lyric_page.html', 'effect_display.html', 'README.html') {
+              $asset = $null
+              foreach ($attempt in 1..3) {
+                if ([datetimeoffset]::UtcNow -ge $uploadDeadline) {
+                  throw "Gitee attachment upload time budget exhausted before uploading ${f} (attempt ${attempt}/3)."
+                }
+                try {
+                  if ($attempt -gt 1) {
+                    $existingFiles = Invoke-RestMethod -Uri "${api}/$($release.id)/attach_files?per_page=100" -Headers $auth -TimeoutSec 60
+                    if ($null -ne $existingFiles) {
+                      foreach ($dup in @($existingFiles)) {
+                        if ($null -ne $dup -and $dup.id -and $dup.name -ceq $f) {
+                          Invoke-RestMethod -Method Delete -Uri "${api}/$($release.id)/attach_files/$($dup.id)" -Headers $auth -TimeoutSec 60 | Out-Null
+                          Write-Output "Deleted stale attachment ${f} (id $($dup.id)) before retry."
+                        }
+                      }
+                    }
+                    Start-Sleep -Seconds 3
+                    if ([datetimeoffset]::UtcNow -ge $uploadDeadline) {
+                      throw "Gitee attachment upload time budget exhausted before uploading ${f} (attempt ${attempt}/3)."
+                    }
+                  }
+                  $asset = Invoke-RestMethod -Method Post -Uri "${api}/$($release.id)/attach_files" -Headers $auth -TimeoutSec 300 -Form @{ file = Get-Item -LiteralPath $f }
+                  break
+                } catch {
+                  if ($attempt -lt 3 -and [datetimeoffset]::UtcNow -lt $uploadDeadline) {
+                    Write-Output "::warning::Uploading ${f} failed (attempt ${attempt}/3): $($_.Exception.Message). Retrying..."
+                  } else {
+                    throw
+                  }
+                }
+              }
+              if ($null -eq $asset -or $asset.name -cne $f) {
+                throw "Gitee attachment name is '$($asset.name)', want '${f}'"
+              }
+              Write-Output "${f}: $($asset.browser_download_url)"
             }
-            if ($asset.name -cne $f) {
-              Write-Output "::error::Gitee attachment name is '$($asset.name)', want '${f}'"
-              exit 1
+          } catch {
+            $releaseErr = $_
+            $rollbackId = $null
+            if ($null -ne $release -and $release.id) {
+              $rollbackId = $release.id
+            } elseif ($createAttempted -and -not $createRejected) {
+              try {
+                $orphan = Invoke-RestMethod -Uri "${api}/tags/${env:TAG_NAME}" -Headers $auth -TimeoutSec 60
+                if ($null -ne $orphan) {
+                  if ($orphan.id -and $orphan.tag_name -ceq $env:TAG_NAME -and $orphan.body -is [string] -and $orphan.body.Contains($createMarker, [System.StringComparison]::Ordinal)) {
+                    $rollbackId = $orphan.id
+                  } else {
+                    Write-Output "::warning::Gitee release ${env:TAG_NAME} (id $($orphan.id)) does not match this run's ownership marker; skipping rollback."
+                  }
+                }
+              } catch {
+                Write-Output "::warning::Failed to check Gitee release ${env:TAG_NAME} during rollback: $($_.Exception.Message)"
+              }
             }
-            Write-Output "${f}: $($asset.browser_download_url)"
+            if ($rollbackId) {
+              Write-Output "::warning::Rolling back incomplete Gitee release ${env:TAG_NAME} (id ${rollbackId})..."
+              try {
+                $uploaded = Invoke-RestMethod -Uri "${api}/${rollbackId}/attach_files?per_page=100" -Headers $auth -TimeoutSec 60
+                if ($null -ne $uploaded) {
+                  foreach ($a in @($uploaded)) {
+                    if ($null -ne $a -and $a.id) {
+                      try {
+                        Invoke-RestMethod -Method Delete -Uri "${api}/${rollbackId}/attach_files/$($a.id)" -Headers $auth -TimeoutSec 60 | Out-Null
+                      } catch {
+                        Write-Output "::warning::Failed to delete Gitee attachment $($a.id) during rollback: $($_.Exception.Message)"
+                      }
+                    }
+                  }
+                }
+              } catch {
+                Write-Output "::warning::Failed to list Gitee attachments during rollback: $($_.Exception.Message)"
+              }
+              try {
+                Invoke-RestMethod -Method Delete -Uri "${api}/${rollbackId}" -Headers $auth -TimeoutSec 60 | Out-Null
+                Write-Output "Rolled back incomplete Gitee release ${env:TAG_NAME} (id ${rollbackId})."
+              } catch {
+                Write-Output "::warning::Failed to delete Gitee release ${rollbackId} during rollback: $($_.Exception.Message)"
+              }
+            }
+            Write-Output "::error::Gitee release failed: $($releaseErr.Exception.Message)"
+            exit 1
           }
 
       - name: Create Release Draft (dotcom mirror)
@@ -447,7 +551,7 @@ jobs:
 
           # Invoke-RestMethod 把返回的数组作为一个对象输出到管道，故先存入变量再展开。
           # 按 created_at 自行从新到旧排序，不依赖 direction 参数。
-          $list = Invoke-RestMethod -Uri "${api}?per_page=100&direction=desc" -Headers $auth
+          $list = Invoke-RestMethod -Uri "${api}?per_page=100&direction=desc" -Headers $auth -TimeoutSec 60
           $releases = @($list | Sort-Object { [datetimeoffset]$_.created_at } -Descending)
           if ($releases.Count -le $keep) {
             Write-Output "Gitee has $($releases.Count) releases, keeping up to ${keep}; nothing to delete."
@@ -461,12 +565,12 @@ jobs:
               Write-Output "Kept $($r.tag_name): created by this run."
               continue
             }
-            $files = Invoke-RestMethod -Uri "${api}/$($r.id)/attach_files?per_page=100" -Headers $auth
+            $files = Invoke-RestMethod -Uri "${api}/$($r.id)/attach_files?per_page=100" -Headers $auth -TimeoutSec 60
             foreach ($f in $files) {
-              Invoke-RestMethod -Method Delete -Uri "${api}/$($r.id)/attach_files/$($f.id)" -Headers $auth | Out-Null
+              Invoke-RestMethod -Method Delete -Uri "${api}/$($r.id)/attach_files/$($f.id)" -Headers $auth -TimeoutSec 60 | Out-Null
               Write-Output "Deleted $($r.tag_name)/$($f.name) ($($f.size) bytes)"
             }
-            Invoke-RestMethod -Method Delete -Uri "${api}/$($r.id)" -Headers $auth | Out-Null
+            Invoke-RestMethod -Method Delete -Uri "${api}/$($r.id)" -Headers $auth -TimeoutSec 60 | Out-Null
             Write-Output "Deleted release $($r.tag_name) (id $($r.id))"
           }
 
@@ -513,7 +617,7 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'sentry-cli'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           $exe = Join-Path $dir 'sentry-cli.exe'
-          Invoke-WebRequest -Uri "https://github.com/getsentry/sentry-cli/releases/download/${env:SENTRY_CLI_VERSION}/sentry-cli-Windows-x86_64.exe" -OutFile $exe
+          Invoke-WebRequest -Uri "https://github.com/getsentry/sentry-cli/releases/download/${env:SENTRY_CLI_VERSION}/sentry-cli-Windows-x86_64.exe" -OutFile $exe -TimeoutSec 120
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash
           if ($hash -ne $env:SENTRY_CLI_SHA256) {
             Write-Output "::error::sentry-cli SHA-256 mismatch: got ${hash}, want ${env:SENTRY_CLI_SHA256}"
@@ -562,11 +666,13 @@ jobs:
       # free plan 的 token 读不到该接口，不代表没有 repo。**唯一真正挡路的是浅克隆**，
       # 上面的 checkout 加了 fetch-depth: 0 之后就通了。
       #
-      # 注意：自 v4.0.0-beta.6 起这一步每次失败（"Could not find the SHA of the previous release"），
-      # 被 continue-on-error 掩盖，见 #166。
+      # 曾自 v4.0.0-beta.6 起因前序发行版提交 SHA 不在本地历史中而失败（"Could not find the SHA of
+      # the previous release"，#166）；增加 --ignore-missing 容忍前序 SHA 缺失（回退关联最近提交）。
       #
       # 仍然保留 continue-on-error 与独立 step：SCM 集成是 Sentry 侧的配置，随时可能被改动
-      # 或失效，而它失效时不该拖累 release 本身（new/finalize/deploy 各自独立完成）。
+      # 或失效，而它失效时不该拖累 release 本身（new/finalize/deploy 各自独立完成）。非零退出时
+      # 输出 ::warning:: 并将告警追加写入 $env:GITHUB_STEP_SUMMARY 后以原退出码 exit，避免失败
+      # 在作业摘要里静默不可见（#166）。
       #
       # 实测 beta.24 关联到 **20 个 commit / 47 个文件**。别被 cli 输出的那张表骗了 ——
       # 它只打 repo 与 HEAD 的 revision，**真正的区间是服务端算的**：从上一个有 commit 关联的
@@ -584,8 +690,20 @@ jobs:
             Write-Output '::error::sentry-cli was not installed and verified (see Install sentry-cli).'
             exit 1
           }
-          & $env:SENTRY_CLI releases set-commits $env:VERSION --auto
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $env:SENTRY_CLI releases set-commits $env:VERSION --auto --ignore-missing
+          if ($LASTEXITCODE -ne 0) {
+            $code = $LASTEXITCODE
+            Write-Output "::warning::Sentry commit association failed (exit $code); release $env:VERSION has no associated commits."
+            if ($env:GITHUB_STEP_SUMMARY) {
+              @(
+                "### Warning: Sentry commit association failed"
+                ""
+                "- Release ``$env:VERSION``: commit association exited with code $code."
+                "- Release publishing was not blocked, but Suspect Commits will be unavailable in Sentry."
+              ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            }
+            exit $code
+          }
 
       - name: Finalize Sentry release
         if: env.PUBLISH == 'true'

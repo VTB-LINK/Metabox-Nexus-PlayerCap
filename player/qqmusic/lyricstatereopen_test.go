@@ -7,6 +7,7 @@ package qqmusic
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 // atReopen 把结果的 reopen 换成 reopen。
@@ -19,7 +20,7 @@ func atReopen(r assocResult, reopen uint64) assocResult {
 // 变异自证（实测）：reopened 像 reset 那样清空（refresh 即要求重发、在线一例为空行），本例红。
 func TestLyricStateReopenedKeepsAdopted(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	applyWant(t, &s, desiredRes(1, srcAssoc, -2000, assocFixture("A"), "A"), true, true, assocADelayed2s...)
 	s.reopened(1)
@@ -35,7 +36,7 @@ func TestLyricStateReopenedKeepsAdopted(t *testing.T) {
 // 变异自证（实测）：apply 只比 gen，本例与下面两例都红。
 func TestLyricStateRejectsOtherReopen(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	refreshWant(t, &s, true, true, onlineAt0...) // 换歌拍按在线、偏移 0 发出
 	s.reopened(1)
@@ -53,9 +54,9 @@ func TestLyricStateRejectsOtherReopen(t *testing.T) {
 // （1，3）都被拒。变异自证（实测）：reset 不把 reopen 归零，本例红。
 func TestLyricStateResetZeroesReopen(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.reopened(3)
-	s.reset(2)
+	s.reset(2, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	applyWant(t, &s, atReopen(desiredRes(2, srcAssoc, 0, assocFixture("A"), "A"), 3), true, false)
 	applyWant(t, &s, atReopen(desiredRes(1, srcAssoc, 0, assocFixture("A"), "A"), 3), true, false)
@@ -66,7 +67,7 @@ func TestLyricStateResetZeroesReopen(t *testing.T) {
 // 连续两次重开：（1，2）下只收（1，2）的，（1，1）的迟到结果与（1，0）的残留都被拒。
 func TestLyricStateTwoReopens(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	refreshWant(t, &s, true, true, onlineAt0...)
 	s.reopened(1)
@@ -84,7 +85,7 @@ func TestLyricStateStoppedAnyGeneration(t *testing.T) {
 	assocA := desiredRes(1, srcAssoc, -2000, assocFixture("A"), "A")
 	t.Run("（1，0）的停用在（1，1）下", func(t *testing.T) {
 		var s lyricState
-		s.reset(1)
+		s.reset(1, false, time.Time{})
 		s.setOnlineRaw(shiftFixture())
 		applyWant(t, &s, assocA, true, true, assocADelayed2s...)
 		s.reopened(1)
@@ -94,9 +95,9 @@ func TestLyricStateStoppedAnyGeneration(t *testing.T) {
 	for _, stop := range []assocResult{stoppedRes(1), atReopen(stoppedRes(1), 3), stoppedRes(3)} {
 		t.Run(fmt.Sprintf("（%d，%d）的停用在（2，0）下", stop.gen, stop.reopen), func(t *testing.T) {
 			var s lyricState
-			s.reset(1)
+			s.reset(1, false, time.Time{})
 			applyWant(t, &s, assocA, true, true, assocADelayed2s...)
-			s.reset(2)
+			s.reset(2, false, time.Time{})
 			s.setOnlineRaw(shiftFixture())
 			applyWant(t, &s, desiredRes(2, srcAssoc, 0, assocFixture("B"), "B"), true, true, assocB0...)
 			applyWant(t, &s, stop, true, true, onlineAt0...)
@@ -105,8 +106,8 @@ func TestLyricStateStoppedAnyGeneration(t *testing.T) {
 	}
 	t.Run("编号缺位", func(t *testing.T) {
 		var s lyricState
-		s.reset(1)
-		s.reset(2)
+		s.reset(1, false, time.Time{})
+		s.reset(2, false, time.Time{})
 		applyWant(t, &s, localRes(2), false, true, localLDelayed1s...)
 		applyWant(t, &s, stoppedRes(1), false, true)
 		wantSource(t, &s, srcNone, "")
@@ -119,7 +120,7 @@ func TestLyricStateStoppedAnyGeneration(t *testing.T) {
 // 给出时到的那一条被折算、要求重发而红。
 func TestLyricStateNothingAfterStopped(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	applyWant(t, &s, desiredRes(1, srcAssoc, -2000, assocFixture("A"), "A"), true, true, assocADelayed2s...)
 	applyWant(t, &s, stoppedRes(1), true, true, onlineAt0...)
@@ -137,7 +138,7 @@ func TestLyricStateNothingAfterStopped(t *testing.T) {
 	refreshWant(t, &s, true, false)
 	wantSource(t, &s, srcOnline, "")
 
-	s.reset(2)
+	s.reset(2, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	refreshWant(t, &s, true, true, onlineAt0...) // 新歌：在线、偏移 0
 	applyWant(t, &s, desiredRes(2, srcAssoc, 0, assocFixture("B"), "B"), true, false)
@@ -145,7 +146,7 @@ func TestLyricStateNothingAfterStopped(t *testing.T) {
 	refreshWant(t, &s, true, false)
 	wantSource(t, &s, srcOnline, "")
 
-	s.reset(3) // 编号缺位：无。reset 之后尚未给出时到的结果同样不收：不折算、不要求重发
+	s.reset(3, false, time.Time{}) // 编号缺位：无。reset 之后尚未给出时到的结果同样不收：不折算、不要求重发
 	applyWant(t, &s, localRes(3), false, false)
 	refreshWant(t, &s, false, true)
 	applyWant(t, &s, localRes(3), false, false)

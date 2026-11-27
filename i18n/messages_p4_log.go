@@ -588,4 +588,7 @@ var p4LogMessages = map[string]string{
 	"KuGou lyrics unassociated by user; lyrics cleared":             "酷狗已取消当前歌曲歌词关联，已清空歌词",
 	"KuGou lyric offset changed: %+dms":                             "酷狗歌词偏移已变更: %+dms",
 	"Lyrics recovered online in KuGou: %d lines; per-character: %s": "酷狗重新选词后已在线恢复歌词: %d 行；逐字：%s",
+
+	// —— 同一首歌内保持最早的歌名与歌手（issue #229）——
+	"Song info read after the announcement: %s / %s; sent: %s / %s": "宣告之后读到的歌曲信息：%s / %s；发出：%s / %s",
 }

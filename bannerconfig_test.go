@@ -142,7 +142,7 @@ func playerLine(name, pollItem string) string {
 func stockEchoConfig() config.Config {
 	cfg := defaultEchoConfig()
 	markExplicit(&cfg, "addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide",
-		"audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "cloudmusicv3-effect-strategy")
+		"audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "song-info-keep-first", "cloudmusicv3-effect-strategy")
 	for name, offset := range map[string]int{"cloudmusicv3": -500, "qqmusic": -100, "kugou": -430, "sodamusic": -340, "applemusic": -900} {
 		cfg.Players[name].Offset = intPtr(offset)
 		markExplicit(&cfg, name+"-offset")
@@ -155,7 +155,7 @@ func stockEchoConfig() config.Config {
 func overriddenEchoConfig(t *testing.T) config.Config {
 	cfg := defaultEchoConfig()
 	cfg.Addr, cfg.Offset, cfg.PriorPlayer, cfg.PriorPlayerExpire = "127.0.0.1:9000", 250, []string{"wesing", "kugou"}, 20
-	cfg.PerPlayerIdleHide, cfg.AudioNormalize, cfg.EffectStrategy = 15, false, "park"
+	cfg.PerPlayerIdleHide, cfg.AudioNormalize, cfg.SongInfoKeepFirst, cfg.EffectStrategy = 15, false, false, "park"
 	setGlobalInt(t, &cfg, "poll", 5, 10)
 	setGlobalInt(t, &cfg, "audio-normalize-target", 10, 0)
 	setGlobalInt(t, &cfg, "audio-normalize-max-gain", 99, 45)
@@ -167,7 +167,7 @@ func overriddenEchoConfig(t *testing.T) config.Config {
 	cfg.Players["sodamusic"].Poll = intPtr(30)
 	cfg.Players["applemusic"].Offset = intPtr(400)
 	markExplicit(&cfg, "addr", "offset", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize",
-		"cloudmusicv3-effect-strategy", "wesing-offset", "cloudmusicv3-offset", "cloudmusicv3-poll", "qqmusic-idle-hide",
+		"song-info-keep-first", "cloudmusicv3-effect-strategy", "wesing-offset", "cloudmusicv3-offset", "cloudmusicv3-poll", "qqmusic-idle-hide",
 		"kugou-audio-normalize", "sodamusic-poll", "applemusic-offset")
 	return cfg
 }
@@ -175,7 +175,9 @@ func overriddenEchoConfig(t *testing.T) config.Config {
 // TestBannerGolden 钉死配置行的整体样式：分行与行序、标签、键名、单位、标记、箭头与图例，中英文各一份。
 //
 // 变异自证（隔离副本，实测）：去掉单位、播放器行按回显顺序排列（effect-strategy 排到最前）、箭头两侧对调，
-// 四例均红；中文译表缺一条行标签 → 中文三例红；bannerGlobalLines 里一条行格式照旧写成中文 → 英文一例红。
+// 四例均红；中文译表缺一条行标签（含 "   Keep first song name & singer: %s\n"）→ 中文三例红；
+// bannerGlobalLines 漏归 song-info-keep-first → 四例与 TestBannerPlacesEveryKey 红；
+// bannerGlobalLines 里一条行格式照旧写成中文 → 英文一例红。
 func TestBannerGolden(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -190,6 +192,7 @@ func TestBannerGolden(t *testing.T) {
    per-player 无活跃自动隐藏: per-player-idle-hide=0s
    音量归一化: audio-normalize=true audio-normalize-target=-14dBFS audio-normalize-max-gain=30dB
    音频波形帧率: audio-frame-rate=25fps
+   保持最早的歌名与歌手: song-info-keep-first=true
    播放器: wesing (offset=-200ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: cloudmusicv3 (offset=-200ms poll=30ms → 100ms idle-hide=0s audio-normalize=true effect-strategy=fadeout)
    播放器: qqmusic (offset=-200ms poll=30ms idle-hide=0s audio-normalize=true)
@@ -205,6 +208,7 @@ func TestBannerGolden(t *testing.T) {
    per-player 无活跃自动隐藏: *per-player-idle-hide=0s
    音量归一化: *audio-normalize=true *audio-normalize-target=-14dBFS *audio-normalize-max-gain=30dB
    音频波形帧率: *audio-frame-rate=25fps
+   保持最早的歌名与歌手: *song-info-keep-first=true
    播放器: wesing (offset=-200ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: cloudmusicv3 (*offset=-500ms poll=30ms → 100ms idle-hide=0s audio-normalize=true *effect-strategy=fadeout)
    播放器: qqmusic (*offset=-100ms poll=30ms idle-hide=0s audio-normalize=true)
@@ -220,6 +224,7 @@ func TestBannerGolden(t *testing.T) {
    per-player 无活跃自动隐藏: *per-player-idle-hide=15s
    音量归一化: *audio-normalize=false *audio-normalize-target=10dBFS → 0dBFS *audio-normalize-max-gain=99dB → 45dB
    音频波形帧率: *audio-frame-rate=100fps → 60fps
+   保持最早的歌名与歌手: *song-info-keep-first=false
    播放器: wesing (*offset=0ms poll=5ms → 10ms idle-hide=15s audio-normalize=false)
    播放器: cloudmusicv3 (*offset=500ms *poll=40ms → 100ms idle-hide=15s audio-normalize=false *effect-strategy=park → fadeout)
    播放器: qqmusic (offset=250ms poll=5ms → 50ms *idle-hide=0s audio-normalize=false)
@@ -235,6 +240,7 @@ func TestBannerGolden(t *testing.T) {
    Per-player idle auto-hide: *per-player-idle-hide=15s
    Audio normalization: *audio-normalize=false *audio-normalize-target=10dBFS → 0dBFS *audio-normalize-max-gain=99dB → 45dB
    Audio waveform frame rate: *audio-frame-rate=100fps → 60fps
+   Keep first song name & singer: *song-info-keep-first=false
    Player: wesing (*offset=0ms poll=5ms → 10ms idle-hide=15s audio-normalize=false)
    Player: cloudmusicv3 (*offset=500ms *poll=40ms → 100ms idle-hide=15s audio-normalize=false *effect-strategy=park → fadeout)
    Player: qqmusic (offset=250ms poll=5ms → 50ms *idle-hide=0s audio-normalize=false)
@@ -523,13 +529,14 @@ type loadCase struct {
 
 // 各行的行首，与 cloudmusicv3 行在默认配置下 effect-strategy 之前的部分。
 const (
-	lineListen  = "   监听: "
-	lineGlobal  = "   全局偏移与轮询: "
-	linePrior   = "   优先播放器: "
-	lineIdle    = "   per-player 无活跃自动隐藏: "
-	lineNorm    = "   音量归一化: "
-	lineRate    = "   音频波形帧率: "
-	cloudPrefix = "   播放器: cloudmusicv3 (offset=-200ms poll=30ms → 100ms idle-hide=0s audio-normalize=true "
+	lineListen       = "   监听: "
+	lineGlobal       = "   全局偏移与轮询: "
+	linePrior        = "   优先播放器: "
+	lineIdle         = "   per-player 无活跃自动隐藏: "
+	lineNorm         = "   音量归一化: "
+	lineRate         = "   音频波形帧率: "
+	lineSongInfoKeep = "   保持最早的歌名与歌手: "
+	cloudPrefix      = "   播放器: cloudmusicv3 (offset=-200ms poll=30ms → 100ms idle-hide=0s audio-normalize=true "
 )
 
 // runLoadCases 逐条跑真实的 Load、组装三件套、渲染横幅并断言；另断言三件套各键的类型没有随写法变化
@@ -593,6 +600,8 @@ func TestBannerRejectedValues(t *testing.T) {
 			want: []string{
 				lineNorm + `audio-normalize="false" → true audio-normalize-target=-14dBFS audio-normalize-max-gain=30dB`,
 				playerLine("wesing", "poll=30ms")}},
+		{name: "song-info-keep-first 写成字符串", yml: `song-info-keep-first: "false"`,
+			want: []string{lineSongInfoKeep + `song-info-keep-first="false" → true`}},
 		{name: "布尔写成整数", yml: `audio-normalize: 0`,
 			want: []string{lineNorm + `audio-normalize=0 → true audio-normalize-target=-14dBFS audio-normalize-max-gain=30dB`}},
 		{name: "整数写成布尔", yml: `prior-player-expire: true`,
@@ -642,12 +651,13 @@ func TestBannerRejectedValues(t *testing.T) {
 			want: []string{cloudPrefix + `effect-strategy=["park"] → fadeout)`}},
 
 		{name: "反例：按原样采纳的值带单位与 *，不带引号",
-			yml: "addr: \"8765\"\noffset: 300\naudio-normalize: false\naudio-frame-rate: 30\n",
+			yml: "addr: \"8765\"\noffset: 300\naudio-normalize: false\naudio-frame-rate: 30\nsong-info-keep-first: false\n",
 			want: []string{
 				lineListen + `*addr=8765`,
 				lineGlobal + `*offset=300ms poll=30ms`,
 				lineNorm + `*audio-normalize=false audio-normalize-target=-14dBFS audio-normalize-max-gain=30dB`,
-				lineRate + `*audio-frame-rate=30fps`},
+				lineRate + `*audio-frame-rate=30fps`,
+				lineSongInfoKeep + `*song-info-keep-first=false`},
 			not: []string{`"`}},
 		{name: "反例：越界的整数是被钳制而不是被拒，两侧都带单位",
 			yml: "poll: 5\naudio-normalize-target: 10\naudio-normalize-max-gain: 99\naudio-frame-rate: 100\nkugou-poll: 99999\n",
@@ -670,8 +680,8 @@ func TestBannerRejectedValues(t *testing.T) {
 // 变异自证（隔离的 worktree，实测）：
 //   - flag.Visit 不清 config.yml 一层留下的被拒原值（RejectedValues）→「config.yml 类型不符 / 列表项被丢弃、
 //     命令行…」六例红；不清 WrittenValues →「特效策略：config.yml 非法、命令行合法」红。
-//   - flag.Visit 的 15 个分支（11 个全局键、每播放器 4 个维度）逐个保留 case、删掉赋值 → 各有用例红；
-//     flag.Visit 不标记显式 → 红。
+//   - flag.Visit 的 16 个分支（12 个全局键、每播放器 4 个维度）逐个保留 case、删掉赋值 → 各有用例红
+//     （song-info-keep-first 保留 case 删去赋值 → 对应新增三例红，隔离副本实测）；flag.Visit 不标记显式 → 红。
 //   - 命令行的特效策略非法时不记原值、不撤销显式标记、连 config.yml 的显式标记也撤销 → 对应各例红。
 //   - Load 不调 clampPolls →「命令行的值越界」「每播放器 poll 越界」「config.yml 类型不符、命令行的值越界」红。
 func TestBannerCommandLineOverride(t *testing.T) {
@@ -744,6 +754,12 @@ func TestBannerCommandLineOverride(t *testing.T) {
 			want: []string{`   播放器: wesing (*offset=50ms poll=30ms idle-hide=0s audio-normalize=true)`}, not: []string{`"0"`}},
 		{name: "config.yml 列表项被丢弃、命令行覆盖", yml: "prior-player: [kugou, 1]\n", args: []string{"-prior-player", "wesing,kugou"},
 			want: []string{linePrior + `*prior-player=[wesing kugou] prior-player-expire=15s`}, not: []string{`["kugou",1]`}},
+		{name: "保持最早的歌名与歌手：空格写法为关", args: []string{"-song-info-keep-first", "false"},
+			want: []string{lineSongInfoKeep + `*song-info-keep-first=false`}},
+		{name: "保持最早的歌名与歌手：等号写法为关", args: []string{"-song-info-keep-first=false"},
+			want: []string{lineSongInfoKeep + `*song-info-keep-first=false`}},
+		{name: "保持最早的歌名与歌手：config.yml 为开、命令行覆盖为关", yml: "song-info-keep-first: true\n", args: []string{"-song-info-keep-first", "false"},
+			want: []string{lineSongInfoKeep + `*song-info-keep-first=false`}},
 		{name: "反例：命令行覆盖的是别的键，被拒的原值照列", yml: "poll: abc\n", args: []string{"-wesing-poll", "50"},
 			want: []string{
 				lineGlobal + `offset=-200ms poll="abc" → 30ms`,

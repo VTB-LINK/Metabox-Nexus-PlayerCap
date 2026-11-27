@@ -2,7 +2,10 @@ package qqmusic
 
 // 本文件只测会话侧歌词状态机按 gen 取舍结果与 reset（设计 §6.8「播放中」：gen 不是当前的丢弃；「会话的状态」换歌时清空）。
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // 过时 gen 丢弃：A（gen 1）→ B（gen 2）→ 又回到 A（gen 3）。迟到的 gen 1、gen 2 期望状态都不接受，gen 1 虽是同一首歌也不
 // 接受；将来的 gen 同样不接受。丢弃的结果不成为 refresh 所按的期望状态，也不打乱已采纳的状态。停用不比代次，见
@@ -10,9 +13,9 @@ import "testing"
 // 变异自证：去掉 gen 核对，或先记下结果再核对 gen，本例各自变红。
 func TestLyricStateDropsStaleGen(t *testing.T) {
 	var s lyricState
-	s.reset(1)
-	s.reset(2)
-	s.reset(3)
+	s.reset(1, false, time.Time{})
+	s.reset(2, false, time.Time{})
+	s.reset(3, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	applyWant(t, &s, desiredRes(2, srcAssoc, 0, assocFixture("B"), "B"), true, false)
 	applyWant(t, &s, desiredRes(1, srcAssoc, 0, assocFixture("A"), "A"), true, false)
@@ -31,24 +34,24 @@ func TestLyricStateDropsStaleGen(t *testing.T) {
 // 变异自证：reset 不清已采纳的指纹，或不清在线原始行，本例各自变红。
 func TestLyricStateResetClears(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	applyWant(t, &s, onlineRes(1, 0), true, true, onlineAt0...)
-	s.reset(2)
+	s.reset(2, false, time.Time{})
 	wantSource(t, &s, srcNone, "")
 	s.setOnlineRaw(shiftFixture())
 	applyWant(t, &s, onlineRes(2, 0), true, true, onlineAt0...)
 
-	s.reset(3) // 没有再存在线原始行：来源为在线即空行
+	s.reset(3, false, time.Time{}) // 没有再存在线原始行：来源为在线即空行
 	applyWant(t, &s, onlineRes(3, 0), true, true)
 
-	s.reset(4)
+	s.reset(4, false, time.Time{})
 	applyWant(t, &s, localRes(4), false, true, localLDelayed1s...)
 	wantSource(t, &s, srcLocal, localFlac)
-	s.reset(5)
+	s.reset(5, false, time.Time{})
 	wantSource(t, &s, srcNone, "")
 	applyWant(t, &s, localRes(5), false, true, localLDelayed1s...)
-	s.reset(6)
+	s.reset(6, false, time.Time{})
 	applyWant(t, &s, noneRes(6), false, true)
 	applyWant(t, &s, noneRes(6), false, false)
 }

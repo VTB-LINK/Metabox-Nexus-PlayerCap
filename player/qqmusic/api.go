@@ -774,7 +774,8 @@ func applyKana(lines []lyricLine, kc *kanaCollector, local bool) {
 	}
 }
 
-// scanLRC 逐行解析歌词，认普通 LRC 的 [分:秒.百分秒] 与 QRC 的 [起始,时长] 两种行，取 [ti:]、[ar:] 为歌名与歌手；
+// scanLRC 逐行解析歌词，认普通 LRC 的 [分:秒.百分秒]、三段冒号 [分:秒:百分秒]（QQ 音乐纯音乐提示行写法，#231）
+// 与 QRC 的 [起始,时长] 三种行，取 [ti:]、[ar:] 为歌名与歌手；
 // [kana:] 元数据行（含 QRC XML 包装行）一律剥离，仅在 withFurigana 为真时经 kanaCollector 流式收集；
 // rawTextLines 为不以「[」开头、不带时间戳的文本行，供 parseLRC 的均分兜底。limit 大于 0 时解析出 limit 行即停。
 func scanLRC(lrc string, limit int, withFurigana bool) (lines []lyricLine, songName, singer string, rawTextLines []string, kc kanaCollector) {
@@ -782,6 +783,7 @@ func scanLRC(lrc string, limit int, withFurigana bool) (lines []lyricLine, songN
 	// 有声书类）行首是 [100:05.00]，整行匹配不上 → 被静默丢弃。秒与毫秒保持原样
 	// （\d{2} 与 \d{2,3}，后者兼容三位毫秒）。
 	re := regexp.MustCompile(`\[(\d+):(\d{2})\.(\d{2,3})\](.*)`)
+	colonRe := regexp.MustCompile(`^\[(\d+):(\d{2}):(\d{2})\](.*)$`)
 	qqRe := regexp.MustCompile(`^\[(\d+),(\d+)\](.+)`)
 	qqCharTimingRe := regexp.MustCompile(`\(\d+,\d+\)`)
 	tiRe := regexp.MustCompile(`\[ti:(.*?)\]`)
@@ -825,6 +827,22 @@ func scanLRC(lrc string, limit int, withFurigana bool) (lines []lyricLine, songN
 				lines = append(lines, lyricLine{
 					Index: len(lines),
 					Time:  float32(min)*60 + float32(sec) + float32(ms)/1000.0,
+					Text:  text,
+				})
+			}
+			continue
+		}
+
+		// Colon-separated LRC [mm:ss:xx] (QQ Music instrumental hint format, #231)
+		if colonMatches := colonRe.FindStringSubmatch(line); len(colonMatches) == 5 {
+			min, _ := strconv.Atoi(colonMatches[1])
+			sec, _ := strconv.Atoi(colonMatches[2])
+			cs, _ := strconv.Atoi(colonMatches[3])
+			text := strings.TrimSpace(colonMatches[4])
+			if text != "" {
+				lines = append(lines, lyricLine{
+					Index: len(lines),
+					Time:  float32(min)*60 + float32(sec) + float32(cs)/100.0,
 					Text:  text,
 				})
 			}

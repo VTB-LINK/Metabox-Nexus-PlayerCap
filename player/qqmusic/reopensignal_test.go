@@ -1,7 +1,8 @@
 package qqmusic
 
-// 本文件只测同一首重开的信号（设计 §6.8「重开」）：本会话载入信号是否可用（loadingUsable）、载入值由无到有（loadEdge）与
-// 按载入值写入重开的条件（reopenByLoading）。runSession 的接线由 assocwiring_test.go 守。
+// 本文件只测同一首重开的信号（设计 §6.8「重开」、#245 增补设计 §3.3）：本会话载入信号是否可用（loadingUsable）、
+// 载入值由无到有（loadEdge）与按载入值写入重开的单拍条件（reopenGuard.shouldReopenByLoading）。跨拍挂起与去重由
+// reopenguard_test.go 覆盖；runSession 的接线由 assocwiring_test.go 守。
 
 import (
 	"fmt"
@@ -89,10 +90,10 @@ func TestLoadEdge(t *testing.T) {
 	}
 }
 
-// 按载入值写入重开：可用、由无到有、已认领、本拍歌名等于已认领的、编号已知，全真为真。反例逐项：不可用；不是由无到有；
-// 歌名不同（换歌那一拍；等进度或等 songMid 的拍，lastName 仍是上一首）；还没认领过（lastName 为空，含本拍歌名也为空）；
-// 歌名为占位串 "QQ音乐"；编号缺位（本地文件不读记录）。
-// 变异自证（实测）：不比歌名、不看 lastName 非空，各自红（assocwiring_test.go 的门禁同时报出）。
+// 按载入值写入重开（单拍直接兑现，#245 已归入 reopenGuard.shouldReopenByLoading）：可用、由无到有、已认领、本拍歌名等于
+// 已认领的、编号已知，全真为真。反例逐项：不可用；不是由无到有；歌名不同（换歌那一拍；等进度或等 songMid 的拍，lastName
+// 仍是上一首）；还没认领过（lastName 为空，含本拍歌名也为空）；歌名为占位串 "QQ音乐"；编号缺位（本地文件不读记录）。
+// 占位串跨拍挂起与兑现见 reopenguard_test.go。
 func TestReopenByLoading(t *testing.T) {
 	for _, c := range []struct {
 		name         string
@@ -110,8 +111,9 @@ func TestReopenByLoading(t *testing.T) {
 		{"歌名为占位串", true, true, "QQ音乐", "百", true, false},
 		{"编号缺位", true, true, "百", "百", false, false},
 	} {
-		if got := reopenByLoading(c.usable, c.edge, c.song, c.last, c.hasIDs); got != c.want {
-			t.Errorf("%s：reopenByLoading = %v，want %v", c.name, got, c.want)
+		var g reopenGuard
+		if got := g.shouldReopenByLoading(c.usable, c.edge, c.song, c.last, c.hasIDs); got != c.want {
+			t.Errorf("%s：shouldReopenByLoading = %v，want %v", c.name, got, c.want)
 		}
 	}
 }

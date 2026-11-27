@@ -31,7 +31,7 @@ func takeWant(t *testing.T, s *lyricState, ch <-chan assocResult, songHasIDs, ch
 // 反例：没有读取者（Results 为 nil 通道）与通道里没有结果，都立即返回、不要求重发，状态不变。
 func TestTakeResultNothingToTake(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	takeWant(t, &s, nil, true, false)
 	takeWant(t, &s, make(chan assocResult, 1), true, false)
@@ -42,7 +42,7 @@ func TestTakeResultNothingToTake(t *testing.T) {
 // 有结果即交给 apply，给出折算后的行；每次只取一条，其余留在通道里供下一拍。
 func TestTakeResultTakesOneAndApplies(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	ch := make(chan assocResult, 2)
 	ch <- desiredRes(1, srcAssoc, -2000, assocFixture("A"), "A")
@@ -59,7 +59,7 @@ func TestTakeResultTakesOneAndApplies(t *testing.T) {
 // 反例：过时 gen、未知、指纹不变的结果都被取走（不留到下一拍），不要求重发，已给出的来源不变。
 func TestTakeResultIgnoredResultsAreConsumed(t *testing.T) {
 	var s lyricState
-	s.reset(2)
+	s.reset(2, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	refreshWant(t, &s, true, true, onlineAt0...)
 	ch := make(chan assocResult, 1)
@@ -81,7 +81,7 @@ func TestTakeResultIgnoredResultsAreConsumed(t *testing.T) {
 func TestTakeResultLogsSourceChange(t *testing.T) {
 	logs := captureAssocLog(t)
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	refreshWant(t, &s, true, true, onlineAt0...)
 	ch := make(chan assocResult, 1)
@@ -107,7 +107,7 @@ func TestTakeResultLogsSourceChange(t *testing.T) {
 func TestTakeResultRejectsResidueAfterReopen(t *testing.T) {
 	logs := captureAssocLog(t)
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	refreshWant(t, &s, true, true, onlineAt0...)
 	ch := make(chan assocResult, 1)
@@ -132,7 +132,7 @@ func TestTakeResultRejectsResidueAfterReopen(t *testing.T) {
 // 补取时多发一条 index:-1；本地文件的歌词到达照常发出。反例：不登记时同一条「无」要求重发。
 func TestTakeResultNoneAfterClaimWithoutIDs(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	refreshWant(t, &s, false, true) // 换歌拍的登记：行为空
 	ch := make(chan assocResult, 1)
 	ch <- noneRes(1)
@@ -142,7 +142,7 @@ func TestTakeResultNoneAfterClaimWithoutIDs(t *testing.T) {
 	wantSource(t, &s, srcLocal, localFlac)
 
 	var bare lyricState
-	bare.reset(1)
+	bare.reset(1, false, time.Time{})
 	ch <- noneRes(1)
 	takeWant(t, &bare, ch, false, true)
 }

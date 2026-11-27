@@ -7,6 +7,7 @@ import (
 	"Metabox-Nexus-PlayerCap/config"
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/applemusic"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/effect"
@@ -161,6 +162,8 @@ func main() {
 	// per-player 通道无活跃自动隐藏阈值解析器（issue #47）。Server 不持有 config，按既有单值注入
 	// 的思路把 cfg.GetPlayerIdleHide 喂进去（nil=全关；此处恒非 nil，全局默认 0 即全关）。
 	srv.SetIdleHideResolver(cfg.GetPlayerIdleHide)
+	// 同一次宣告内是否保持最早的歌名与歌手（#229）：必须在启动任何播放器之前设定，之后只读。
+	player.SetSongInfoKeepFirst(cfg.SongInfoKeepFirst)
 
 	// 构建接口地址
 	scheme := "http"
@@ -365,6 +368,7 @@ func buildConfigEcho(cfg *config.Config, playerNames []string, effectStrategy st
 	set("audio-normalize-target", cfg.Written("audio-normalize-target", cfg.AudioNormalizeTarget), cfg.AudioNormalizeTarget)
 	set("audio-normalize-max-gain", cfg.Written("audio-normalize-max-gain", cfg.AudioNormalizeMaxGain), cfg.AudioNormalizeMaxGain)
 	set("audio-frame-rate", cfg.Written("audio-frame-rate", cfg.AudioFrameRate), cfg.AudioFrameRate)
+	same("song-info-keep-first", cfg.SongInfoKeepFirst)
 	set("cloudmusicv3-effect-strategy", cfg.Written("cloudmusicv3-effect-strategy", cfg.EffectStrategy), effectStrategy)
 	for _, name := range playerNames {
 		same(name+"-offset", cfg.GetPlayerOffset(name))

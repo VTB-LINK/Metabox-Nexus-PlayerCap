@@ -38,9 +38,10 @@ var realCoverFetchOps = coverFetchOps{
 // （#145，设计 §4.4「元数据补读」）：此前没有 mid 就不重试，整首没有歌手与封面。只认歌名等于宣告时窗口歌名
 // windowTitle 的记录：#145 时 FindSongInfo 匹配不到窗口歌名会退回地址最高的记录，可能是上一首，补读期间代次
 // 不变，EmitForGen 拦不住（设计审 F5）；#146 起 FindSongInfoPreferMID 不再退回，这里照旧核对歌名。匹配上的记录
-// 有 mid 而没有歌手时按 mid 补歌手，查到的歌名相同才取（#146，设计 §3.2）。补读到的歌名或歌手与宣告时的不同，
-// 先回写一次歌名与歌手，歌手可能因此被清空：宣告时没有 mid，宣告时的歌手来源无法核对，以补读匹配上的记录为准
-// （设计 §3.5，兜底歌手设计审 R2）。有了 mid 之后在剩余次数里按它查专辑 mid、构造封面地址（#146，设计 §3.4）。
+// 有 mid 而没有歌手时按 mid 补歌手，查到的歌名相同才取（#146，设计 §3.2）。补读到的歌名与歌手经
+// player.SupplementField 按全局开关 song-info-keep-first 取舍（#229）：开启时只补宣告时为空的字段，
+// 关闭时以补读匹配上的记录为准（歌手可能因此被清空或改写，设计 §3.5，兜底歌手设计审 R2）；取舍后与
+// 基准不同才先回写一次歌名与歌手。有了 mid 之后在剩余次数里按它查专辑 mid、构造封面地址（#146，设计 §3.4）。
 // 两次回写各自独立，标题仍是宣告时的。窗口歌名为空时不补读。
 //
 // pcm 为真是 PCM 模式（#146，设计 §3.5），以上补读都不用：mid 是路径 mid，歌曲信息未确认（unconfirmed）、或
@@ -73,7 +74,8 @@ func (p *WesingPlayer) startCoverFetch(ops coverFetchOps, gen uint64, pid uint32
 			defer ops.closeProc(h)
 		}
 		coverURL := url
-		infoFound := false // PCM 模式：已按路径 mid 查到歌曲信息（name、singer 已更新），但回写未必已入队
+		infoFound := false       // PCM 模式：已按路径 mid 查到歌曲信息（name、singer 已更新），但回写未必已入队
+		fallbackPending := false // 兜底模式：已更新 name、singer，但回写尚未入队，后续重试继续重发
 		// 如果初始未获取到封面 URL，重试从内存中搜索（K歌客户端可能延迟加载封面数据）
 		if scan {
 			for i := 0; i < 5; i++ {
@@ -82,7 +84,11 @@ func (p *WesingPlayer) startCoverFetch(ops coverFetchOps, gen uint64, pid uint32
 					if unconfirmed {
 						if !infoFound {
 							if info, ok := ops.findByMID(h, mid); ok {
-								infoFound, name, singer = true, info.Name, info.Singer
+								nn, ns := player.SupplementField(name, info.Name), player.SupplementField(singer, info.Singer)
+								if info.Name != name || info.Singer != singer {
+									log.Detail("Song info read after the announcement: %s / %s; sent: %s / %s", info.Name, info.Singer, nn, ns)
+								}
+								infoFound, name, singer = true, nn, ns
 								log.Info("Song info fetched on retry %d", i+1)
 							}
 						}
@@ -104,28 +110,41 @@ func (p *WesingPlayer) startCoverFetch(ops coverFetchOps, gen uint64, pid uint32
 					continue
 				}
 				if mid == "" {
-					info, err := ops.findInfo(h, windowTitle)
-					if err != nil || info.Name != windowTitle {
-						continue
-					}
-					if info.Mid != "" && info.Singer == "" {
-						if s, ok := ops.findByMID(h, info.Mid); ok && s.Name == info.Name {
-							info.Singer = s.Singer
+					if info, err := ops.findInfo(h, windowTitle); err == nil && info.Name == windowTitle {
+						if info.Mid != "" && info.Singer == "" {
+							if s, ok := ops.findByMID(h, info.Mid); ok && s.Name == info.Name {
+								info.Singer = s.Singer
+							}
+						}
+						nn, ns := player.SupplementField(name, info.Name), player.SupplementField(singer, info.Singer)
+						if info.Name != name || info.Singer != singer {
+							log.Detail("Song info read after the announcement: %s / %s; sent: %s / %s", info.Name, info.Singer, nn, ns)
+						}
+						if nn != name || ns != singer {
+							name, singer = nn, ns
+							fallbackPending = true
+							log.Info("Song info fetched on retry %d", i+1)
+						}
+						if info.Mid != "" {
+							mid = info.Mid
+							log.Detail("Song mid fetched on retry %d: %s", i+1, mid)
 						}
 					}
-					if info.Name != name || info.Singer != singer {
-						name, singer = info.Name, info.Singer
-						log.Info("Song info fetched on retry %d", i+1)
-						p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{Name: name, Singer: singer, Title: title})
-					}
-					if mid = info.Mid; mid == "" {
-						continue
-					}
-					log.Detail("Song mid fetched on retry %d: %s", i+1, mid)
 				}
-				if a := ops.findAlbum(h, mid); a != "" {
-					coverURL = lyric.AlbumCoverURL(a)
-					log.Info("Cover URL fetched on retry %d", i+1)
+				// 回写入队了才算完成：事件通道满被丢弃的，后续重试按已更新的 name、singer 重发（同 PCM 模式）。
+				if fallbackPending && p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{Name: name, Singer: singer, Title: title, Cover: coverURL}) {
+					fallbackPending = false
+				}
+				if mid == "" {
+					continue
+				}
+				if coverURL == "" {
+					if a := ops.findAlbum(h, mid); a != "" {
+						coverURL = lyric.AlbumCoverURL(a)
+						log.Info("Cover URL fetched on retry %d", i+1)
+					}
+				}
+				if !fallbackPending && coverURL != "" {
 					break
 				}
 			}

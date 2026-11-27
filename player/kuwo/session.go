@@ -43,10 +43,19 @@ var (
 // session has one owner: the polling loop. Workers return values, never emit
 // events. Generation AND RID checks prevent late assets crossing songs/idle.
 type session struct {
-	p                                      *KuwoPlayer
-	gen                                    uint64
-	rid                                    string
-	song                                   player.SongInfo
+	p    *KuwoPlayer
+	gen  uint64
+	rid  string
+	song player.SongInfo
+	// metaTitle is the platform's latest assembled title for this tick, used only
+	// to recognise Kuwo's pure-music hint lyrics in accept (player.PureMusicHint),
+	// never published externally (#229). Resets with *s = session{...}.
+	metaTitle string
+	// lastReadName, lastReadSinger and hasLastRead remember the previous tick's
+	// raw bridge reading so the Detail log on post-announcement differences is
+	// emitted once per reading change instead of every tick (#229).
+	lastReadName, lastReadSinger           string
+	hasLastRead                            bool
 	clock                                  pos.CoreClock
 	duration                               float32
 	playing, haveState, idle, clearPending bool
@@ -283,6 +292,23 @@ func (s *session) observe(meta cdp.Snapshot, sample pos.Sample) bool {
 	if meta.Artist != "" {
 		info.Title += " - " + meta.Artist
 	}
+	// 平台本拍的标题，只供识别酷我的提示语歌词（accept 的 player.PureMusicHint），不对外发（#229）。
+	s.metaTitle = info.Title
+	if !changed {
+		// 同一个 RID 是同一次宣告（#229）：标题保持宣告时的，歌名、歌手按 song-info-keep-first 取舍。
+		readName, readSinger := info.Name, info.Singer
+		info.Name = player.SupplementField(s.song.Name, readName)
+		info.Singer = player.SupplementField(s.song.Singer, readSinger)
+		info.Title = s.song.Title
+		if (readName != s.song.Name || readSinger != s.song.Singer) &&
+			(!s.hasLastRead || readName != s.lastReadName || readSinger != s.lastReadSinger) {
+			log.Detail("Song info read after the announcement: %s / %s; sent: %s / %s",
+				readName, readSinger, info.Name, info.Singer)
+		}
+		s.lastReadName, s.lastReadSinger, s.hasLastRead = readName, readSinger, true
+	} else {
+		s.lastReadName, s.lastReadSinger, s.hasLastRead = meta.Title, meta.Artist, true
+	}
 	metadataChanged := changed || info.Name != s.song.Name || info.Singer != s.song.Singer
 	if metadataChanged {
 		info.Cover, info.CoverBase64 = s.song.Cover, s.song.CoverBase64
@@ -445,7 +471,7 @@ func (s *session) accept(r assetResult, now time.Time) {
 	s.retryAt = time.Time{}
 	s.settled = true
 	s.lines = toLyricLines(r.lines, float32(s.p.offsetMs)/1000)
-	if hint, ok := player.PureMusicHint(s.lines, s.song.Title); ok {
+	if hint, ok := player.PureMusicHint(s.lines, s.metaTitle); ok {
 		s.lines = []player.LyricLine{}
 		s.hint = hint
 	} else {

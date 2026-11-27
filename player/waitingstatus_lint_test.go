@@ -44,10 +44,8 @@ import (
 )
 
 // pendingStatusPackages 是尚未改用 ProcessStatus / NoSongStatus 的播放器包（目录相对 player/ 的路径）→ 何时移除。
-// 任务编号见 doc/design/converge-player-behavior-231-plan.md 第 1 节。
-var pendingStatusPackages = map[string]string{
-	"qqmusic": "#218 合入后的阶段二移除",
-}
+// 全部 8 个播放器包已收敛完毕，本表保持为空。
+var pendingStatusPackages = map[string]string{}
 
 // synthesizedStatuses 是子包里只能经 ProcessStatus / NoSongStatus 合成的状态。
 var synthesizedStatuses = map[string]bool{
@@ -215,7 +213,9 @@ func statusProblems(pkg string, sc statusScan, exempt bool) []string {
 // kugou（规则 4）；kugou 连上而没有歌的 NoSongStatus 改回 waiting_song 字面量（规则 1）；往 pendingStatusPackages 加回
 // 已改写的 cloudmusic（规则 4）；cloudmusic 连上而没有歌的 NoSongStatus 改回 waiting_song 字面量（规则 1）；cloudmusic
 // 的 v2 状态改回 Emit 发出（规则 2）；往 pendingStatusPackages 加回已改写的 spotify 或 sodamusic（规则 4）；spotify 外层循环的
-// 状态改回 Emit 发出（规则 2）；往 pendingStatusPackages 加回已改写的 applemusic、wesing 或 kuwo（规则 4）。
+// 状态改回 Emit 发出（规则 2）；往 pendingStatusPackages 加回已改写的 applemusic、wesing 或 kuwo（规则 4）；
+// 往 pendingStatusPackages 加回已改写的 qqmusic（规则 4）、qqmusic 会话结束改回 standby 字面量（规则 1）或改回直接 Emit（规则 2），
+// 在隔离临时副本中逐项实测均红。
 func TestNonSongStatusGoesThroughSynthesis(t *testing.T) {
 	root, err := repoRoot()
 	if err != nil {

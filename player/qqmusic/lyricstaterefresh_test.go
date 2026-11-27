@@ -3,19 +3,22 @@ package qqmusic
 // 本文件只测按本 gen 已接受的期望状态重新折算（lyricState.refresh，设计 §6.8「补取块」：已有本 gen 的期望状态则按它，
 // 否则按「在线、偏移 0」）：在线原始行更新之后不丢掉已采纳的关联与偏移。
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // 尚未接受任何结果：在线歌曲按在线、偏移 0，编号缺位按无；再来一次不要求重发，随后到达的同样输出也不要求。
 func TestLyricStateRefreshDefault(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	refreshWant(t, &s, true, true, onlineAt0...)
 	refreshWant(t, &s, true, false)
 	wantSource(t, &s, srcOnline, "")
 	applyWant(t, &s, onlineRes(1, 0), true, false)
 
-	s.reset(2)
+	s.reset(2, false, time.Time{})
 	refreshWant(t, &s, false, true)
 	refreshWant(t, &s, false, false)
 	wantSource(t, &s, srcNone, "")
@@ -27,7 +30,7 @@ func TestLyricStateRefreshDefault(t *testing.T) {
 // 变异自证：refresh 一律按「在线、偏移 0」（不按已接受的期望状态），本例即红。
 func TestLyricStateRefreshKeepsAdopted(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	applyWant(t, &s, desiredRes(1, srcAssoc, -2000, assocFixture("A"), "A"), true, true, assocADelayed2s...)
 	s.setOnlineRaw(shiftFixture())
 	refreshWant(t, &s, true, false)

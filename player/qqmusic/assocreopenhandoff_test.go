@@ -56,7 +56,7 @@ type reopenSession struct {
 // claim 照换歌拍：reset、写入，在线取词成功后存在线原始行、按已接受的结果（刚换歌即在线、偏移 0）折算。
 func (s *reopenSession) claim(k songKey) {
 	s.key = k
-	s.st.reset(k.gen)
+	s.st.reset(k.gen, false, time.Time{})
 	s.r.Submit(k)
 	s.st.setOnlineRaw(shiftFixture())
 	s.st.refresh(k.hasIDs(), stateOffsetSec)

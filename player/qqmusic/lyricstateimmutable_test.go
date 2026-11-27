@@ -6,6 +6,7 @@ package qqmusic
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"Metabox-Nexus-PlayerCap/player"
 )
@@ -15,7 +16,7 @@ import (
 func TestLyricStateOnlineRawUntouched(t *testing.T) {
 	raw := shiftFixture()
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(raw)
 	applyWant(t, &s, onlineRes(1, -1000), true, true, onlineDelayed1s...)
 	applyWant(t, &s, onlineRes(1, 500), true, true, onlineAdvanced500...)
@@ -40,7 +41,7 @@ func TestLyricStateResultLinesUntouched(t *testing.T) {
 	for _, src := range []lyricSource{srcAssoc, srcLocal} {
 		lines := assocFixture("A")
 		var s lyricState
-		s.reset(1)
+		s.reset(1, false, time.Time{})
 		applyWant(t, &s, desiredRes(1, src, -2000, lines, "A"), src == srcAssoc, true, assocADelayed2s...)
 		applyWant(t, &s, desiredRes(1, src, 0, lines, "A"), src == srcAssoc, true, assocA0...)
 		if !reflect.DeepEqual(lines, assocFixture("A")) {
@@ -62,7 +63,7 @@ func TestLyricStateFuriganaImmutable(t *testing.T) {
 	raw[0].Furigana = player.LyricFurigana{{Text: "心", Ruby: "こころ"}, {Text: "の"}}
 
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(raw)
 
 	// 篡改传给 setOnlineRaw 的入参切片。
@@ -83,7 +84,7 @@ func TestLyricStateFuriganaImmutable(t *testing.T) {
 		lines := assocFixture("F")
 		lines[0].Furigana = player.LyricFurigana{{Text: "心", Ruby: "こころ"}, {Text: "の"}}
 		var st lyricState
-		st.reset(1)
+		st.reset(1, false, time.Time{})
 		got1, ch := st.apply(desiredRes(1, src, -2000, lines, "F"), src == srcAssoc, stateOffsetSec)
 		if !ch || !reflect.DeepEqual(got1[0].Furigana, want) {
 			t.Fatalf("source %d 首次 apply：changed=%v Furigana=%#v，want %#v", src, ch, got1[0].Furigana, want)

@@ -155,8 +155,10 @@ const (
 // 残差 ±0.3s（换歌那一瞬间的界面延迟无法从外部测准）由 spotify-offset 吸收；默认 -200 经项目负责人确认正合适，不单独对齐。
 //
 // **别把这条校正搬到时钟里**：它只作用于"读数 → 位置"这一步（见 posConverter）。
-// 暂停态读数不含超前；恢复播放后、页面刷出新有效读数前读到的仍是暂停态残留值，须继续沿用无超前口径，
-// 直到页面刷出新的有效读数再切回减 progressLeadSec，否则恢复首拍会把位置拽回 1 秒。
+// 读数是否带 1s 动画超前量取决于页面写出该读数时的播放态，而不只看当拍按钮图标：
+// 暂停态读数不含超前，恢复播放后至页面刷出新有效读数前继续沿用无超前口径，避免恢复首拍拽回 1 秒；
+// 反向地，在图标可信的播放态读到含超前读数后，点击暂停当拍若进度条尚未回落仍为同一原始值，
+// 继续按含超前减 progressLeadSec 输出，直到页面回落或拖动改写读数，避免暂停当拍虚高 1 秒。
 //
 // 播放倍速（`spotify_cli speed`）非 1x 时这条常数会失准（动画 1 秒覆盖的内容长度随倍速变），
 // 未实测，故不猜。
@@ -226,6 +228,23 @@ func classifyTrack(title string, durationMs float64, playing bool) trackPresence
 		return trackUnnamed
 	}
 	return trackAbsent
+}
+
+// shouldWarnUnknownIcon 报告本拍是否应触发每会话一次的「播放/暂停图标不认识」告警。
+func shouldWarnUnknownIcon(snap *cdp.Snapshot, playingSeen bool) bool {
+	if snap == nil {
+		return false
+	}
+	if _, known := snap.Playing(); known {
+		return false
+	}
+	if snap.State == "missing" {
+		// 冷启动页面尚未挂载底栏时按钮不存在且无曲目（classifyTrack == trackAbsent），不误报；
+		// 一旦页面已有歌名、有效时长或已观测到位置推进（playingSeen，不含会话首样本），
+		// 仍找不到播放按钮（选择器可能已变更），照常告警。
+		return classifyTrack(snap.Title, snap.DurationMs, playingSeen) != trackAbsent
+	}
+	return true
 }
 
 // preAnnounceStatus 是本会话还没宣告过歌时、非 trackNamed 的拍要声明的状态（设计 4.3 第 2、6 条）；trackNamed 返回 nil，
@@ -583,7 +602,7 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 		playing, iconKnown := snap.Playing()
 		playingSeen := playing
 		if !iconKnown {
-			// 图标常量不认识（Spotify 换了图标/结构）：退回「位置有没有在推进」。
+			// 图标常量不认识或按钮尚未挂载：退回「位置有没有在推进」。
 			moved := lastPositionMs >= 0 && snap.PositionMs != lastPositionMs
 			if moved {
 				lastAdvanceAt = now
@@ -594,7 +613,7 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 			lastPositionMs = snap.PositionMs
 			playing = !lastMoveAt.IsZero() && now.Sub(lastMoveAt) < stallWindow
 			playingSeen = !lastAdvanceAt.IsZero() && now.Sub(lastAdvanceAt) < stallWindow
-			if !unknownIconWarned {
+			if !unknownIconWarned && shouldWarnUnknownIcon(snap, playingSeen) {
 				unknownIconWarned = true
 				log.Warn("play/pause icon not recognised; falling back to position-advance detection")
 			}
@@ -619,10 +638,10 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 		durationSec := float32(snap.DurationMs) / 1000.0
 		rawSec := float32(snap.PositionMs) / 1000.0
 
-		// 页面读数 → 真实位置：播放中减掉进度条的动画超前量（见 progressLeadSec / posConverter）；
-		// 暂停态读数不含超前，恢复播放后至页面刷出新有效读数前继续沿用无超前口径。
+		// 页面读数 → 真实位置：双向沿用读数写出时的播放态口径（见 progressLeadSec / posConverter），
+		// 避免恢复首拍倒退 1 秒与暂停当拍虚高 1 秒。
 		isNewSong := songKey != lastSongKey
-		posSec, stalePos, clamped := posConv.convertTick(rawSec, durationSec, playing, isNewSong, lastSongKey == "")
+		posSec, stalePos, clamped := posConv.convertTick(rawSec, durationSec, playing, iconKnown, isNewSong, lastSongKey == "")
 
 		// ── 换歌检测（歌名 + 歌手归一化后的稳定键）──
 		if isNewSong {
@@ -635,7 +654,7 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 			retry.stop()
 			clk.reset()
 
-			// 换歌时页面的位置读数（见 trackStartGraceSec）：convertTick 已在超限时夹零并复位无超前状态。
+			// 换歌时页面的位置读数（见 trackStartGraceSec）：convertTick 已在超限时夹零并复位换算状态。
 			if clamped {
 				log.Detail("position %.2fs right after the song change looks stale; anchoring at 0", stalePos)
 			}
@@ -1038,13 +1057,20 @@ func truePositionSec(rawSec float32, playing bool) float32 {
 
 // posConverter 把页面 `--progress-bar-transform` 换算出的秒数转为真实播放位置。
 //
-// 暂停态下页面的读数不含 1s 动画超前量；恢复播放后、页面下一次刷新该读数之前，
-// 轮询读到的仍是暂停态留下的同一个原始值，继续按无超前原样输出，使 clock 识别为
-// 「采样未变、仅播放态切换（stateChanged && !rawChanged）」并从冻结位置平滑外推。
-// 只在 runSession 的轮询 goroutine 内调用，不加锁。
+// 读数是否带 1s 动画超前量取决于页面写出它时的播放态，而不只看当拍按钮图标：
+//   - 暂停态读数不含超前（hasUnled / unledRaw）：恢复播放后、页面刷出新有效读数前读到的仍是同一原始值，
+//     继续按无超前原样输出，使 clock 识别为「采样未变、仅播放态切换（stateChanged && !rawChanged）」并从冻结位置平滑外推；
+//   - 图标可信的播放态读数含 +1s 超前（hasLed / ledRaw）：点击暂停后按钮先翻为 paused、进度条约 10~14ms
+//     后才回落真实位置，滞后期间读到同一原始值继续减 progressLeadSec 输出，直到页面回落或暂停中拖动改写读数。
+//     以 iconKnown 门控 hasLed：退回 stallWindow（2.5s）判暂停时读数已静止 2.5s、早越过回落窗口，
+//     此时静止读数本身就是无超前的真实暂停位置，不得沿用 hasLed。
+//
+// 不变量：同一时刻 hasUnled 与 hasLed 至多一个为真。只在 runSession 的轮询 goroutine 内调用，不加锁。
 type posConverter struct {
 	hasUnled bool
 	unledRaw float32
+	hasLed   bool
+	ledRaw   float32
 }
 
 func (c *posConverter) reset() {
@@ -1053,14 +1079,18 @@ func (c *posConverter) reset() {
 
 // convert 返回本拍换算后的位置（秒）。durationSec 用于与 clockRaw 同口径过滤非法读数：
 // NaN、负数或超长读数不改变已记录采样的口径，原样返回交由后续 clockRaw 统一判 -1。
-func (c *posConverter) convert(rawSec, durationSec float32, playing bool) float32 {
+func (c *posConverter) convert(rawSec, durationSec float32, playing, iconKnown bool) float32 {
 	if !(rawSec >= 0) {
 		return rawSec
 	}
 	if !playing {
+		if iconKnown && c.hasLed && rawSec == c.ledRaw {
+			return truePositionSec(rawSec, true)
+		}
 		if durationSec > 0 && rawSec > durationSec*1.05 {
 			return rawSec
 		}
+		c.hasLed = false
 		c.hasUnled = true
 		c.unledRaw = rawSec
 		return rawSec
@@ -1073,16 +1103,22 @@ func (c *posConverter) convert(rawSec, durationSec float32, playing bool) float3
 		return pos
 	}
 	c.hasUnled = false
+	if iconKnown {
+		c.hasLed = true
+		c.ledRaw = rawSec
+	} else {
+		c.hasLed = false
+	}
 	return pos
 }
 
 // convertTick 按本拍是否换歌执行换歌复位、位置换算与跨歌残留夹零，供 runSession 与离线单测共用。
 // clamped 为真时，返回的 posSec 已夹为 0，stalePos 为夹零前的换算值（供日志输出）。
-func (c *posConverter) convertTick(rawSec, durationSec float32, playing, isNewSong, firstSong bool) (posSec, stalePos float32, clamped bool) {
+func (c *posConverter) convertTick(rawSec, durationSec float32, playing, iconKnown, isNewSong, firstSong bool) (posSec, stalePos float32, clamped bool) {
 	if isNewSong {
 		c.reset()
 	}
-	posSec = c.convert(rawSec, durationSec, playing)
+	posSec = c.convert(rawSec, durationSec, playing, iconKnown)
 	if isNewSong && !firstSong && posSec > trackStartGraceSec {
 		c.reset()
 		return 0, posSec, true

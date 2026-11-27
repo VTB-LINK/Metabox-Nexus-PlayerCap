@@ -262,6 +262,7 @@ audio-normalize: "false"
 audio-normalize-target: [-14]
 audio-normalize-max-gain: {gain: 30}
 audio-frame-rate: "30"
+song-info-keep-first: "false"
 cloudmusicv3-effect-strategy: 1
 zzyaml-offset: "0"
 zzyaml-poll: fast
@@ -281,6 +282,7 @@ zzyaml-audio-normalize: 0
 		"audio-normalize-target":       []any{-14},
 		"audio-normalize-max-gain":     map[string]any{"gain": 30},
 		"audio-frame-rate":             "30",
+		"song-info-keep-first":         "false",
 		"cloudmusicv3-effect-strategy": 1,
 		"zzyaml-offset":                "0",
 		"zzyaml-poll":                  "fast",
@@ -301,6 +303,7 @@ zzyaml-audio-normalize: 0
 		cfg.PriorPlayerExpire != def.PriorPlayerExpire || cfg.PerPlayerIdleHide != def.PerPlayerIdleHide ||
 		cfg.AudioNormalize != def.AudioNormalize || cfg.AudioNormalizeTarget != def.AudioNormalizeTarget ||
 		cfg.AudioNormalizeMaxGain != def.AudioNormalizeMaxGain || cfg.AudioFrameRate != def.AudioFrameRate ||
+		cfg.SongInfoKeepFirst != def.SongInfoKeepFirst ||
 		cfg.EffectStrategy != def.EffectStrategy || !reflect.DeepEqual(cfg.Players[player], &PlayerConfig{}) {
 		t.Errorf("被拒的键不该改动运行值: %+v（%s: %+v）", cfg, player, cfg.Players[player])
 	}

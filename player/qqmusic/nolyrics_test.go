@@ -16,56 +16,68 @@ import (
 	"Metabox-Nexus-PlayerCap/player"
 )
 
-// TestEmitNoLyrics 钉死两条事件的内容、顺序与位置口径。
+// TestEmitNoLyrics 钉死两条事件的内容、顺序、位置口径与提示语透传（#116、#231）。
 //
 // 顺序是承重的：服务端收到 all_lyrics 时会清掉缓存的 lyric_update（server.go 的 UpdatePlayerState），
 // index:-1 必须排在它之后才留得住，中途连入的客户端才拿得到。
 //
 // 变异自证：调换两条的发送顺序、把 Lyrics 换成 nil、删掉 lyric_update 里的 Progress、
-// 把 Index 改成 0，各自变红。
+// 把 Index 改成 0、忽略 hint 传空串，各自变红。
 func TestEmitNoLyrics(t *testing.T) {
-	p := New(0, 500)
-	p.emitNoLyrics("某歌 - 某人", 215.5, 12.25, 0.0568)
-
-	var got []player.Event
-	for len(p.EventCh) > 0 {
-		got = append(got, <-p.EventCh)
-	}
-	if len(got) != 2 {
-		t.Fatalf("应发出 2 条事件，实得 %d 条: %+v", len(got), got)
-	}
-	if got[0].Type != player.EventAllLyrics || got[1].Type != player.EventLyricUpdate {
-		t.Fatalf("顺序应为 all_lyrics → lyric_update，实得 %s → %s", got[0].Type, got[1].Type)
+	cases := []struct {
+		name string
+		hint string
+	}{
+		{"无提示语时 Text 为空串", ""},
+		{"有平台提示语时 Text 原样保留", "此歌曲为没有填词的纯音乐，请您欣赏"},
 	}
 
-	all, ok := got[0].Data.(*player.AllLyricsData)
-	if !ok {
-		t.Fatalf("all_lyrics 的 Data 类型不对: %T", got[0].Data)
-	}
-	if all.Title != "某歌 - 某人" || all.Duration != 215.5 || all.Position != 12.25 || all.Progress != 0.0568 || all.Count != 0 {
-		t.Errorf("all_lyrics 内容不对: %+v", all)
-	}
-	if all.Lyrics == nil || len(all.Lyrics) != 0 {
-		t.Errorf("all_lyrics.Lyrics 应为显式空 slice，实得 %#v", all.Lyrics)
-	}
-	b, err := json.Marshal(all)
-	if err != nil {
-		t.Fatalf("all_lyrics 序列化失败: %v", err)
-	}
-	if !strings.Contains(string(b), `"lyrics":[]`) || strings.Contains(string(b), `"lyrics":null`) {
-		t.Errorf("all_lyrics 应序列化出 \"lyrics\":[]，实得 %s", b)
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := New(0, 500)
+			p.emitNoLyrics("某歌 - 某人", 215.5, 12.25, 0.0568, c.hint)
 
-	lu, ok := got[1].Data.(*player.LyricUpdate)
-	if !ok {
-		t.Fatalf("lyric_update 的 Data 类型不对: %T", got[1].Data)
-	}
-	if lu.Index != -1 || lu.Text != "" || lu.SubText != "" || lu.Timestamp != 0 {
-		t.Errorf("lyric_update 应为 index:-1 且文本全空，实得 %+v", lu)
-	}
-	if lu.Position != all.Position || lu.Progress != all.Progress {
-		t.Errorf("lyric_update 的 position/progress 应与 all_lyrics 同值（%v/%v），实得 %v/%v",
-			all.Position, all.Progress, lu.Position, lu.Progress)
+			var got []player.Event
+			for len(p.EventCh) > 0 {
+				got = append(got, <-p.EventCh)
+			}
+			if len(got) != 2 {
+				t.Fatalf("应发出 2 条事件，实得 %d 条: %+v", len(got), got)
+			}
+			if got[0].Type != player.EventAllLyrics || got[1].Type != player.EventLyricUpdate {
+				t.Fatalf("顺序应为 all_lyrics → lyric_update，实得 %s → %s", got[0].Type, got[1].Type)
+			}
+
+			all, ok := got[0].Data.(*player.AllLyricsData)
+			if !ok {
+				t.Fatalf("all_lyrics 的 Data 类型不对: %T", got[0].Data)
+			}
+			if all.Title != "某歌 - 某人" || all.Duration != 215.5 || all.Position != 12.25 || all.Progress != 0.0568 || all.Count != 0 {
+				t.Errorf("all_lyrics 内容不对: %+v", all)
+			}
+			if all.Lyrics == nil || len(all.Lyrics) != 0 {
+				t.Errorf("all_lyrics.Lyrics 应为显式空 slice，实得 %#v", all.Lyrics)
+			}
+			b, err := json.Marshal(all)
+			if err != nil {
+				t.Fatalf("all_lyrics 序列化失败: %v", err)
+			}
+			if !strings.Contains(string(b), `"lyrics":[]`) || strings.Contains(string(b), `"lyrics":null`) {
+				t.Errorf("all_lyrics 应序列化出 \"lyrics\":[]，实得 %s", b)
+			}
+
+			lu, ok := got[1].Data.(*player.LyricUpdate)
+			if !ok {
+				t.Fatalf("lyric_update 的 Data 类型不对: %T", got[1].Data)
+			}
+			if lu.Index != -1 || lu.Text != c.hint || lu.SubText != "" || lu.Timestamp != 0 {
+				t.Errorf("lyric_update 应为 index:-1、Text=%q 且其余文本全空，实得 %+v", c.hint, lu)
+			}
+			if lu.Position != all.Position || lu.Progress != all.Progress {
+				t.Errorf("lyric_update 的 position/progress 应与 all_lyrics 同值（%v/%v），实得 %v/%v",
+					all.Position, all.Progress, lu.Position, lu.Progress)
+			}
+		})
 	}
 }
 

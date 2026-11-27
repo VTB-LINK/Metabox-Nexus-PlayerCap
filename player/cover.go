@@ -1,7 +1,9 @@
 package player
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -18,7 +20,14 @@ import (
 var coverLog = logger.New("Cover")
 
 // FetchCoverBase64 下载封面图片，经 CoverDataURI 规范为 800×800 后返回 data URI。
-// playerName 用于日志前缀标识调用来源；timeout 控制 HTTP 下载超时，超时则返回空字符串（不阻塞主流程）。
+// 等价于使用 context.Background() 调用 FetchCoverBase64Context。
+func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration) string {
+	return FetchCoverBase64Context(context.Background(), playerName, coverURL, timeout)
+}
+
+// FetchCoverBase64Context 下载封面图片，经 CoverDataURI 规范为 800×800 后返回 data URI。
+// ctx 用于中止在途下载（为 nil 时按 context.Background() 处理）；playerName 用于日志前缀标识调用来源；
+// timeout 控制 HTTP 下载超时，超时或出错则返回空字符串（不阻塞主流程）。
 //
 // SSRF 加固（issue #12）：只接受 http/https scheme；并在拨号回调里对「实际要连的 IP」拒绝
 // 回环/内网/链路本地/unspecified 地址。校验落在 DNS 解析之后、connect 之前，对每个候选 IP 逐一
@@ -27,8 +36,15 @@ var coverLog = logger.New("Cover")
 // 经代理会绕过下面的内网 IP 校验。
 //
 // 下载失败时记一条 Detail，写明原因（错误、HTTP 状态码、超限或不完整），返回值不变（#199）。
-func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration) string {
+// 调用方经 ctx 主动取消（context.Canceled）时静默返回空串，不记 Detail 日志；超时与其他网络错误照常记 Detail（#168）。
+func FetchCoverBase64Context(ctx context.Context, playerName string, coverURL string, timeout time.Duration) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if coverURL == "" {
+		return ""
+	}
+	if ctx.Err() == context.Canceled {
 		return ""
 	}
 
@@ -42,7 +58,7 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 	// （Transport 默认没有空闲超时，Body.Close 与 Client.Timeout 都不清理空闲连接）。
 	client := newCoverClient(timeout)
 	defer client.CloseIdleConnections()
-	req, err := http.NewRequest(http.MethodGet, coverURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
 	if err != nil {
 		coverLog.Detail("[%s] cover download failed: %v", playerName, err)
 		return ""
@@ -52,6 +68,9 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() == context.Canceled && errors.Is(err, context.Canceled) {
+			return ""
+		}
 		coverLog.Detail("[%s] cover download failed: %v", playerName, err)
 		return ""
 	}
@@ -66,7 +85,13 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 	const maxSize = 5 * 1024 * 1024
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
+		if ctx.Err() == context.Canceled && errors.Is(err, context.Canceled) {
+			return ""
+		}
 		coverLog.Detail("[%s] cover download failed while reading: %v: %s", playerName, err, coverURL)
+		return ""
+	}
+	if ctx.Err() == context.Canceled {
 		return ""
 	}
 	if int64(len(body)) > maxSize {

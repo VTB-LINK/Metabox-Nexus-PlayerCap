@@ -65,13 +65,13 @@ const pageURLMarker = "xpui.app.spotify.com"
 // iconPlayingPrefix / iconPausedPrefix 是播放/暂停按钮里那个 svg path 的开头（Encore 图标，语言无关）。
 //
 // 按钮显示的是「点一下会做什么」：**正在播放时显示暂停图标**（两根竖条），暂停时显示播放三角。
-// 完整 d（实测 1.3.4.258，viewBox 0 0 16 16）：
+// 完整 d（实测 1.3.4.258、1.3.10.2586 逐字节一致，viewBox 0 0 16 16）：
 //
 //	playing: M2.7 1a.7.7 0 0 0-.7.7v12.6a.7.7 0 0 0 .7.7h2.6a.7.7 0 0 0 .7-.7V1.7a.7.7 0 0 0-.7-.7zm8 0a.7.7 0 0 0-.7.7v12.6a.7.7 0 0 0 .7.7h2.6a.7.7 0 0 0 .7-.7V1.7a.7.7 0 0 0-.7-.7z
 //	paused:  M3 1.713a.7.7 0 0 1 1.05-.607l10.89 6.288a.7.7 0 0 1 0 1.212L4.05 14.894A.7.7 0 0 1 3 14.288z
 //
-// 只取开头就够（足以区分），也让内嵌 JS 小得多。两条都对不上时 state 为 unknown，
-// 由上层退回「位置有没有在推进」的判据（见 Snapshot.PlayingKnown）。
+// 只取开头就够（足以区分），也让内嵌 JS 小得多。按钮尚未挂载时 state 为 missing，按钮已挂载但两条都对不上
+// （或无 <path>）时 state 为 unknown，由上层退回「位置有没有在推进」的判据（见 Snapshot.Playing）。
 const (
 	iconPlayingPrefix = "M2.7 1a.7.7 0 0 0-.7.7v12.6"
 	iconPausedPrefix  = "M3 1.713a.7.7 0 0 1 1.05-.607l10.89"
@@ -93,10 +93,10 @@ type Snapshot struct {
 	Cover      string   `json:"cover"`
 	DurationMs float64  `json:"durationMs"`
 	PositionMs float64  `json:"positionMs"`
-	State      string   `json:"state"` // playing / paused / unknown
+	State      string   `json:"state"` // playing / paused / unknown / missing
 }
 
-// Playing 返回播放态与它是否可信（false = 图标不认识，上层用位置推进兜底）。
+// Playing 返回播放态与它是否可信（false = 按钮未挂载或图标不认识，上层用位置推进兜底）。
 func (s *Snapshot) Playing() (playing bool, known bool) {
 	switch s.State {
 	case "playing":
@@ -576,8 +576,8 @@ func snapshotJS() string {
 		"if(bar){var st=bar.getAttribute('style')||'';" +
 		"var m=st.match(/--progress-bar-transform:\\s*([0-9.]+)%/);" +
 		"if(m&&durationMs>0){positionMs=parseFloat(m[1])*durationMs/100;}}" +
-		"var state='unknown';var btn=q('[data-testid=\"control-button-playpause\"]');" +
-		"if(btn){var p=btn.querySelector('svg path');var d=p?(p.getAttribute('d')||''):'';" +
+		"var state='missing';var btn=q('[data-testid=\"control-button-playpause\"]');" +
+		"if(btn){state='unknown';var p=btn.querySelector('svg path');var d=p?(p.getAttribute('d')||''):'';" +
 		"if(d.indexOf(" + strconv.Quote(iconPlayingPrefix) + ")===0){state='playing';}" +
 		"else if(d.indexOf(" + strconv.Quote(iconPausedPrefix) + ")===0){state='paused';}}" +
 		"return JSON.stringify({ok:true,err:'',title:title,artists:artists,cover:cover," +

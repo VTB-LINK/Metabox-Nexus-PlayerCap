@@ -3,6 +3,7 @@ package qqmusic
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -625,6 +626,10 @@ type QQMusicMem struct {
 	version        string     // 检测到的 QQ 音乐版本号，如 "22.16"
 	offsets        dllOffsets // 当前版本的偏移量
 	fallbackTo     string     // 非空=version 无偏移表、按 nearestKnownVersion 回退到的版本；用于上报歌名样本判断赌对没有
+
+	// 仅离线用例注入，生产恒为 nil。
+	checkValidFn func() bool
+	readMetaFn   func() (*SongMetadata, error)
 }
 
 // Close 关闭进程句柄并置 0；可重复调用，对 nil 或未持有句柄的实例无操作。
@@ -638,7 +643,13 @@ func (m *QQMusicMem) Close() {
 }
 
 func (m *QQMusicMem) CheckValid() bool {
-	if m == nil || m.hProcess == 0 {
+	if m == nil {
+		return false
+	}
+	if m.checkValidFn != nil {
+		return m.checkValidFn()
+	}
+	if m.hProcess == 0 {
 		return false
 	}
 	var exitCode uint32
@@ -721,10 +732,23 @@ func probeQQMusicModules(hProcess windows.Handle) (dllBase, gfBase uintptr, gfSi
 	return dllBase, gfBase, gfSize, k32Base, found
 }
 
-func attachQQMusicPID(pid uint32, ops attachOps) *QQMusicMem {
+var (
+	// ConnectQQMusic / attachQQMusic 错误分类哨兵（#231）：供外层循环按进程层次合成非歌名状态。
+	errQQMusicNotRunning     = i18n.Sentinel("QQMusic.exe not found")
+	errQQMusicAccessDenied   = i18n.Sentinel("cannot open QQMusic.exe process (access denied)")
+	errQQMusicModuleNotReady = i18n.Sentinel("QQMusic.dll not found in any QQMusic.exe process")
+
+	// connectQQMusic 是 ConnectQQMusic 的底层入口，离线用例替换它以驱动 Start。
+	connectQQMusic = connectQQMusicProcess
+)
+
+func attachQQMusicPID(pid uint32, ops attachOps) (*QQMusicMem, error) {
 	h, err := ops.openProcess(pid)
-	if err != nil || h == 0 {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if h == 0 {
+		return nil, nil
 	}
 	keep := false
 	defer func() {
@@ -735,7 +759,7 @@ func attachQQMusicPID(pid uint32, ops attachOps) *QQMusicMem {
 
 	dllBase, gfBase, gfSize, k32Base, found := ops.probeModules(h)
 	if !found {
-		return nil
+		return nil, nil
 	}
 
 	mem := &QQMusicMem{
@@ -749,20 +773,28 @@ func attachQQMusicPID(pid uint32, ops attachOps) *QQMusicMem {
 	// 检测版本并加载偏移表
 	ops.detectVersion(mem)
 	keep = true
-	return mem
+	return mem, nil
 }
 
 func attachQQMusic(pids []uint32, ops attachOps) (*QQMusicMem, error) {
+	sawAccessDenied := false
 	for _, pid := range pids {
-		if mem := attachQQMusicPID(pid, ops); mem != nil {
+		mem, err := attachQQMusicPID(pid, ops)
+		if mem != nil {
 			return mem, nil
 		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			sawAccessDenied = true
+		}
 	}
-	return nil, i18n.Errorf("QQMusic.dll not found in any QQMusic.exe process")
+	if sawAccessDenied {
+		return nil, errQQMusicAccessDenied
+	}
+	return nil, errQQMusicModuleNotReady
 }
 
-func ConnectQQMusic() (*QQMusicMem, error) {
-	// 1. Find process ID
+// findQQMusicPIDs 枚举当前系统里所有 QQMusic.exe 的进程 ID。
+func findQQMusicPIDs() ([]uint32, error) {
 	hSnap, _, _ := procCreateToolhelp32.Call(uintptr(TH32CS_SNAPPROCESS), 0)
 	if hSnap == uintptr(syscall.InvalidHandle) {
 		return nil, i18n.Errorf("CreateToolhelp32Snapshot failed")
@@ -781,12 +813,28 @@ func ConnectQQMusic() (*QQMusicMem, error) {
 		}
 		ret, _, _ = procProcess32Next.Call(hSnap, uintptr(unsafe.Pointer(&pe32)))
 	}
+	return pids, nil
+}
 
-	if len(pids) == 0 {
-		return nil, i18n.Errorf("QQMusic.exe not found")
+// isQQMusicRunning 报告当前是否至少有一个 QQMusic.exe 进程在运行。
+func isQQMusicRunning() bool {
+	pids, err := findQQMusicPIDs()
+	return err == nil && len(pids) > 0
+}
+
+func connectQQMusicProcess() (*QQMusicMem, error) {
+	pids, err := findQQMusicPIDs()
+	if err != nil {
+		return nil, err
 	}
-
+	if len(pids) == 0 {
+		return nil, errQQMusicNotRunning
+	}
 	return attachQQMusic(pids, defaultAttachOps)
+}
+
+func ConnectQQMusic() (*QQMusicMem, error) {
+	return connectQQMusic()
 }
 
 // detectVersion 从 QQMusic.exe 的 PE 版本资源中提取版本号并匹配偏移表
@@ -1593,6 +1641,9 @@ func extractSongMid(data []byte, durationMs uint32) string {
 }
 
 func (m *QQMusicMem) ReadAllMetadata() (*SongMetadata, error) {
+	if m.readMetaFn != nil {
+		return m.readMetaFn()
+	}
 	if m.hProcess == 0 || m.qqmusicDllBase == 0 {
 		return nil, i18n.Errorf("process not attached")
 	}

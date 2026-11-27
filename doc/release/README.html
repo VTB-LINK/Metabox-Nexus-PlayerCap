@@ -669,7 +669,7 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <ul>
 <li>参数的名字与 <code>config.yml</code> 中的设置项相同，前面加 <code>-</code>，如 <code>-offset</code>、<code>-kugou-offset</code>。在命令提示符中运行 <code>Metabox-Nexus-PlayerCap.exe -h</code> 可列出全部参数。</li>
 <li>写作 <code>-参数 值</code> 或 <code>-参数=值</code>，如 <code>-poll 50</code>；负值照写，如 <code>-offset -200</code> 或 <code>-offset=-200</code>。</li>
-<li>开关类参数（<code>-audio-normalize</code>、<code>-名字-audio-normalize</code>）只写参数名即为开，写作 <code>-参数 false</code> 或 <code>-参数=false</code> 为关。</li>
+<li>开关类参数（<code>-audio-normalize</code>、<code>-song-info-keep-first</code>、<code>-名字-audio-normalize</code>）只写参数名即为开，写作 <code>-参数 false</code> 或 <code>-参数=false</code> 为关。</li>
 <li>优先播放器写作以逗号分隔的列表，如 <code>-prior-player wesing,kugou</code>；写作 <code>-prior-player ""</code> 为不设优先播放器。</li>
 <li>参数名写错，或有不属于任何参数的词（如漏了横线的 <code>offset -200</code>）时，本程序报错并列出全部参数后退出，不会忽略。</li>
 <li>4.0 起 offset 的方向与 3.x 相反。升级时 <code>config.yml</code> 中的值会自动换算，写在快捷方式或脚本中的 <code>-offset</code>、<code>-名字-offset</code> 不会换算，须自行改为相反数。</li>
@@ -698,7 +698,7 @@ The online v3 is a frozen copy of the 3.x pages. It takes the same parameters as
 <ul>
 <li>Options have the same names as the settings in <code>config.yml</code>, preceded by <code>-</code>, such as <code>-offset</code> and <code>-kugou-offset</code>. Run <code>Metabox-Nexus-PlayerCap.exe -h</code> in Command Prompt to list all options.</li>
 <li>Write <code>-option value</code> or <code>-option=value</code>, such as <code>-poll 50</code>; negative values are written as they are, such as <code>-offset -200</code> or <code>-offset=-200</code>.</li>
-<li>Switches (<code>-audio-normalize</code>, <code>-name-audio-normalize</code>) are turned on by the option name alone, and off by <code>-option false</code> or <code>-option=false</code>.</li>
+<li>Switches (<code>-audio-normalize</code>, <code>-song-info-keep-first</code>, <code>-name-audio-normalize</code>) are turned on by the option name alone, and off by <code>-option false</code> or <code>-option=false</code>.</li>
 <li>Priority players are a comma-separated list, such as <code>-prior-player wesing,kugou</code>; <code>-prior-player ""</code> means no priority player.</li>
 <li>If an option name is misspelled, or a word is not part of any option (such as <code>offset -200</code> without the dash), this program reports it, lists all options and exits; nothing is silently ignored.</li>
 <li>From 4.0 on, offset works in the opposite direction to 3.x. On upgrade the values in <code>config.yml</code> are converted automatically, but <code>-offset</code> and <code>-name-offset</code> written in a shortcut or script are not; change their sign yourself.</li>

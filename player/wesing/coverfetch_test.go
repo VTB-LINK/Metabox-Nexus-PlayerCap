@@ -5,8 +5,10 @@ package wesing
 // 元数据补读（#145，设计 §4.4「元数据补读」、§6），以及 PCM 模式按路径 mid 的补读（#146，设计 §3.5）。
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	stdlog "log"
 	"reflect"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/wesing/lyric"
 )
@@ -432,6 +435,9 @@ func TestCoverFetchBackfillRejectsPreviousSong(t *testing.T) {
 // 变异自证（实测）：补读只在宣告时没有歌手时回写（#146 之前的条件），没有那条带 A 歌手的回写、封面那条带着
 // B 的歌名与歌手而红。
 func TestCoverFetchBackfillCorrectsAnnouncedPreviousSong(t *testing.T) {
+	player.SetSongInfoKeepFirst(false)
+	t.Cleanup(func() { player.SetSongInfoKeepFirst(true) })
+
 	p := newTestPlayer()
 	gen := p.NewSongGen()
 	l := &opLog{}
@@ -593,6 +599,9 @@ func TestCoverFetchBackfillSingerByMID(t *testing.T) {
 // 变异自证（实测）：不拿空歌手覆盖（回写条件加上「补读的歌手非空」）：「歌手为空」没有清空的回写、封面那条带着
 // 宣告时的歌手而红；回写条件只看歌名（不看歌手）：两例都没有第一条回写、封面那条带着宣告时的歌手而红。
 func TestCoverFetchBackfillOverridesUnverifiedSinger(t *testing.T) {
+	player.SetSongInfoKeepFirst(false)
+	t.Cleanup(func() { player.SetSongInfoKeepFirst(true) })
+
 	title := bfWindow + " - 宣告时的歌手"
 	for _, c := range []struct {
 		name   string
@@ -952,4 +961,393 @@ func TestSongMetaFallback(t *testing.T) {
 			t.Errorf("%s：查询 %s，want %s", c.name, got, c.calls)
 		}
 	}
+}
+
+// ===== 同一次宣告内保持标题与歌名歌手取舍（#229，设计 §6.3、§6.6、§9.4、§10）=====
+
+func captureCoverLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	w := stdlog.Writer()
+	stdlog.SetOutput(&buf)
+	t.Cleanup(func() { stdlog.SetOutput(w) })
+	return &buf
+}
+
+func setWesingKeepFirst(t *testing.T, on bool) {
+	t.Helper()
+	player.SetSongInfoKeepFirst(on)
+	t.Cleanup(func() { player.SetSongInfoKeepFirst(true) })
+}
+
+func countWesingDetailLog(logs, body string) int {
+	n := 0
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "[+]") && strings.Contains(line, body) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCoverFetchSongInfoKeepFirst 钉住 wesing 兜底补读与 PCM 补读的字段取舍、标题保持与 Detail 日志（W1–W8）。
+//
+// 变异自证（隔离临时目录实测，均变红）：
+//   - 兜底补读不经 SupplementField（直接用 info.Name、info.Singer）→ W2、W3 红；
+//   - PCM 补读不经 SupplementField（直接用 info.Name、info.Singer）→ W5 红；
+//   - 兜底补读取舍后不比较 nn/ns、仍按 info.Name != name || info.Singer != singer 回写 → W2、W3 红。
+func TestCoverFetchSongInfoKeepFirst(t *testing.T) {
+	const logFmt = "Song info read after the announcement: %s / %s; sent: %s / %s"
+
+	t.Run("W1_fallback_keep_fills_empty_singer", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		buf := captureCoverLog(t)
+		p := newTestPlayer()
+		gen := p.NewSongGen()
+		l := &opLog{}
+		ops := withInfo(fakeOps(l, 1, nil, nil), l, lyric.SongInfo{Mid: testMID, Name: bfWindow, Singer: "X"})
+
+		waitDone(t, p.startCoverFetch(ops, gen, testPID, bfWindow, "", bfWindow, "", bfWindow, "", false, false))
+
+		want := []string{
+			bfWindow + "|X|" + bfWindow + "||",
+			bfWindow + "|X|" + bfWindow + "|" + testCover + "|B64",
+		}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		wantLog := fmt.Sprintf(i18n.T(logFmt), bfWindow, "X", bfWindow, "X")
+		if n := countWesingDetailLog(buf.String(), wantLog); n != 1 {
+			t.Fatalf("应恰有 1 条 Detail 日志 %q，实得 %d 条；日志：\n%s", wantLog, n, buf.String())
+		}
+	})
+
+	t.Run("W2_fallback_keep_blocks_different_singer", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		buf := captureCoverLog(t)
+		p := newTestPlayer()
+		gen := p.NewSongGen()
+		l := &opLog{}
+		title := bfWindow + " - A"
+		ops := withInfo(fakeOps(l, 1, nil, nil), l, lyric.SongInfo{Mid: testMID, Name: bfWindow, Singer: "B"})
+
+		waitDone(t, p.startCoverFetch(ops, gen, testPID, bfWindow, "", bfWindow, "A", title, "", false, false))
+
+		want := []string{
+			bfWindow + "|A|" + title + "|" + testCover + "|B64",
+		}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		wantLog := fmt.Sprintf(i18n.T(logFmt), bfWindow, "B", bfWindow, "A")
+		if n := countWesingDetailLog(buf.String(), wantLog); n != 1 {
+			t.Fatalf("应恰有 1 条 Detail 日志 %q，实得 %d 条；日志：\n%s", wantLog, n, buf.String())
+		}
+	})
+
+	t.Run("W3_fallback_keep_blocks_empty_singer", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		buf := captureCoverLog(t)
+		p := newTestPlayer()
+		gen := p.NewSongGen()
+		l := &opLog{}
+		title := bfWindow + " - A"
+		ops := withInfo(fakeOps(l, 1, nil, nil), l, lyric.SongInfo{Mid: testMID, Name: bfWindow, Singer: ""})
+
+		waitDone(t, p.startCoverFetch(ops, gen, testPID, bfWindow, "", bfWindow, "A", title, "", false, false))
+
+		want := []string{
+			bfWindow + "|A|" + title + "|" + testCover + "|B64",
+		}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		wantLog := fmt.Sprintf(i18n.T(logFmt), bfWindow, "", bfWindow, "A")
+		if n := countWesingDetailLog(buf.String(), wantLog); n != 1 {
+			t.Fatalf("应恰有 1 条 Detail 日志 %q，实得 %d 条；日志：\n%s", wantLog, n, buf.String())
+		}
+	})
+
+	t.Run("W3b_fallback_same_value_no_detail_log", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		buf := captureCoverLog(t)
+		p := newTestPlayer()
+		gen := p.NewSongGen()
+		l := &opLog{}
+		title := bfWindow + " - A"
+		ops := withInfo(fakeOps(l, 1, nil, nil), l, lyric.SongInfo{Mid: testMID, Name: bfWindow, Singer: "A"})
+
+		waitDone(t, p.startCoverFetch(ops, gen, testPID, bfWindow, "", bfWindow, "A", title, "", false, false))
+
+		want := []string{
+			bfWindow + "|A|" + title + "|" + testCover + "|B64",
+		}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		prefix := strings.Split(i18n.T(logFmt), "%s")[0]
+		if n := countWesingDetailLog(buf.String(), prefix); n != 0 {
+			t.Fatalf("读数与基准相同时不应打 Detail 日志，实得 %d 条；日志：\n%s", n, buf.String())
+		}
+	})
+
+	t.Run("W4_fallback_off_overrides_or_clears_singer", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			singer string
+		}{
+			{"different_singer_B", "B"},
+			{"empty_singer", ""},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				setWesingKeepFirst(t, false)
+				buf := captureCoverLog(t)
+				p := newTestPlayer()
+				gen := p.NewSongGen()
+				l := &opLog{}
+				title := bfWindow + " - A"
+				ops := withInfo(fakeOps(l, 1, nil, nil), l, lyric.SongInfo{Mid: testMID, Name: bfWindow, Singer: c.singer})
+
+				waitDone(t, p.startCoverFetch(ops, gen, testPID, bfWindow, "", bfWindow, "A", title, "", false, false))
+
+				want := []string{
+					bfWindow + "|" + c.singer + "|" + title + "||",
+					bfWindow + "|" + c.singer + "|" + title + "|" + testCover + "|B64",
+				}
+				if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+					t.Fatalf("回写 %q，want %q", got, want)
+				}
+				wantLog := fmt.Sprintf(i18n.T(logFmt), bfWindow, c.singer, bfWindow, c.singer)
+				if n := countWesingDetailLog(buf.String(), wantLog); n != 1 {
+					t.Fatalf("应恰有 1 条 Detail 日志 %q，实得 %d 条；日志：\n%s", wantLog, n, buf.String())
+				}
+			})
+		}
+	})
+
+	t.Run("W5_pcm_keep_preserves_window_name_fills_singer", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		buf := captureCoverLog(t)
+		p := newTestPlayer()
+		gen := p.NewSongGen()
+		l := &opLog{}
+		rec := lyric.SongInfo{Mid: psMID, Name: "记录歌名", Singer: "X"}
+		ops := withAlbum(withByMID(pcmOps(l), l, rec), l, psAlbum)
+
+		waitDone(t, p.startCoverFetch(ops, gen, testPID, psWindow, psMID, psWindow, "", psWindow, "", true, true))
+
+		want := []string{
+			psWindow + "|X|" + psWindow + "||",
+			psWindow + "|X|" + psWindow + "|" + pcCover + "|B64",
+		}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		wantLog := fmt.Sprintf(i18n.T(logFmt), "记录歌名", "X", psWindow, "X")
+		if n := countWesingDetailLog(buf.String(), wantLog); n != 1 {
+			t.Fatalf("应恰有 1 条 Detail 日志 %q，实得 %d 条；日志：\n%s", wantLog, n, buf.String())
+		}
+	})
+
+	t.Run("W6_pcm_off_overrides_name_keeps_title", func(t *testing.T) {
+		setWesingKeepFirst(t, false)
+		buf := captureCoverLog(t)
+		p := newTestPlayer()
+		gen := p.NewSongGen()
+		l := &opLog{}
+		rec := lyric.SongInfo{Mid: psMID, Name: "记录歌名", Singer: "X"}
+		ops := withAlbum(withByMID(pcmOps(l), l, rec), l, psAlbum)
+
+		waitDone(t, p.startCoverFetch(ops, gen, testPID, psWindow, psMID, psWindow, "", psWindow, "", true, true))
+
+		want := []string{
+			"记录歌名|X|" + psWindow + "||",
+			"记录歌名|X|" + psWindow + "|" + pcCover + "|B64",
+		}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		wantLog := fmt.Sprintf(i18n.T(logFmt), "记录歌名", "X", "记录歌名", "X")
+		if n := countWesingDetailLog(buf.String(), wantLog); n != 1 {
+			t.Fatalf("应恰有 1 条 Detail 日志 %q，实得 %d 条；日志：\n%s", wantLog, n, buf.String())
+		}
+	})
+
+	t.Run("W7_pcm_keep_empty_window_name_fills_both_keeps_empty_title", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		p := newTestPlayer()
+		gen := p.NewSongGen()
+		l := &opLog{}
+		rec := lyric.SongInfo{Mid: psMID, Name: "记录歌名", Singer: "X"}
+		ops := withAlbum(withByMID(pcmOps(l), l, rec), l, psAlbum)
+
+		waitDone(t, p.startCoverFetch(ops, gen, testPID, "", psMID, "", "", "", "", true, true))
+
+		want := []string{
+			"记录歌名|X|||",
+			"记录歌名|X||" + pcCover + "|B64",
+		}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+	})
+
+	t.Run("W8_all_backfills_keep_announced_title", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			pcm    bool
+			keep   bool
+			singer string
+			title  string
+		}{
+			{"fallback_keep=true", false, true, "", "宣告兜底标题开"},
+			{"fallback_keep=false", false, false, "A", "宣告兜底标题关"},
+			{"pcm_keep=true", true, true, "", "宣告PCM标题开"},
+			{"pcm_keep=false", true, false, "", "宣告PCM标题关"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				setWesingKeepFirst(t, c.keep)
+				p := newTestPlayer()
+				gen := p.NewSongGen()
+				l := &opLog{}
+				if c.pcm {
+					rec := lyric.SongInfo{Mid: psMID, Name: "记录歌名", Singer: "X"}
+					ops := withAlbum(withByMID(pcmOps(l), l, rec), l, psAlbum)
+					waitDone(t, p.startCoverFetch(ops, gen, testPID, psWindow, psMID, psWindow, c.singer, c.title, "", true, true))
+				} else {
+					ops := withInfo(fakeOps(l, 1, nil, nil), l, lyric.SongInfo{Mid: testMID, Name: bfWindow, Singer: "B"})
+					waitDone(t, p.startCoverFetch(ops, gen, testPID, bfWindow, "", bfWindow, c.singer, c.title, "", false, false))
+				}
+				evts := drainEvents(p)
+				if len(evts) == 0 {
+					t.Fatal("至少应有一条 song_info_update 回写")
+				}
+				for i, e := range evts {
+					if e.Type != player.EventSongInfoUpdate {
+						t.Fatalf("第 %d 条不是 song_info_update：%s", i, e.Type)
+					}
+					info := e.Data.(*player.SongInfo)
+					if info.Title != c.title {
+						t.Fatalf("第 %d 条回写 title = %q，want %q（完整 %+v）", i, info.Title, c.title, info)
+					}
+				}
+			})
+		}
+	})
+}
+
+// 兜底补读回写因事件通道满被丢弃时，在后续重试（通道恢复后）按已更新的 name/singer 重发，
+// 不论后续是否拿到 mid、是否再次读到记录；专辑已查到时等待重发期间不重复调 findAlbum，重发成功后即结束循环（#229 t2-r1）。
+//
+// 变异自证（隔离临时目录实测，均变红）：
+//   - 忽略 EmitForGen 返回值（无论是否入队都清 fallbackPending）→ 全部 4 个子用例红；
+//   - 查到专辑即 break、不看 !fallbackPending → 「已有mid_首轮已查到专辑_重发后立即break且不重查findAlbum」红；
+//   - 不判 coverURL == ""、每轮都调 findAlbum → 「已有mid_首轮已查到专辑_重发后立即break且不重查findAlbum」红；
+//   - findInfo 查不到时直接 continue 跳过重发 → 「mid为空_后续查不到记录仍重发」红。
+func TestCoverFetchFallbackRetriesDroppedInfo(t *testing.T) {
+	t.Run("mid为空_后续读到相同记录重发且只发一次", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		p := newTestPlayer()
+		p.EventCh = make(chan player.Event) // 无缓冲、无人接收：第 1 轮回写被丢弃
+		l := &opLog{}
+		rec := lyric.SongInfo{Name: bfWindow, Singer: bfSinger}
+		ops := withInfo(fakeOps(l, 0, nil, nil), l, rec, rec, rec, rec, rec)
+		sleeps := 0
+		inner := ops.sleep
+		ops.sleep = func(d time.Duration) {
+			inner(d)
+			if sleeps++; sleeps == 2 {
+				p.EventCh = make(chan player.Event, 16) // 第 2 轮前通道恢复（同一 goroutine 内换，无竞争）
+			}
+		}
+
+		waitDone(t, p.startCoverFetch(ops, p.NewSongGen(), testPID, bfWindow, "", bfWindow, "", bfWindow, "", false, false))
+
+		want := []string{bfWindow + "|" + bfSinger + "|" + bfWindow + "||"}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		if got := l.snapshot(); count(got, "album") != 0 {
+			t.Errorf("没有 mid 不应查专辑：%q", got)
+		}
+	})
+
+	t.Run("mid为空_后续查不到记录仍重发", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		p := newTestPlayer()
+		p.EventCh = make(chan player.Event)
+		l := &opLog{}
+		// 仅第 1 轮查到无 mid 记录，第 2~5 轮均读不到
+		ops := withInfo(fakeOps(l, 0, nil, nil), l, lyric.SongInfo{Name: bfWindow, Singer: bfSinger})
+		sleeps := 0
+		inner := ops.sleep
+		ops.sleep = func(d time.Duration) {
+			inner(d)
+			if sleeps++; sleeps == 2 {
+				p.EventCh = make(chan player.Event, 16)
+			}
+		}
+
+		waitDone(t, p.startCoverFetch(ops, p.NewSongGen(), testPID, bfWindow, "", bfWindow, "", bfWindow, "", false, false))
+
+		want := []string{bfWindow + "|" + bfSinger + "|" + bfWindow + "||"}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+	})
+
+	t.Run("已有mid_查不到专辑时仍重发", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		p := newTestPlayer()
+		p.EventCh = make(chan player.Event)
+		l := &opLog{}
+		ops := withInfo(fakeOps(l, 0, nil, nil), l, lyric.SongInfo{Mid: testMID, Name: bfWindow, Singer: bfSinger})
+		sleeps := 0
+		inner := ops.sleep
+		ops.sleep = func(d time.Duration) {
+			inner(d)
+			if sleeps++; sleeps == 2 {
+				p.EventCh = make(chan player.Event, 16)
+			}
+		}
+
+		waitDone(t, p.startCoverFetch(ops, p.NewSongGen(), testPID, bfWindow, "", bfWindow, "", bfWindow, "", false, false))
+
+		want := []string{bfWindow + "|" + bfSinger + "|" + bfWindow + "||"}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		if got := l.snapshot(); count(got, "info") != 1 || count(got, "album") != 5 {
+			t.Errorf("拿到 mid 后应只调 1 次 info、5 次 album：%q", got)
+		}
+	})
+
+	t.Run("已有mid_首轮已查到专辑_重发后立即break且不重查findAlbum", func(t *testing.T) {
+		setWesingKeepFirst(t, true)
+		p := newTestPlayer()
+		p.EventCh = make(chan player.Event)
+		l := &opLog{}
+		ops := withInfo(fakeOps(l, 1, nil, nil), l, lyric.SongInfo{Mid: testMID, Name: bfWindow, Singer: bfSinger})
+		ops.download = func(url string) string { l.add("download(%s)", url); return "" } // 模拟封面下载失败，确认不依赖封面回写补歌手
+		sleeps := 0
+		inner := ops.sleep
+		ops.sleep = func(d time.Duration) {
+			inner(d)
+			if sleeps++; sleeps == 2 {
+				p.EventCh = make(chan player.Event, 16)
+			}
+		}
+
+		waitDone(t, p.startCoverFetch(ops, p.NewSongGen(), testPID, bfWindow, "", bfWindow, "", bfWindow, "", false, false))
+
+		want := []string{bfWindow + "|" + bfSinger + "|" + bfWindow + "|" + testCover + "|"}
+		if got := songInfos(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("回写 %q，want %q", got, want)
+		}
+		gotOps := l.snapshot()
+		if count(gotOps, "info") != 1 || count(gotOps, "album") != 1 || count(gotOps, "sleep") != 2 {
+			t.Errorf("应只调 1 次 info、1 次 album、睡 2 轮即 break：%q", gotOps)
+		}
+	})
 }

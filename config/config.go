@@ -61,6 +61,7 @@ type Config struct {
 	AudioNormalizeTarget  int                      `yaml:"audio-normalize-target"`   // 目标响度（dBFS），范围 [-60,0]
 	AudioNormalizeMaxGain int                      `yaml:"audio-normalize-max-gain"` // 最大增益（dB），范围 [0,45]
 	AudioFrameRate        int                      `yaml:"audio-frame-rate"`         // 音频波形帧的出帧帧率（帧每秒），范围 [15,60]
+	SongInfoKeepFirst     bool                     `yaml:"song-info-keep-first"`     // 同一首歌内保持最早的歌名与歌手
 	EffectStrategy        string                   `yaml:"-"`                        // 网易云特效最小化策略：park | fadeout（键 cloudmusicv3-effect-strategy）
 	Players               map[string]*PlayerConfig `yaml:"-"`                        // 各播放器专属配置
 	Sources               []string                 `yaml:"-"`                        // 配置来源列表（内部字段）
@@ -162,6 +163,7 @@ func DefaultConfig() Config {
 		AudioNormalizeTarget:  -14,
 		AudioNormalizeMaxGain: 30,
 		AudioFrameRate:        25,
+		SongInfoKeepFirst:     true,
 		EffectStrategy:        "fadeout",
 		Players:               make(map[string]*PlayerConfig),
 		ExplicitKeys:          make(map[string]bool),
@@ -290,7 +292,7 @@ func Load(programVersion string) Config {
 	// 命令行参数覆盖
 	var cliAddr, cliPriorPlayer, cliEffectStrategy string
 	var cliOffset, cliPoll, cliIdleHide, cliPriorExpire int
-	var cliAudioNormalize bool
+	var cliAudioNormalize, cliSongInfoKeepFirst bool
 	var cliAudioNormalizeTarget, cliAudioNormalizeMaxGain, cliAudioFrameRate int
 	flag.StringVar(&cliAddr, "addr", "", i18n.T("WebSocket listen address"))
 	flag.IntVar(&cliOffset, "offset", 0, i18n.T("lyric delay (ms); positive = later, negative = earlier"))
@@ -301,6 +303,7 @@ func Load(programVersion string) Config {
 	flag.IntVar(&cliAudioNormalizeTarget, "audio-normalize-target", 0, i18n.T("volume normalization target loudness (dBFS), range [-60,0]"))
 	flag.IntVar(&cliAudioNormalizeMaxGain, "audio-normalize-max-gain", 0, i18n.T("volume normalization maximum gain (dB), range [0,45]"))
 	flag.IntVar(&cliAudioFrameRate, "audio-frame-rate", 0, i18n.T("audio waveform frame rate (frames per second), range [15,60]"))
+	flag.BoolVar(&cliSongInfoKeepFirst, "song-info-keep-first", false, i18n.T("keep the first song name and singer within a song; values empty at first may still be filled"))
 	flag.StringVar(&cliPriorPlayer, "prior-player", "", i18n.T("prior player list, comma-separated (e.g. wesing,kugou); an empty string means no prior player"))
 	flag.StringVar(&cliEffectStrategy, "cloudmusicv3-effect-strategy", "", i18n.T("NetEase effect minimize strategy: park (off-screen keep-alive) | fadeout (fade out)"))
 
@@ -322,7 +325,7 @@ func Load(programVersion string) Config {
 	}
 
 	// 自定义 Usage：全局 flag 在前，播放器 flag 按字母排序在后
-	globalFlags := []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "cloudmusicv3-effect-strategy"}
+	globalFlags := []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "song-info-keep-first", "cloudmusicv3-effect-strategy"}
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		// 先输出全局 flag
@@ -392,6 +395,8 @@ func Load(programVersion string) Config {
 			cfg.AudioNormalizeMaxGain = cliAudioNormalizeMaxGain
 		case "audio-frame-rate":
 			cfg.AudioFrameRate = cliAudioFrameRate
+		case "song-info-keep-first":
+			cfg.SongInfoKeepFirst = cliSongInfoKeepFirst
 		case "prior-player":
 			cfg.PriorPlayer = splitCommaList(cliPriorPlayer)
 		case "cloudmusicv3-effect-strategy":
@@ -757,6 +762,15 @@ func mergeYAML(dst *Config, m map[string]interface{}) {
 			log.Warn("audio-frame-rate expects an integer, got %T (%v); ignored", v, v)
 		}
 	}
+	if v, ok := m["song-info-keep-first"]; ok {
+		if b, ok := v.(bool); ok {
+			dst.SongInfoKeepFirst = b
+			mark("song-info-keep-first")
+		} else {
+			dst.noteRejected("song-info-keep-first", v)
+			log.Warn("song-info-keep-first expects a boolean, got %T (%v); ignored", v, v)
+		}
+	}
 	if v, ok := m["cloudmusicv3-effect-strategy"]; ok {
 		if s, ok := v.(string); ok && validEffectStrategy(s) {
 			dst.EffectStrategy = s
@@ -887,6 +901,10 @@ audio-normalize-max-gain: 30
 # 音频波形帧率（帧每秒）：有音频数据时 /audio-ws 与 /<player>/audio-ws 每秒推送的帧数，
 # 范围 [15,60]，越界自动钳到边界
 audio-frame-rate: 25
+
+# 同一首歌内保持最早的歌名与歌手：开启时，换歌时发出的歌名、歌手（song_info_update 的 name、singer）在这首歌内
+# 不再改动，只有当时为空的可以补上；关闭时随播放器之后读到的写法更新（可能改写或清空）。title 在同一首歌内始终不变。
+song-info-keep-first: true
 
 # 全民K歌 配置
 # wesing-offset: 0

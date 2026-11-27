@@ -7,7 +7,7 @@ package qqmusic
 // 时刻）并按载入支写入；换歌认领时先取上一首采纳的本地文件、求改名证据（claim），经 excludeFor 交 excludeLocal，再 reset 与
 // 写入；换歌认领与补取两处取词之后被采用的重读同样交给 loadOpen（传重读时刻）、按载入支写入；补取块编号由缺到有时 gen 加一、
 // 不改 excludeLocal；暂扣与暂扣支；每拍至多写入一次；每拍取一条结果。判定函数（loadingUsable、loadEdge 与其窗口、
-// reopenByLoading、excludeFor、rereadSameSong、switchHold）、歌词状态机、takeResult 与（部分用例里的）读取者都是真的。
+// reopenGuard、excludeFor、rereadSameSong、switchHold）、歌词状态机、takeResult 与（部分用例里的）读取者都是真的。
 // runSession 与这份复述是否一致由 assocwiring_test.go 的源码扫描守形状。
 
 import (
@@ -57,6 +57,7 @@ type reopenReplay struct {
 	beats int
 
 	loadOpen loadEdge
+	reopenG  reopenGuard
 	hold     switchHold
 	lastName string
 	lastMem  uint32
@@ -70,7 +71,8 @@ type reopenReplay struct {
 	evidence []renameEvidence // 每次换歌认领求得的改名证据
 }
 
-func (p *reopenReplay) reopenSong(byLoading bool) {
+func (p *reopenReplay) reopenSong(byLoading bool, progressMs uint32) {
+	p.reopenG.noteReopen(progressMs)
 	p.key.reopen++
 	p.st.reopened(p.key.reopen)
 	p.r.Submit(p.key)
@@ -102,9 +104,12 @@ func (p *reopenReplay) beat(first reopenRead, f *reopenFetch) {
 
 	loadUsable := p.spec.loadingUsable(p.bad, p.poll)
 	reopenedThisTick := false
-	if edge := p.loadOpen.step(p.spec, meta.state, meta.ok, sampleTime); !reopenedThisTick && reopenByLoading(loadUsable, edge, meta.name, p.lastName, p.key.hasIDs()) {
+	if edge := p.loadOpen.step(p.spec, meta.state, meta.ok, sampleTime); p.reopenG.shouldReopenByLoading(loadUsable, edge, meta.name, p.lastName, p.key.hasIDs()) && !reopenedThisTick {
 		reopenedThisTick = true
-		p.reopenSong(true)
+		p.reopenSong(true, meta.ms)
+	} else if !reopenedThisTick && p.reopenG.shouldReopenByFallback(false, meta.name, p.lastName, p.key.hasIDs()) {
+		reopenedThisTick = true
+		p.reopenSong(false, meta.ms)
 	}
 	// fetch 做一次取词与其后的重读，返回重读是否被采用（采用时读数与播放状态换成重读的）。
 	fetch := func() bool {
@@ -128,20 +133,21 @@ func (p *reopenReplay) beat(first reopenRead, f *reopenFetch) {
 	if meta.name != p.lastName && meta.name != "" && !strings.HasPrefix(meta.name, "QQ音乐") {
 		p.hold.drop(sampleTime)
 		p.lastName, p.lastMem = meta.name, meta.ms
+		p.reopenG.reset()
 		// 同 runSession 的换歌分支：上一首采纳的本地文件在 reset 之前取，改名证据成立时交空（第 5 版）
 		prevLocal := p.st.localPath()
 		renamed := p.loadOpen.claim(loadUsable, p.spec, p.poll)
 		p.evidence = append(p.evidence, renamed)
 		p.key = songKey{gen: p.key.gen + 1, songID: p.ids.songID, songMid: p.ids.songMid, name: meta.name, excludeLocal: excludeFor(prevLocal, renamed)}
 		p.excludes = append(p.excludes, p.key.excludeLocal)
-		p.st.reset(p.key.gen)
+		p.st.reset(p.key.gen, false, time.Time{})
 		p.r.Submit(p.key)
 		p.pending = true
 		if p.key.hasIDs() && f != nil {
 			if fetch() {
-				if edge := p.loadOpen.step(p.spec, meta.state, meta.ok, sampleTime); !reopenedThisTick && reopenByLoading(loadUsable, edge, meta.name, p.lastName, p.key.hasIDs()) {
+				if edge := p.loadOpen.step(p.spec, meta.state, meta.ok, sampleTime); p.reopenG.shouldReopenByLoading(loadUsable, edge, meta.name, p.lastName, p.key.hasIDs()) && !reopenedThisTick {
 					reopenedThisTick = true
-					p.reopenSong(true)
+					p.reopenSong(true, meta.ms)
 				}
 			}
 			if f.ok {
@@ -170,14 +176,14 @@ func (p *reopenReplay) beat(first reopenRead, f *reopenFetch) {
 			p.key.gen++
 			p.key.reopen = 0
 			p.key.songID, p.key.songMid = p.ids.songID, p.ids.songMid
-			p.st.reset(p.key.gen)
+			p.st.reset(p.key.gen, false, time.Time{})
 			p.r.Submit(p.key)
 			p.excludes = append(p.excludes, p.key.excludeLocal)
 		}
 		if fetch() {
-			if edge := p.loadOpen.step(p.spec, meta.state, meta.ok, sampleTime); !reopenedThisTick && reopenByLoading(loadUsable, edge, meta.name, p.lastName, p.key.hasIDs()) {
+			if edge := p.loadOpen.step(p.spec, meta.state, meta.ok, sampleTime); p.reopenG.shouldReopenByLoading(loadUsable, edge, meta.name, p.lastName, p.key.hasIDs()) && !reopenedThisTick {
 				reopenedThisTick = true
-				p.reopenSong(true)
+				p.reopenSong(true, meta.ms)
 			}
 		}
 		if f.ok {
@@ -194,13 +200,14 @@ func (p *reopenReplay) beat(first reopenRead, f *reopenFetch) {
 			seekDetected = true
 		}
 		if seekDetected {
-			if !reopenedThisTick && !loadUsable && released && meta.ms < p.lastMem && p.key.hasIDs() {
+			if p.reopenG.shouldReopenByFallback(released && meta.ms < p.lastMem, meta.name, p.lastName, p.key.hasIDs()) && !reopenedThisTick {
 				reopenedThisTick = true
-				p.reopenSong(false)
+				p.reopenSong(false, meta.ms)
 			}
 		}
 		p.lastMem = meta.ms
 	}
+	p.reopenG.stepProgress(meta.ms, held, p.loadOpen.loading)
 	if p.lastName != "" {
 		p.show(takeResult(&p.st, p.r.Results(), p.key.hasIDs(), stateOffsetSec))
 	}

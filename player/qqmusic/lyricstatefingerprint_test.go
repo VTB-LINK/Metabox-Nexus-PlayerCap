@@ -5,6 +5,7 @@ package qqmusic
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"Metabox-Nexus-PlayerCap/player"
 )
@@ -32,7 +33,7 @@ func TestLyricStateSameResultNoResend(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var s lyricState
-			s.reset(1)
+			s.reset(1, false, time.Time{})
 			s.setOnlineRaw(shiftFixture())
 			applyWant(t, &s, c.first, c.songHasIDs, true, c.want...)
 			applyWant(t, &s, c.again, c.songHasIDs, false)
@@ -44,7 +45,7 @@ func TestLyricStateSameResultNoResend(t *testing.T) {
 // 变异自证：指纹不含偏移，本例即红。
 func TestLyricStateOffsetOnlyResends(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	applyWant(t, &s, onlineRes(1, 0), true, true, onlineAt0...)
 	applyWant(t, &s, onlineRes(1, -500), true, true, onlineDelayed500...)
@@ -57,7 +58,7 @@ func TestLyricStateOffsetOnlyResends(t *testing.T) {
 // 不要求。来源为关联时在线原始行变了不影响输出。变异自证：在线的指纹不含原始行的摘要，本例即红。
 func TestLyricStateOnlineRawChangeResends(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	applyWant(t, &s, onlineRes(1, -1000), true, true, onlineDelayed1s...)
 
@@ -86,7 +87,7 @@ func TestLyricStateOnlineRawChangeResends(t *testing.T) {
 // 存入非空的行再应用即按它发出。
 func TestLyricStateOnlineEmptyRaw(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	applyWant(t, &s, desiredRes(1, srcOnline, 0, assocFixture("X"), ""), true, true)
 	wantSource(t, &s, srcOnline, "")
 	s.setOnlineRaw([]lyricLine{})
@@ -99,7 +100,7 @@ func TestLyricStateOnlineEmptyRaw(t *testing.T) {
 // 反例：在线关联的结果带着本地路径（读取者不会这样给）也不当作采纳的本地文件。
 func TestLyricStateLocalPathFollowsAdopted(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	wantSource(t, &s, srcNone, "")
 	applyWant(t, &s, localRes(1), false, true, localLDelayed1s...)
 	other := localRes(1)
@@ -110,7 +111,7 @@ func TestLyricStateLocalPathFollowsAdopted(t *testing.T) {
 	wantSource(t, &s, srcNone, "")
 
 	s = lyricState{} // 停用是会话级终态、reset 不清，下面换一个会话
-	s.reset(2)
+	s.reset(2, false, time.Time{})
 	odd := desiredRes(2, srcAssoc, 0, assocFixture("A"), "A")
 	odd.localPath = localFlac
 	applyWant(t, &s, odd, true, true, assocA0...)
@@ -121,7 +122,7 @@ func TestLyricStateLocalPathFollowsAdopted(t *testing.T) {
 // Furigana 相同时不无谓重发；跨来源切换仅 Furigana 不同时不被 shownSum 误判为相同而吞掉。
 func TestLyricStateFuriganaChangeResends(t *testing.T) {
 	var s lyricState
-	s.reset(1)
+	s.reset(1, false, time.Time{})
 	s.setOnlineRaw(shiftFixture())
 	if out, ch := s.apply(onlineRes(1, -1000), true, stateOffsetSec); !ch || len(out) != 2 || out[0].Furigana != nil {
 		t.Fatalf("首次无振假名 apply = (%+v, %v)，want changed=true 且 Furigana=nil", out, ch)

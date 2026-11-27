@@ -27,13 +27,13 @@ type Result struct {
 
 // Fetch resolves and downloads artwork, including the shared 800x800 normalization.
 // Run it in the caller's cancellable cover job, not its playback polling loop.
-// The shared downloader has a timeout rather than a context; an in-flight download
-// can therefore finish after cancellation, but its result is discarded here.
+// Cancellation propagates to both the URL lookup and the image download, and any
+// result observed after cancellation is discarded.
 func Fetch(ctx context.Context, rid string, timeout time.Duration) (Result, error) {
-	return fetch(ctx, rid, timeout, endpoint, player.FetchCoverBase64)
+	return fetch(ctx, rid, timeout, endpoint, player.FetchCoverBase64Context)
 }
 
-func fetch(ctx context.Context, rid string, timeout time.Duration, endpointURL string, download func(string, string, time.Duration) string) (Result, error) {
+func fetch(ctx context.Context, rid string, timeout time.Duration, endpointURL string, download func(context.Context, string, string, time.Duration) string) (Result, error) {
 	id, err := numericRID(rid)
 	if err != nil {
 		return Result{}, err
@@ -62,7 +62,7 @@ func fetch(ctx context.Context, rid string, timeout time.Duration, endpointURL s
 	if remaining <= 0 {
 		return result, context.DeadlineExceeded
 	}
-	result.DataURI = download("kuwo", result.URL, remaining)
+	result.DataURI = download(ctx, "kuwo", result.URL, remaining)
 	if err := ctx.Err(); err != nil {
 		result.DataURI = ""
 		return result, err

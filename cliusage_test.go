@@ -23,7 +23,10 @@ func TestHelpShowsSwitchValueHint(t *testing.T) {
 		t.Fatalf("-h：退出码 %d，stdout %q，stderr:\n%s", code, stdout, stderr)
 	}
 
-	want := []string{"  -audio-normalize [true|false]\n    \t音量归一化开关\n"}
+	want := []string{
+		"  -audio-normalize [true|false]\n    \t音量归一化开关\n",
+		"  -song-info-keep-first [true|false]\n    \t同一首歌内保持最早的歌名与歌手，起初为空的仍可补上\n",
+	}
 	players := config.RegisteredPlayers()
 	for _, p := range players {
 		want = append(want, "  -"+p+"-audio-normalize [true|false]\n    \t"+p+" 音量归一化开关（不传=跟随全局）\n")
@@ -46,7 +49,7 @@ func TestHelpShowsSwitchValueHint(t *testing.T) {
 	if len(players) == 0 {
 		t.Error("没有注册的播放器：每播放器的开关没有被检查到")
 	}
-	if got := strings.Count(usage, "[true|false]"); got != 1+len(players) {
-		t.Errorf("带取值提示的有 %d 项，期望 %d 项（全局开关与 %d 个播放器的开关）:\n%s", got, 1+len(players), len(players), usage)
+	if got := strings.Count(usage, "[true|false]"); got != 2+len(players) {
+		t.Errorf("带取值提示的有 %d 项，期望 %d 项（2 个全局开关与 %d 个播放器的开关）:\n%s", got, 2+len(players), len(players), usage)
 	}
 }

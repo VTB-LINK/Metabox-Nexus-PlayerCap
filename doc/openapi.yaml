@@ -86,7 +86,7 @@ paths:
         - 可能的值：`"config.yml"`，以及按系统显示语言本地化的另两项：中文系统为 `"内置默认"`、`"命令行参数"`，其余语言为 `"built-in default"`、`"command-line arguments"`
 
         **config 与 config_effective 说明：**
-        - 两者键集合与顺序相同：全局键 `addr`、`offset`、`poll`、`prior-player`、`prior-player-expire`、`per-player-idle-hide`、`audio-normalize`、`audio-normalize-target`、`audio-normalize-max-gain`、`audio-frame-rate`、`cloudmusicv3-effect-strategy`，随后每个播放器（按 `player_support` 顺序）`<player>-offset`、`<player>-poll`、`<player>-idle-hide`、`<player>-audio-normalize`
+        - 两者键集合与顺序相同：全局键 `addr`、`offset`、`poll`、`prior-player`、`prior-player-expire`、`per-player-idle-hide`、`audio-normalize`、`audio-normalize-target`、`audio-normalize-max-gain`、`audio-frame-rate`、`song-info-keep-first`、`cloudmusicv3-effect-strategy`，随后每个播放器（按 `player_support` 顺序）`<player>-offset`、`<player>-poll`、`<player>-idle-hide`、`<player>-audio-normalize`
         - `config` 为配置写下的值：按「播放器覆盖 → 全局 → 内置默认」解析继承，不做钳制或纠正。越界的数值与非法的 `cloudmusicv3-effect-strategy` 字符串按原值回显；类型错误等解析不出值的键视同未设置
         - `config_effective` 为运行时实际生效的值，计入配置层钳制（`poll` 与 `<player>-poll` 钳到 [10,2000]，`audio-normalize-target` 钳到 [-60,0]，`audio-normalize-max-gain` 钳到 [0,45]，`audio-frame-rate` 钳到 [15,60]）、非法值回退、播放器层轮询下限（`cloudmusicv3` 低于 50 抬到 100，`qqmusic` 低于 30 抬到 50，`sodamusic` 低于 200 抬到 200，`applemusic` 低于 50 抬到 50，`spotify` 低于 200 抬到 200，`kuwo` 低于 50 抬到 50）与 Windows 11 下 `park` 强制改为 `fadeout`
         - 某键在两者中取值不同，即写下的值未按原样生效
@@ -159,6 +159,7 @@ paths:
                         audio-normalize-target: -14
                         audio-normalize-max-gain: 30
                         audio-frame-rate: 25
+                        song-info-keep-first: true
                         cloudmusicv3-effect-strategy: fadeout
                         wesing-offset: -200
                         wesing-poll: 30
@@ -203,6 +204,7 @@ paths:
                         audio-normalize-target: -14
                         audio-normalize-max-gain: 30
                         audio-frame-rate: 25
+                        song-info-keep-first: true
                         cloudmusicv3-effect-strategy: fadeout
                         wesing-offset: -200
                         wesing-poll: 30
@@ -236,7 +238,7 @@ paths:
                         kuwo-poll: 50
                         kuwo-idle-hide: 0
                         kuwo-audio-normalize: true
-                      config_overwritten: ["addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "cloudmusicv3-effect-strategy", "cloudmusicv3-offset", "qqmusic-offset", "kugou-offset", "sodamusic-offset", "applemusic-offset", "kuwo-offset"]
+                      config_overwritten: ["addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "song-info-keep-first", "cloudmusicv3-effect-strategy", "cloudmusicv3-offset", "qqmusic-offset", "kugou-offset", "sodamusic-offset", "applemusic-offset", "kuwo-offset"]
                       player_support: ["wesing", "cloudmusicv3", "qqmusic", "kugou", "sodamusic", "applemusic", "spotify", "kuwo"]
                       player_running: ["wesing"]
                       player_status:
@@ -493,7 +495,7 @@ paths:
 
         **`index: -1` 纯音乐说明：**
         当平台未返回任何歌词数据时，发送 `index: -1` 而非空对象 `{}`。此时 `timestamp` 为 `0`，`sub_text` 与 `roma_text` 均为空字符串，`text_detailed` 与 `roma_text_detailed` 为 `{}`，`furigana` 为 `[]`；**`progress` 照常反映整曲播放进度，不为 `0`**（歌没有歌词，但它还在播）。
-        **`text` 不保证为空**：平台对无歌词歌曲给出提示语时（如「纯音乐，请欣赏」，或「此歌曲为…欣赏」「该歌曲为…欣赏」，前面可带一行与标题去掉空白后相同的歌名行），服务端把 `index` 归一为 `-1` 并原样保留提示原文进 `text`（前置歌名行不进 `text`）；平台没有给出提示语（零行、404、取词失败、超时，或 sodamusic 未给出 KRC、applemusic 扫不到该曲 TTML、kuwo 明确无歌词）时，`text` 为 `""`。共用提示识别对除 qqmusic 外的播放器生效（spotify 的异步取词无标题，仅认单行形状；qqmusic 待阶段二改造，当前其接口返回的三段冒号提示行被解析器丢弃、结果同零行、`text` 为 `""`）。
+        **`text` 不保证为空**：平台对无歌词歌曲给出提示语时（如「纯音乐，请欣赏」，或「此歌曲为…欣赏」「该歌曲为…欣赏」，前面可带一行与标题去掉空白后相同的歌名行），服务端把 `index` 归一为 `-1` 并原样保留提示原文进 `text`（前置歌名行不进 `text`）；平台没有给出提示语（零行、404、取词失败、超时，或 sodamusic 未给出 KRC、applemusic 扫不到该曲 TTML、kuwo 明确无歌词）时，`text` 为 `""`。共用提示识别对除 wesing 外的七家播放器生效（spotify 的异步取词无标题，仅认单行形状；qqmusic 已适配三段冒号提示行，并对在线、关联与本地歌词统一经共用识别保留原文）。
         wesing 不发 `index: -1`：读不到歌词时不宣告这首歌，首行之前不发 `lyric_update`。
         判断有无歌词一律用 `index !== -1`，不要看 `text`。
         对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达：applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 `index: -1`。
@@ -602,7 +604,7 @@ paths:
                     player: wesing
                     data: {}
                 无可用歌词（qqmusic）:
-                  summary: 平台未给出可保留的无歌词提示时 text 为空字符串（qqmusic 阶段二改造前其接口的三段冒号提示行被解析器丢弃，结果同零行）。timestamp 为 0、play_time 为 0（无行可播出），而 position / progress 照常反映整曲播放位置（此例为中途接入，故非 0）。
+                  summary: 平台未给出可保留的无歌词提示时 text 为空字符串（本录音录于 #231 改造前，当时 qqmusic 接口的三段冒号提示行被解析器丢弃、结果同零行；现行版本会适配并经共用识别原样保留提示原文，仅平台未给提示语时 text 为 ""）。timestamp 为 0、play_time 为 0（无行可播出），而 position / progress 照常反映整曲播放位置（此例为中途接入，故非 0）。
                   value:
                     code: 0
                     msg: success
@@ -650,7 +652,7 @@ paths:
         播放器所处的层次，各值的含义对所有播放器一致；原因看 `reason`，`detail` 只给人读。非歌名状态（`waiting_process`、`standby`、`waiting_song`）只在 `status`、`detail`、`reason` 三者之一变化时发出，状态不变期间不重发。
         - `"waiting_process"` - 播放器进程没在运行。`reason` 为 `process_not_running`（本次服务期间没见它运行过）或 `process_exited`（曾在运行、现已退出；保持到进程重新出现为止）。进程是否在运行先于一切判定：已知的读取受阻原因（如版本不受支持、微软商店版、未取得管理员权限）在进程不在运行时只写进 `detail`，进程启动后改报 `standby` 加该原因
         - `"standby"` - 进程在运行，但本服务读不了它；只在进程在运行时出现。`reason` 为 `cdp_disconnected`（调试通道未就绪或已断开）、`version_unsupported`（版本不受支持，含微软商店版）、`no_admin`（无权读取进程或其安装路径，多因播放器以管理员身份运行；读不到安装路径时无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接）、`install_not_found`（未找到安装）或 `metadata_unavailable`（曲目在而读不到曲目信息）。版本不受支持等原因按间隔重查，条件满足即自动恢复、不必重启本服务；重查期间进程退出，在下一个常规轮次即改报 `waiting_process`，不等重查间隔
-        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、spotify 当前不报，保留上一首。qqmusic 当前不产生此状态。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
+        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、qqmusic、spotify 当前不报，保留上一首（qqmusic 连上进程后尚未认领过歌曲且歌名为空或为窗口占位串时已当拍报 `waiting_song` / `no_song`，会话中途无歌待真机探针）。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
         - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
@@ -880,7 +882,7 @@ paths:
         播放器所处的层次，各值的含义对所有播放器一致；原因看 `reason`，`detail` 只给人读。非歌名状态（`waiting_process`、`standby`、`waiting_song`）只在 `status`、`detail`、`reason` 三者之一变化时发出，状态不变期间不重发。
         - `"waiting_process"` - 播放器进程没在运行。`reason` 为 `process_not_running`（本次服务期间没见它运行过）或 `process_exited`（曾在运行、现已退出；保持到进程重新出现为止）。进程是否在运行先于一切判定：已知的读取受阻原因（如版本不受支持、微软商店版、未取得管理员权限）在进程不在运行时只写进 `detail`，进程启动后改报 `standby` 加该原因
         - `"standby"` - 进程在运行，但本服务读不了它；只在进程在运行时出现。`reason` 为 `cdp_disconnected`（调试通道未就绪或已断开）、`version_unsupported`（版本不受支持，含微软商店版）、`no_admin`（无权读取进程或其安装路径，多因播放器以管理员身份运行；读不到安装路径时无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接）、`install_not_found`（未找到安装）或 `metadata_unavailable`（曲目在而读不到曲目信息）。版本不受支持等原因按间隔重查，条件满足即自动恢复、不必重启本服务；重查期间进程退出，在下一个常规轮次即改报 `waiting_process`，不等重查间隔
-        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、spotify 当前不报，保留上一首。qqmusic 当前不产生此状态。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
+        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、qqmusic、spotify 当前不报，保留上一首（qqmusic 连上进程后尚未认领过歌曲且歌名为空或为窗口占位串时已当拍报 `waiting_song` / `no_song`，会话中途无歌待真机探针）。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
         - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
@@ -897,7 +899,7 @@ paths:
 
         **异步封面：** 部分播放器的封面 base64 通过异步 HTTP 下载获取。歌曲开始播放时会先发送一条 `cover_base64` 为空串 `""` 的 `song_info_update`（键始终存在，`cover` 是封面 URL），待封面下载完成后再补发一条 `cover_base64` 有值的完整版本；下载失败或超时时，补发的这一条 `cover_base64` 可能仍为空串（如 kugou）。前端应使用最新收到的数据覆盖即可，判断有没有图看 `cover_base64` 是否为空串。
 
-        wesing 的歌曲信息可能分几条到达：宣告时缺封面地址或歌曲信息未核实的，之后约 5 秒内每秒补读一次，补读到歌名、歌手后补发一条带歌名、歌手的 `song_info_update`（以补读到的为准，`singer` 可能由有值变为空串）；找到封面并下载完成，再补发一条带 `cover_base64` 的。补发各条的 `title` 都保持宣告时的值（宣告时没有歌手的，之后的 `title` 也不含歌手），需要歌名与歌手请读 `name` / `singer`。封面地址由专辑 mid 构造，查不到专辑时 `cover` 为空串，也没有带 `cover_base64` 的那一条。同一首歌中途更换播放位置的来源时会整套重新宣告（见下文 `lyric_idle`），以上各条随之再发一遍。
+        wesing 的歌曲信息可能分几条到达：宣告时缺封面地址或歌曲信息未核实的，之后约 5 秒内每秒补读一次，补读到歌名、歌手后按配置 `song-info-keep-first` 补发一条带歌名、歌手的 `song_info_update`（开启时只补宣告时为空的；关闭时以补读到的为准，`singer` 可能由有值变为空串）；找到封面并下载完成，再补发一条带 `cover_base64` 的。补发各条的 `title` 都保持宣告时的值（通用约定见 `SongInfo.title`），需要歌名与歌手请读 `name` / `singer`。封面地址由专辑 mid 构造，查不到专辑时 `cover` 为空串，也没有带 `cover_base64` 的那一条。同一首歌中途更换播放位置的来源时会整套重新宣告（见下文 `lyric_idle`），以上各条随之再发一遍。
 
         ---
 
@@ -1379,7 +1381,7 @@ paths:
         播放器所处的层次，各值的含义对所有播放器一致；原因看 `reason`，`detail` 只给人读。非歌名状态（`waiting_process`、`standby`、`waiting_song`）只在 `status`、`detail`、`reason` 三者之一变化时发出，状态不变期间不重发。
         - `"waiting_process"` - 播放器进程没在运行。`reason` 为 `process_not_running`（本次服务期间没见它运行过）或 `process_exited`（曾在运行、现已退出；保持到进程重新出现为止）。进程是否在运行先于一切判定：已知的读取受阻原因（如版本不受支持、微软商店版、未取得管理员权限）在进程不在运行时只写进 `detail`，进程启动后改报 `standby` 加该原因
         - `"standby"` - 进程在运行，但本服务读不了它；只在进程在运行时出现。`reason` 为 `cdp_disconnected`（调试通道未就绪或已断开）、`version_unsupported`（版本不受支持，含微软商店版）、`no_admin`（无权读取进程或其安装路径，多因播放器以管理员身份运行；读不到安装路径时无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接）、`install_not_found`（未找到安装）或 `metadata_unavailable`（曲目在而读不到曲目信息）。版本不受支持等原因按间隔重查，条件满足即自动恢复、不必重启本服务；重查期间进程退出，在下一个常规轮次即改报 `waiting_process`，不等重查间隔
-        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、spotify 当前不报，保留上一首。qqmusic 当前不产生此状态。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
+        - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、qqmusic、spotify 当前不报，保留上一首（qqmusic 连上进程后尚未认领过歌曲且歌名为空或为窗口占位串时已当拍报 `waiting_song` / `no_song`，会话中途无歌待真机探针）。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
         - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
         - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
         - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
@@ -1655,7 +1657,7 @@ webhooks:
       operationId: onSongInfoUpdate
       description: |
         歌曲信息发生变化时推送。连接建立时，若已有缓存则补发一次，否则不发。
-        部分播放器的封面 base64 异步获取，会先发送 cover_base64 为空串的版本，待下载完成后补发 cover_base64 有值的完整版本；下载失败或超时时，补发的这一条 cover_base64 可能仍为空串（如 kugou）。wesing 宣告之后可能再补发带歌名、歌手的一条与带封面的一条，补发各条的 title 保持宣告时的值；同一首歌重新宣告时这些事件再发一遍，见 `/ws` 的「异步封面」。
+        部分播放器的封面 base64 异步获取，会先发送 cover_base64 为空串的版本，待下载完成后补发 cover_base64 有值的完整版本；下载失败或超时时，补发的这一条 cover_base64 可能仍为空串（如 kugou）。wesing 宣告之后可能按配置 `song-info-keep-first` 再补发带歌名、歌手的一条（开启时只补宣告时为空的；关闭时以补读到的为准，`singer` 可能由有值变为空串）与带封面的一条，补发各条的 `title` 都保持宣告时的值（通用约定见 `SongInfo.title`）；同一首歌重新宣告时这些事件再发一遍，见 `/ws` 的「异步封面」。
       requestBody:
         required: true
         content:
@@ -1753,7 +1755,7 @@ webhooks:
         歌词行发生变化时推送。连接建立时，若已有缓存的歌词则补发一次，否则不发。
 
         **`index: -1` 纯音乐说明：**
-        当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`、`roma_text: ""`、`text_detailed: {}`、`roma_text_detailed: {}`、`furigana: []`，而 **`progress` 照常反映播放进度**；`text` 不保证为空：平台给出无歌词提示语时原样保留提示原文（不含前置歌名行），没有提示语时为 `""`（共用识别对除 qqmusic 外的播放器生效；qqmusic 待阶段二改造，当前为 `""`；kuwo 在取词有结论之后发出）。wesing 不发 `index: -1`。
+        当平台未返回任何歌词数据时，发送 `index: -1`。此时 `data` 不为 `{}`，而是包含完整字段的对象：`timestamp: 0`、`sub_text: ""`、`roma_text: ""`、`text_detailed: {}`、`roma_text_detailed: {}`、`furigana: []`，而 **`progress` 照常反映播放进度**；`text` 不保证为空：平台给出无歌词提示语时原样保留提示原文（不含前置歌名行），没有提示语时为 `""`（共用识别对除 wesing 外的七家播放器生效，spotify 仅认单行形状，kuwo 在取词有结论之后发出）。wesing 不发 `index: -1`。
         对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达：applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 `index: -1`。
         客户端利用 `msg.data.index === -1` 识别纯音乐。
       requestBody:
@@ -1807,7 +1809,7 @@ webhooks:
                         - { timestamp: 17.243, play_time: 17.043, duration: 0.362, text: "filling  " }
                     furigana: []
               无可用歌词:
-                summary: 平台未返回可用歌词。平台给出无歌词提示语时服务端把 index 归一为 -1 并原样保留提示原文（不含前置歌名行），没有提示语时 text 为 ""（qqmusic 待阶段二改造，当前为 ""）。timestamp 恒为 0、play_time 恒为 0（无行可播出），而 position / progress 照常反映整曲播放位置。本例为 kugou 的真实录音（2026-11-13），与 count 为 0 的 all_lyrics 同一毫秒发出，歌刚开始，position 为 0。
+                summary: 平台未返回可用歌词。平台给出无歌词提示语时服务端把 index 归一为 -1 并原样保留提示原文（不含前置歌名行），没有提示语时 text 为 ""。timestamp 恒为 0、play_time 恒为 0（无行可播出），而 position / progress 照常反映整曲播放位置。本例为 kugou 的真实录音（2026-11-13），与 count 为 0 的 all_lyrics 同一毫秒发出，歌刚开始，position 为 0。
                 value:
                   type: lyric_update
                   player: kugou
@@ -1979,7 +1981,7 @@ webhooks:
       operationId: onAllLyrics
       description: |
         新歌曲开始播放时推送完整歌词列表。连接建立时，若已有缓存则补发一次，否则不发。
-        同一首歌也可能再推一次：qqmusic 换歌时歌曲 ID 尚未就绪、先推了一条空歌词的，补取到歌词时（播放中补取 8 秒；8 秒用尽时已暂停的，恢复播放后再补取 8 秒）或播放本地文件、取到其关联的歌词时，播放的本地文件被 QQ 音乐匹配成在线歌曲之后，认出 QQ 音乐仍在放关联表里的这个文件、晚于在线取词到达时，在 QQ 音乐里改了这首歌的歌词关联或时间偏移时，QQ 音乐写完这首歌的歌词缓存时，开播几秒内认出 QQ 音乐所用的关联与先前不同时，从另一个入口重开同一首、所用的关联随之改变时，以及换歌时 QQ 音乐所用的歌词（关联或它自己的歌词缓存）晚于在线取词到达的；kuwo 换歌时先推一条空歌词的，取到歌词时，以及时长或歌名、歌手变化时；sodamusic 时长晚到（无歌词曲目紧跟补发 `index:-1`）或音译补齐时、wesing 宣告的总时长被纠正时（播放中核实之后，最早约开播 6 秒，每首至多一次）、applemusic 歌词晚到时（换歌后头 3 秒约每 0.4 秒、到 15 秒约每 1.2 秒找一次，之后退避到最长 15 秒一次；若晚到的是仅含无歌词提示的 TTML，重发空 `all_lyrics` 并紧跟补发带提示原文的 `index:-1`）、spotify 歌词取到时（换歌时不等取词、先推一条空歌词的；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止）、kugou 从酷狗读到这首歌的歌词与已推的不同时（换歌后 300 毫秒内没读到、先推了在线取词结果的；或播放中酷狗换了这首歌的歌词：手动关联、或首次播放时酷狗稍后写入歌词缓存；或换歌时沿用了同名上一首的歌词、随后确认酷狗里这份本地文件没有歌词，补发一条空歌词，并发一条 `index:-1` 的 `lyric_update`），各补发一条完整的 `all_lyrics`，前端以最新一条覆盖即可。
+        同一首歌也可能再推一次：qqmusic 换歌时歌曲 ID 尚未就绪、先推了一条空歌词的，补取到歌词时（播放中补取 8 秒；8 秒用尽时已暂停的，恢复播放后再补取 8 秒）或播放本地文件、取到其关联的歌词时，播放的本地文件被 QQ 音乐匹配成在线歌曲之后，认出 QQ 音乐仍在放关联表里的这个文件、晚于在线取词到达时，在 QQ 音乐里改了这首歌的歌词关联或时间偏移时，QQ 音乐写完这首歌的歌词缓存时，开播几秒内认出 QQ 音乐所用的关联与先前不同时，从另一个入口重开同一首、所用的关联随之改变时，以及换歌时 QQ 音乐所用的歌词（关联或它自己的歌词缓存）晚于在线取词到达的；kuwo 换歌时先推一条空歌词的，取到歌词时，以及时长变化或歌名、歌手补正时（见 `song-info-keep-first`）；sodamusic 时长晚到（无歌词曲目紧跟补发 `index:-1`）或音译补齐时、wesing 宣告的总时长被纠正时（播放中核实之后，最早约开播 6 秒，每首至多一次）、applemusic 歌词晚到时（换歌后头 3 秒约每 0.4 秒、到 15 秒约每 1.2 秒找一次，之后退避到最长 15 秒一次；若晚到的是仅含无歌词提示的 TTML，重发空 `all_lyrics` 并紧跟补发带提示原文的 `index:-1`）、spotify 歌词取到时（换歌时不等取词、先推一条空歌词的；没取到响应则换歌后在播放中每 5 秒补取一次，18 次后降到每 30 秒一次，累计约 10 分钟的播放时间为止）、kugou 从酷狗读到这首歌的歌词与已推的不同时（换歌后 300 毫秒内没读到、先推了在线取词结果的；或播放中酷狗换了这首歌的歌词：手动关联、或首次播放时酷狗稍后写入歌词缓存；或换歌时沿用了同名上一首的歌词、随后确认酷狗里这份本地文件没有歌词，补发一条空歌词，并发一条 `index:-1` 的 `lyric_update`），各补发一条完整的 `all_lyrics`，前端以最新一条覆盖即可。
       requestBody:
         required: true
         content:
@@ -2682,6 +2684,10 @@ components:
               type: integer
               description: 音频波形帧率（帧每秒），即有音频数据时 `/audio-ws` 与 `/{player}/audio-ws` 每秒推送的帧数，生效范围 [15,60]
               example: 25
+            song-info-keep-first:
+              type: boolean
+              description: 同一首歌内保持最早的歌名与歌手：开启（默认）时，换歌时发出的 `name`、`singer` 在这首歌内不再改动，只有当时为空的可以补上；关闭时随播放器之后读到的写法更新（可能改写或清空）。`title` 在同一首歌内始终不变
+              example: true
             cloudmusicv3-effect-strategy:
               type: string
               description: 网易云特效最小化策略，生效值为 `park` 或 `fadeout`
@@ -2830,7 +2836,7 @@ components:
           description: 被更高优先级来源覆盖的配置键名列表，按 `config` 的键顺序。写下但未被采纳的值（如非法的 `cloudmusicv3-effect-strategy`）不计入，被钳制的值仍计入
           items:
             type: string
-          example: ["addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "cloudmusicv3-effect-strategy", "cloudmusicv3-offset", "qqmusic-offset", "kugou-offset", "sodamusic-offset", "applemusic-offset", "kuwo-offset"]
+          example: ["addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide", "audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "song-info-keep-first", "cloudmusicv3-effect-strategy", "cloudmusicv3-offset", "qqmusic-offset", "kugou-offset", "sodamusic-offset", "applemusic-offset", "kuwo-offset"]
         player_support:
           type: array
           description: 系统编译时注册的所有播放器标识名列表
@@ -2944,7 +2950,7 @@ components:
             播放器所处的层次，各值的含义对所有播放器一致；原因看 `reason`，`detail` 只给人读。非歌名状态（`waiting_process`、`standby`、`waiting_song`）只在 `status`、`detail`、`reason` 三者之一变化时发出，状态不变期间不重发。可能的值：
             - `"waiting_process"` - 播放器进程没在运行。`reason` 为 `process_not_running`（本次服务期间没见它运行过）或 `process_exited`（曾在运行、现已退出；保持到进程重新出现为止）。进程是否在运行先于一切判定：已知的读取受阻原因（如版本不受支持、微软商店版、未取得管理员权限）在进程不在运行时只写进 `detail`，进程启动后改报 `standby` 加该原因
             - `"standby"` - 进程在运行，但本服务读不了它；只在进程在运行时出现。`reason` 为 `cdp_disconnected`（调试通道未就绪或已断开）、`version_unsupported`（版本不受支持，含微软商店版）、`no_admin`（无权读取进程或其安装路径，多因播放器以管理员身份运行；读不到安装路径时无从确知不是微软商店版，本服务不结束、重启、修补或注入它，也不连接）、`install_not_found`（未找到安装）或 `metadata_unavailable`（曲目在而读不到曲目信息）。版本不受支持等原因按间隔重查，条件满足即自动恢复、不必重启本服务；重查期间进程退出，在下一个常规轮次即改报 `waiting_process`，不等重查间隔
-            - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、spotify 当前不报，保留上一首。qqmusic 当前不产生此状态。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
+            - `"waiting_song"` - 已连上，播放器此刻没有当前歌曲。`reason` 为 `no_song`；wesing 的 K 歌播放窗口未打开时为 `window_not_open`。连上之后第一次读到没有歌曲即报（含 wesing 连上时 K 歌窗口已关，不发 `lyric_idle`；wesing 首次连上即处于加载中时以 `waiting_song` / `no_song` 脱离未运行，已宣告歌曲后的换歌加载仍保持静默）。已宣告过歌曲之后再读到没有歌曲：sodamusic、wesing 当即报；kuwo 累计满 2 秒才报（换歌时网页桥会短暂报告没有歌曲，其间保留上一首，2 秒内新歌到来即直接换成新歌、不报此状态；播放态为空的换歌间隙不计入）；cloudmusicv3、kugou、qqmusic、spotify 当前不报，保留上一首（qqmusic 连上进程后尚未认领过歌曲且歌名为空或为窗口占位串时已当拍报 `waiting_song` / `no_song`，会话中途无歌待真机探针）。applemusic 受数据源所限，以下情况报它：本服务连上进程后、认出正在播放的曲目之前（暂停中连上时一直如此，直到开始播放；Apple Music 打开后还没放过歌的，第一首开播后按扫描节奏最长约 8 秒才认出）；换歌后加载超过 6 秒（换歌后 10 秒仍取不到新歌标题改报 `standby` + `metadata_unavailable`）
             - `"playing"` - 播放中，`detail` 为歌曲标题。拼接顺序按播放器而异（wesing / cloudmusicv3 / qqmusic / spotify / kuwo 为 `歌曲名 - 歌手`，kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`），详见 SongInfo.title
             - `"paused"` - 暂停中，`detail` 为歌曲标题。通常伴随一条 `playback_pause`，但不保证：kugou、sodamusic 与 kuwo 换歌时（含服务连上后识别到的第一首）、applemusic 宣告新歌时，都按当时的播放态直接发状态，此时若为 `paused` 不另发 `playback_pause`（applemusic 的新歌起手按播放中计，宣告前位置已停住、被判为暂停时才是 `paused`，位置恢复推进后补发 `playback_resume` 与 `playing`；暂停中切歌时新歌时长一直为 0，按加载中处理、不宣告，开始播放后才宣告）。kugou 换歌那一拍读到的播放态既非播放也非暂停（切歌未起播的过渡态）时不发状态，等读到播放或暂停再发，发之前先发对应的 `playback_resume` 或 `playback_pause`；每次连上 CDP 后的第一首例外，按 `paused` 发、不另发 `playback_pause`（酷狗启动后恢复了上次的歌而未播放即是此情形），开始播放后照常发 `playback_resume` 与 `playing`。applemusic 位置结构失效（连续读不出超过 0.9 秒）时也报 `paused`（伴随 `playback_pause`），歌未必真停，重新找到后补发 `playback_resume` 与 `playing`
             - `"loading"` - 保留值：当前版本各播放器均不产出此状态（wesing 的 loading 发送已停用，其余七家不产生），下游可不为它单独处理
@@ -2989,11 +2995,11 @@ components:
       properties:
         name:
           type: string
-          description: 歌曲名称
+          description: 歌曲名称。同一首歌内是否随播放器之后读到的写法改变，由配置 `song-info-keep-first` 决定：开启（默认）时宣告时有值的不再改变，宣告时为空的可能补上；关闭时可能被改写或清空
           example: "晚风"
         singer:
           type: string
-          description: 歌手名称
+          description: 歌手名称。同一首歌内是否随播放器之后读到的写法改变，由配置 `song-info-keep-first` 决定：开启（默认）时宣告时有值的不再改变，宣告时为空的可能补上；关闭时可能被改写或清空
           example: "陈婧霏"
         title:
           type: string
@@ -3002,7 +3008,7 @@ components:
             而 **kugou / sodamusic / applemusic 为 `歌手 - 歌曲名`**（如 `"Taylor Swift - Cruel Summer (伴奏)"`）。
             需要歌名与歌手时请直接读 `name` / `singer`，不要解析 `title`。
             歌手为空时：wesing / kugou / sodamusic / applemusic / spotify / kuwo 的 `title` 即 `name` 本身（不含分隔符），而 cloudmusicv3 / qqmusic 无条件拼接、会得到带尾随 ` - ` 的 `title`。需要歌名与歌手请直接读 `name` / `singer`。
-            wesing 补读歌曲信息后补发的 `song_info_update` 中，`title` 仍是宣告时的值：宣告时歌手为空、之后补读到歌手的，`title` 不含歌手。
+            同一首歌内 `title` 不变，之后补发的 `song_info_update`、`all_lyrics` 与 `status_update` 的 `detail` 都沿用宣告时的值，宣告时歌名或歌手为空、之后补上的，`title` 也不改；判断是否换了歌请比较 `title`。同一首歌重新宣告（wesing 更换播放位置的来源、applemusic 纠正换歌后首次读到的上一首标题）时整套事件再发一遍，`title` 可能改变。
             sodamusic 的 `singer` 是平台 `artists[]` 全部艺人名以 ` / ` 连接的结果（多艺人时 `title` 里会出现多个 ` / `）；spotify 的 `singer` 同理，是页面上歌手名以 ` / ` 连接的结果。
           example: "晚风 - 陈婧霏"
         cover:
@@ -3025,7 +3031,7 @@ components:
           type: integer
           description: |
             歌词行号。
-            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 与 `roma_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出）、`text_detailed` 与 `roma_text_detailed` 为 `{}`、`furigana` 为 `[]`，而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空：平台给出无歌词提示语时原样保留提示原文（不含前置歌名行），没有提示语时为 `""`（共用识别对除 qqmusic 外的播放器生效；qqmusic 待阶段二改造，当前为 `""`；kuwo 在取词有结论之后发出）。wesing 不发 `-1`。对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达（applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 -1）。
+            特殊值 `-1` 表示平台未返回任何可用歌词数据（并非等同于「纯音乐」）。此时 `data` 仍是完整对象、不是 `{}`：`sub_text` 与 `roma_text` 为空、`timestamp` 为 `0`、`play_time` 为 `0`（无行可播出）、`text_detailed` 与 `roma_text_detailed` 为 `{}`、`furigana` 为 `[]`，而 `position` / `progress` 照常反映整曲播放位置；`text` 不保证为空：平台给出无歌词提示语时原样保留提示原文（不含前置歌名行），没有提示语时为 `""`（共用识别对除 wesing 外的七家播放器生效，spotify 仅认单行形状，kuwo 在取词有结论之后发出）。wesing 不发 `-1`。对应的 `all_lyrics` 为 `count: 0`、`lyrics: []`，二者不一定同时到达（applemusic、spotify、kuwo 换歌时，以及 qqmusic 换歌时歌曲 ID 尚未就绪，先发空的 `all_lyrics`，确定没有歌词后才发 -1）。
             客户端用 `msg.data.index === -1` 判断有无歌词，不要依赖 `msg.data.text` 是否为空。
           example: 1
         text:
@@ -3203,7 +3209,7 @@ components:
       properties:
         title:
           type: string
-          description: 歌曲标题。拼接顺序按播放器而异，详见 SongInfo.title。为空字符串时省略此键
+          description: 歌曲标题。同一首歌内不变，与同期 `song_info_update` 的 `title` 相同；拼接顺序按播放器而异，详见 SongInfo.title。为空字符串时省略此键
           example: "blue hour - Hana Hope"
         duration:
           type: number

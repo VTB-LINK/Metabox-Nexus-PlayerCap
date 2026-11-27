@@ -50,11 +50,11 @@ var assocReaders atomic.Int32
 // reportOnce 即 telemetry.ReportOnce，测试替换以计数。
 var reportOnce = telemetry.ReportOnce
 
-// songKey 是会话写入的当前歌曲。gen 在每次换歌与每次 songid/songmid 由缺到有时加一，reopen 随之归零；reopen 在同一首重开
-// 时加一，gen 不变（设计 §6.8「输入」「重开」）。（gen，reopen）合称代次，结果原样带回；读取者每个代次读一轮当前歌曲记录。
-// songID 为 0、songMid 为空即缺位；本地文件认定不论有无编号都做（设计 §6.5）。name 是会话认领的歌名（经 sanitizeString）。
-// excludeLocal 是上一首最终采纳的本地文件，认定时不注册它（设计 §6.5 第 5 步）。detail 是会话按本 gen 的封面请求补全另一个
-// 编号的详情结果（设计 §6.4 第 2 步「交接」），零值即尚无；代次不变时会话只改它再写一次。
+// songKey 是会话写入的当前歌曲。gen 在每次换歌时加一，reopen 随之归零；同一首补齐在线编号时 gen 与 reopen 不变（#248）；
+// reopen 在同一首重开时加一，gen 不变（设计 §6.8「输入」「重开」）。（gen，reopen）合称代次，结果原样带回；读取者每个代次
+// 读一轮当前歌曲记录。songID 为 0、songMid 为空即缺位；本地文件认定不论有无编号都做（设计 §6.5）。name 是会话认领的歌名
+// （经 sanitizeString）。excludeLocal 是上一首最终采纳的本地文件，认定时不注册它（设计 §6.5 第 5 步）。detail 是会话按本
+// gen 的封面请求补全另一个编号的详情结果（设计 §6.4 第 2 步「交接」），零值即尚无；代次不变时会话可补齐编号或更新它再写一次。
 type songKey struct {
 	gen, reopen   uint64
 	songID        uint32
@@ -131,14 +131,25 @@ func defaultAssocDeps(pid uint32, version string, rec *recordSource) assocDeps {
 	}
 }
 
-// assocReader 是会话与读取者 goroutine 之间的交接：会话以 Submit 写入当前歌曲，从 Results 取结果。
-// 没有读取者（startAssocReader 返回 nil）时，nil 上的 Submit 什么也不做，Results 返回 nil 通道。
+// assocReader 是会话与读取者 goroutine 之间的交接：会话以 Submit 写入当前歌曲，从 Results 取结果，经 LocalCheckPossible
+// 查询本会话是否仍有可能认出本地文件关联（#248）。没有读取者（startAssocReader 返回 nil）时，nil 上的 Submit 什么也不做，
+// Results 返回 nil 通道，LocalCheckPossible 返回假。
 type assocReader struct {
-	mu      sync.Mutex
-	key     songKey // 读取者尚未取走的当前歌曲
-	hasKey  bool
-	wake    chan struct{}    // 容量 1，有新歌时唤醒读取者
-	results chan assocResult // 容量 1，只留最新一条
+	mu            sync.Mutex
+	key           songKey // 读取者尚未取走的当前歌曲
+	hasKey        bool
+	wake          chan struct{}    // 容量 1，有新歌时唤醒读取者
+	results       chan assocResult // 容量 1，只留最新一条
+	localPossible atomic.Bool      // 关联表可能存在本地音频条目且本会话未停做本地认定（#248）
+}
+
+// LocalCheckPossible 报告本会话是否仍有可能认出本地文件关联（#248，设计 §2.3）：读取者启动时初值为真，首次表解析后按
+// 「表可用、含至少一条本地条目、Restart Manager 未报致命错误且未停用」维护；nil 接收者返回假。
+func (r *assocReader) LocalCheckPossible() bool {
+	if r == nil {
+		return false
+	}
+	return r.localPossible.Load()
 }
 
 // Submit 写入当前歌曲，覆盖读取者尚未取走的旧值。不阻塞，读取者退出之后调用也不阻塞。
@@ -205,9 +216,11 @@ func startAssocReader(ctx context.Context, d assocDeps) (*assocReader, bool) {
 		return nil, false
 	}
 	r := &assocReader{wake: make(chan struct{}, 1), results: make(chan assocResult, 1)}
+	r.localPossible.Store(true)
 	go func() {
 		defer telemetry.Guard() // 兜底：只有下面 recoverStop 自身 panic 才会走到它
 		defer assocReaders.Add(-1)
+		defer r.localPossible.Store(false)
 		defer d.record.release()
 		w := &assocWorker{r: r, d: d, ctx: ctx}
 		defer w.recoverStop()
@@ -316,6 +329,8 @@ func (w *assocWorker) run() {
 	w.nextTick = w.d.now().Add(assocTick)
 	if w.prev.ok {
 		w.parse()
+	} else {
+		w.updateLocalPossible()
 	}
 	for !w.stopped {
 		timer := time.NewTimer(w.next().Sub(w.d.now()))
@@ -390,6 +405,7 @@ func (w *assocWorker) tick(now time.Time) {
 	case !st.ok:
 		if w.tableOK {
 			w.tableOK, w.parsed = false, fileStat{}
+			w.updateLocalPossible()
 			w.evaluate()
 		}
 		if !now.Before(w.lastLocate.Add(relocateEvery)) {
@@ -519,9 +535,17 @@ func (w *assocWorker) parse() {
 	}
 	log.Detail("Parsed the QQ Music lyric association table: %d entries, %d bytes in %v", len(es), len(raw), time.Since(start).Round(time.Millisecond))
 	w.entries, w.tableOK = es, true
+	w.updateLocalPossible()
 	w.backoff, w.retryAt, w.badStat, w.badMsg = 0, time.Time{}, fileStat{}, ""
 	w.restartLocal()
 	w.evaluate()
+}
+
+// updateLocalPossible 按当前表状态与本地认定开关更新只读原子提示 localPossible（#248）。
+func (w *assocWorker) updateLocalPossible() {
+	possible := !w.stopped && w.tableOK && !w.localOff &&
+		slices.ContainsFunc(w.entries, func(e assoc.Entry) bool { return e.Kind == assoc.KindLocal })
+	w.r.localPossible.Store(possible)
 }
 
 // parseFailed 处理关联表读取或解析的失败（设计 §6.3 第 4、5 步）。结构错误（含超出 16 MiB）与上一次结构错误的文本相同、
@@ -539,6 +563,7 @@ func (w *assocWorker) parseFailed(st fileStat, err error) {
 		w.badStat, w.badMsg = st, err.Error()
 	}
 	w.tableOK = false
+	w.updateLocalPossible()
 	w.backoff = min(max(2*w.backoff, assocBackoffMin), assocBackoffMax)
 	w.retryAt = w.d.now().Add(w.backoff)
 	if w.once("table " + err.Error()) {
@@ -547,10 +572,11 @@ func (w *assocWorker) parseFailed(st fileStat, err error) {
 	w.evaluate()
 }
 
-// onSong 换用会话写入的歌曲，再求结果。代次（gen，reopen）不变的写入只换详情结果（设计 §6.4 第 2 步「交接」），不清本首的
-// 认定、Detail 额度、本地认定与记录的日程。代次变了：清掉上一首的认定、待重试与 Detail 额度，本地文件从第 0 秒起认定，读当前
-// 歌曲记录的状态清空、新的一轮在求结果时开始；gen 变了另清兜底的状态，只变 reopen 时保留兜底所得。详情结果为已失败而本 gen
-// 尚未排过兜底请求即当即排一次；编号因此变了按 idsUpdated 作废认出或排补读。
+// onSong 换用会话写入的歌曲，再求结果。代次（gen，reopen）不变的写入用于同首补齐在线编号（#248）或更新详情结果（设计 §6.4
+// 第 2 步「交接」）：保留已认定的本地文件、本地认定日程与 Detail 额度；若此前编号缺位时窗口用尽记过 detailFailed、本次清为
+// detailNone，同步清零兜底状态。代次变了：清掉上一首的认定、待重试与 Detail 额度，本地文件从第 0 秒起认定，读当前歌曲记录的
+// 状态清空、新的一轮在求结果时开始；gen 变了另清兜底的状态，只变 reopen 时保留兜底所得。详情结果为已失败而本 gen 尚未排过
+// 兜底请求即当即排一次；编号因此变了按 idsUpdated 作废认出或排补读。
 func (w *assocWorker) onSong(k songKey) {
 	now := w.d.now()
 	id0, mid0 := w.ids()
@@ -562,6 +588,11 @@ func (w *assocWorker) onSong(k songKey) {
 		w.cur, w.hasSong = k, true
 		w.localPath, w.logged = "", nil
 		w.restartLocal()
+	} else {
+		if w.cur.detail.state == detailFailed && k.detail.state == detailNone {
+			w.fill = fillState{}
+		}
+		w.cur.songID, w.cur.songMid = k.songID, k.songMid
 	}
 	w.cur.detail = k.detail
 	if k.detail.state == detailFailed && w.fill.at.IsZero() {
@@ -686,6 +717,7 @@ func (w *assocWorker) attemptLocal() bool {
 	case w.ctx.Err() != nil:
 	case restartmgr.IsFatal(err):
 		w.localOff = true
+		w.updateLocalPossible()
 		log.Warn("Restart Manager failed; not identifying the local file QQ Music is playing for this session: %v", err)
 	case err != nil:
 		if w.once("identify " + err.Error()) {
@@ -1015,6 +1047,7 @@ func (w *assocWorker) lyricFiles(lyricURL string) (files assoc.LyricFiles, missi
 // goroutine 退出，停用只发这一次。
 func (w *assocWorker) stop(reason error) {
 	w.stopped = true
+	w.updateLocalPossible()
 	log.Warn("QQ Music lyric association disabled: %v", reason)
 	if k, ok := w.r.take(); ok {
 		w.cur = k

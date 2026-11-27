@@ -25,7 +25,12 @@ func TestLookupRequestAndDownload(t *testing.T) {
 	}))
 	defer server.Close()
 	for _, rid := range []string{"MUSIC_568213041", "568213041"} {
-		got, err := fetch(context.Background(), rid, time.Second, server.URL, func(name, u string, timeout time.Duration) string {
+		got, err := fetch(context.Background(), rid, time.Second, server.URL, func(dctx context.Context, name, u string, timeout time.Duration) string {
+			if dctx == nil {
+				t.Error("download context is nil")
+			} else if _, ok := dctx.Deadline(); !ok {
+				t.Error("download context missing deadline")
+			}
 			if name != "kuwo" || u != artwork || timeout <= 0 || timeout > time.Second {
 				t.Errorf("bad download arguments: %s %s %s", name, u, timeout)
 			}
@@ -42,7 +47,7 @@ func TestFailedLookupNeverDownloads(t *testing.T) {
 		t.Run(fmt.Sprintf("body_%d_%s", len(body), strings.ReplaceAll(body, "/", "_")), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
 			defer server.Close()
-			_, err := fetch(context.Background(), "MUSIC_568213041", time.Second, server.URL, func(string, string, time.Duration) string {
+			_, err := fetch(context.Background(), "MUSIC_568213041", time.Second, server.URL, func(context.Context, string, string, time.Duration) string {
 				t.Fatal("download after failed lookup")
 				return ""
 			})
@@ -58,7 +63,7 @@ func TestFailedLookupNeverDownloads(t *testing.T) {
 
 func TestInvalidRIDNeverRequests(t *testing.T) {
 	for _, rid := range []string{"", "0", "MUSIC_0", "MUSIC_", "568213041&rid=1", "-12", " MUSIC_12", "123456789012345678901"} {
-		_, err := fetch(context.Background(), rid, time.Second, ":invalid", func(string, string, time.Duration) string {
+		_, err := fetch(context.Background(), rid, time.Second, ":invalid", func(context.Context, string, string, time.Duration) string {
 			t.Fatal("invalid RID was downloaded")
 			return ""
 		})
@@ -73,12 +78,56 @@ func TestCancelledCoverResultDiscarded(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	got, err := fetch(ctx, "568213041", time.Second, server.URL, func(string, string, time.Duration) string {
+	got, err := fetch(ctx, "568213041", time.Second, server.URL, func(context.Context, string, string, time.Duration) string {
 		cancel()
 		return "stale image"
 	})
 	if !errors.Is(err, context.Canceled) || got.DataURI != "" {
 		t.Fatalf("stale result leaked: %+v %v", got, err)
+	}
+}
+
+// Mutation check: passing context.Background() instead of ctx to download in cover.go
+// makes TestLookupRequestAndDownload fail (missing deadline) and this test fail at ~1s (> 300ms).
+func TestCancelledDownloadReturnsPromptly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "https://img1.kuwo.cn/a.jpg") }))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{})
+	type outcome struct {
+		got Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		got, err := fetch(ctx, "568213041", 5*time.Second, server.URL, func(dctx context.Context, _, _ string, _ time.Duration) string {
+			close(started)
+			select {
+			case <-dctx.Done():
+				return ""
+			case <-time.After(time.Second):
+				return "download ignored cancellation"
+			}
+		})
+		done <- outcome{got: got, err: err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("download did not start")
+	}
+	cancelAt := time.Now()
+	cancel()
+
+	res := <-done
+	if elapsed := time.Since(cancelAt); elapsed >= 300*time.Millisecond {
+		t.Fatalf("cancelled download took %v, want < 300ms", elapsed)
+	}
+	if !errors.Is(res.err, context.Canceled) || res.got.DataURI != "" {
+		t.Fatalf("cancelled download: got=%+v err=%v", res.got, res.err)
 	}
 }
 
@@ -92,7 +141,7 @@ func TestLookupRedirectNotFollowed(t *testing.T) {
 		http.Redirect(w, r, "/redirected", http.StatusFound)
 	}))
 	defer server.Close()
-	_, err := fetch(context.Background(), "568213041", time.Second, server.URL, func(string, string, time.Duration) string {
+	_, err := fetch(context.Background(), "568213041", time.Second, server.URL, func(context.Context, string, string, time.Duration) string {
 		t.Fatal("download after redirected lookup")
 		return ""
 	})
@@ -108,7 +157,7 @@ func TestCancelledLookupNeverDownloads(t *testing.T) {
 		t.Error("request after cancellation")
 	}))
 	defer server.Close()
-	got, err := fetch(ctx, "568213041", time.Second, server.URL, func(string, string, time.Duration) string {
+	got, err := fetch(ctx, "568213041", time.Second, server.URL, func(context.Context, string, string, time.Duration) string {
 		t.Fatal("download after cancellation")
 		return ""
 	})

@@ -2013,11 +2013,11 @@ func TestPlayStateWiringCatchesKnownHoles(t *testing.T) {
 		// 暂停中补发：#218 变基后只在 showLyrics 里一处，补取与播放中换词共用
 		repause    = "\t\tif isPaused {\n\t\t\trepausePos = pos\n\t\t\trepausePending = !p.emitFrozenPause(repausePos, currentDurationSec)\n\t\t}\n"
 		repauseOne = "\t\t\trepausePos = pos\n\t\t\trepausePending = !p.emitFrozenPause(repausePos, currentDurationSec)\n"
-		coverLine  = "\t\t\t\t\t\tcoverURL, det := fetchCoverURL(sid, smid)\n"
+		coverLine  = "\t\tcoverURL, det := fetchCoverURL(sid, smid)\n"
 		allEmitEnd = "\t\t\t\tCount: len(items), Lyrics: items,\n\t\t\t})\n" // showLyrics 里有歌词一支的 all_lyrics
 		fillShow   = "\t\t\t\t\t\tshowLyrics(shown, float32(meta.ProgressMs)/1000.0, sampleTime)\n"
 		fillRaw    = "\t\t\t\t\t\tlyricSt.setOnlineRaw(lines)\n"
-		tickShow   = "\t\t\t\tshowLyrics(lines, float32(anchorProgressMs)/1000.0, anchorTime)\n"
+		tickShow   = "\t\t\tshowLyrics(lines, float32(anchorProgressMs)/1000.0, anchorTime)\n"
 		sampleHead = "\t\t// 位置采样"
 		resumeHead = "\t\t\tisPaused = false\n\t\t\trepausePending = false\n\t\t\tanchorTime = sampleTime\n" // 只在 if v.resume 体里是这个次序
 		// #227 的补取窗口（k、l）
@@ -2127,7 +2127,7 @@ func TestPlayStateWiringCatchesKnownHoles(t *testing.T) {
 		{"拆开两条路径时漏掉无歌词一条", "g:", allEmitEnd, moveRepause(insertAfter(allEmitEnd, repause))},
 		{"补取块绕过 showLyrics 直接发歌词", "g:", fillShow, replace(fillShow,
 			"\t\t\t\t\t\tp.Emit(player.EventAllLyrics, &player.AllLyricsData{Title: currentTitle, Position: 0})\n")},
-		{"播放中换词绕过 showLyrics 直接发歌词", "g:", tickShow, replace(tickShow, "\t\t\t\tp.emitNoLyrics(currentTitle, currentDurationSec, 0, 0)\n")},
+		{"播放中换词绕过 showLyrics 直接发歌词", "g:", tickShow, replace(tickShow, "\t\t\tp.emitNoLyrics(currentTitle, currentDurationSec, 0, 0, \"\")\n")},
 		{"补取块不再发歌词（锚点）", "g:", fillShow, replace(fillShow, "")},
 		{"认领不复位 judge.resume", "h:", "judge.resume.reset()", replace("judge.resume.reset()", "_ = judge")},
 		{"核对触发不 Warn", "i:", `log.Warn("QQ Music reports`, func(s string) string {

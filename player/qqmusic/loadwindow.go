@@ -1,8 +1,9 @@
 package qqmusic
 
-// 本文件是会话一侧的改名证据与载入段的记录（#218 第 5 版，doc/design/qqmusic-lyric-association-design.md §6.5 第 5 步、§6.8
-// 「改名证据」「载入段的记录」）：loadEdge（qqmusic.go）的 step 记下窗口与载入段，换歌认领时 claim 求证据、excludeFor 定出交给
-// 读取者的 excludeLocal。只由轮询线程调用，只做内存比较，没有 IO、没有等待。
+// 本文件是会话一侧的改名证据、载入段记录与同一首重开守卫（#218 第 5 版，doc/design/qqmusic-lyric-association-design.md
+// §6.5 第 5 步、§6.8；#245，doc/design/qqmusic-assoc-followup-design.md §3.3）：loadEdge（qqmusic.go）的 step 记下窗口与
+// 载入段，换歌认领时 claim 求证据、excludeFor 定出交给读取者的 excludeLocal；reopenGuard 统一协调同一首重开的 R1/R2/R3
+// 触发与跨拍去重。只由轮询线程调用，只做内存比较，没有 IO、没有等待。
 
 import (
 	"time"
@@ -126,4 +127,102 @@ func logLoadSegment(s loadSegment) {
 	}
 	log.Detail("QQ Music loading segment: non-loading %s, loading %s to %s, non-loading %s; at least %s, at most %s%s",
 		at(s.pre), at(s.first), at(s.last), at(s.post), bound(s.lower()), bound(s.upper()), marks)
+}
+
+// reopenGuard 是同一首重开的统一跨拍守卫（#245，doc/design/qqmusic-assoc-followup-design.md §3.3）：
+// 协调载入边沿及占位串挂起（R1）、暂扣放行回零（R2）与暂停在开头恢复（R3）三条触发规则，以确定性的进度与暂停状态
+// 变化而非时间超时划定跨拍去重边界。只由轮询线程调用，零值立即可用。
+type reopenGuard struct {
+	pendingEdge     bool   // 已认领歌曲期间见到了载入边沿，等待歌名恢复为 lastName 兑现
+	pendingFallback bool   // 已认领歌曲期间在非 lastName 拍见到了无边沿兜底信号（R2/R3），等待歌名恢复为 lastName 兑现
+	consumed        bool   // 当前这一次重开操作已触发过 reopenSong（R1/R2/R3 统一登记）
+	sawStart        bool   // 自 consumed 置真以来已观测到进度落入开头带 (< switchStartBandMs)
+	consumedMs      uint32 // consumed 置真时的进度读数（用于区分「重开前停在旧值等归零」与「曲中缓冲后继续前进」）
+}
+
+// noteReopen 仅在 reopenSong 闭包内统一调用一次：登记本次重开已消费，并清掉尚未兑现的旧挂起边沿与兜底意图，
+// 防止 R1/R2/R3 任一触发后因滞后歌名恢复再次触发重开。
+func (g *reopenGuard) noteReopen(progressMs uint32) {
+	g.consumed = true
+	g.sawStart = progressMs < switchStartBandMs
+	g.consumedMs = progressMs
+	g.pendingEdge = false
+	g.pendingFallback = false
+}
+
+// reset 在换歌认领时调用：清零上一首残留的挂起边沿、挂起兜底意图与跨拍去重状态。
+func (g *reopenGuard) reset() {
+	*g = reopenGuard{}
+}
+
+// onPause 仅在暂停与恢复判定处 if v.pause 为真时调用（绝不在 v.pausedSeek 或 hold.step 开启暂扣时调用）：
+// 新进入已判暂停即清零跨拍消费状态与暂停前的旧兜底挂起（pendingFallback），保留 pendingEdge 不动
+// （暂停前刚见到的占位串载入边沿仍待歌名恢复兑现）。
+func (g *reopenGuard) onPause() {
+	g.consumed = false
+	g.sawStart = false
+	g.consumedMs = 0
+	g.pendingFallback = false
+}
+
+// stepProgress 每拍在暂停与恢复判定之后调用（不要求 !isPaused，播放走出或暂停中跳转离开开头带均成立）：
+// 观测进度进入开头带，并在确定性离开开头带或自触发点继续前进/非归零回跳时解除 consumed。
+func (g *reopenGuard) stepProgress(progressMs uint32, held, loading bool) {
+	if !g.consumed {
+		return
+	}
+	if progressMs < switchStartBandMs {
+		g.sawStart = true
+		return
+	}
+	if held || loading || g.pendingEdge || g.pendingFallback {
+		return
+	}
+	if g.sawStart ||
+		uint64(progressMs) >= uint64(g.consumedMs)+resumeStepMs ||
+		seekBack(g.consumedMs, progressMs) {
+		g.consumed = false
+		g.sawStart = false
+		g.consumedMs = 0
+	}
+}
+
+// shouldReopenByLoading 按规则 R1 判定是否由载入边沿触发同一首重开（设计 §3.3）：
+// 观测到新物理载入边沿即挂起 pendingEdge 并解锁 consumed（即使仍在 < 1.0s 内连续第二次双击重开）；
+// 若当拍为占位串（空串或 "QQ音乐..."）或其他非空真歌名则保持挂起，待歌名恢复为 lastName 时兑现（若认领新歌则由 reset 清零）；
+// 歌名恢复为 lastName 时消耗 pendingEdge，仅在 !consumed && hasIDs 时返回真。
+func (g *reopenGuard) shouldReopenByLoading(usable, edge bool, name, lastName string, hasIDs bool) bool {
+	if !usable || lastName == "" {
+		g.pendingEdge = false
+		return false
+	}
+	if edge {
+		g.pendingEdge = true
+		g.consumed = false
+		g.sawStart = false
+		g.consumedMs = 0
+	}
+	if g.pendingEdge && name == lastName {
+		g.pendingEdge = false
+		return !g.consumed && hasIDs
+	}
+	return false
+}
+
+// shouldReopenByFallback 按规则 R2/R3 判定是否由无边沿兜底信号触发同一首重开（设计 §3.3，#245）：
+// 当拍歌名等于 lastName 且未消费时立即兑现；若当拍歌名为占位串或其他非 lastName（例如切往新歌 B 的过渡占位串拍），
+// 则仅挂起 pendingFallback 不立即触发，待后续歌名恢复为 lastName 时由拍首兑现，若最终认领新歌则由 reset() 丢弃。
+func (g *reopenGuard) shouldReopenByFallback(triggered bool, name, lastName string, hasIDs bool) bool {
+	if lastName == "" {
+		g.pendingFallback = false
+		return false
+	}
+	if triggered && !g.consumed {
+		g.pendingFallback = true
+	}
+	if g.pendingFallback && name == lastName {
+		g.pendingFallback = false
+		return !g.consumed && hasIDs
+	}
+	return false
 }

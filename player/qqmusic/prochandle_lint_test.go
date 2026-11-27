@@ -468,7 +468,7 @@ func TestProcHandleLintCatchesMutations(t *testing.T) {
 		checkClose  = "\t\tm.Close()\n"
 		deferClose  = "\tdefer mem.Close()\n"
 		deferCancel = "\tdefer cancel()\n"
-		pollSleep   = "\t\ttime.Sleep(pollInterval)\n"
+		pollSleep   = "\t\tif p.sleepOrStop(lyricSt.pollSleep(pollInterval, time.Now())) {\n\t\t\treturn\n\t\t}\n"
 		startLog    = "\t\tlog.Info(\"Connected to QQMusic.exe (PID: %d, version: %s)\", mem.pid, mem.Version())\n"
 	)
 

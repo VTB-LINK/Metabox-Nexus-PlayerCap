@@ -202,7 +202,7 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 ### 命令行参数
 
 格式 `-参数 值` 或 `-参数=值`（如 `-poll 50`；负值照写，`-offset -200` 或 `-offset=-200`），优先级最高（> config.yml > 内置默认）；
-`-h` 打印全部参数。开关类参数（`-audio-normalize`、`-<player>-audio-normalize`）只写 `-参数` 为开，
+`-h` 打印全部参数。开关类参数（`-audio-normalize`、`-song-info-keep-first`、`-<player>-audio-normalize`）只写 `-参数` 为开，
 `-参数 false` 或 `-参数=false` 为关。命令行里多余的词（如漏了横线的 `offset -200`）不会被忽略：程序报出该词、打印用法后退出。
 
 | 参数 | 默认值 | 说明 |
@@ -217,6 +217,7 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 | `-audio-normalize-target` | `-14` | 归一化目标响度（dBFS），范围 -60~0 |
 | `-audio-normalize-max-gain` | `30` | 归一化最大增益（dB），范围 0~45 |
 | `-audio-frame-rate` | `25` | 音频波形帧率（帧每秒），范围 15~60 |
+| `-song-info-keep-first` | `true` | 同一首歌内保持最早的歌名与歌手（`name`、`singer`），起初为空的仍可补上；`false` 时随之后读到的写法更新。`title` 在同一首歌内始终不变 |
 | `-cloudmusicv3-effect-strategy` | `fadeout` | 网易云特效最小化策略：`park`（屏外渲染保活）/ `fadeout`（自动淡出） |
 | `-<player>-offset` | *(沿用 `-offset`)* | 指定播放器的歌词延迟（毫秒） |
 | `-<player>-poll` | *(沿用 `-poll`)* | 指定播放器的轮询间隔（毫秒） |
@@ -251,6 +252,7 @@ VTB-TOOLS Metabox Nexus-PlayerCap 多播放器歌词实时推送服务
    per-player 无活跃自动隐藏: *per-player-idle-hide=0s
    音量归一化: *audio-normalize=true *audio-normalize-target=-14dBFS *audio-normalize-max-gain=30dB
    音频波形帧率: *audio-frame-rate=25fps
+   保持最早的歌名与歌手: *song-info-keep-first=true
    播放器: wesing (offset=-200ms poll=30ms idle-hide=0s audio-normalize=true)
    播放器: cloudmusicv3 (*offset=-500ms poll=30ms → 100ms idle-hide=0s audio-normalize=true *effect-strategy=fadeout)
    播放器: qqmusic (*offset=-100ms poll=30ms idle-hide=0s audio-normalize=true)

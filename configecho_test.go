@@ -63,7 +63,7 @@ func TestConfigEchoKeysMatch(t *testing.T) {
 	ek, _ := echoEntries(t, effective)
 
 	want := []string{"addr", "offset", "poll", "prior-player", "prior-player-expire", "per-player-idle-hide",
-		"audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "cloudmusicv3-effect-strategy"}
+		"audio-normalize", "audio-normalize-target", "audio-normalize-max-gain", "audio-frame-rate", "song-info-keep-first", "cloudmusicv3-effect-strategy"}
 	for _, n := range echoPlayers {
 		want = append(want, n+"-offset", n+"-poll", n+"-idle-hide", n+"-audio-normalize")
 	}
@@ -332,5 +332,37 @@ func TestConfigEchoAudioFrameRate(t *testing.T) {
 	}
 	if !reflect.DeepEqual(overwritten, []string{"audio-frame-rate"}) {
 		t.Errorf("config_overwritten=%v，期望 [audio-frame-rate]", overwritten)
+	}
+}
+
+// TestConfigEchoSongInfoKeepFirst song-info-keep-first 回显：默认 true/true 且不进 config_overwritten；
+// 显式设为 false 时两表皆为 false 且进 config_overwritten（#229）。
+//
+// 变异自证（隔离副本，实测）：buildConfigEcho 漏加 song-info-keep-first → 本用例、
+// TestConfigEchoKeysMatch 与 TestBannerPlacesEveryKey 红；buildConfigEcho 放错位置
+// （移至 cloudmusicv3-effect-strategy 之后）→ TestConfigEchoKeysMatch 红。
+func TestConfigEchoSongInfoKeepFirst(t *testing.T) {
+	cfg := defaultEchoConfig()
+	written, effective, overwritten := buildConfigEcho(&cfg, echoPlayers, cfg.EffectStrategy)
+	_, w := echoEntries(t, written)
+	_, e := echoEntries(t, effective)
+	if w["song-info-keep-first"] != true || e["song-info-keep-first"] != true {
+		t.Errorf("默认写下/生效=%#v/%#v，期望 true/true", w["song-info-keep-first"], e["song-info-keep-first"])
+	}
+	if len(overwritten) != 0 {
+		t.Errorf("默认配置下 config_overwritten=%v，期望为空", overwritten)
+	}
+
+	cfg = defaultEchoConfig()
+	cfg.SongInfoKeepFirst = false
+	cfg.ExplicitKeys["song-info-keep-first"] = true
+	written, effective, overwritten = buildConfigEcho(&cfg, echoPlayers, cfg.EffectStrategy)
+	_, w = echoEntries(t, written)
+	_, e = echoEntries(t, effective)
+	if w["song-info-keep-first"] != false || e["song-info-keep-first"] != false {
+		t.Errorf("显式关闭写下/生效=%#v/%#v，期望 false/false", w["song-info-keep-first"], e["song-info-keep-first"])
+	}
+	if !reflect.DeepEqual(overwritten, []string{"song-info-keep-first"}) {
+		t.Errorf("config_overwritten=%v，期望 [song-info-keep-first]", overwritten)
 	}
 }

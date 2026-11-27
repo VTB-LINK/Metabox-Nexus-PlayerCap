@@ -1,18 +1,21 @@
 package player
 
-// 本文件只测共享下载路径 FetchCoverBase64：下载之后接上了规范化（设计 §9 第 21 条，AST 门禁管不到这一处，
-// 门禁允许整个 cover.go 拼 data URI），以及它的 SSRF 拨号检查（第 22 条，此前没有任何用例）。
+// 本文件只测共享下载路径 FetchCoverBase64 / FetchCoverBase64Context：下载之后接上了规范化（设计 §9 第 21 条，AST 门禁管不到这一处，
+// 门禁允许整个 cover.go 拼 data URI）、它的 SSRF 拨号检查（第 22 条，此前没有任何用例），以及 context 取消与超时日志区分（#168）。
 //
 // 变异自证（均实测，逐条记在各用例注释里）。
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -221,4 +224,249 @@ func TestFetchCoverBase64ClosesIdleConnections(t *testing.T) {
 	if n := open.Load(); n != 0 {
 		t.Fatalf("3 次下载之后服务端仍有 %d 条打开的连接，空闲连接没有回收", n)
 	}
+}
+
+// FetchCoverBase64Context 响应取消（issue #168）：响应头返回前取消、响应体读取期间取消都能立即中止且不打 Detail 日志；
+// 调用前已取消时不发请求、不打日志；传入 nil context 时降级为 context.Background() 正常下载。
+//
+// 变异自证：FetchCoverBase64Context 中 http.NewRequestWithContext 改回 http.NewRequest，
+// cancel_before_headers 与 cancel_during_body_read 均等满 5s 超出 500ms 阈值而红；分别去掉
+// client.Do 与 io.ReadAll 错误分支的取消静默判断，对应子用例因打出 cover download failed 日志而红。
+func TestFetchCoverBase64ContextCancelsInFlight(t *testing.T) {
+	orig := newCoverClient
+	newCoverClient = func(timeout time.Duration) *http.Client { return &http.Client{Timeout: timeout} }
+	t.Cleanup(func() { newCoverClient = orig })
+
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldOut) })
+
+	t.Run("cancel_before_headers", func(t *testing.T) {
+		buf.Reset()
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			once.Do(func() { close(started) })
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}))
+		t.Cleanup(srv.Close)
+		t.Cleanup(func() { close(release) })
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		type outcome struct {
+			got string
+			dur time.Duration
+		}
+		done := make(chan outcome, 1)
+		start := time.Now()
+		go func() {
+			got := FetchCoverBase64Context(ctx, "Kuwo", srv.URL+"/a.jpg", 5*time.Second)
+			done <- outcome{got: got, dur: time.Since(start)}
+		}()
+
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("服务端未收到请求")
+		}
+		cancel()
+
+		res := <-done
+		if res.got != "" {
+			t.Fatalf("取消后应返回空串，got %d 字节", len(res.got))
+		}
+		if res.dur >= 500*time.Millisecond {
+			t.Fatalf("取消响应过慢: %v，期望 < 500ms", res.dur)
+		}
+		if logOut := buf.String(); strings.Contains(logOut, "cover download failed") || logOut != "" {
+			t.Fatalf("主动取消不应记 coverLog 日志，got %q", logOut)
+		}
+	})
+
+	t.Run("cancel_during_body_read", func(t *testing.T) {
+		buf.Reset()
+		bodyReading := make(chan struct{})
+		release := make(chan struct{})
+
+		tr := &http.Transport{}
+		t.Cleanup(tr.CloseIdleConnections)
+		prevClient := newCoverClient
+		newCoverClient = func(timeout time.Duration) *http.Client {
+			return &http.Client{
+				Timeout: timeout,
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					resp, err := tr.RoundTrip(req)
+					if err == nil {
+						resp.Body = &readNotifyBody{ReadCloser: resp.Body, notify: bodyReading}
+					}
+					return resp, err
+				}),
+			}
+		}
+		t.Cleanup(func() { newCoverClient = prevClient })
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("partial-image-bytes"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}))
+		t.Cleanup(srv.Close)
+		t.Cleanup(func() { close(release) })
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		type outcome struct {
+			got string
+			dur time.Duration
+		}
+		done := make(chan outcome, 1)
+		start := time.Now()
+		go func() {
+			got := FetchCoverBase64Context(ctx, "Kuwo", srv.URL+"/a.jpg", 5*time.Second)
+			done <- outcome{got: got, dur: time.Since(start)}
+		}()
+
+		select {
+		case <-bodyReading:
+		case <-time.After(2 * time.Second):
+			t.Fatal("客户端未进入响应体读取阶段")
+		}
+		cancel()
+
+		res := <-done
+		if res.got != "" {
+			t.Fatalf("读取期间取消应返回空串，got %d 字节", len(res.got))
+		}
+		if res.dur >= 500*time.Millisecond {
+			t.Fatalf("读取期间取消响应过慢: %v，期望 < 500ms", res.dur)
+		}
+		if logOut := buf.String(); strings.Contains(logOut, "cover download failed") || strings.Contains(logOut, "cover fetched") || logOut != "" {
+			t.Fatalf("读取期间主动取消不应记日志，got %q", logOut)
+		}
+	})
+
+	t.Run("already_canceled_before_call", func(t *testing.T) {
+		buf.Reset()
+		srv, hits := coverServer(t, map[string][2]string{
+			"/a.jpg": {"image/jpeg", string(photoJPEG(t, 800, 800))},
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		if got := FetchCoverBase64Context(ctx, "Kuwo", srv.URL+"/a.jpg", 5*time.Second); got != "" {
+			t.Fatalf("调用前已取消应返回空串，got %d 字节", len(got))
+		}
+		if n := hits.Load(); n != 0 {
+			t.Fatalf("调用前已取消不应发请求，got %d 次", n)
+		}
+		if logOut := buf.String(); logOut != "" {
+			t.Fatalf("调用前已取消不应记日志，got %q", logOut)
+		}
+	})
+
+	t.Run("nil_context_falls_back_to_background", func(t *testing.T) {
+		buf.Reset()
+		srv, hits := coverServer(t, map[string][2]string{
+			"/a.jpg": {"image/jpeg", string(photoJPEG(t, 800, 800))},
+		})
+
+		got := FetchCoverBase64Context(nil, "Kuwo", srv.URL+"/a.jpg", 5*time.Second)
+		if !strings.HasPrefix(got, "data:image/jpeg;base64,") {
+			t.Fatalf("nil context 应降级为 Background 正常下载，got %q", got[:min(len(got), 40)])
+		}
+		if n := hits.Load(); n != 1 {
+			t.Fatalf("期望 1 次请求，got %d 次", n)
+		}
+	})
+}
+
+// FetchCoverBase64Context 超时仍照常记 Detail 日志，与主动取消（context.Canceled）精确区分：
+// 无论是 HTTP 客户端 timeout 还是调用方 context deadline 到期，都返回空串并记 cover download failed。
+//
+// 变异自证：把 client.Do 错误分支的取消静默条件放宽为 ctx.Err() != nil（一并静默超时），
+// context_deadline 子用例因日志为空而红。
+func TestFetchCoverBase64ContextTimeoutLogsDetail(t *testing.T) {
+	orig := newCoverClient
+	newCoverClient = func(timeout time.Duration) *http.Client { return &http.Client{Timeout: timeout} }
+	t.Cleanup(func() { newCoverClient = orig })
+
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldOut) })
+
+	blockingServer := func(t *testing.T) *httptest.Server {
+		t.Helper()
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}))
+		t.Cleanup(srv.Close)
+		t.Cleanup(func() { close(release) })
+		return srv
+	}
+
+	t.Run("client_timeout", func(t *testing.T) {
+		buf.Reset()
+		srv := blockingServer(t)
+
+		if got := FetchCoverBase64Context(context.Background(), "Kuwo", srv.URL+"/a.jpg", 50*time.Millisecond); got != "" {
+			t.Fatalf("客户端超时应返回空串，got %d 字节", len(got))
+		}
+		if logOut := buf.String(); !strings.Contains(logOut, "cover download failed") || !strings.Contains(logOut, "[Cover] [+]") {
+			t.Fatalf("客户端超时应记 Detail 日志含 cover download failed，got %q", logOut)
+		}
+	})
+
+	t.Run("context_deadline", func(t *testing.T) {
+		buf.Reset()
+		srv := blockingServer(t)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+
+		if got := FetchCoverBase64Context(ctx, "Kuwo", srv.URL+"/a.jpg", 5*time.Second); got != "" {
+			t.Fatalf("context 超时应返回空串，got %d 字节", len(got))
+		}
+		if logOut := buf.String(); !strings.Contains(logOut, "cover download failed") || !strings.Contains(logOut, "[Cover] [+]") {
+			t.Fatalf("context 超时应记 Detail 日志含 cover download failed，got %q", logOut)
+		}
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// readNotifyBody 在首次从底层响应体读到字节后发信号，确保调用方已从 client.Do 返回并进入 io.ReadAll。
+type readNotifyBody struct {
+	io.ReadCloser
+	once   sync.Once
+	notify chan struct{}
+}
+
+func (b *readNotifyBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.once.Do(func() { close(b.notify) })
+	}
+	return n, err
 }
