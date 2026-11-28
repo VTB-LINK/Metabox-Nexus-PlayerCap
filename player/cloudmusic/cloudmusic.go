@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,9 +30,13 @@ var log = logger.New("CloudMusic")
 // CloudMusicPlayer 网易云音乐播放器
 type CloudMusicPlayer struct {
 	player.BaseEmitter
-	offsetMs  int
-	pollMs    int
-	connected int32 // atomic：CDP 会话是否在进行（网易云已连上）。供特效捕获器门控生命周期。
+	offsetMs         int
+	pollMs           int
+	connected        int32 // atomic：CDP 会话是否在进行（网易云已连上）。供特效捕获器门控生命周期。
+	rumGate          player.SessionRUMGate[*cmSessionRUM]
+	testBeforeAttach func() // 仅供单测注入 Register 锁外发 attached 前的并发交错屏障
+	attachMetaMu     sync.Mutex
+	attachMeta       cmAttachMeta
 }
 
 // IsConnected 报告取词 CDP 会话是否在进行（网易云已连上并在监听）。
@@ -190,6 +195,7 @@ var (
 	patchAutoStart  = watchdog.PatchRegistryAutoStart
 	ensureDebugMode = watchdog.EnsureDebugMode
 	isRunning       = watchdog.IsRunning
+	lastVersion     = watchdog.LastVersion
 	connectCDP      = func(ctx context.Context) (sessionClient, error) {
 		c, err := cdp.Connect(ctx)
 		if err != nil {
@@ -224,6 +230,9 @@ func (p *CloudMusicPlayer) Start() {
 	warnedUnsupported := false // v2 警告只打一次（它是永久状态，每轮打就是新的刷屏）
 	warnedStore := false       // 微软商店版警告只打一次，理由同 v2（issue #212）
 	warnedExeUnknown := false  // 读不到安装路径的警告只打一次（issue #212）
+	var bt cmBlockTracker
+	var pendingRestart bool
+	var restartAt time.Time
 
 	// 连接 CDP 随停止中止（cdp.Connect 自身另有单次上限）：9222 端口接受连接而不完成响应时，轮询 goroutine 不被挡在连接里。
 	ctx, cancel := context.WithCancel(context.Background())
@@ -244,6 +253,7 @@ func (p *CloudMusicPlayer) Start() {
 		default:
 		}
 
+		ensureStart := time.Now()
 		restarted, err := ensureDebugMode()
 		running := isRunning()
 		if running {
@@ -251,6 +261,11 @@ func (p *CloudMusicPlayer) Start() {
 		}
 		var unsupported *watchdog.UnsupportedVersionError
 		if errors.As(err, &unsupported) {
+			if running {
+				bt.onBlocked("version_unsupported", unsupported.Version)
+			} else {
+				bt.onNotRunning()
+			}
 			// v2：什么都不做。watchdog 已在 taskkill 之前挡住，这里只负责「别再往下走」。
 			//
 			// **本条真正治的是什么，别搞错**（issue #40 的现象描述实测有误）：
@@ -284,14 +299,21 @@ func (p *CloudMusicPlayer) Start() {
 				Reason: player.ReasonVersionUnsupported, Detail: fmt.Sprintf(i18n.T("NetEase Cloud Music v%s unsupported (requires v3+)"), unsupported.Version),
 			}))
 			// 重查间隔只用于重做版本判定；其间每 2 秒判进程，退出即回到循环顶部改报 waiting_process。
-			if stopped, _ := player.RecheckWait(p.StopCh, unsupportedRecheck, 2*time.Second, isRunning); stopped {
+			if stopped, exited := player.RecheckWait(p.StopCh, unsupportedRecheck, 2*time.Second, isRunning); stopped {
 				return
+			} else if exited {
+				bt.onNotRunning()
 			}
 			continue
 		}
 		warnedUnsupported = false // 版本变了（升级/换装）→ 下次再是 v2 可以再警告一次
 		var packaged *launch.PackagedError
 		if errors.As(err, &packaged) {
+			if running {
+				bt.onBlocked("store_install", "")
+			} else {
+				bt.onNotRunning()
+			}
 			// 微软商店版：watchdog 已在结束、拉起之前挡住（门禁），这里提示改用官网安装版、报状态、不往下连。
 			// 形状同上面的 v2：只警告一次、standby + version_unsupported、按 unsupportedRecheck 重查，
 			// 用户改装官网版后不必重启 PlayerCap。
@@ -308,13 +330,20 @@ func (p *CloudMusicPlayer) Start() {
 			p.EmitStatusIfChanged(player.ProcessStatus(running, seen, d, player.Blocked{
 				Reason: player.ReasonVersionUnsupported, Detail: i18n.T("NetEase Cloud Music Microsoft Store version unsupported (requires the official installer version)"),
 			}))
-			if stopped, _ := player.RecheckWait(p.StopCh, unsupportedRecheck, 2*time.Second, isRunning); stopped {
+			if stopped, exited := player.RecheckWait(p.StopCh, unsupportedRecheck, 2*time.Second, isRunning); stopped {
 				return
+			} else if exited {
+				bt.onNotRunning()
 			}
 			continue
 		}
 		warnedStore = false
 		if errors.Is(err, launch.ErrExeUnknown) {
+			if running {
+				bt.onBlocked("no_admin", "")
+			} else {
+				bt.onNotRunning()
+			}
 			// 有 cloudmusic.exe 在运行而读不到它的映像路径（通常是它以更高权限运行）：无从确知不是商店版，
 			// watchdog 已拒绝结束、重启。不往下连：特效与取词都以门禁通过为前提。路径读到或网易云退出后，
 			// 下一轮按当时的层次改报，不另撤状态。
@@ -333,6 +362,8 @@ func (p *CloudMusicPlayer) Start() {
 			log.Error("watchdog error: %v", err)
 		}
 		if !running {
+			bt.onNotRunning()
+			pendingRestart = false
 			p.EmitStatusIfChanged(player.ProcessStatus(false, seen, d, player.Blocked{}))
 			time.Sleep(2 * time.Second)
 			continue
@@ -341,16 +372,35 @@ func (p *CloudMusicPlayer) Start() {
 		// 连上之后由 runSession 按第一次读到的快照改报。
 		p.EmitStatusIfChanged(player.ProcessStatus(true, seen, d, player.Blocked{}))
 		if restarted {
+			pendingRestart = true
+			restartAt = ensureStart
 			log.Info("restarted NetEase Cloud Music, waiting 5s...")
 			time.Sleep(5 * time.Second)
 		}
 
+		connectStart := time.Now()
 		client, err := connectCDP(ctx)
 		if err != nil {
+			if isRunning() {
+				bt.onBlocked("cdp_port_not_ready", lastVersion())
+				if pendingRestart && time.Since(restartAt) >= 25*time.Second {
+					emitCMControlledRestart("port_timeout", time.Since(restartAt).Milliseconds())
+					pendingRestart = false
+				}
+			} else {
+				bt.onNotRunning()
+				pendingRestart = false
+			}
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
+		bt.onRecovered()
+		if pendingRestart {
+			emitCMControlledRestart("ok", time.Since(restartAt).Milliseconds())
+			pendingRestart = false
+		}
+		p.setSessionAttachMeta(time.Since(connectStart).Milliseconds(), lastVersion())
 		log.Info("CDP connected, monitoring playback state")
 		atomic.StoreInt32(&p.connected, 1) // 供特效捕获器门控：网易云已连上才截帧
 		p.runSession(client)
@@ -364,6 +414,26 @@ func (p *CloudMusicPlayer) Start() {
 }
 
 func (p *CloudMusicPlayer) runSession(client sessionClient) {
+	attachMeta := p.takeSessionAttachMeta()
+	rumSess := p.startSessionRUM(attachMeta.version, attachMeta.attachMs)
+	defer func() {
+		if rumSess == nil {
+			return
+		}
+		cause := "cdp_closed"
+		select {
+		case <-p.StopCh:
+			cause = "stopped"
+		default:
+			if !isRunning() {
+				cause = "process_exited"
+			}
+		}
+		p.endSessionRUM(rumSess, cause)
+	}()
+
+	var trackGen uint64
+	var cdpFetchErr bool
 	var lastSongIdentityKey string
 	var lastPlayingState int = -1
 	var lastLineIdx int = -1
@@ -424,6 +494,7 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 			// 其余错误交给降噪：既不刷屏，也不彻底静默。
 			if !strings.Contains(err.Error(), "no root") {
 				if should, repeat, dur := errLog.next(err.Error(), time.Now()); should {
+					rumSess.onCompat("fiber_redux_extract_failed", classifyExtractErrCode(err))
 					if repeat {
 						log.Warn("Extraction error persisting for %s (still retrying): %v", dur.Round(time.Second), err)
 					} else {
@@ -476,10 +547,13 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 			activeSongID = ""
 			isPureMusic = false
 			cdpLyricsOK = false
+			cdpFetchErr = false
 			songDuration = 0
 			clock = baseRealClock{LastKnownLyricIndex: -1} // 行匹配下限随之清掉
 			pending.anchored()                             // 上一首的未告知量不带到新歌
 			lastSongChangeTime = time.Now()
+			trackGen++
+			rumSess.beginTrack(trackGen)
 			currentSongName = songName
 			currentSongArtist = songArtist
 
@@ -557,21 +631,30 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 			// 带代次守卫：下载最长 5s（退回原 URL 时再加 5s），其间可能已换歌；迟到的回写若无守卫会把这首歌的
 			// 标题+封面盖在下一首上，且 song_info_update 只在换歌分支发一次，整首歌不自愈。
 			coverGen := p.NewSongGen()
-			go func(gen uint64, name, artist, title, cover, rawCover string) {
-				defer telemetry.Guard()
-				fetch := func(u string) string { return player.FetchCoverBase64("CloudMusic", u, 5*time.Second) }
-				if b64 := fetchCoverWithFallback(fetch, cover, rawCover); b64 != "" {
-					p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
-						Name: name, Singer: artist, Title: title,
-						Cover: cover, CoverBase64: b64,
-					})
-				}
-			}(coverGen, songName, songArtist, songTitle, songCover, rawCover)
+			rumSess.bindCoverGen(trackGen, coverGen, songCover != "")
+			if songCover != "" {
+				go func(gen uint64, name, artist, title, cover, rawCover string) {
+					defer telemetry.Guard()
+					fetch := func(u string) (string, player.CoverOutcome) {
+						return player.FetchCoverBase64WithOutcome("CloudMusic", u, 5*time.Second)
+					}
+					b64, coverOut := fetchCoverWithFallbackOutcome(fetch, cover, rawCover)
+					rumSess.onCoverOutcome(gen, coverOut)
+					if b64 != "" {
+						p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
+							Name: name, Singer: artist, Title: title,
+							Cover: cover, CoverBase64: b64,
+						})
+					}
+				}(coverGen, songName, songArtist, songTitle, songCover, rawCover)
+			}
 
 			// Fetch lyrics via CDP using Redux ID
+			lyricSource := "none"
 			if activeSongID != "" {
 				lrcResult, err := client.FetchLyricsViaCDP(activeSongID)
 				if err != nil {
+					cdpFetchErr = true
 					log.Warn("lyric fetch failed: %v", err)
 				} else if lrcResult.PureMusic || lrcResult.NoLyric {
 					// CDP 返回纯音乐，用 Go HTTP API 二次确认
@@ -585,6 +668,7 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 						log.Info("API recheck (ID=%s) found %d lyric lines, using API lyrics; per-character: %s", activeSongID, len(apiLyrics), lyricDetailedFlag(apiLyrics))
 						activeLyrics = append(activeLyrics, toExtracted(apiLyrics)...)
 						cdpLyricsOK = true
+						lyricSource = "online"
 					} else {
 						log.Info("API recheck (ID=%s) found no lyrics either, marking as pure music", activeSongID)
 						isPureMusic = true
@@ -600,11 +684,13 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 						emitPos(player.EventLyricUpdate, &player.LyricUpdate{
 							Index: -1, Text: "", Timestamp: 0, Position: playTime, Progress: progress,
 						})
+						rumSess.onTrackLyricSettled(trackGen, "cdp", nil, true, time.Since(lastSongChangeTime).Milliseconds())
 					}
 				} else {
 					parsed, ok := resolveCDPLyrics(lrcResult.Lrc, lrcResult.Tlyric, lrcResult.Romalrc, lrcResult.Yrc, offsetSec)
 					if ok {
 						cdpLyricsOK = true
+						lyricSource = "cdp"
 						log.Info("lyrics loaded (CDP): %d lines (ID=%s); per-character: %s", len(parsed), activeSongID, lyricDetailedFlag(parsed))
 						activeLyrics = append(activeLyrics, toExtracted(parsed)...)
 					} else {
@@ -621,6 +707,7 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 			if activeSongID == "" && matchedRedux && len(data.Lyrics) > 0 {
 				activeLyrics = data.Lyrics
 				cdpLyricsOK = true
+				lyricSource = "redux"
 				log.Info("Redux ID empty, using Redux lyrics directly: %d lines; per-character: no", len(activeLyrics))
 				// 通过独立 CDP 评估读取 Redux 中的翻译歌词
 				if tmap := client.ExtractTlyricLines(); tmap != nil {
@@ -665,6 +752,7 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 						Lyrics: lyricItems, Count: len(lyricItems),
 					})
 				}
+				rumSess.onTrackLyricSettled(trackGen, lyricSource, activeLyrics, isPureMusic, time.Since(lastSongChangeTime).Milliseconds())
 			}
 
 			// 切歌时按播放态主动发 status_update，暂停中连上、暂停中换歌也报（报 paused，设计 4.3 第 2 条）。
@@ -731,6 +819,7 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 						})
 					}
 				}
+				rumSess.onTrackLyricSettled(trackGen, "redux", activeLyrics, isPureMusic, time.Since(lastSongChangeTime).Milliseconds())
 			}
 		}
 
@@ -741,6 +830,11 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 			if songDuration == 0 && snapshotMatchesCurrentSong(data, currentSongName, currentSongArtist) && data.CurPlaying != nil && data.CurPlaying.Track.Duration > 0 {
 				songDuration = float32(data.CurPlaying.Track.Duration) / 1000.0
 			}
+			timeoutSrc := "none"
+			if cdpFetchErr {
+				timeoutSrc = "err"
+			}
+			rumSess.onTrackLyricSettled(trackGen, timeoutSrc, nil, true, time.Since(lastSongChangeTime).Milliseconds())
 			lateLyrics = func() {
 				playTime := posNow()
 				progress := player.ClampProgress(playTime, songDuration)
@@ -816,6 +910,7 @@ func (p *CloudMusicPlayer) runSession(client sessionClient) {
 			pending.add(d)
 			if d >= syncNotifySec || d <= -syncNotifySec {
 				log.Info("synced to UI progress: %.2fs → %.2fs", before, synced)
+				emitCMDOMSyncGuard(d)
 			}
 		}
 

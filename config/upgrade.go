@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"unicode/utf8"
 
 	"Metabox-Nexus-PlayerCap/i18n"
 )
@@ -55,10 +57,21 @@ func upgradeFile(ops *fileOps, cfg *Config, path string, data []byte, m map[stri
 	}
 	migrating := len(steps) > 0
 	next, changed := migrateValues(m, steps, registeredPlayers)
+	if len(changed) > 0 {
+		keys := make([]string, 0, len(changed))
+		for k := range changed {
+			if IsKnownKey(k) {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		cfg.MigratedKeys = keys
+	}
 	next[versionKey] = plan.stamp
 
-	// pending 记下「应改而没有写成」。why 已在调用处告警过具体原因。
-	pending := func() map[string]interface{} {
+	// pending 记下「应改而没有写成」及稳定短原因枚举。why 已在调用处告警过具体原因。
+	pending := func(reason string) map[string]interface{} {
+		cfg.RewriteFailReason = reason
 		cfg.FileRewrite = RewriteStampPending
 		if migrating {
 			cfg.FileRewrite = RewriteMigratePending
@@ -68,13 +81,17 @@ func upgradeFile(ops *fileOps, cfg *Config, path string, data []byte, m map[stri
 	}
 
 	_, hadKey := m[versionKey]
+	var failReason string
 	content, err := rewriteText(data, hadKey, next, changed, steps, registeredPlayers, plan.stamp)
-	if err == nil && fileReadOnly(path) {
+	if err != nil {
+		failReason = classifyRewriteError(data, hadKey, changed, steps, registeredPlayers, plan.stamp)
+	} else if fileReadOnly(path) {
 		err = i18n.Errorf("the file is read-only")
+		failReason = "read_only"
 	}
 	if err != nil {
 		log.Warn("%s cannot be rewritten safely (%v); file left unchanged", path, err)
-		return pending()
+		return pending(failReason)
 	}
 
 	res := replaceFile(ops, path, content, data, label, migrating)
@@ -106,7 +123,51 @@ func upgradeFile(ops *fileOps, cfg *Config, path string, data []byte, m map[stri
 			log.Warn("Cannot write the new %s (%v) and the original could not be put back; it is kept as %s", path, res.err, res.backup)
 		}
 	}
-	return pending()
+	return pending(replaceFailureKind(res.failure))
+}
+
+// classifyRewriteError 将 rewriteText 的失败归类为不含路径和底层错误原文的稳定短枚举。
+func classifyRewriteError(data []byte, hadKey bool, changed map[string]intChange, steps []migrationStep, players []string, stamp string) string {
+	if !utf8.Valid(data) {
+		return "non_utf8"
+	}
+	if checkRewritable(data) != nil {
+		return "multi_doc"
+	}
+	lines, err := rewriteMigrated(splitLines(data), changed, steps, players)
+	if err != nil {
+		return "unsupported_syntax"
+	}
+	notes := []string{versionKeyComment}
+	for _, s := range steps {
+		if s.note != "" {
+			notes = append(notes, s.note)
+		}
+	}
+	if _, err := setVersionKeyLine(lines, hadKey, stamp, notes); err != nil {
+		return "unsupported_syntax"
+	}
+	return "verify_mismatch"
+}
+
+// replaceFailureKind 将 replaceFailure 映射为稳定短枚举字符串；成功时返回空串。
+func replaceFailureKind(f replaceFailure) string {
+	switch f {
+	case replaceDone:
+		return ""
+	case replaceTempFailed:
+		return "temp_failed"
+	case replaceRenameFailed:
+		return "rename_failed"
+	case replaceFileChanged:
+		return "file_changed"
+	case replaceFileAppeared:
+		return "file_appeared"
+	case replacePlaceFailed:
+		return "place_failed"
+	default:
+		return "write_failed"
+	}
 }
 
 // fileReadOnly 报告 path 是否带只读属性。只读的 config.yml 不改写：改名对只读文件照样成功（Windows 上

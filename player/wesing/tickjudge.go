@@ -34,11 +34,12 @@ type tickOut struct {
 	pos  float32 // 本拍报出的位置：直读值，兜底模式最小化外推时为外推值
 	from float32 // 上一拍报出的位置（日志用）
 
-	back, fwd bool // 判为回跳 / 前跳：发 playback_resume
-	resetLine bool // 复位行号：跳转那拍重发当前行，同一行内的跳转也重发（lyric_update-SSE 只收 lyric_update）
-	unpause   bool // 跳转那拍把已判的暂停置为播放，先发 status_update(playing)（前跳只在未判暂停时判，只有回跳会）
-	pause     bool // 判为暂停：status_update(paused) 与 playback_pause
-	resume    bool // 从暂停恢复：status_update(playing) 与 playback_resume，不复位行号
+	back, fwd      bool // 判为回跳 / 前跳：发 playback_resume
+	minExtrapStart bool // 首次进入兜底最小化外推边沿（仅边沿上报，防每拍刷屏）
+	resetLine      bool // 复位行号：跳转那拍重发当前行，同一行内的跳转也重发（lyric_update-SSE 只收 lyric_update）
+	unpause        bool // 跳转那拍把已判的暂停置为播放，先发 status_update(playing)（前跳只在未判暂停时判，只有回跳会）
+	pause          bool // 判为暂停：status_update(paused) 与 playback_pause
+	resume         bool // 从暂停恢复：status_update(playing) 与 playback_resume，不复位行号
 }
 
 // step 在每拍读数成功之后调一次：raw 是本拍外推之前的直读值，now 是读数成功之后取的时刻，minimized、moving
@@ -68,6 +69,7 @@ func (j *tickJudge) step(raw float32, now time.Time, minimized, moving bool, dur
 				j.minimizedAt = now
 				j.atMinimize = raw
 				j.wasMinimized = true
+				o.minExtrapStart = true
 			}
 			o.pos = j.atMinimize + float32(now.Sub(j.minimizedAt).Seconds())
 			if dur > 0 && o.pos > dur {
@@ -105,15 +107,21 @@ func (j *tickJudge) step(raw float32, now time.Time, minimized, moving bool, dur
 // emitTick 按 step 的结果发事件。跳转与恢复的位置都是本拍直读值 raw（最小化外推期间不判跳转、不判暂停）。
 func (p *WesingPlayer) emitTick(o tickOut, raw float32, title string, dur float32) {
 	if o.back || o.fwd {
+		deltaMs := int64((raw - o.from) * 1000)
 		if o.back {
 			log.Info("Seek-back detected: %.2fs → %.2fs", o.from, raw)
+			emitWesingClockGuard("seek_back_2s", "released", deltaMs)
 		} else {
 			log.Info("forward seek detected: %.2fs → %.2fs", o.from, raw)
+			emitWesingClockGuard("seek_forward_2s", "released", deltaMs)
 		}
 		if o.unpause {
 			p.Emit(player.EventStatusUpdate, &player.StatusInfo{Status: "playing", Detail: title})
 		}
 		p.Emit(player.EventPlaybackResume, &player.PlaybackTimeInfo{Position: raw, Progress: player.ClampProgress(raw, dur)})
+	}
+	if o.minExtrapStart {
+		emitWesingClockGuard("minimize_extrapolation", "intercepted", 0)
 	}
 	if o.pause {
 		log.Info("paused @ %.2fs", raw)

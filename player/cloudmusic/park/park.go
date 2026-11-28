@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -444,12 +445,25 @@ func Unpark() bool {
 	return true
 }
 
+var orphanedRestored atomic.Bool
+
+// TakeOrphanedRestored 原子读取并清零「启动时曾恢复孤儿泊车窗口」标志，供首次特效镜像会话汇总上报。
+func TakeOrphanedRestored() bool {
+	return orphanedRestored.Swap(false)
+}
+
+// MarkOrphanedRestoredForTest 仅供单测注入孤儿恢复标志。
+func MarkOrphanedRestoredForTest(v bool) {
+	orphanedRestored.Store(v)
+}
+
 // RestoreOrphaned 在 playercap 启动时调用：若发现遗留泊车状态（上次崩溃时仍在泊车），立即还原窗口。
 func RestoreOrphaned() {
 	s := readState()
 	if s == nil || !s.Parked {
 		return
 	}
+	orphanedRestored.Store(true)
 	log.Warn("Detected orphaned park state (previous abnormal exit); restoring NetEase Cloud Music window...")
 	mu.Lock()
 	parkedMem = true

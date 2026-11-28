@@ -591,4 +591,10 @@ var p4LogMessages = map[string]string{
 
 	// —— 同一首歌内保持最早的歌名与歌手（issue #229）——
 	"Song info read after the announcement: %s / %s; sent: %s / %s": "宣告之后读到的歌曲信息：%s / %s；发出：%s / %s",
+
+	// —— rum：PostHog RUM 后台上报与远端热开关（issue #257）——
+	"RUM worker recovered from panic: %v":             "RUM 后台协程已从异常中恢复: %v",
+	"RUM worker panicked and stopped: %v":             "RUM 后台协程发生未预期异常并已停止: %v",
+	"RUM remote config fetch failed: %v":              "RUM 远端配置拉取失败: %v",
+	"RUM batch rejected with HTTP %d; dropping batch": "RUM 批量上报被服务端拒绝 (HTTP %d)，已放弃本批",
 }

@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
 	"Metabox-Nexus-PlayerCap/i18n"
+	"Metabox-Nexus-PlayerCap/rum"
 	"Metabox-Nexus-PlayerCap/taskbar"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
@@ -51,23 +53,36 @@ var (
 )
 
 // rebuildConfigIfForced 按网关字段 forceUpdate（config_force_update）判定并重建 config.yml，返回是否
-// 重建成功。判定成立而重建没有成功时返回 false：不因重建而重启，以已加载的配置继续运行（config 包已
+// 重建成功，以及是否已在本处上报 config_lifecycle（避免留驻后重复上报）。
+// 判定成立而重建没有成功时返回 false, true：不因重建而重启，以已加载的配置继续运行（config 包已
 // 告警并给出人工补救的办法）。
 //
 // 重建成功后设两个环境变量再返回，随后的重启（含由更新带出的重启）把它们带给新进程。
-func rebuildConfigIfForced(cfg *config.Config, forceUpdate string) bool {
+func rebuildConfigIfForced(cfg *config.Config, forceUpdate, readmeSyncErr string) (rebuilt, lifecycleEmitted bool) {
 	if !cfg.ShouldRebuild(forceUpdate, Version, os.Getenv(envConfigRebuilt)) {
-		return false
+		return false, false
 	}
 	mainLog.Warn("config.yml (version %s) is older than %s, the version below which the gateway requires it to be rebuilt; rebuilding it from the template of this version", cfg.FileVersionLabel, normalizeSemver(forceUpdate))
 	report := cfg.ForceRebuild(Version)
+	var diffKeys []string
+	if report.DiffKnown {
+		seen := make(map[string]bool, len(report.Diffs))
+		for _, d := range report.Diffs {
+			if config.IsKnownKey(d.Key) && !seen[d.Key] {
+				seen[d.Key] = true
+				diffKeys = append(diffKeys, d.Key)
+			}
+		}
+		sort.Strings(diffKeys)
+	}
+	rum.Track(rum.CatUpdateCfg, "config_lifecycle", buildConfigLifecycleProps(cfg, readmeSyncErr, report.Done, report.FailKind, diffKeys))
 	if !report.Done {
-		return false
+		return false, true
 	}
 	os.Setenv(envConfigRebuilt, normalizeSemver(forceUpdate))
 	os.Setenv(envConfigBackup, report.Backup)
 	showRebuildNotice(rebuildNoticeLines(report))
-	return true
+	return true, true
 }
 
 // rebuildNoticeLines 返回重建提示的各行（样式同自动更新的提示框）：已重建、备份的文件名、旧文件与

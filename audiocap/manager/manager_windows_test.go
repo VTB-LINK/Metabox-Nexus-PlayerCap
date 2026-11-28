@@ -408,8 +408,8 @@ func TestReconcileFilterWant(t *testing.T) {
 	}{
 		{"已放弃", captureFailure{count: maxQuickFails, givenUp: true, pid: pid}, nil, true},
 		{"退避期内", captureFailure{count: 1, retryAt: time.Now().Add(time.Hour), pid: pid}, nil, true},
-		{"退避期满", captureFailure{count: 1, retryAt: time.Now().Add(-time.Second), pid: pid}, []string{fmt.Sprintf("capture %d %s 0 0 0 50", pid, player)}, true},
-		{"PID 变化", captureFailure{count: maxQuickFails, givenUp: true, pid: pid + 1}, []string{fmt.Sprintf("capture %d %s 0 0 0 50", pid, player)}, false},
+		{"退避期满", captureFailure{count: 1, retryAt: time.Now().Add(-time.Second), pid: pid}, []string{fmt.Sprintf("capture %d %s 0 0 0 50 1", pid, player)}, true},
+		{"PID 变化", captureFailure{count: maxQuickFails, givenUp: true, pid: pid + 1}, []string{fmt.Sprintf("capture %d %s 0 0 0 50 2", pid, player)}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w.lines = nil
@@ -519,15 +519,15 @@ func newApplyManager(w *recWriter, np NormParams) *Manager {
 }
 
 // TestApplyControls 验证差异控制：新增→capture；PID 变更→先 stop 旧再 capture 新；
-// 移除→stop 且 dispatched 与 lastFrame 均被清。capture 命令为 7 字段（归一化参数与帧率），
+// 移除→stop 且 dispatched 与 lastFrame 均被清。capture 命令含归一化参数、帧率与单调会话编号 sid，
 // 由 normResolver 的 Enabled 决定 bit 位（1/0）。
 func TestApplyControls(t *testing.T) {
 	w := &recWriter{}
 	m := newApplyManager(w, NormParams{Enabled: true, Target: -14, MaxGain: 30})
 
-	// 1. 新增 kugou→100：只下发 capture，含归一化参数（enabled→bit=1）与帧率。
+	// 1. 新增 kugou→100：只下发 capture，含归一化参数（enabled→bit=1）、帧率与 sid=1。
 	m.applyControls(map[string]uint32{"kugou": 100})
-	if got, want := w.lines, []string{"capture 100 kugou 1 -14 30 50"}; !reflect.DeepEqual(got, want) {
+	if got, want := w.lines, []string{"capture 100 kugou 1 -14 30 50 1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("新增后下发 = %v, 期望 %v", got, want)
 	}
 	if m.dispatched["kugou"] != 100 {
@@ -545,10 +545,10 @@ func TestApplyControls(t *testing.T) {
 		t.Fatalf("新增后不应写 lastForward[kugou]")
 	}
 
-	// 2. PID 变更 kugou→200：先 stop 旧再 capture 新（仍带全部参数）。
+	// 2. PID 变更 kugou→200：先 stop 旧再 capture 新（仍带全部参数且 sid 递增为 2）。
 	w.lines = nil
 	m.applyControls(map[string]uint32{"kugou": 200})
-	if got, want := w.lines, []string{"stop kugou", "capture 200 kugou 1 -14 30 50"}; !reflect.DeepEqual(got, want) {
+	if got, want := w.lines, []string{"stop kugou", "capture 200 kugou 1 -14 30 50 2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("PID 变更后下发 = %v, 期望 %v", got, want)
 	}
 	if m.dispatched["kugou"] != 200 {
@@ -578,7 +578,7 @@ func TestApplyControlsNormDisabled(t *testing.T) {
 	m := newApplyManager(w, NormParams{Enabled: false, Target: -14, MaxGain: 30})
 
 	m.applyControls(map[string]uint32{"kugou": 100})
-	if got, want := w.lines, []string{"capture 100 kugou 0 -14 30 50"}; !reflect.DeepEqual(got, want) {
+	if got, want := w.lines, []string{"capture 100 kugou 0 -14 30 50 1"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("禁用归一化后下发 = %v, 期望 %v", got, want)
 	}
 }

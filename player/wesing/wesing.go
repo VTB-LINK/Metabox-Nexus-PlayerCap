@@ -51,8 +51,10 @@ func wesingNoAdminBlocked() player.Blocked {
 // WesingPlayer 全民K歌播放器
 type WesingPlayer struct {
 	player.BaseEmitter
-	offsetMs int
-	pollMs   int
+	offsetMs         int
+	pollMs           int
+	rumGate          player.SessionRUMGate[*wesingSessionRUM]
+	testBeforeAttach func() // 仅供单测注入 Register 锁外发 attached 前的并发交错屏障
 }
 
 // New 创建全民K歌播放器
@@ -85,6 +87,7 @@ func (p *WesingPlayer) Start() {
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
 	d := wesingDetails()
 	seen := false // 本次服务期间见过 WeSing.exe 在运行：区分 process_exited 与 process_not_running
+	var blockTrack wesingBlockTracker
 
 	for {
 		select {
@@ -93,11 +96,11 @@ func (p *WesingPlayer) Start() {
 		default:
 		}
 
-		handle, pid := p.waitForProcess(&seen, d)
+		handle, pid, attachMs := p.waitForProcess(&seen, d, &blockTrack)
 		if handle == 0 {
 			return
 		}
-		p.runSession(handle, pid, offsetSec, pollInterval)
+		p.runSession(handle, pid, offsetSec, pollInterval, &blockTrack, attachMs)
 		closeProc(handle)
 
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo（issue #118）
@@ -106,6 +109,9 @@ func (p *WesingPlayer) Start() {
 		running := p.isProcessAlive()
 		if running {
 			block = wesingNoAdminBlocked()
+			blockTrack.onBlocked(player.ReasonNoAdmin)
+		} else {
+			blockTrack.onNotRunning()
 		}
 		p.EmitStatusIfChanged(player.ProcessStatus(running, true, d, block))
 		p.Emit(player.EventClearSongData, nil)
@@ -116,25 +122,28 @@ func (p *WesingPlayer) Start() {
 	}
 }
 
-func (p *WesingPlayer) waitForProcess(seen *bool, d player.ProcessDetails) (syscall.Handle, uint32) {
+func (p *WesingPlayer) waitForProcess(seen *bool, d player.ProcessDetails, blockTrack *wesingBlockTracker) (syscall.Handle, uint32, int64) {
 	log.Info("Waiting for WeSing.exe to start...")
 	printed := false
 	for {
 		select {
 		case <-p.StopCh:
-			return 0, 0
+			return 0, 0, 0
 		default:
 		}
+		attachStart := time.Now()
 		pid, err := findProcess(TargetProcessName)
 		if err == nil {
 			*seen = true
 			handle, err := openProc(pid)
 			if err == nil {
 				log.Info("Found WeSing.exe (PID: %d)", pid)
-				return handle, pid
+				return handle, pid, time.Since(attachStart).Milliseconds()
 			}
+			blockTrack.onBlocked(player.ReasonNoAdmin)
 			p.EmitStatusIfChanged(player.ProcessStatus(true, true, d, wesingNoAdminBlocked()))
 		} else {
+			blockTrack.onNotRunning()
 			p.EmitStatusIfChanged(player.ProcessStatus(false, *seen, d, player.Blocked{}))
 			if !printed {
 				log.Info("WeSing.exe not running, waiting...")
@@ -143,7 +152,7 @@ func (p *WesingPlayer) waitForProcess(seen *bool, d player.ProcessDetails) (sysc
 		}
 		p.Emit(player.EventClearSongData, nil)
 		if p.sleepOrStop(2 * time.Second) {
-			return 0, 0
+			return 0, 0, 0
 		}
 	}
 }
@@ -184,12 +193,22 @@ const (
 	romaWaitStep  = 200 * time.Millisecond
 )
 
-func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec float32, pollInterval time.Duration) {
+func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec float32, pollInterval time.Duration, blockTrack *wesingBlockTracker, attachMs int64) {
+	enumStart := time.Now()
 	modules, err := enumModules(pid)
 	if err != nil {
 		log.Error("Failed to enumerate modules: %v", err)
 		return
 	}
+	if blockTrack != nil {
+		blockTrack.onRecovered()
+	}
+	rumSess := p.startSessionRUM(attachMs + time.Since(enumStart).Milliseconds())
+	disconnectCause := "process_exited"
+	defer func() {
+		p.endSessionRUM(rumSess, disconnectCause)
+	}()
+	reannounce := false
 
 	lastTitle := ""
 	var cachedTimeAddr uint32
@@ -230,11 +249,13 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 	for {
 		select {
 		case <-p.StopCh:
+			disconnectCause = "stopped"
 			return
 		default:
 		}
 
 		if !p.isProcessAlive() {
+			disconnectCause = "process_exited"
 			return
 		}
 
@@ -256,8 +277,10 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 				lastPhase = proc.PhaseStandby
 			}
 			lastTitle = ""
+			reannounce = false
 			skip.reset()
 			if p.sleepOrStop(1 * time.Second) {
+				disconnectCause = "stopped"
 				return
 			}
 			continue
@@ -284,6 +307,7 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			}
 			lastPhase = proc.PhaseLoading
 			if p.sleepOrStop(500 * time.Millisecond) {
+				disconnectCause = "stopped"
 				return
 			}
 			continue
@@ -292,13 +316,16 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			if state.SongTitle != lastTitle {
 				log.Info("♪ Song: %s", state.SongTitle)
 				lastTitle = state.SongTitle
+				reannounce = false
 			}
 			skip.seen(state.SongTitle)
 		}
 
 		// === 播放中：初始化歌词并开始轮询 ===
-		lyrics, ok := p.initSong(handle, modules)
+		lyricStart := time.Now()
+		lyrics, failStage, ok := p.initSong(handle, modules)
 		if !ok {
+			rumSess.onCompat("lyric_host_failed", failStage)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -392,6 +419,20 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 		// 内存重试用的句柄由封面 goroutine 自己另开、自己关，见 startCoverFetch（issue #117）。
 		p.startCoverFetch(realCoverFetchOps, coverGen, pid, lastTitle, songMID, songName, singer, songTitle, coverURL, clock != nil, !songConfirmed)
 
+		if !reannounce {
+			clockMode, idSource := "aob_fallback", "window_title"
+			if clock != nil {
+				clockMode = "pcm"
+				if songMID != "" {
+					idSource = "pcm_path_mid"
+				}
+			} else if songMID != "" {
+				idSource = "mem_song_info"
+			}
+			rumSess.onTrackRecognized(clockMode, idSource, lyrics, time.Since(lyricStart).Milliseconds())
+		}
+		reannounce = false
+
 		lastPhase = proc.PhasePlaying
 
 		// CKSongsGraph 的实例每首重扫（0.1~0.3 s），放在宣告之后，宣告不推迟。不跨歌沿用：已释放对象的
@@ -411,21 +452,33 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 
 		// 歌词轮询循环
 		exitR, altAddr := p.pollLyrics(handle, pid, lyrics, lyricItems, timeAddr, altAddrs, offsetSec, pollInterval, lastTitle, songTitle, songDuration,
-			graph, deadAddrRetriedFor != lastTitle, clock, ann)
+			graph, deadAddrRetriedFor != lastTitle, clock, ann, rumSess)
 		idle.emit(p.TryEmit)
 
 		switch exitR {
 		case exitProcessDied:
+			select {
+			case <-p.StopCh:
+				disconnectCause = "stopped"
+			default:
+				if p.isProcessAlive() {
+					disconnectCause = "no_admin"
+				} else {
+					disconnectCause = "process_exited"
+				}
+			}
 			return
 		case exitSongChanged:
 			log.Info("Song change detected, reloading...")
 			lastTitle = ""
 			altSwitchedFor = ""
+			reannounce = false
 			continue
 		case exitWindowClosed:
 			log.Info("WeSing window closed")
 			lastTitle = ""
 			altSwitchedFor = ""
+			reannounce = false
 			skip.reset()
 			continue
 		case exitDeadAddr:
@@ -434,12 +487,16 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			// **不清 lastTitle**：这不是切歌，是同一首歌重来。清了会让上面的
 			// `state.SongTitle != lastTitle` 重新成立，deadAddrRetriedFor 的记忆随之作废，
 			// 于是每 5 秒重扫一次、永不停止。
+			rumSess.onCompat("clock_dead_addr", "")
+			reannounce = true
 			deadAddrRetriedFor = lastTitle
 			cachedTimeAddr = 0
 			continue
 		case exitAltAddr:
 			// 同一首歌换一个播放时间地址重来：不清 lastTitle（理由同上），把它当缓存地址交给 initSong，
 			// 不必重扫。被换下的那个进候选名单、带到之后的歌里；这一首不再盯（altSwitchedFor）。
+			rumSess.onCompat("clock_alt_addr", "")
+			reannounce = true
 			cachedAltAddrs = swapAlt(cachedAltAddrs, altAddr, cachedTimeAddr)
 			cachedTimeAddr = altAddr
 			altSwitchedFor = lastTitle
@@ -448,16 +505,22 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 			// 只这一首改走兜底重来，下一首仍先试 PCM（#196，设计 doc/design/wesing-small-seek-design.md §3.6）。
 			// 不清 lastTitle，理由同 exitDeadAddr。到期判出的没有测出速率，不报 Rate（#177 设计 §4.9）。每次判出
 			// 一条 Warn，不经 pcmNotes：这是这一首的结论，测出的那条还带这一首的速率。
+			rateDetail := "rate_out_of_range"
 			if clock.RateTimedOut() {
+				rateDetail = "rate_timeout"
 				log.Warn("PCM decoder rate was not measured: out-of-range advances (seeks or a wrong sample format) kept voiding the measurement for 30s; using the existing play-time source for this song")
 			} else {
 				log.Warn("PCM decoder rate %.3f is outside [0.95, 1.05]; using the existing play-time source for this song", clock.Rate())
 			}
+			rumSess.onCompat("clock_pcm_rate_off", rateDetail)
+			reannounce = true
 			skip.mark(lastTitle)
 			continue
 		case exitPCMStalled:
 			// 只这一首改走兜底重来，下一首仍先试 PCM。不清 lastTitle，理由同 exitDeadAddr。
 			notes.unavailable(i18n.T("the accompaniment decoder did not advance within 5s"))
+			rumSess.onCompat("clock_pcm_stalled", "")
+			reannounce = true
 			skip.mark(lastTitle)
 			continue
 		}
@@ -465,21 +528,21 @@ func (p *WesingPlayer) runSession(handle syscall.Handle, pid uint32, offsetSec f
 }
 
 // initSong 加载歌词与音译。
-func (p *WesingPlayer) initSong(handle syscall.Handle, modules []proc.Module) ([]lyric.LyricLine, bool) {
+func (p *WesingPlayer) initSong(handle syscall.Handle, modules []proc.Module) ([]lyric.LyricLine, string, bool) {
 	_, subStructAddr, err := lyric.FindLyricHost(handle, modules)
 	if err != nil {
-		return nil, false
+		return nil, "find_host", false
 	}
 
 	lyrics, err := lyric.LoadLyrics(handle, subStructAddr)
 	if err != nil || len(lyrics) == 0 {
-		return nil, false
+		return nil, "load_lyrics", false
 	}
 	log.Info("Lyrics loaded: %d lines; per-character: %s", len(lyrics), detailedFlag(lyrics))
 	if n := loadRomaWithWait(handle, subStructAddr, lyrics); n > 0 {
 		log.Info("Romanization attached: %d/%d lines", n, len(lyrics))
 	}
-	return lyrics, true
+	return lyrics, "", true
 }
 
 // locatePlayTime 定位播放时间地址（兜底模式）。altAddrs 是定位时落选的其它候选；沿用缓存地址时原样带回
@@ -845,7 +908,7 @@ func songMeta(windowTitle string, findInfo func(string) (lyric.SongInfo, error),
 // 与停滞检测。clock 为 nil 是兜底模式，行为同 #145 之前。
 func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []lyric.LyricLine, lyricItems []player.LyricLine, timeAddr uint32, altAddrs []uint32,
 	offsetSec float32, pollInterval time.Duration, currentTitle string, fullSongTitle string, songDuration float32,
-	graph *lyric.SongsGraphWatch, allowDeadAddrExit bool, clock *lyric.PCMClock, ann *allLyricsAnnounce) (exitReason, uint32) {
+	graph *lyric.SongsGraphWatch, allowDeadAddrExit bool, clock *lyric.PCMClock, ann *allLyricsAnnounce, rumSess *wesingSessionRUM) (exitReason, uint32) {
 
 	lastLineIdx := -1
 	failCount := 0
@@ -985,6 +1048,7 @@ func (p *WesingPlayer) pollLyrics(handle syscall.Handle, pid uint32, lyrics []ly
 				Lyrics: lyricItems, Count: len(lyricItems),
 			}) {
 				graph.Adopted(songDuration, d)
+				rumSess.onCompat("songs_graph_corrected", "")
 				songDuration = d
 				lastLineIdx = -1
 			}

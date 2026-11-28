@@ -65,6 +65,8 @@ jobs:
       - name: Build Windows executable
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
         run: |
           # 获取commit hash和build time
           $COMMIT_HASH = '${{ steps.vars.outputs.COMMIT_HASH }}'
@@ -77,14 +79,12 @@ jobs:
           $EXE_NAME = "${VERSION}.exe"
           Add-Content -Path $env:GITHUB_ENV -Value "EXE_NAME=${EXE_NAME}" -Encoding utf8
 
-          # Sentry DSN 从 secret 注入。secret 没配 → 空串 → 客户端自动禁用遥测，构建照常成功
-          # （telemetry.Enabled 只看这个变量）。启动日志第一行会说「未注入 DSN，遥测已禁用」，
-          # 那就是 secret 没生效的信号。
+          # Sentry DSN 与 PostHog RUM 凭据均从 secret 注入。secret 没配 → 空串 → 客户端自动禁用对应上报，构建照常成功。
           #
           # 这里的 VERSION 是非 semver 的，会把遥测送进 Sentry 的 development 环境 ——
-          # 与它让客户端跳过自动更新是同一个判据（main.isReleaseVersion）。改这个格式会同时
-          # 挪动两件事。
-          go build -ldflags "-X 'main.Version=${VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${env:SENTRY_DSN}'" -o "${EXE_NAME}"
+          # 与它让客户端跳过自动更新以及 RUM 静默是同一个判据（main.isReleaseVersion）。改这个格式会同时
+          # 挪动这些行为。
+          go build -ldflags "-X 'main.Version=${VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${env:SENTRY_DSN}' -X 'Metabox-Nexus-PlayerCap/rum.apiKey=${env:POSTHOG_API_KEY}' -X 'Metabox-Nexus-PlayerCap/rum.host=${env:POSTHOG_HOST}'" -o "${EXE_NAME}"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
           if (Test-Path -LiteralPath $EXE_NAME) {

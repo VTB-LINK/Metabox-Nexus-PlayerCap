@@ -3,6 +3,7 @@ package sodamusic
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	"Metabox-Nexus-PlayerCap/player"
@@ -466,21 +467,29 @@ var fetchKugouLyrics = klyric.Fetch
 // 直接 Emit，才必须靠 coverCancel 挡住迟到回写盖掉当前歌曲）。缓冲容量 1 保证送出不阻塞、
 // goroutine 必能退出。
 func (p *SodaMusicPlayer) fetchKugouRoma(romaCh chan<- []krc.Line, sodaLines []krc.Line, name, singer string, durationMs int) {
+	p.fetchKugouRomaWithRUM(romaCh, sodaLines, name, singer, durationMs, nil, 0)
+}
+
+func (p *SodaMusicPlayer) fetchKugouRomaWithRUM(romaCh chan<- []krc.Line, sodaLines []krc.Line, name, singer string, durationMs int, rumSess *sodaSessionRUM, trackSeq uint64) {
 	defer telemetry.Guard()
+	start := time.Now()
 	// 传空 hash → 走 Tier 2/3（按歌手+歌名 catalog 搜 + ±5s 时长严格匹配），不依赖酷狗 hash。
 	kugouLines, err := fetchKugouLyrics("", durationMs, name, singer)
 	if err != nil {
 		log.Detail("Borrowing romanization from KuGou failed: search for \"%s - %s\" errored: %v", singer, name, err)
+		rumSess.onKugouRomaResolved(trackSeq, "err", false, false, time.Since(start).Milliseconds())
 		return
 	}
 	if len(kugouLines) == 0 {
 		log.Detail("No KuGou romanization match: no song found for \"%s - %s\"; romanization left empty", singer, name)
+		rumSess.onKugouRomaResolved(trackSeq, "no_match", false, false, time.Since(start).Milliseconds())
 		return
 	}
 	st := mergeKugouRomaStats(sodaLines, kugouLines)
 	if st.matched == 0 {
 		log.Detail("KuGou matched \"%s - %s\" with %d lines, but none align with the SodaMusic main lyrics (different version/master/cover?); romanization left empty",
 			singer, name, len(kugouLines))
+		rumSess.onKugouRomaResolved(trackSeq, "unaligned", false, false, time.Since(start).Milliseconds())
 		return
 	}
 	sample := st.sample
@@ -489,6 +498,12 @@ func (p *SodaMusicPlayer) fetchKugouRoma(romaCh chan<- []krc.Line, sodaLines []k
 	}
 	log.Detail("KuGou romanization aligned: \"%s - %s\" matched %d KuGou lines; word-level %d + line-level fallback %d = %d/%d lines in total, %d left empty; sample %s",
 		singer, name, len(kugouLines), st.charLines, st.lineLines, st.matched, len(sodaLines), len(sodaLines)-st.matched, sample)
+	outcome := "hit_line"
+	if st.charLines > 0 {
+		outcome = "hit_char"
+	}
+	_, _, _, hasRoma, hasRomaDetailed := sodaLyricCapabilities(sodaLines)
+	rumSess.onKugouRomaResolved(trackSeq, outcome, hasRoma, hasRomaDetailed, time.Since(start).Milliseconds())
 	romaCh <- sodaLines
 }
 

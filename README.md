@@ -217,7 +217,7 @@ go build -ldflags "-X main.Version=3.0.0-beta.5" -o Metabox-Nexus-PlayerCap.exe 
 | `-audio-normalize-target` | `-14` | 归一化目标响度（dBFS），范围 -60~0 |
 | `-audio-normalize-max-gain` | `30` | 归一化最大增益（dB），范围 0~45 |
 | `-audio-frame-rate` | `25` | 音频波形帧率（帧每秒），范围 15~60 |
-| `-song-info-keep-first` | `true` | 同一首歌内保持最早的歌名与歌手（`name`、`singer`），起初为空的仍可补上；`false` 时随之后读到的写法更新。`title` 在同一首歌内始终不变 |
+| `-song-info-keep-first` | `true` | 同一首歌内保持最早的歌名与歌手（`name`、`singer`），起初为空的仍可补上；`false` 时随之后读到的写法更新。组合标题（`title`，如「歌名 - 歌手」）在同一首歌内始终不变 |
 | `-cloudmusicv3-effect-strategy` | `fadeout` | 网易云特效最小化策略：`park`（屏外渲染保活）/ `fadeout`（自动淡出） |
 | `-<player>-offset` | *(沿用 `-offset`)* | 指定播放器的歌词延迟（毫秒） |
 | `-<player>-poll` | *(沿用 `-poll`)* | 指定播放器的轮询间隔（毫秒） |

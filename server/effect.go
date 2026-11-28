@@ -11,8 +11,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"Metabox-Nexus-PlayerCap/rum"
 	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"github.com/gorilla/websocket"
@@ -36,13 +38,16 @@ type effectMsg struct {
 }
 
 type effectSub struct {
-	ch   chan effectMsg
-	addr string // 客户端 RemoteAddr，仅供 /service-status 的 effect_ws_connected 回显
+	ch      chan effectMsg
+	addr    string // 客户端 RemoteAddr，仅供 /service-status 的 effect_ws_connected 回显
+	dropped atomic.Uint64
+	session *clientSessionMeta
 }
 
 type effectHub struct {
-	mu   sync.Mutex
-	subs map[*effectSub]struct{}
+	mu       sync.Mutex
+	subs     map[*effectSub]struct{}
+	peakSubs uint64 // 本周期特效订阅并发峰值（受 h.mu 保护）
 
 	// 截帧/注入参数（由前端连接时通过 query 设置，捕获器按需读取并在变更时重启）
 	quality         int     // JPEG 质量 1-100
@@ -58,9 +63,10 @@ type effectHub struct {
 	// 纯层捕获（page→Go 帧回传）：
 	// 注入网易云页面的抓帧脚本经 /cloudmusicv3/effect-ingest 把特效 canvas 的 JPEG 字节推进来，
 	// 由捕获器注册的 ingestHandler 做帧门控后广播给 effect-ws 订阅者。
-	ingestHandler func([]byte) // 捕获器注册：处理一帧 ingest 进来的 JPEG（含门控）
-	ingestPort    string       // 服务监听端口，供拼接注入脚本里的 page→Go WS 地址
-	ingestToken   string       // 进程内一次性随机 token（仅存内存、绝不落盘）：ingest 写端鉴权，防本机其它软件伪造帧
+	ingestHandler      func([]byte)  // 捕获器注册：处理一帧 ingest 进来的 JPEG（含门控）
+	ingestPort         string        // 服务监听端口，供拼接注入脚本里的 page→Go WS 地址
+	ingestToken        string        // 进程内一次性随机 token（仅存内存、绝不落盘）：ingest 写端鉴权，防本机其它软件伪造帧
+	ingestForbidden403 atomic.Uint64 // effect-ingest 鉴权失败 403 次数
 }
 
 func newEffectHub() *effectHub {
@@ -176,6 +182,14 @@ func (s *Server) EffectCaptureParams() (quality int, scale float64, headerClicka
 	return h.quality, h.scale, h.headerClickable, h.footerClickable, h.gen
 }
 
+func (h *effectHub) removeSub(sub *effectSub) int {
+	h.mu.Lock()
+	delete(h.subs, sub)
+	count := len(h.subs)
+	h.mu.Unlock()
+	return count
+}
+
 // HasEffectSubscribers 是否有客户端在看特效镜像（捕获器据此按需启停 screencast）
 func (s *Server) HasEffectSubscribers() bool {
 	h := s.effectHub
@@ -207,13 +221,20 @@ func (s *Server) BroadcastEffectFrame(jpeg []byte) {
 		case sub.ch <- msg:
 		default:
 			// 通道已满：丢弃旧消息，写入最新帧，保证低延迟
+			var dropped uint64
 			select {
 			case <-sub.ch:
+				dropped++
 			default:
 			}
 			select {
 			case sub.ch <- msg:
 			default:
+				dropped++
+			}
+			if dropped > 0 {
+				sub.dropped.Add(dropped)
+				rum.AddDropped("effect_sub", dropped)
 			}
 		}
 	}
@@ -254,13 +275,20 @@ func (s *Server) BroadcastEffectStatus() {
 		case sub.ch <- msg:
 		default:
 			// 满则腾一格再发，确保状态不丢
+			var dropped uint64
 			select {
 			case <-sub.ch:
+				dropped++
 			default:
 			}
 			select {
 			case sub.ch <- msg:
 			default:
+				dropped++
+			}
+			if dropped > 0 {
+				sub.dropped.Add(dropped)
+				rum.AddDropped("effect_sub", dropped)
 			}
 		}
 	}
@@ -325,6 +353,7 @@ func (s *Server) handleEffectIngest(w http.ResponseWriter, r *http.Request) {
 	token := h.ingestToken
 	h.mu.Unlock()
 	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("t")), []byte(token)) != 1 {
+		h.ingestForbidden403.Add(1)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -368,6 +397,7 @@ func parseBoolParam(v string, def bool) bool {
 }
 
 func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
+	surface := classifyRequestSurface(r)
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		serverLog.Warn("NetEase effect WS upgrade failed: %v", err)
@@ -411,11 +441,22 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setEffectParams(quality, scale, headerClickable, footerClickable)
 
-	sub := &effectSub{ch: make(chan effectMsg, 8), addr: conn.RemoteAddr().String()}
+	sub := &effectSub{
+		ch:   make(chan effectMsg, 8),
+		addr: conn.RemoteAddr().String(),
+	}
+	sub.session = s.registerClientSession(
+		newClientSessionMeta("effect_ws", cloudmusicPlayerName, surface, time.Now()),
+		sub.dropped.Load,
+	)
+	// 保持 h.subs[sub] = struct{}{} 直接位于 handleEffectWS 内（effectparams_test.go AST 顺序门禁锚点）。
 	h := s.effectHub
 	h.mu.Lock()
 	h.subs[sub] = struct{}{}
 	count := len(h.subs)
+	if n := uint64(count); n > h.peakSubs {
+		h.peakSubs = n
+	}
 	h.mu.Unlock()
 	serverLog.Info("NetEase effect WS connected: %s (total: %d)", conn.RemoteAddr(), count)
 
@@ -429,6 +470,7 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 		for msg := range sub.ch {
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteMessage(msg.mt, msg.data); err != nil {
+				sub.session.markWriteFailed()
 				serverLog.Warn("NetEase effect WS write failed, closing connection: %s: %v", conn.RemoteAddr(), err)
 				conn.Close() // 解阻塞读循环，交由下面既有的清理路径注销
 				return
@@ -453,12 +495,10 @@ func (s *Server) handleEffectWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.mu.Lock()
-	delete(h.subs, sub)
-	count = len(h.subs)
-	h.mu.Unlock()
+	count = s.effectHub.removeSub(sub)
 	close(sub.ch)
 	conn.Close()
 	<-done
+	s.endClientSession(sub.session, sub.dropped.Load(), time.Now())
 	serverLog.Info("NetEase effect WS disconnected: %s (total: %d)", conn.RemoteAddr(), count)
 }

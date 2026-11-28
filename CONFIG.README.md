@@ -53,7 +53,8 @@ audio-normalize-max-gain: 30
 audio-frame-rate: 25
 
 # 同一首歌内保持最早的歌名与歌手：开启时，换歌时发出的歌名、歌手（song_info_update 的 name、singer）在这首歌内
-# 不再改动，只有当时为空的可以补上；关闭时随播放器之后读到的写法更新（可能改写或清空）。title 在同一首歌内始终不变。
+# 不再改动，只有当时为空的可以补上；关闭时随播放器之后读到的写法更新（可能改写或清空）。
+# 组合标题（title，如「歌名 - 歌手」）在同一首歌内始终不变。
 song-info-keep-first: true
 
 # 全民K歌 配置

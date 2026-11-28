@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"reflect"
 	"slices"
 	"sort"
 	"time"
@@ -60,8 +61,10 @@ var log = logger.New("AppleMusic")
 // AppleMusicPlayer Apple Music for Windows 播放器（纯内存扫描实现）。
 type AppleMusicPlayer struct {
 	player.BaseEmitter
-	offsetMs int
-	pollMs   int
+	offsetMs         int
+	pollMs           int
+	rumGate          player.SessionRUMGate[*amSessionRUM]
+	testBeforeAttach func() // 仅供单测注入 Register 锁外发 attached 前的并发交错屏障
 }
 
 // New 创建 Apple Music 播放器。
@@ -256,6 +259,7 @@ func (t twinStats) summary(now time.Time) map[string]any {
 func (p *AppleMusicPlayer) Start() {
 	d := appleMusicDetails()
 	seen := false // 本次服务期间见过 Apple Music 在运行：区分 process_exited 与 process_not_running
+	var blockTrack amBlockTracker
 	for {
 		select {
 		case <-p.StopCh:
@@ -263,15 +267,18 @@ func (p *AppleMusicPlayer) Start() {
 		default:
 		}
 
+		attachStart := time.Now()
 		r, err := attach()
 		if err != nil {
 			if errors.Is(err, mem.ErrAccessDenied) {
 				seen = true
+				blockTrack.onBlocked(player.ReasonNoAdmin)
 				p.EmitStatusIfChanged(player.ProcessStatus(true, true, d, player.Blocked{
 					Reason: player.ReasonNoAdmin,
 					Detail: i18n.T("Cannot read the Apple Music process (Apple Music may be running as administrator)"),
 				}))
 			} else {
+				blockTrack.onNotRunning()
 				p.EmitStatusIfChanged(player.ProcessStatus(false, seen, d, player.Blocked{}))
 			}
 			p.Emit(player.EventClearSongData, nil)
@@ -282,11 +289,14 @@ func (p *AppleMusicPlayer) Start() {
 		}
 
 		seen = true
+		attachMs := time.Since(attachStart).Milliseconds()
+		blockTrack.onRecovered()
 		log.Info("Attached to AppleMusic.exe, monitoring playback state")
-		p.runSession(r)
+		p.runSession(r, attachMs)
 		r.Close()
 
 		// 进程退出（Apple Music 常自重启，pid/地址会变）——回到外层重新 Attach。
+		blockTrack.onNotRunning()
 		p.EmitStatusIfChanged(player.ProcessStatus(false, true, d, player.Blocked{}))
 		p.Emit(player.EventClearSongData, nil)
 		log.Info("Session ended; waiting for a new AppleMusic process...")
@@ -297,14 +307,20 @@ func (p *AppleMusicPlayer) Start() {
 }
 
 // runSession 轮询内存并 emit 事件，直到目标进程退出或收到 Stop。
-func (p *AppleMusicPlayer) runSession(r *mem.Reader) {
+func (p *AppleMusicPlayer) runSession(r *mem.Reader, attachMs int64) {
 	s := newSession(p, r, time.Now)
+	rumSess := p.registerSessionRUM(s, attachMs)
+	disconnectCause := "process_exited"
+	defer func() {
+		p.endSessionRUM(rumSess, disconnectCause)
+	}()
 	defer close(s.coverEnd)
 	defer s.reportTwinStats()
 	poll := EffectivePollInterval(p.pollMs)
 	for {
 		select {
 		case <-p.StopCh:
+			disconnectCause = "stopped"
 			return
 		default:
 		}
@@ -313,6 +329,7 @@ func (p *AppleMusicPlayer) runSession(r *mem.Reader) {
 		}
 		s.tick()
 		if p.sleepOrStop(poll) {
+			disconnectCause = "stopped"
 			return
 		}
 	}
@@ -464,6 +481,7 @@ type session struct {
 	// noSongClear：附加后首拍 waiting_song 之后的 clear_song_data 尚未入队（通道满时在后续无歌 tick 重试），
 	// 使断线清缓存后重连无歌时服务端能向专属出口派发清除（#231）。
 	noSongClear bool
+	rum         *amSessionRUM
 }
 
 func newSession(p *AppleMusicPlayer, r memReader, clock func() time.Time) *session {
@@ -486,6 +504,7 @@ func newSession(p *AppleMusicPlayer, r memReader, clock func() time.Time) *sessi
 		staleScan:   backoff{steps: staleScanSteps},
 		coverCh:     make(chan coverResult, 1),
 		coverEnd:    make(chan struct{}),
+		rum:         newAMSessionRUM(clock),
 	}
 	s.clk.lastRaw = -1
 	// 附加成功后先报「没有歌」并紧跟一条 clear_song_data：此前外层报的是「未启动」，附加后若一直没有歌也
@@ -607,6 +626,7 @@ func (s *session) onTwin(t mem.Twin, now time.Time) {
 		}
 		if (s.announced || s.song.dur > 0) && now.Sub(s.loadingAt) >= loadingGrace {
 			log.Info("Song still loading after %v; treating as no song", loadingGrace)
+			s.emitCompat("loading_grace_cleared_6s", 0)
 			s.clearSong()
 		}
 		return
@@ -672,6 +692,8 @@ func (s *session) beginSong(t mem.Twin, now time.Time, est float64, fromStart bo
 		log.Detail("Position structure refound after %dms (different duration)", d.Milliseconds())
 	}
 	log.Info("Song change: duration %.0fs", t.Dur)
+	s.flushTrackRecognized()
+	s.resetTrackRUM(false)
 	s.songsBegun++
 	s.rotateChains()
 	if s.song.coverHash != 0 {
@@ -709,6 +731,7 @@ func (s *session) dropTwin(now time.Time) {
 	if wasPlaying && s.announced {
 		s.twins.lost++
 		s.twins.lostAt = now
+		s.emitCompat("twin_lost", 0)
 	}
 	s.twin = 0
 	s.twinFailAt = time.Time{}
@@ -786,6 +809,7 @@ func (s *session) watchCandidates(now time.Time) {
 			if d > s.twins.maxRefind {
 				s.twins.maxRefind = d
 			}
+			s.emitCompat("twin_refound", d.Milliseconds())
 			log.Detail("Position structure refound after %dms (same song)", d.Milliseconds())
 		}
 		// 同一首（位置结构丢失或停住后找到在走的那个）：接上位置，按恢复处理。找回的位置可能在已推的
@@ -845,6 +869,7 @@ func (s *session) maybeScan() {
 	// （每次换歌至多报一次），取到再宣告。每轮都判，不等下一次扫描（扫描按退避排，等它会拖到十几秒）。
 	if songReady && !s.announced && s.needTitle && now.Sub(s.songChangedAt) >= titleGiveUp && !s.titleGiveUpSent {
 		s.titleGiveUpSent = true
+		s.onMetadataBlocked(now)
 		log.Warn("No title %v after the song change; clearing the overlay for now", titleGiveUp)
 		s.p.EmitStatusIfChanged(player.ProcessStatus(true, true, appleMusicDetails(), player.Blocked{
 			Reason: player.ReasonMetadataUnavailable,
@@ -858,9 +883,21 @@ func (s *session) maybeScan() {
 	wantSong := songReady && !s.songScanAt.IsZero() && !now.Before(s.songScanAt)
 	wantDirty := s.storeDirty && now.Sub(s.dirtyAt) >= s.dirtyGap
 	wantTag := !s.tagScanAt.IsZero() && !now.Before(s.tagScanAt)
-	wantTwins := s.twinScan.due(now) || s.staleScan.due(now)
+	staleDue := s.staleScan.due(now)
+	wantTwins := s.twinScan.due(now) || staleDue
 	if !wantSong && !wantDirty && !wantTag && !wantTwins {
 		return
+	}
+	scanTrigger := "twin_discovery"
+	switch {
+	case wantSong:
+		scanTrigger = "song_meta_or_lyric"
+	case wantDirty:
+		scanTrigger = "store_dirty"
+	case wantTag:
+		scanTrigger = "loading_tag"
+	case staleDue:
+		scanTrigger = "stale_twin"
 	}
 	// 还没确认位置结构时，见到了存储的每一次全扫都顺带收候选：存储换了（用户点了歌）正是真结构要露面的
 	// 时候。没见到存储就不收——watchCandidates 那时不认任何候选（「先见到存储才认」），而收候选的全扫
@@ -872,6 +909,11 @@ func (s *session) maybeScan() {
 	}
 	snap := s.r.Scan(collect, s.scanTick)
 	end := s.now()
+	scanVerdict := "empty"
+	if len(snap.Songs) > 0 || len(snap.Docs) > 0 || len(snap.Twins) > 0 {
+		scanVerdict = "hit"
+	}
+	emitAMScanSample(scanTrigger, end.Sub(now).Milliseconds(), snap.TwinsTruncated, scanVerdict)
 	s.lastScanEnd = end
 	s.tagScanAt = time.Time{}
 	if wantDirty {
@@ -908,6 +950,7 @@ func (s *session) maybeScan() {
 func (s *session) setCandidates(snap mem.Snapshot, now time.Time) {
 	if snap.TwinsTruncated && !s.truncWarn {
 		s.truncWarn = true
+		s.emitCompat("twin_candidates_truncated", 0)
 		log.Warn("More than %d position candidates; truncated", len(snap.Twins))
 	}
 	next := make(map[uintptr]*cand, len(snap.Twins)+len(s.cands))
@@ -1201,6 +1244,7 @@ func (s *session) applyMeta(np mem.NowPlaying, now time.Time) bool {
 			// 换歌后头一次扫到的还是上一首的标题，现在才读到真的。这期间记到旧标题名下的歌词文档其实是
 			// 新歌的，转给它；更早就属于旧标题的（上一首自己的歌词）不动——旧实现在这里把旧标题名下的
 			// 认领全撤了，时长相同的两首歌相邻时，新歌当场领走上一首的歌词。
+			s.resetTrackRUM(s.rum.isTrackReported())
 			old, key := s.song.key(), metaKey(np.Title, np.Artist)
 			for h, k := range s.docOwner {
 				if k == old && !s.docSeenAt[h].Before(s.songChangedAt) {
@@ -1209,6 +1253,8 @@ func (s *session) applyMeta(np mem.NowPlaying, now time.Time) bool {
 			}
 		} else {
 			// 时长没变、也没看到归零：时长相同的下一首（自然播完衔接时归零只有几十毫秒）。按新歌重来。
+			s.flushTrackRecognized()
+			s.resetTrackRUM(false)
 			s.songsBegun++
 		}
 		if s.song.coverHash != 0 {
@@ -1247,10 +1293,20 @@ func (s *session) applyLyrics(lines []krc.Line, h uint64) {
 	s.needLyrics = false
 	s.lastLineIdx = -1
 	if s.announced {
+		latePanel := s.verdictSent
 		s.emitAllLyrics()
 		if pure {
 			s.emitVerdict()
 		}
+		if latePanel {
+			s.rum.onLyricsUpdated(s.now(), s.song.docHash, s.song.lyrics, s.song.pureHint)
+			s.emitLatePanelLyricUpdate(s.now())
+		} else {
+			s.rum.onLyricsUpdated(s.now(), s.song.docHash, s.song.lyrics, s.song.pureHint)
+			s.tryEmitTrackRecognized()
+		}
+	} else {
+		s.rum.onLyricsUpdated(s.now(), s.song.docHash, s.song.lyrics, s.song.pureHint)
 	}
 }
 
@@ -1286,6 +1342,7 @@ func (s *session) setCover(np mem.NowPlaying, h uint64) {
 	s.coverSrc, s.coverMIME = np.Cover, np.CoverMIME
 	s.needCover = false
 	if h == s.coverLast.hash {
+		s.rum.onCoverOutcome(s.coverLast.outcome)
 		s.putCover(s.coverLast.uri)
 	}
 	s.startCover()
@@ -1304,13 +1361,19 @@ func (s *session) putCover(uri string) {
 
 // coverResult 是一次封面缩放的结果，经容量为 1 的 session.coverCh 交回轮询 goroutine。
 type coverResult struct {
-	seq  uint64 // 第几次缩放（session.coverSeq）
-	hash uint64 // 原始字节的哈希
-	uri  string
+	seq     uint64 // 第几次缩放（session.coverSeq）
+	hash    uint64 // 原始字节的哈希
+	uri     string
+	outcome player.CoverOutcome
+}
+
+// defaultCoverDataURI 是生产默认封面规范化实现。
+func defaultCoverDataURI(playerName string, b []byte, mime string) string {
+	return player.CoverDataURI(playerName, b, mime)
 }
 
 // coverDataURI 是 player.CoverDataURI 的可替换 seam：仅供封面缩放的离线测试注入桩。生产恒为该函数，不导出。
-var coverDataURI = player.CoverDataURI
+var coverDataURI = defaultCoverDataURI
 
 // startCover 当前曲目的封面还没缩放过、又没有在飞的就起一次。**至多一次在飞**：缩放吃 CPU、中途停不下，
 // 换歌连按时不叠着做——在飞的那次落地时对不上当前曲目、被丢掉，随即起最新的那张，中间几张不做。
@@ -1326,19 +1389,25 @@ func (s *session) startCover() {
 // pollCover 每轮 tick 收一次缩放结果：是当前曲目要的那张就落地（putCover），不是的（换了歌或换了图）丢掉；
 // 然后按需起下一次（startCover）。会话状态只在轮询 goroutine 里读写，不加锁。
 func (s *session) pollCover() {
+	got := false
 	select {
 	case r := <-s.coverCh:
 		if !s.coverFly || r.seq != s.coverSeq {
 			break // 不是在飞的那次（按构造不会有）：丢掉，在飞的照旧等它
 		}
+		got = true
 		s.coverFly = false
 		s.coverLast = r
 		if r.hash == s.song.coverHash {
+			s.rum.onCoverOutcome(r.outcome)
 			s.putCover(r.uri)
 		}
 	default:
 	}
 	s.startCover()
+	if got {
+		s.tryEmitTrackRecognized()
+	}
 }
 
 // runCoverJob 在独立 goroutine 里用 norm（coverDataURI，由起缩放的轮询 goroutine 取来传入）规范一张封面，结果
@@ -1346,7 +1415,11 @@ func (s *session) pollCover() {
 // end 关闭时退出，不挂住。
 func runCoverJob(norm func(string, []byte, string) string, r coverResult, b []byte, mime string, out chan<- coverResult, end <-chan struct{}) {
 	defer telemetry.Guard()
-	r.uri = norm("AppleMusic", b, mime)
+	if norm != nil && reflect.ValueOf(norm).Pointer() == reflect.ValueOf(defaultCoverDataURI).Pointer() {
+		r.uri, r.outcome = player.CoverDataURIWithOutcome("AppleMusic", b, mime)
+	} else {
+		r.uri = norm("AppleMusic", b, mime)
+	}
 	select {
 	case out <- r:
 	case <-end:
@@ -1359,6 +1432,8 @@ func runCoverJob(norm func(string, []byte, string) string, r coverResult, b []by
 // （见 setCover）。
 func (s *session) announce() {
 	log.Info("♪ Song: %s", buildTitle(s.song.title, s.song.artist))
+	now := s.now()
+	s.onMetadataRecovered(now)
 	if np := s.store; np.Cover != nil && np.Title == s.song.title && np.Artist == s.song.artist {
 		if h := hashBytes(np.Cover); !s.staleCover(np, h) {
 			s.setCover(np, h)
@@ -1368,11 +1443,13 @@ func (s *session) announce() {
 	s.announced = true
 	s.noSongClear = false
 	s.lastLineIdx = -1
+	s.rum.onAnnounced(now, s.songChangedAt, s.song.docHash, s.song.lyrics, s.song.pureHint, !s.needLyrics)
 	s.emitAllLyrics()
 	if !s.needLyrics && len(s.song.lyrics) == 0 {
 		s.emitVerdict() // 取到的是「纯音乐」提示：已经知道没有歌词，不必等宽限期
 	}
 	s.emitStatus()
+	s.tryEmitTrackRecognized()
 }
 
 // emitSongInfo 发歌曲信息。封面来自内存里的图片字节，没有 URL：cover 恒为空串，只有 cover_base64。
@@ -1413,6 +1490,8 @@ func (s *session) emitVerdict() {
 	s.p.Emit(player.EventLyricUpdate, &player.LyricUpdate{
 		Index: -1, Text: s.song.pureHint, Timestamp: 0, Position: pos, Progress: player.ClampProgress(pos, float32(s.song.dur)),
 	})
+	s.rum.onVerdict(s.now(), s.song.docHash, s.song.lyrics, s.song.pureHint)
+	s.tryEmitTrackRecognized()
 }
 
 // checkVerdict 宽限期到了还没有歌词：发「无歌词」。加载中、未宣告时不判。
@@ -1451,6 +1530,8 @@ func (s *session) showNoSong() {
 // 「最近一次采用的封面」不随之清掉：清屏后的新歌同样可能先带着上一首的图建出存储（见 staleCover），
 // 抹掉它，新歌就带着上一首的封面宣告。
 func (s *session) clearSong() {
+	s.flushTrackRecognized()
+	s.resetTrackRUM(false)
 	if s.song.coverHash != 0 {
 		s.prevCover, s.prevAlbum = s.song.coverHash, s.song.album
 	}
@@ -1906,9 +1987,16 @@ func (c *clock) observe(raw float64, now time.Time) clockEvent {
 	// 待确认的跳转须每一次读数都指向它：先取下，这一次读数仍指向它才由 holdJump 续上——弹回原值、
 	// 落回范围内、判了暂停，都就此作废。
 	pendingAt := c.jumpAt
+	pendingRaw := c.jumpRaw
 	c.jumpAt = time.Time{}
+	noteIntercepted := func() {
+		if !pendingAt.IsZero() {
+			emitAMClockGuard("intercepted", pendingRaw-c.lastRaw, now.Sub(pendingAt))
+		}
+	}
 	switch {
 	case raw == c.lastRaw:
+		noteIntercepted()
 		threshold := pauseThreshold
 		if now.Sub(c.relaxAt) < startWindow {
 			threshold = startPauseThreshold
@@ -1926,6 +2014,7 @@ func (c *clock) observe(raw float64, now time.Time) clockEvent {
 			if !c.holdJump(raw, now, pendingAt) {
 				return evNone // 还没持续够：读数与位置都不动
 			}
+			emitAMClockGuard("released", raw-c.lastRaw, now.Sub(pendingAt))
 			// 位置从第一次读到目标值的那一刻推算（那一刻是 目标+seekLag）。持续期间读数进了一格的（落点
 			// 有时比目标少一、约 250ms 后进一格），进这一格时真实位置不低于 lo，只按第一次读到的值会慢约 1s。
 			c.anchorPos, c.anchorAt = math.Max(c.jumpRaw+seekLag+now.Sub(c.jumpAt).Seconds(), lo), now
@@ -1933,6 +2022,7 @@ func (c *clock) observe(raw float64, now time.Time) clockEvent {
 			c.relaxAt = now // 跳转后的下一跳与开播后的第一跳一样来得晚，见 startWindow
 			return evSeek
 		}
+		noteIntercepted()
 		c.lastRaw, c.lastChange = raw, now
 		switch {
 		case est < lo:
@@ -1944,8 +2034,13 @@ func (c *clock) observe(raw float64, now time.Time) clockEvent {
 	default:
 		d := raw - c.lastRaw
 		tick := c.lastRaw >= 0 && d > 0 && d <= sinceObs.Seconds()+tickSlackSec
-		if !tick && !c.holdJump(raw, now, pendingAt) {
-			return evNone // 暂停中拖动，目标值还没持续够：读数与位置都不动
+		if tick {
+			noteIntercepted()
+		} else {
+			if !c.holdJump(raw, now, pendingAt) {
+				return evNone // 暂停中拖动，目标值还没持续够：读数与位置都不动
+			}
+			emitAMClockGuard("released", raw-c.lastRaw, now.Sub(pendingAt))
 		}
 		c.lastRaw, c.lastChange, c.jumpAt = raw, now, time.Time{}
 		c.anchorPos, c.anchorAt = raw+flipLagMid, now
@@ -1970,6 +2065,9 @@ func (c *clock) observe(raw float64, now time.Time) clockEvent {
 // 约每 20ms 读一次位置（scanTick）时更多。播放中的跳转与暂停中的拖动共用。
 func (c *clock) holdJump(raw float64, now, pendingAt time.Time) bool {
 	if d := raw - c.jumpRaw; pendingAt.IsZero() || d < 0 || d > now.Sub(pendingAt).Seconds()+tickSlackSec {
+		if !pendingAt.IsZero() {
+			emitAMClockGuard("intercepted", c.jumpRaw-c.lastRaw, now.Sub(pendingAt))
+		}
 		c.jumpRaw, c.jumpAt = raw, now
 		return false
 	}

@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+
+	"Metabox-Nexus-PlayerCap/rum"
 )
 
 // LyricTextDetailedWord 逐字歌词片段
@@ -276,6 +278,7 @@ func (b *BaseEmitter) emit(evtType string, data interface{}) bool {
 		}
 		return true
 	default:
+		rum.AddDropped("player_event_ch", 1)
 		return false
 	}
 }

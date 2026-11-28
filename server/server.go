@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player"
+	"Metabox-Nexus-PlayerCap/rum"
 	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"github.com/gorilla/websocket"
@@ -25,8 +27,10 @@ type subscriber struct {
 	player     string   // "" = root（跟随 activePlayer），"wesing" = 只收该 player
 	eventTypes []string // nil/empty = 全部事件，否则按类型过滤
 	ch         chan WSEvent
-	isWS       bool   // true=WS, false=SSE（用于统计）
-	addr       string // 远程地址（用于 service-status）
+	isWS       bool               // true=WS, false=SSE（用于统计）
+	addr       string             // 远程地址（用于 service-status）
+	dropped    atomic.Uint64      // 慢消费者满通道丢弃计数
+	session    *clientSessionMeta // RUM 会话元数据（直接内部 subscribe 测试可为 nil）
 }
 
 func (sub *subscriber) matchesType(evtType string) bool {
@@ -157,12 +161,28 @@ type Server struct {
 	// 每个播放器的独立状态缓存
 	playerStates map[string]*PlayerState
 
+	// playingSnap 保存各播放器是否处于 playing 状态的不可变只读快照，供音频热路径无锁读取（不获取 s.mu）。
+	// 仅在持有 s.mu.Lock() 更新 ps.Status 时按写时复制发布新 map，绝不原地修改已发布快照。
+	playingSnap atomic.Pointer[map[string]bool]
+
 	// 当前活跃播放器（由 Router 设置）
 	activePlayer string
 
 	// 统一订阅器系统（替代旧的 clients/broadcastCh/SSE channels）
 	subscribers map[*subscriber]struct{}
 	subMu       sync.Mutex
+	wsPeak      uint64 // 受 subMu 保护：本周期 WS+SSE 并发峰值
+
+	// RUM 客户端会话退出闸门与活跃集合（独立叶子锁，严禁与 s.mu/s.subMu/audioHub.mu/effectHub.mu 嵌套持锁）
+	rumSessMu  sync.Mutex
+	rumFlushed bool
+	rumActive  map[*clientSessionMeta]func() uint64
+
+	// RUM 统计（无锁原子维护，不引入跨模块锁序）
+	routeSwitches     atomic.Uint64
+	activePriorCount  atomic.Int32
+	activeNormalCount atomic.Int32
+	httpStats         httpSnapshotStats
 
 	// 网易云特效镜像帧分发（独立于 JSON 事件通道）
 	effectHub *effectHub
@@ -197,6 +217,7 @@ func NewServer(playerNames []string) *Server {
 		},
 		playerStates: states,
 		subscribers:  make(map[*subscriber]struct{}),
+		rumActive:    make(map[*clientSessionMeta]func() uint64),
 		serviceInfo:  &ServiceInfo{},
 		effectHub:    newEffectHub(),
 		audioHub:     newAudioHub(),
@@ -206,6 +227,10 @@ func NewServer(playerNames []string) *Server {
 // --- 订阅器管理 ---
 
 func (s *Server) subscribe(playerName string, eventTypes []string, isWS bool, addr string) *subscriber {
+	return s.subscribeWithSession(playerName, eventTypes, isWS, addr, "", "")
+}
+
+func (s *Server) subscribeWithSession(playerName string, eventTypes []string, isWS bool, addr, channel, clientSurface string) *subscriber {
 	sub := &subscriber{
 		player:     playerName,
 		eventTypes: eventTypes,
@@ -213,8 +238,17 @@ func (s *Server) subscribe(playerName string, eventTypes []string, isWS bool, ad
 		isWS:       isWS,
 		addr:       addr,
 	}
+	if channel != "" {
+		sub.session = s.registerClientSession(
+			newClientSessionMeta(channel, playerName, clientSurface, time.Now()),
+			sub.dropped.Load,
+		)
+	}
 	s.subMu.Lock()
 	s.subscribers[sub] = struct{}{}
+	if n := uint64(len(s.subscribers)); n > s.wsPeak {
+		s.wsPeak = n
+	}
 	s.subMu.Unlock()
 	return sub
 }
@@ -223,6 +257,16 @@ func (s *Server) unsubscribe(sub *subscriber) {
 	s.subMu.Lock()
 	delete(s.subscribers, sub)
 	s.subMu.Unlock()
+}
+
+// trySendWSEvent 非阻塞向订阅通道投递事件；满则丢弃并累加单连接与全局 ws_sub 丢包计数。
+func trySendWSEvent(sub *subscriber, evt WSEvent) {
+	select {
+	case sub.ch <- evt:
+	default:
+		sub.dropped.Add(1)
+		rum.AddDropped("ws_sub", 1)
+	}
 }
 
 // internalEvents 只驱动服务端内部状态、不属于对外 API 的事件类型。
@@ -342,10 +386,7 @@ func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
 				if !sub.matchesType(e.Type) {
 					continue
 				}
-				select {
-				case sub.ch <- e:
-				default:
-				}
+				trySendWSEvent(sub, e)
 			}
 			if skipEvt {
 				continue
@@ -354,10 +395,7 @@ func (s *Server) NotifySubscribers(evt player.Event, skipRoot bool) {
 		if !sub.matchesType(evt.Type) {
 			continue
 		}
-		select {
-		case sub.ch <- wsEvt:
-		default:
-		}
+		trySendWSEvent(sub, wsEvt)
 	}
 }
 
@@ -436,20 +474,14 @@ func (s *Server) NotifySubscribersFullState(oldPlayer, newPlayer string) map[str
 		}
 		// 先推 player_switch
 		if sub.matchesType(switchEvt.Type) {
-			select {
-			case sub.ch <- switchEvt:
-			default:
-			}
+			trySendWSEvent(sub, switchEvt)
 		}
 		// 再推完整缓存
 		for _, evt := range events {
 			if !sub.matchesType(evt.Type) {
 				continue
 			}
-			select {
-			case sub.ch <- evt:
-			default:
-			}
+			trySendWSEvent(sub, evt)
 		}
 	}
 	return sentHashes
@@ -621,33 +653,21 @@ func (s *Server) NotifySubscribersClear(oldPlayer string) {
 		}
 		sentControl := false
 		if sub.matchesType(switchEvt.Type) {
-			select {
-			case sub.ch <- switchEvt:
-			default:
-			}
+			trySendWSEvent(sub, switchEvt)
 			sentControl = true
 		}
 		if sub.matchesType(clearEvt.Type) {
-			select {
-			case sub.ch <- clearEvt:
-			default:
-			}
+			trySendWSEvent(sub, clearEvt)
 			sentControl = true
 		}
 		if sentControl {
 			continue
 		}
 		if sub.matchesType(player.EventLyricUpdate) {
-			select {
-			case sub.ch <- lyricClear:
-			default:
-			}
+			trySendWSEvent(sub, lyricClear)
 		}
 		if sub.matchesType(player.EventSongInfoUpdate) {
-			select {
-			case sub.ch <- songClear:
-			default:
-			}
+			trySendWSEvent(sub, songClear)
 		}
 	}
 }
@@ -659,8 +679,14 @@ func (s *Server) watchIdleHide() {
 	defer telemetry.Guard()
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	lastHTTPFlush := time.Now()
 	for range ticker.C {
-		s.sweepIdleHide(time.Now())
+		now := time.Now()
+		s.sweepIdleHide(now)
+		if now.Sub(lastHTTPFlush) >= httpSummaryInterval {
+			lastHTTPFlush = now
+			s.flushHTTPSnapshotSummary()
+		}
 	}
 }
 
@@ -675,7 +701,6 @@ type idleClearTarget struct {
 // 只有开启了自动隐藏（阈值 > 0）、曾经活跃过、当前不在播放、且静默达阈值的通道才会被隐藏。
 func (s *Server) sweepIdleHide(now time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	fn := s.idleHideResolver // 纯配置读闭包（cfg.GetPlayerIdleHide），不回锁 s.mu，可在锁内直接调
 	var toClear []idleClearTarget
 	if fn != nil {
@@ -714,29 +739,35 @@ func (s *Server) sweepIdleHide(now time.Time) {
 	for _, tc := range toClear {
 		s.notifyPerPlayerIdleClear(tc.name, tc.position, tc.progress)
 	}
+	s.mu.Unlock()
+
+	if len(toClear) > 0 {
+		priorCnt, normalCnt := s.activeGroupCounts()
+		for _, tc := range toClear {
+			emitRouterTransition(routerTransitionEvent{
+				kind:              "idle_hide",
+				fromPlayer:        tc.name,
+				toPlayer:          "",
+				reason:            "idle_hide",
+				activePriorCount:  priorCnt,
+				activeNormalCount: normalCnt,
+			})
+		}
+	}
 }
 
 // sendClearToSub 按订阅者的事件过滤规则非阻塞投递清除事件（§2.1 承重不变量：全部 select default）：
 // WS / 全类型订阅者收一条 player_clear，类型过滤的 SSE 按订阅类型收对应的 in-band 清除。
 func sendClearToSub(sub *subscriber, clearEvt, lyricClear, songClear WSEvent) {
 	if sub.matchesType(player.EventPlayerClear) {
-		select {
-		case sub.ch <- clearEvt:
-		default:
-		}
+		trySendWSEvent(sub, clearEvt)
 		return
 	}
 	if sub.matchesType(player.EventLyricUpdate) {
-		select {
-		case sub.ch <- lyricClear:
-		default:
-		}
+		trySendWSEvent(sub, lyricClear)
 	}
 	if sub.matchesType(player.EventSongInfoUpdate) {
-		select {
-		case sub.ch <- songClear:
-		default:
-		}
+		trySendWSEvent(sub, songClear)
 	}
 }
 
@@ -794,8 +825,28 @@ func (s *Server) getPlayerState(playerName string) *PlayerState {
 	return ps
 }
 
-// UpdatePlayerState 仅更新播放器状态缓存（不广播，始终调用）
+// UpdatePlayerState 仅更新播放器状态缓存（不广播，始终调用）。
+// 独立调用时若解除了无活跃隐藏态则立即上报 idle_wake；Router.Run 路径改走 updatePlayerState，
+// 待 updateRouting 刷新活跃组计数后再调 emitIdleWake，避免上报旧的活跃组计数。
 func (s *Server) UpdatePlayerState(evt player.Event) {
+	if s.updatePlayerState(evt) {
+		s.emitIdleWake(evt.PlayerName)
+	}
+}
+
+func (s *Server) emitIdleWake(playerName string) {
+	priorCnt, normalCnt := s.activeGroupCounts()
+	emitRouterTransition(routerTransitionEvent{
+		kind:              "idle_wake",
+		fromPlayer:        "",
+		toPlayer:          playerName,
+		reason:            "idle_wake",
+		activePriorCount:  priorCnt,
+		activeNormalCount: normalCnt,
+	})
+}
+
+func (s *Server) updatePlayerState(evt player.Event) (wokeIdle bool) {
 	s.mu.Lock()
 	ps := s.getPlayerState(evt.PlayerName)
 	now := time.Now()
@@ -809,6 +860,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 		if ps.IdleHidden {
 			ps.IdleHidden = false
 			ps.IdleResumePending = true
+			wokeIdle = true
 		}
 	}
 
@@ -830,6 +882,25 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 				}
 			}
 			ps.Status = &StatusMessage{Status: msg.Status, Detail: msg.Detail, Reason: msg.Reason}
+			cur := s.playingSnap.Load()
+			var curMap map[string]bool
+			if cur != nil {
+				curMap = *cur
+			}
+			if curMap[evt.PlayerName] != isPlaying {
+				next := make(map[string]bool, len(curMap)+1)
+				for k, v := range curMap {
+					if v {
+						next[k] = true
+					}
+				}
+				if isPlaying {
+					next[evt.PlayerName] = true
+				} else {
+					delete(next, evt.PlayerName)
+				}
+				s.playingSnap.Store(&next)
+			}
 		}
 	case player.EventSongInfoUpdate:
 		if msg, ok := evt.Data.(*player.SongInfo); ok {
@@ -915,6 +986,7 @@ func (s *Server) UpdatePlayerState(evt player.Event) {
 		ps.PositionFromPause = false
 	}
 	s.mu.Unlock()
+	return wokeIdle
 }
 
 // GetPlayerStatus 获取播放器状态
@@ -925,6 +997,15 @@ func (s *Server) GetPlayerStatus(playerName string) string {
 		return ps.Status.Status
 	}
 	return "offline"
+}
+
+// IsPlayerPlaying 无锁读取指定播放器当前是否处于 playing 状态，不获取 s.mu。
+func (s *Server) IsPlayerPlaying(playerName string) bool {
+	snap := s.playingSnap.Load()
+	if snap == nil {
+		return false
+	}
+	return (*snap)[playerName]
 }
 
 // --- 启动 & 路由注册 ---
@@ -1018,19 +1099,26 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) handleWS(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		surface := classifyRequestSurface(r)
 		conn, err := s.upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			serverLog.Warn("WS Upgrade error: %v", err)
 			return
 		}
 
-		sub := s.subscribe(playerName, nil, true, conn.RemoteAddr().String())
+		channel := "ws_root"
+		if playerName != "" {
+			channel = "ws_player"
+		}
+		sub := s.subscribeWithSession(playerName, nil, true, conn.RemoteAddr().String(), channel, surface)
 		serverLog.Info("WS connected: %s player=%q (total: %d)", conn.RemoteAddr(), playerName, s.wsCount())
 
 		// 发送初始缓存状态
 		for _, evt := range s.buildInitEvents(playerName, true) {
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			conn.WriteJSON(evt)
+			if err := conn.WriteJSON(evt); err != nil {
+				sub.session.markWriteFailed()
+			}
 		}
 
 		// 写入 goroutine：从订阅通道读取并发送到 WebSocket。
@@ -1047,6 +1135,7 @@ func (s *Server) handleWS(playerName string) http.HandlerFunc {
 			for evt := range sub.ch {
 				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteJSON(evt); err != nil {
+					sub.session.markWriteFailed()
 					serverLog.Warn("WS write failed, closing connection: %s player=%q: %v", conn.RemoteAddr(), playerName, err)
 					conn.Close() // 解阻塞读循环，交由下面既有的清理路径注销
 					return
@@ -1066,6 +1155,7 @@ func (s *Server) handleWS(playerName string) http.HandlerFunc {
 		close(sub.ch)
 		conn.Close()
 		<-done
+		s.endClientSession(sub.session, sub.dropped.Load(), time.Now())
 		serverLog.Info("WS disconnected: %s player=%q (total: %d)", conn.RemoteAddr(), playerName, s.wsCount())
 	}
 }
@@ -1082,6 +1172,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
+	s.recordHTTPSnapshot(r, httpRouteServiceStatus, false)
 	s.mu.RLock()
 	info := s.serviceInfo
 
@@ -1227,7 +1318,9 @@ func (s *Server) perPlayerHidden(requestPlayer string) bool {
 func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
-		if s.perPlayerHidden(playerName) {
+		hidden := s.perPlayerHidden(playerName)
+		s.recordHTTPSnapshot(r, httpRouteAllLyrics, hidden)
+		if hidden {
 			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
 			return
 		}
@@ -1258,7 +1351,9 @@ func (s *Server) handleAllLyrics(playerName string) http.HandlerFunc {
 func (s *Server) handleLyricUpdate(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
-		if s.perPlayerHidden(playerName) {
+		hidden := s.perPlayerHidden(playerName)
+		s.recordHTTPSnapshot(r, httpRouteLyricUpdate, hidden)
+		if hidden {
 			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
 			return
 		}
@@ -1283,7 +1378,9 @@ func (s *Server) handleLyricUpdate(playerName string) http.HandlerFunc {
 func (s *Server) handleStatusUpdate(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
-		if s.perPlayerHidden(playerName) {
+		hidden := s.perPlayerHidden(playerName)
+		s.recordHTTPSnapshot(r, httpRouteStatusUpdate, hidden)
+		if hidden {
 			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
 			return
 		}
@@ -1306,7 +1403,9 @@ func (s *Server) handleStatusUpdate(playerName string) http.HandlerFunc {
 func (s *Server) handleSongInfo(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pn := s.resolvePlayer(playerName)
-		if s.perPlayerHidden(playerName) {
+		hidden := s.perPlayerHidden(playerName)
+		s.recordHTTPSnapshot(r, httpRouteSongInfo, hidden)
+		if hidden {
 			writeJSON(w, HTTPResponse{Code: 0, Msg: "success", Player: pn, Data: struct{}{}})
 			return
 		}
@@ -1336,13 +1435,17 @@ func (s *Server) handleSSE(playerName string, eventTypes ...string) http.Handler
 			return
 		}
 
+		surface := classifyRequestSurface(r)
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
-		sub := s.subscribe(playerName, eventTypes, false, r.RemoteAddr)
-		defer s.unsubscribe(sub)
+		sub := s.subscribeWithSession(playerName, eventTypes, false, r.RemoteAddr, "sse", surface)
+		defer func() {
+			s.unsubscribe(sub)
+			s.endClientSession(sub.session, sub.dropped.Load(), time.Now())
+		}()
 		serverLog.Info("SSE subscribe: path=%s player=%q eventTypes=%v", r.URL.Path, playerName, eventTypes)
 
 		// 发送初始缓存（仅匹配 eventTypes 的事件）
@@ -1351,7 +1454,9 @@ func (s *Server) handleSSE(playerName string, eventTypes ...string) http.Handler
 				continue
 			}
 			data, _ := json.Marshal(evt)
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				sub.session.markWriteFailed()
+			}
 		}
 		flusher.Flush()
 
@@ -1360,7 +1465,9 @@ func (s *Server) handleSSE(playerName string, eventTypes ...string) http.Handler
 			select {
 			case evt := <-sub.ch:
 				data, _ := json.Marshal(evt)
-				fmt.Fprintf(w, "data: %s\n\n", data)
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+					sub.session.markWriteFailed()
+				}
 				flusher.Flush()
 			case <-r.Context().Done():
 				return

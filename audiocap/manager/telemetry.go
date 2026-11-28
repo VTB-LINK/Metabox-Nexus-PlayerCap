@@ -5,6 +5,7 @@ package manager
 // （该包只在 Windows 上构建），保持 GOOS=linux 可编译；接线与默认上报函数在 manager_windows.go。
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"regexp"
@@ -101,18 +102,149 @@ func redactUserDirs(s string) string {
 	return userDirPattern.ReplaceAllString(s, "${1}<user>")
 }
 
+const (
+	// rumDiagPrefix 是 helper 经 stderr 传递结构化 RUM 诊断摘要的专用行前缀。
+	rumDiagPrefix = "[mbx-rum] "
+	// maxDiagLineBytes 是单条 [mbx-rum] 诊断行的缓冲上限，防超长无换行输入触发 OOM。
+	maxDiagLineBytes = 4 << 10
+)
+
 // pumpStderr 把 r（helper stderr 管道的读端）读到 EOF 或出错为止，每块数据顺序做两件事：写入 tail，再同步
 // 写 out（写错误忽略，继续读）。不丢、不乱序；out 阻塞时本函数随之阻塞，管道写满后阻塞落在 helper 自己的
 // stderr 写入上，与 helper 直接继承控制台时相同。
 func pumpStderr(r io.Reader, tail *tailBuffer, out io.Writer) {
+	pumpStderrWithHook(r, tail, out, nil)
+}
+
+// pumpStderrWithHook 在 pumpStderr 基础上按行分流以 rumDiagPrefix 开头的结构化 RUM 诊断行：
+// 命中行仅交给 onDiagLine 消费，不写入 tailBuffer 也不转发到 out；其余字节原样写入 tail 与 out。
+// onDiagLine 为 nil 时退化为原始 32 KiB 块直通；非 nil 时使用有界前缀状态机处理跨块拆行与超长行防 OOM。
+func pumpStderrWithHook(r io.Reader, tail *tailBuffer, out io.Writer, onDiagLine func(string)) {
+	writePass := func(p []byte) {
+		if len(p) == 0 {
+			return
+		}
+		if tail != nil {
+			tail.Write(p)
+		}
+		if out != nil {
+			out.Write(p)
+		}
+	}
+
 	buf := make([]byte, 32<<10)
+	if onDiagLine == nil {
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				writePass(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+
+	const (
+		stateLineStart = iota
+		stateNormalLine
+		stateDiagLine
+	)
+	state := stateLineStart
+	var lineBuf []byte
+	var diagOverflow bool
+
+	deliverDiag := func() {
+		if !diagOverflow && len(lineBuf) > 0 {
+			onDiagLine(strings.TrimSuffix(string(lineBuf), "\r"))
+		}
+		lineBuf = lineBuf[:0]
+		diagOverflow = false
+	}
+
 	for {
 		n, err := r.Read(buf)
-		if n > 0 {
-			tail.Write(buf[:n])
-			out.Write(buf[:n])
+		p := buf[:n]
+		for len(p) > 0 {
+			switch state {
+			case stateLineStart:
+				b := p[0]
+				if b == rumDiagPrefix[len(lineBuf)] {
+					lineBuf = append(lineBuf, b)
+					p = p[1:]
+					if len(lineBuf) == len(rumDiagPrefix) {
+						state = stateDiagLine
+					}
+					continue
+				}
+				idx := bytes.IndexByte(p, '\n')
+				var rest []byte
+				if idx >= 0 {
+					rest = p[:idx+1]
+					p = p[idx+1:]
+					state = stateLineStart
+				} else {
+					rest = p
+					p = nil
+					state = stateNormalLine
+				}
+				if len(lineBuf) > 0 {
+					combined := make([]byte, len(lineBuf)+len(rest))
+					copy(combined, lineBuf)
+					copy(combined[len(lineBuf):], rest)
+					lineBuf = lineBuf[:0]
+					writePass(combined)
+				} else {
+					writePass(rest)
+				}
+
+			case stateNormalLine:
+				idx := bytes.IndexByte(p, '\n')
+				if idx >= 0 {
+					writePass(p[:idx+1])
+					p = p[idx+1:]
+					state = stateLineStart
+				} else {
+					writePass(p)
+					p = nil
+				}
+
+			case stateDiagLine:
+				idx := bytes.IndexByte(p, '\n')
+				var seg []byte
+				ended := false
+				if idx >= 0 {
+					seg = p[:idx]
+					p = p[idx+1:]
+					ended = true
+				} else {
+					seg = p
+					p = nil
+				}
+				if !diagOverflow {
+					if len(lineBuf)+len(seg) > maxDiagLineBytes {
+						diagOverflow = true
+						lineBuf = lineBuf[:0]
+					} else {
+						lineBuf = append(lineBuf, seg...)
+					}
+				}
+				if ended {
+					deliverDiag()
+					state = stateLineStart
+				}
+			}
 		}
 		if err != nil {
+			switch state {
+			case stateLineStart:
+				if len(lineBuf) > 0 {
+					writePass(lineBuf)
+					lineBuf = lineBuf[:0]
+				}
+			case stateDiagLine:
+				deliverDiag()
+			}
 			return
 		}
 	}

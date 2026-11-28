@@ -4,11 +4,13 @@ package helper
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -83,7 +85,7 @@ func Run(stdin io.Reader, stdout io.Writer) {
 	// 主服务由 Job Object/重启兜底）。Guard 无论 Init 与否都能安全 re-panic（未启用即零开销直抛）。
 	defer telemetry.Guard()
 
-	frames := make(chan []byte, outChanCap)
+	frames := make(chan queuedFrame, outChanCap)
 
 	// 写 goroutine（单个）。挂 Guard：写端 panic 亦 re-panic 杀 helper（隔离）。
 	var writeWG sync.WaitGroup
@@ -101,7 +103,13 @@ func Run(stdin io.Reader, stdout io.Writer) {
 	go func() {
 		defer telemetry.Guard()
 		defer diagWG.Done()
-		diagLoop(diag, func(s string) { log.Print(s) })
+		diagLoop(diag, func(s string) {
+			if strings.HasPrefix(s, rumDiagPrefix) {
+				_, _ = os.Stderr.WriteString(s + "\n")
+				return
+			}
+			log.Print(s)
+		})
 	}()
 
 	// 控制 goroutine = 本 goroutine：逐行读 stdin。active 只被本 goroutine 读写 → 无需锁。
@@ -182,9 +190,12 @@ func Run(stdin io.Reader, stdout io.Writer) {
 // 背压解耦（§2.5）：写阻塞（父读端停顿、Windows 管道 ~64KB 满）只会卡住本 goroutine——采集
 // 侧靠 frames 的有界+drop-oldest 永不被冻住，故这里用平凡阻塞写即可（“非阻塞”落在系统层：采集
 // 不被阻塞）。父进程真死则 Write 报错，本 goroutine 退出，最终由 stdin EOF 触发整体关停。
-func writeLoop(w io.Writer, frames <-chan []byte) {
+func writeLoop(w io.Writer, frames <-chan queuedFrame) {
 	for f := range frames {
-		if _, err := w.Write(f); err != nil {
+		if f.owner != nil {
+			f.owner.decInFlight()
+		}
+		if _, err := w.Write(f.data); err != nil {
 			log.Printf(i18n.T("[helper] frame write failed (the parent's read end may be closed): %v"), err)
 			return
 		}
@@ -207,7 +218,7 @@ func writeLoop(w io.Writer, frames <-chan []byte) {
 // 本 goroutine 不同步写日志。
 //
 // slot 是这次 capture 的会话信号槽位，由会话 watcher 写入，encodeFrame 只读。
-func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames chan []byte, diag chan<- string) {
+func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames chan queuedFrame, diag chan<- string) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -226,6 +237,7 @@ func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames c
 
 	c, err := wasapi.Activate(ctl.pid, true) // 含子进程树
 	if err != nil {
+		sendDiag(diag, formatWASAPIActivateError(ctl.player, ctl.sessionID, err))
 		log.Printf(i18n.T("[helper][%s] WASAPI activation failed (pid=%d): %v"), ctl.player, ctl.pid, err)
 		return // 这一路失败不崩整个 helper（其余路照跑）
 	}
@@ -243,25 +255,92 @@ func captureLoop(ctl control, done <-chan struct{}, slot *session.Slot, frames c
 		disc.report(disc.observe(c.Discontinuities(), time.Now()), send)
 		return n, silent, err
 	}
-	if err := pumpCapture(read, time.Now, ctl, atomic.AddUint32(&epochCounter, 1), slot, done, frames); err != nil {
+	stats, err := pumpCaptureWithStats(read, time.Now, ctl, atomic.AddUint32(&epochCounter, 1), slot, done, frames, c.Discontinuities, diag)
+	if err != nil {
 		log.Printf(i18n.T("[helper][%s] read failed: %v"), ctl.player, err)
 	}
 	// 捕获已结束：补报投递失败时次数退回 disc 后不再重试，这些次数不会出现在日志里。
 	disc.report(disc.flush(), send)
+	// 向 manager 回传本路归一化触顶、断流与丢帧最终摘要（非阻塞投递，不触碰 stdout 帧流）。
+	sendDiag(diag, formatCaptureSummaryDiag(ctl.player, ctl.sessionID, stats.normFrames, stats.cappedFrames, c.Discontinuities(), stats.framesDropped, stats.incomplete))
+}
+
+func formatWASAPIActivateError(player string, sid uint64, err error) string {
+	signalState := "wasapi_activate_failed"
+	stage := "unknown"
+	var hr uint32
+	var ae *wasapi.ActivateError
+	if errors.As(err, &ae) {
+		if ae.Timeout {
+			signalState = "wasapi_wait_timeout_2s"
+		}
+		if ae.Stage != "" {
+			stage = ae.Stage
+		}
+		hr = ae.HRESULT
+	}
+	return formatWASAPIActivateDiag(player, sid, signalState, stage, hr)
+}
+
+type captureStats struct {
+	normFrames    uint64
+	cappedFrames  uint64
+	framesDropped uint64
+	incomplete    bool
 }
 
 // pumpCapture 把 read 读到的包按 ctl 的参数分帧、分析、归一化、编码后入队 frames，直到 done 关闭
 // （返回 nil）或读包出错（返回该错误）。每帧按 slot 的当前结果带上会话标志。captureLoop 在激活成功后以
 // 包了数据不连续计数的 Capturer.Read 与 time.Now 调用；两者可注入，本函数不触碰 WASAPI。
 func pumpCapture(read readFunc, now func() time.Time, ctl control, epoch uint32, slot *session.Slot, done <-chan struct{}, frames chan []byte) error {
+	_, err := pumpCaptureLoop(read, now, ctl, epoch, slot, done, func(raw []byte) {
+		enqueue(frames, raw)
+	}, nil, nil, nil)
+	return err
+}
+
+func pumpCaptureWithStats(read readFunc, now func() time.Time, ctl control, epoch uint32, slot *session.Slot, done <-chan struct{}, frames chan queuedFrame, discontinuities func() uint64, diag chan<- string) (captureStats, error) {
+	diagStats := &captureDiagStats{}
+	stats, err := pumpCaptureLoop(read, now, ctl, epoch, slot, done, func(raw []byte) {
+		enqueueFrame(frames, queuedFrame{data: raw, owner: diagStats})
+	}, diagStats, discontinuities, diag)
+	return stats, err
+}
+
+func pumpCaptureLoop(read readFunc, now func() time.Time, ctl control, epoch uint32, slot *session.Slot, done <-chan struct{}, pushFrame func([]byte), diagStats *captureDiagStats, discontinuities func() uint64, diag chan<- string) (captureStats, error) {
 	analyzer := dsp.New(fftSize)
 	nz := newNormalizer(ctl.norm, ctl.target, ctl.maxGain, wasapi.SampleRate) // 每路一个，持独立 EMA
 	readBuf := make([]float32, wasapi.SampleRate*wasapi.Channels/10)          // 100ms 容量，避免 Read 截断
 	fr := newFramer(hopFor(wasapi.SampleRate, ctl.fps), fftSize)
+	var stats captureStats
+	lastDiagAt := now()
 	emit := func(batch []float32, peaks [2]float32, fresh int) {
-		enqueue(frames, encodeFrame(analyzer, nz, slot, ctl.player, epoch, batch, peaks, fresh))
+		pushFrame(encodeFrame(analyzer, nz, slot, ctl.player, epoch, batch, peaks, fresh))
+		if diag != nil {
+			if cur := now(); cur.Sub(lastDiagAt) >= rumStatsDiagInterval {
+				lastDiagAt = cur
+				nf, cf := nz.CapStats()
+				var discCount, dropped uint64
+				if discontinuities != nil {
+					discCount = discontinuities()
+				}
+				if diagStats != nil {
+					dropped = diagStats.framesDropped.Load()
+				}
+				sendDiag(diag, formatCaptureDiag("capture_stats", ctl.player, ctl.sessionID, nf, cf, discCount, dropped))
+			}
+		}
 	}
-	return pumpFrames(read, now, done, fr, readBuf, wasapi.Channels, time.Second/time.Duration(ctl.fps), emit)
+	err := pumpFrames(read, now, done, fr, readBuf, wasapi.Channels, time.Second/time.Duration(ctl.fps), emit)
+	stats.normFrames, stats.cappedFrames = nz.CapStats()
+	if diagStats != nil {
+		// 有界等待本会话残留在共享帧队列中的帧被写端消费或被他路淘汰，再读取最终丢帧数；
+		// 排空超时时标记 incomplete=true，通知 manager 不得将本次汇总视作完整。
+		drained := diagStats.waitInFlightZero(inFlightDrainGrace)
+		stats.incomplete = !drained
+		stats.framesDropped = diagStats.framesDropped.Load()
+	}
+	return stats, err
 }
 
 // encodeFrame 用 batch 的**最近 fftSize 样本**算 RMS 与 bins，peaks 为本帧新增的全部非静音样本

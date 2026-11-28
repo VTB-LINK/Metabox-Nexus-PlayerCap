@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/i18n"
+	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/kugou/kgdb"
 	klyric "Metabox-Nexus-PlayerCap/player/kugou/lyric"
 	"Metabox-Nexus-PlayerCap/player/kugou/watchdog"
+	"Metabox-Nexus-PlayerCap/rum"
 	"Metabox-Nexus-PlayerCap/telemetry"
 )
 
@@ -474,13 +476,14 @@ type worker struct {
 	lastConfirm time.Time // 上次确认返回的时刻
 	disabled    bool
 
-	hash     string        // 当前 hash；为空即会话还没写入过
-	parsed   fileStat      // 最近一次解析之前 stat 所得（磁盘模式）
-	prev     fileStat      // 最近一拍 stat 所得（磁盘模式）
-	nextStat time.Time     // 下一次 stat 的时刻（磁盘模式）
-	retryAt  time.Time     // 重新解析当前 hash 的时刻（磁盘模式）；零值即不重试
-	backoff  time.Duration // 最近一次暂时失败的退避（磁盘模式）；0 即下一次从 backoffMin 起
-	logged   map[string]bool
+	hash       string        // 当前 hash；为空即会话还没写入过
+	parsed     fileStat      // 最近一次解析之前 stat 所得（磁盘模式）
+	prev       fileStat      // 最近一拍 stat 所得（磁盘模式）
+	nextStat   time.Time     // 下一次 stat 的时刻（磁盘模式）
+	retryAt    time.Time     // 重新解析当前 hash 的时刻（磁盘模式）；零值即不重试
+	backoff    time.Duration // 最近一次暂时失败的退避（磁盘模式）；0 即下一次从 backoffMin 起
+	logged     map[string]bool
+	compatSent map[string]bool // 本会话已上报的 RUM 兼容信号去重表
 
 	dialogGuard dialogUnassocGuard
 
@@ -595,6 +598,36 @@ func (w *worker) ensureDiskIO() *diskIO {
 	return w.disk
 }
 
+func (w *worker) emitCompat(signal, detailCode, fallbackMode string) {
+	if signal == "" {
+		return
+	}
+	if w.compatSent == nil {
+		w.compatSent = make(map[string]bool)
+	}
+	key := signal + "\x00" + detailCode
+	if w.compatSent[key] {
+		return
+	}
+	w.compatSent[key] = true
+	ver := ""
+	if w.conf != nil {
+		ver = player.SanitizeVersion(w.conf.Version)
+	}
+	props := rum.Props{
+		"player":         "kugou",
+		"signal":         signal,
+		"player_version": ver,
+	}
+	if detailCode != "" {
+		props["detail_code"] = detailCode
+	}
+	if fallbackMode != "" {
+		props["fallback_mode"] = fallbackMode
+	}
+	rum.Track(rum.CatPlayer, "player_compat_signal", props)
+}
+
 func (w *worker) tryOpenMem() {
 	if w.conf == nil || w.memUnsupported || w.mem != nil || w.d.openMem == nil {
 		return
@@ -611,11 +644,13 @@ func (w *worker) tryOpenMem() {
 		log.Info("KuGou memory lyric reader enabled (KuGou %s, %s)", w.conf.Version, fp)
 	case memOpenUnsupported:
 		w.memUnsupported = true
+		w.emitCompat("kugou_mem_fallback_to_db", "open_unsupported", "db")
 		log.Info("KuGou memory lyric reader does not recognize this version (KuGou %s, %s); falling back to database mode", w.conf.Version, fp)
 	case memOpenNotReady:
 		w.memNotReady++
 		if w.memNotReady >= maxMemNotReady {
 			w.memUnsupported = true
+			w.emitCompat("kugou_mem_fallback_to_db", "open_not_ready", "db")
 		}
 	default: // memOpenFailed
 		if err != nil {
@@ -770,6 +805,7 @@ func (w *worker) pollMem(ctx context.Context) {
 			w.closeMem()
 			log.Warn("KuGou memory lyric reader vtable check failed %d times in a row; falling back to database mode", w.badVtableCount)
 			w.memUnsupported = true
+			w.emitCompat("kugou_mem_fallback_to_db", "bad_vtable", "db")
 			w.memFoundPtr = 0
 			w.memRevoked = false
 			w.hasLastMemSnap = false
@@ -1083,6 +1119,7 @@ func (w *worker) onDiskIO(ctx context.Context, ev diskIOEvent) {
 }
 
 func (w *worker) sendMem(res Result, cacheKey parsedCacheKey) {
+	res.FromMemory = true
 	sig := memSentSig{
 		sent:           true,
 		hash:           res.Hash,
@@ -1181,12 +1218,18 @@ func (w *worker) parse(ctx context.Context) {
 		res.Hash = w.hash
 		w.backoff = 0
 	case errors.Is(err, kgdb.ErrUnsupportedDB) || errors.Is(err, kgdb.ErrCorrupt):
+		dc := "wal_or_unsupported"
+		if errors.Is(err, kgdb.ErrCorrupt) {
+			dc = "corrupt"
+		}
+		w.emitCompat("sqlite_wal_or_lock_conflict", dc, "")
 		reportOnce("kugou.lyricdb_unsupported", "酷狗歌词数据库不受支持或已损坏，本地歌词关联已停用",
 			map[string]string{"kugou.version": w.conf.Version},
 			map[string]any{"error": w.redact(err.Error())})
 		w.disable(err)
 		return
 	default:
+		w.emitCompat("sqlite_wal_or_lock_conflict", "transient_lock", "")
 		res = Result{Hash: w.hash, Kind: KindTransient}
 		w.backoff = min(max(2*w.backoff, backoffMin), backoffMax)
 		w.detailOnce("Reading the KuGou lyric database failed; will retry: %v", err)

@@ -1,6 +1,7 @@
 package kuwo
 
 import (
+	"errors"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/player/kuwo/pos"
@@ -27,12 +28,17 @@ type lagReader interface {
 // once the session clears, and a song after that opens a new one, with a fresh
 // zero-value filter and corrector.
 type correctedSource struct {
-	core   positionSource
-	lag    lagReader
-	filter pos.TransientFilter
-	c      pos.LagCorrector
-	pollMs int   // for the filter's effective poll interval
-	warned *bool // the connection's: its first drift is a warning, later ones are details
+	core          positionSource
+	lag           lagReader
+	filter        pos.TransientFilter
+	c             pos.LagCorrector
+	pollMs        int    // for the filter's effective poll interval
+	warned        *bool  // the connection's: its first drift is a warning, later ones are details
+	lastClockMode string // 最近观测到的有效音频后端设备类型（ds/waveout/wasapi）
+}
+
+func (s *correctedSource) clockMode() string {
+	return s.lastClockMode
 }
 
 // newCorrectedSource returns a positionSource whose Read reads the core (a
@@ -64,6 +70,10 @@ func (s *correctedSource) Read(rid string, playing bool) (pos.Sample, error) {
 	lag, out, err := s.lag.Read()
 	if err != nil {
 		lag, out = pos.LagSample{}, pos.OutputState{}
+	} else if out.Valid {
+		if m := kuwoClockModeFromDevice(out.Device); m != "" {
+			s.lastClockMode = m
+		}
 	}
 	// Filter the raw core C_raw to P_f before the corrector: PositionMs becomes
 	// P_f, CoreMs stays C_raw (the three CoreMs consumers must see the raw core),
@@ -78,6 +88,7 @@ func (s *correctedSource) Read(rid string, playing bool) (pos.Sample, error) {
 			method = "B (WaveOut header counts)"
 		}
 		log.Detail("Kuwo output transient filter engaged: method %s, base %d ms", method, out.Base)
+		emitKuwoClockGuard("ds_waveout_transient", "intercepted", 0, 0)
 	}
 	// One Detail when a song's opening DirectSound segment, after a song change,
 	// passes a multi-report through (#198 A-5): for the real-device acceptance to
@@ -102,6 +113,7 @@ func (s *correctedSource) Read(rid string, playing bool) (pos.Sample, error) {
 	case pos.LagNoteAdopted:
 		log.Detail("Kuwo seek-lag correction adopted: %.1f ms, segment ctx 0x%08X ring 0x%08X base %d ms", float64(note.EUs)/1000, k.Ctx, k.Ring, k.Base)
 	case pos.LagNoteDrift:
+		emitKuwoClockGuard("lag_drift_disabled", "drift_disabled", note.EUs/1000, 0)
 		if !*s.warned {
 			*s.warned = true
 			log.Warn("Kuwo seek-lag correction stopped for this song: the lag drifted to %.1f ms, segment ctx 0x%08X ring 0x%08X base %d ms", float64(note.EUs)/1000, k.Ctx, k.Ring, k.Base)
@@ -139,9 +151,16 @@ func (s *correctedSource) Close() {
 // yet) is tried again when the core reader is reopened. pollMs is the player's
 // poll interval, for the #135 filter's effective poll interval.
 func withLag(core positionSource, openLag func() (lagReader, string, error), warned *bool, pollMs int) positionSource {
+	return withLagNotifying(core, openLag, warned, pollMs, nil)
+}
+
+func withLagNotifying(core positionSource, openLag func() (lagReader, string, error), warned *bool, pollMs int, onLagUnsupported func()) positionSource {
 	lag, build, err := openLag()
 	if err != nil {
 		log.Detail("Kuwo seek-lag correction disabled: %v", err)
+		if onLagUnsupported != nil && errors.Is(err, pos.ErrLagUnsupported) {
+			onLagUnsupported()
+		}
 		return core
 	}
 	log.Detail("Kuwo seek-lag correction enabled: build %s", build)

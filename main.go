@@ -19,6 +19,7 @@ import (
 	"Metabox-Nexus-PlayerCap/player/sodamusic"
 	"Metabox-Nexus-PlayerCap/player/spotify"
 	"Metabox-Nexus-PlayerCap/player/wesing"
+	"Metabox-Nexus-PlayerCap/rum"
 	"Metabox-Nexus-PlayerCap/server"
 	"Metabox-Nexus-PlayerCap/taskbar"
 	"Metabox-Nexus-PlayerCap/telemetry"
@@ -27,13 +28,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,8 +49,15 @@ import (
 var Version = "0.0.0"
 
 // privacyNoticeWait 是隐私提示的停留时间。够读完那 20 行、又不至于让人觉得程序卡住。
-// 只在遥测启用时才会真的等（未注入 DSN 时 PrintPrivacyNotice 立即返回）。
+// 只在遥测、版本检查或匿名使用统计任一启用时才会真的等（三者均关闭时 PrintPrivacyNotice 立即返回）。
 const privacyNoticeWait = 10 * time.Second
+
+const (
+	// envRenamedLaunch 由 ensureCanonicalName 注入给规范名子进程，用于 app_start 标记 renamed_relaunch。
+	envRenamedLaunch = "MBX_RENAMED_LAUNCH"
+	// rumFlushTimeout 为重启或退出前冲刷 RUM 尾批事件的预算上限。
+	rumFlushTimeout = 800 * time.Millisecond
+)
 
 var mainLog = logger.New("Main")
 
@@ -137,19 +149,37 @@ func main() {
 		PlayerNames: playerNames,
 	})
 
+	// 同一次宣告内是否保持最早的歌名与歌手（#229）：须位于 main() 第一处 .Start() 调用之前设定（songinfokeepwiring_test.go 门禁），之后只读。
+	player.SetSongInfoKeepFirst(cfg.SongInfoKeepFirst)
+
+	// RUM 纯内存初始化（不启动协程、不联网），必须在 PrintPrivacyNotice 之前准备就绪。
+	sysProfile := telemetry.CollectSystemProfile()
+	rum.Init(rum.Options{
+		IsRelease:  isReleaseVersion(Version),
+		AppVersion: Version,
+		DistinctID: clientid.ID(),
+		BaseProps:  buildRUMBaseProps(sysProfile),
+	})
+
 	// 隐私提示：告诉主播我们上报什么、干什么用，给他 10 秒读完。
 	//
-	// 位置是刻意的 —— **在 checkAndUpdate 之前**：那一步会联网、可能替换 exe 并重启进程。
+	// 位置是刻意的 —— **在 rum.Start 与 checkAndUpdate 之前**：这两步会联网、可能替换 exe 并重启进程。
 	// 提示必须出现在任何联网动作之前，否则「先斩后奏」。
 	//
-	// 两段文案各归各的开关：遥测段看 DSN 有没有注入，更新段看 isReleaseVersion —— 也就是
-	// 这次启动到底会不会去查版本。两段都不适用时它立即返回（不打印也不等待），那正是本地
-	// go build 的常态：一个字节都不外发，摆告示是撒谎，而且每次调试都白等 10 秒。
-	// 见 telemetry/privacy.go。
-	telemetry.PrintPrivacyNotice(privacyNoticeWait, isReleaseVersion(Version))
+	// 三段文案各归各的开关：遥测段看 DSN、更新段看 isReleaseVersion、使用统计段看 rum.Configured() && isReleaseVersion。
+	// 三段都不适用时它立即返回（不打印也不等待），那正是本地 go build 的常态。见 telemetry/privacy.go。
+	telemetry.PrintPrivacyNotice(privacyNoticeWait, isReleaseVersion(Version), rum.Configured() && isReleaseVersion(Version))
+
+	// 隐私告知完成后才启动 RUM 后台上报协程。
+	rum.Start()
 
 	// 强制版本检查与自动更新；网关要求时在这里重建 config.yml 并重启（见 rebuildConfigIfForced）
-	checkAndUpdate(&cfg)
+	updateCheckRes := checkAndUpdate(&cfg)
+
+	// 确认本进程进入常驻服务：记录启动基准时刻并发送 app_start 与 config_lifecycle。
+	appStartTime = time.Now()
+	setRUMTracksTotalHook(player.TracksRecognizedTotal)
+	emitAppStart(&cfg, sysProfile, effectStrategy, updateCheckRes)
 
 	// 每日在线心跳。**必须在 checkAndUpdate 之后起** —— 那一步可能替换 exe 并 restartSelf()：
 	// 本进程此后只等新进程结束、不再提供服务，在它之前起心跳，这个旧版本进程会在整个运行期里
@@ -157,13 +187,23 @@ func main() {
 	startDailyHeartbeat()
 
 	srv := server.NewServer(playerNames)
+	toRuntimeStats := func(st server.StatsSnapshot) rumRuntimeStats {
+		return rumRuntimeStats{
+			RouteSwitches:     st.RouteSwitches,
+			PeakWSClients:     int64(st.PeakWSClients),
+			PeakAudioClients:  int64(st.PeakAudioClients),
+			PeakEffectClients: int64(st.PeakEffectClients),
+		}
+	}
+	setRUMServerStatsHooks(
+		func() rumRuntimeStats { return toRuntimeStats(srv.StatsSnapshot()) },
+		func() rumRuntimeStats { return toRuntimeStats(srv.TakeHeartbeatStatsSnapshot()) },
+	)
 	// 生效的特效策略在横幅之前已定下（effectiveEffectStrategy，含 Win11 降级）。
 	srv.SetDefaultEffectStrategy(effectStrategy)
 	// per-player 通道无活跃自动隐藏阈值解析器（issue #47）。Server 不持有 config，按既有单值注入
 	// 的思路把 cfg.GetPlayerIdleHide 喂进去（nil=全关；此处恒非 nil，全局默认 0 即全关）。
 	srv.SetIdleHideResolver(cfg.GetPlayerIdleHide)
-	// 同一次宣告内是否保持最早的歌名与歌手（#229）：必须在启动任何播放器之前设定，之后只读。
-	player.SetSongInfoKeepFirst(cfg.SongInfoKeepFirst)
 
 	// 构建接口地址
 	scheme := "http"
@@ -219,6 +259,8 @@ func main() {
 		defer telemetry.Guard()
 		if err := srv.Start(cfg.Addr, readyCh); err != nil {
 			mainLog.Error("Server startup failed: %v", err)
+			emitAppExit("port_bind_failed", listenPortFromAddr(cfg.Addr))
+			rum.Shutdown(rumFlushTimeout)
 			os.Exit(1)
 		}
 	}()
@@ -283,14 +325,26 @@ func main() {
 		}
 	}
 	audioMgr := manager.New(srv.AudioHub(), srv.GetPlayerStatus, audioNormResolver, cfg.AudioFrameRate, selfExe)
+	audioMgr.SetPlayingQuery(srv.IsPlayerPlaying)
 	srv.SetAudioWake(audioMgr.Wake) // 切歌钩子唤醒管理器立即重算门控
 	// 本地 recover、绝不挂 telemetry.Guard：音频波形是可降级附加能力，其 goroutine panic 只记日志降级，
 	// 绝不 re-panic 杀主进程（Guard 会 re-panic=直播事故）。这是对主服务侧 Guard 范式的有意豁免。
 	go func() { defer localRecover("audio-manager"); audioMgr.Run() }()
 
-	// 优雅退出：收到中断信号时，还原网易云被双击隐藏的菜单后再退出
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	// 优雅退出：收到中断信号时，还原网易云被双击隐藏的菜单后再退出。
+	// 使用轻量中转 goroutine 记录实际信号类型，同时在主退出协程保持裸 `<-sigCh` 紧邻
+	// `audioMgr.BeginShutdown()`（audiocap/manager/telemetrywiring_lint_test.go 硬门禁）。
+	rawSigCh := make(chan os.Signal, 1)
+	signal.Notify(rawSigCh, os.Interrupt, syscall.SIGTERM)
+	sigCh := make(chan struct{}, 1)
+	var exitSig atomic.Value
+	go func() {
+		defer telemetry.Guard()
+		if sig, ok := <-rawSigCh; ok {
+			exitSig.Store(sig)
+			close(sigCh)
+		}
+	}()
 	go func() {
 		defer telemetry.Guard()
 		<-sigCh
@@ -299,6 +353,15 @@ func main() {
 		mainLog.Info("Received shutdown signal, restoring NetEase Cloud Music window and menu...")
 		park.Unpark() // 若处于屏外泊车，先飞回原位
 		effectCapturer.RestoreChrome()
+		effectCapturer.FlushRUM()
+		flushPlayersRUM(wp, cp, qp, kp, sp, ap, spfy, kwp)
+		srv.FlushRUM()
+		exitReason := "signal_term"
+		if sig, _ := exitSig.Load().(os.Signal); sig == os.Interrupt {
+			exitReason = "signal_interrupt"
+		}
+		emitAppExit(exitReason, listenPortFromAddr(cfg.Addr))
+		rum.Shutdown(rumFlushTimeout)
 		os.Exit(0)
 	}()
 
@@ -310,6 +373,16 @@ func main() {
 
 	// 主循环：路由器分发事件（阻塞）
 	router.Run()
+}
+
+// flushPlayersRUM 在退出信号处理路径中同步结算全部已启动播放器的活动 RUM 会话，
+// 必须在 emitAppExit（读取 TracksRecognizedTotal）与 rum.Shutdown 之前调用。
+func flushPlayersRUM(players ...player.Player) {
+	for _, p := range players {
+		if f, ok := p.(player.RUMFlusher); ok {
+			f.FlushRUM()
+		}
+	}
 }
 
 // playerPollIntervals 是各播放器轮询循环所用的同一个下限函数；不在表中的播放器（wesing、kugou）
@@ -464,6 +537,11 @@ type releaseInfo struct {
 	Assets            []updateAsset `json:"assets"`
 }
 
+type checkAndUpdateResult struct {
+	readmeSyncErr          string
+	configLifecycleEmitted bool
+}
+
 // checkAndUpdate 做启动时的版本检查：取得网关的响应，先按 config_force_update 判定是否重建 config.yml
 // （rebuildConfigIfForced），再按版本决定是否更新（updateIfNeeded）。cfg 是 config.Load 的结果。
 //
@@ -472,27 +550,41 @@ type releaseInfo struct {
 // 判定用的是 cfg 里 Load 在改写之前记下的文件版本，不重读文件。
 //
 // 拿不到响应（非发布版本、连不上网关、响应非 200 或解析失败）时不重建，只有 Load 里的自动迁移。
-func checkAndUpdate(cfg *config.Config) {
+func checkAndUpdate(cfg *config.Config) (result checkAndUpdateResult) {
 	if !isReleaseVersion(Version) {
 		mainLog.Info("Current version (%s) is not an auto-updatable release version, skipping update check", displayVersion(Version))
-		return
+		return result
 	}
 
 	cleanupOldExe()
 	if exePath, err := os.Executable(); err == nil {
-		syncChineseReadme(filepath.Dir(exePath))
+		result.readmeSyncErr = syncChineseReadme(filepath.Dir(exePath))
 	}
 	mainLog.Info("Checking for version updates...")
 
 	req, err := newVersionCheckRequest(clientid.PingStart)
 	if err != nil {
 		mainLog.Warn("Failed to assemble version-check request: %v, continuing", err)
-		return
+		rum.Track(rum.CatUpdateCfg, "update_check", rum.Props{
+			"outcome":        "http_err",
+			"target_version": "",
+			"gateway_rtt_ms": int64(0),
+			"http_status":    0,
+		})
+		return result
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
+	checkStart := time.Now()
 	resp, err := client.Do(req)
+	rttMs := time.Since(checkStart).Milliseconds()
 	if err != nil {
+		rum.Track(rum.CatUpdateCfg, "update_check", rum.Props{
+			"outcome":        "http_err",
+			"target_version": "",
+			"gateway_rtt_ms": rttMs,
+			"http_status":    0,
+		})
 		// 连不上网关：标红提示几秒后清除，避免永久卡红。这条路径不重启、要继续跑服务，故
 		// clear 后 detach 释放 COM 与被锁的 OS 线程，不让 consoleInit 的 LockOSThread 泄漏进
 		// server 阶段。sleep 阻塞启动几秒只发生在连不上这一异常路径，OBS 此刻还没在拉流。
@@ -502,7 +594,7 @@ func checkAndUpdate(cfg *config.Config) {
 		taskbar.Clear()
 		taskbar.Detach()
 		mainLog.Warn("Version check failed: %v, continuing", err)
-		return
+		return result
 	}
 	defer resp.Body.Close()
 
@@ -512,35 +604,134 @@ func checkAndUpdate(cfg *config.Config) {
 	markPinged(time.Now())
 
 	if resp.StatusCode != http.StatusOK {
+		rum.Track(rum.CatUpdateCfg, "update_check", rum.Props{
+			"outcome":        "non_200",
+			"target_version": "",
+			"gateway_rtt_ms": rttMs,
+			"http_status":    resp.StatusCode,
+		})
 		mainLog.Warn("Version check returned %d, continuing", resp.StatusCode)
-		return
+		return result
 	}
 
 	var release releaseInfo
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		rum.Track(rum.CatUpdateCfg, "update_check", rum.Props{
+			"outcome":        "decode_err",
+			"target_version": "",
+			"gateway_rtt_ms": rttMs,
+			"http_status":    resp.StatusCode,
+		})
 		mainLog.Warn("Failed to parse version info: %v, continuing", err)
-		return
+		return result
 	}
 
-	rebuilt := rebuildConfigIfForced(cfg, release.ConfigForceUpdate)
+	rebuilt, emitted := rebuildConfigIfForced(cfg, release.ConfigForceUpdate, result.readmeSyncErr)
+	result.configLifecycleEmitted = emitted
 	// 要更新的在这里更新并重启（restartSelf 不返回），由更新后的新进程读到重建好的 config.yml。
-	updateIfNeeded(release)
+	updateIfNeeded(release, rttMs, resp.StatusCode)
 	if rebuilt {
 		// 不更新而刚重建过：本进程加载的仍是旧配置，横幅也已按旧配置打印，重启以加载新文件。
 		// restartSelf 要等新进程结束才退出：先释放任务栏后端占用的 COM 与被锁的 OS 线程。
 		taskbar.Detach()
+		rum.Flush(rumFlushTimeout)
 		restartForRebuild()
 	}
+	return result
+}
+
+func updateCheckOutcomeName(reason string) string {
+	switch reason {
+	case updateReasonSameVersion:
+		return "same_version"
+	case updateReasonNewerTarget:
+		return "newer_target"
+	case updateReasonOlderTargetForced:
+		return "older_forced"
+	case updateReasonOlderTargetBlocked:
+		return "older_blocked"
+	default:
+		return "same_version"
+	}
+}
+
+type updateTransferStats struct {
+	LockContended  bool
+	LockWaitMs     int64
+	RaceWinner     string
+	ChinaKBps      int64
+	GlobalKBps     int64
+	SwitchedSource bool
+	SlowTriggered  bool
+	RenameRetries  int
+	UsedPIDBackup  bool
+}
+
+func (s *updateTransferStats) merge(round updateTransferStats) {
+	if round.LockContended {
+		s.LockContended = true
+	}
+	s.LockWaitMs += round.LockWaitMs
+	if round.RaceWinner != "" {
+		s.RaceWinner = round.RaceWinner
+	}
+	s.ChinaKBps = round.ChinaKBps
+	s.GlobalKBps = round.GlobalKBps
+	if round.SwitchedSource {
+		s.SwitchedSource = true
+	}
+	if round.SlowTriggered {
+		s.SlowTriggered = true
+	}
+	s.RenameRetries += round.RenameRetries
+	if round.UsedPIDBackup {
+		s.UsedPIDBackup = true
+	}
+}
+
+func emitUpdateTransfer(outcome string, stats updateTransferStats, durationMs int64, attempt int, userRetried bool) {
+	raceWinner := stats.RaceWinner
+	if raceWinner == "" {
+		raceWinner = "single"
+	}
+	rum.Track(rum.CatUpdateCfg, "update_transfer", rum.Props{
+		"outcome":         outcome,
+		"lock_contended":  stats.LockContended,
+		"lock_wait_ms":    stats.LockWaitMs,
+		"race_winner":     raceWinner,
+		"china_kbps":      stats.ChinaKBps,
+		"global_kbps":     stats.GlobalKBps,
+		"switched_source": stats.SwitchedSource,
+		"slow_triggered":  stats.SlowTriggered,
+		"duration_ms":     durationMs,
+		"rename_retries":  stats.RenameRetries,
+		"used_pid_backup": stats.UsedPIDBackup,
+		"attempt":         attempt,
+		"user_retried":    userRetried,
+	})
 }
 
 // updateIfNeeded 按网关响应决定是否更新：要更新则下载、替换并经 restartSelf 重启，不返回；
 // 不更新、或没有可用的更新文件时返回。
-func updateIfNeeded(release releaseInfo) {
+func updateIfNeeded(release releaseInfo, gatewayRTTMs int64, httpStatus int) {
 	shouldUpdate, reason, err := decideUpdate(Version, release.TagName, release.Name)
 	if err != nil {
+		rum.Track(rum.CatUpdateCfg, "update_check", rum.Props{
+			"outcome":        "decode_err",
+			"target_version": release.TagName,
+			"gateway_rtt_ms": gatewayRTTMs,
+			"http_status":    httpStatus,
+		})
 		mainLog.Warn("Invalid version info: %v, continuing", err)
 		return
 	}
+
+	rum.Track(rum.CatUpdateCfg, "update_check", rum.Props{
+		"outcome":        updateCheckOutcomeName(reason),
+		"target_version": release.TagName,
+		"gateway_rtt_ms": gatewayRTTMs,
+		"http_status":    httpStatus,
+	})
 
 	if !shouldUpdate {
 		switch reason {
@@ -590,8 +781,18 @@ func updateIfNeeded(release releaseInfo) {
 	// 下载、刷新任务栏进度。
 	taskbar.Init()
 
+	transferStart := time.Now()
+	var totalStats updateTransferStats
+	attempt := 0
+	userRetried := false
+
 	err = updateWithRetry(
-		func() ([]updateSource, error) { return performUpdateAll(sources, release.TagName, sortedAssets) },
+		func() ([]updateSource, error) {
+			attempt++
+			tried, roundStats, performErr := performUpdateAllWithStats(sources, release.TagName, sortedAssets)
+			totalStats.merge(roundStats)
+			return tried, performErr
+		},
 		func(tried []updateSource, err error) {
 			taskbar.Error()
 			mainLog.Error("Auto-update failed: %v", err)
@@ -608,12 +809,16 @@ func updateIfNeeded(release releaseInfo) {
 			if !askUpdateRetry() {
 				return false
 			}
+			userRetried = true
 			mainLog.Info("Retrying update...")
 			taskbar.Progress(0) // 任务栏从失败的红色回到普通进度
 			return true
 		},
 	)
+	durationMs := time.Since(transferStart).Milliseconds()
 	if err != nil {
+		emitUpdateTransfer(classifyUpdateOutcome(err), totalStats, durationMs, attempt, userRetried)
+		rum.Shutdown(rumFlushTimeout)
 		// 下载阶段的失败已在 askUpdateRetry 里选择了退出；放置阶段的失败不询问，照旧等回车。
 		var pe *placeError
 		if errors.As(err, &pe) {
@@ -623,6 +828,7 @@ func updateIfNeeded(release releaseInfo) {
 		os.Exit(1)
 	}
 
+	emitUpdateTransfer("ok", totalStats, durationMs, attempt, userRetried)
 	taskbar.Warning()
 	taskbar.Flash()
 	mainLog.Success("All updates complete! The program will restart automatically...")
@@ -631,7 +837,13 @@ func updateIfNeeded(release releaseInfo) {
 	taskbar.Clear()
 	// restartSelf 要等新进程结束才退出，本进程还会存活整个运行期：先释放 COM 与被锁的 OS 线程。
 	taskbar.Detach()
-	restartSelf()
+	rum.Flush(rumFlushTimeout)
+	if err := tryRestartSelf(); err != nil {
+		emitUpdateTransfer("relaunch_err", totalStats, time.Since(transferStart).Milliseconds(), attempt, userRetried)
+		rum.Shutdown(rumFlushTimeout)
+		mainLog.Error("Unable to restart automatically: %v, please restart the program manually", err)
+		os.Exit(1)
+	}
 }
 
 // ============================================================================
@@ -673,6 +885,17 @@ var (
 	// lastPingDate 是最近一次**成功发出**请求的本地日期。空串表示本次运行还一次都没发出去
 	// （例如启动时断网），此时下一个唤醒点就会补发。
 	lastPingDate string
+
+	// heartbeatNow 为心跳时钟源，生产路径恒为 time.Now，测试可注入可控时钟。
+	heartbeatNow = time.Now
+
+	// appStartTime 记录确认进入常驻服务阶段的时刻，用于计算心跳与退出的 uptime_sec。
+	appStartTime time.Time
+
+	rumHeartbeatMu             sync.Mutex
+	lastRUMHeartbeatDate       string
+	lastHeartbeatTracks        uint64
+	lastHeartbeatRouteSwitches uint64
 )
 
 func markPinged(now time.Time) {
@@ -702,7 +925,7 @@ func startDailyHeartbeat() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if shouldPing(time.Now()) {
+			if shouldPing(heartbeatNow()) {
 				sendHeartbeat()
 			}
 		}
@@ -713,17 +936,25 @@ func startDailyHeartbeat() {
 //
 // 失败只记 Detail 不记 Warn：这条路径对主播没有任何价值，网关不通也不影响任何功能，
 // 用 [!] 刷屏只会淹没真正要看的东西。
+//
+// 即便网关请求失败（如断网多日），只要跨入新本地日历日仍须经独立去重日期发 1 条 app_heartbeat
+// 进入 rum 33 日保底槽，且绝不改变 markPinged 的原有网关语义。
 func sendHeartbeat() {
+	now := heartbeatNow()
 	req, err := newVersionCheckRequest(clientid.PingDaily)
 	if err != nil {
 		mainLog.Detail("Failed to assemble online heartbeat: %v", err)
+		emitRUMHeartbeatOnce(now, false, 0)
 		return
 	}
 
+	start := time.Now()
 	client := &http.Client{Timeout: heartbeatTimeout}
 	resp, err := client.Do(req)
+	rttMs := time.Since(start).Milliseconds()
 	if err != nil {
 		mainLog.Detail("Failed to send online heartbeat: %v", err)
+		emitRUMHeartbeatOnce(now, false, rttMs)
 		return
 	}
 	defer resp.Body.Close()
@@ -731,8 +962,58 @@ func sendHeartbeat() {
 	// 读干净才能让连接回到池里复用。响应内容本身**故意不解析**。
 	io.Copy(io.Discard, resp.Body)
 
-	markPinged(time.Now())
+	pingTime := heartbeatNow()
+	markPinged(pingTime)
+	emitRUMHeartbeatOnce(pingTime, resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest, rttMs)
 	mainLog.Detail("Online heartbeat sent")
+}
+
+func emitRUMHeartbeatOnce(now time.Time, gatewayPingOK bool, gatewayRTTMs int64) {
+	localDate := now.Format(pingDateLayout)
+
+	rumHeartbeatMu.Lock()
+	if lastRUMHeartbeatDate == localDate {
+		rumHeartbeatMu.Unlock()
+		return
+	}
+	lastRUMHeartbeatDate = localDate
+	snap := rumHeartbeatStatsSnapshot()
+	var tracksDelta, routeSwitchesDelta uint64
+	if snap.TracksRecognized >= lastHeartbeatTracks {
+		tracksDelta = snap.TracksRecognized - lastHeartbeatTracks
+	}
+	lastHeartbeatTracks = snap.TracksRecognized
+	if snap.RouteSwitches >= lastHeartbeatRouteSwitches {
+		routeSwitchesDelta = snap.RouteSwitches - lastHeartbeatRouteSwitches
+	}
+	lastHeartbeatRouteSwitches = snap.RouteSwitches
+	rumHeartbeatMu.Unlock()
+
+	rumDropped, droppedByScope := rum.DrainDropped()
+	if droppedByScope == nil {
+		droppedByScope = map[string]uint64{}
+	}
+	rum.Track(rum.CatLifecycle, "app_heartbeat", rum.Props{
+		"local_date":              localDate,
+		"uptime_sec":              uptimeSec(now),
+		"tracks_recognized_delta": tracksDelta,
+		"route_switches_delta":    routeSwitchesDelta,
+		"peak_ws_clients":         snap.PeakWSClients,
+		"peak_audio_clients":      snap.PeakAudioClients,
+		"peak_effect_clients":     snap.PeakEffectClients,
+		"gateway_ping_ok":         gatewayPingOK,
+		"gateway_rtt_ms":          gatewayRTTMs,
+		"rum_dropped":             rumDropped,
+		"dropped_by_scope":        droppedByScope,
+	})
+}
+
+func resetRUMHeartbeatStateForTest() {
+	rumHeartbeatMu.Lock()
+	defer rumHeartbeatMu.Unlock()
+	lastRUMHeartbeatDate = ""
+	lastHeartbeatTracks = 0
+	lastHeartbeatRouteSwitches = 0
 }
 
 // placeError 标记放置阶段（改名备份、替换、覆盖）的失败。此时可能已替换了部分文件，且是本地错误，重来多半
@@ -764,24 +1045,37 @@ func updateWithRetry(perform func() ([]updateSource, error), report func([]updat
 // 全部成功后再按 assets 的顺序逐个放置。下载阶段的错误原样返回，放置阶段的错误包成 *placeError；放置失败时
 // 删除尚未放置的 .new，已放置的不回滚。tried 见 fetchAssets。
 func performUpdateAll(sources []updateSource, tagName string, assets []updateAsset) (tried []updateSource, err error) {
+	tried, _, err = performUpdateAllWithStats(sources, tagName, assets)
+	return tried, err
+}
+
+func performUpdateAllWithStats(sources []updateSource, tagName string, assets []updateAsset) (tried []updateSource, stats updateTransferStats, err error) {
+	stats.RaceWinner = "single"
 	exePath, err := os.Executable()
 	if err != nil {
-		return nil, i18n.Errorf("failed to get program path: %v", err)
+		return nil, stats, i18n.Errorf("failed to get program path: %v", err)
 	}
 	exeDir := filepath.Dir(exePath)
 	exeBase := filepath.Base(exePath)
 
 	// 同一安装目录的更新串行（acquireUpdateLock）。锁覆盖下载与放置两段、返回时释放：失败后的询问与 restartSelf
 	// 都在锁外，一个进程停在提示上不会卡住另一个。取不到锁即不更新，不碰任何 .new；这属下载阶段的失败，可按 R 重试。
-	release, err := acquireUpdateLock(exeDir)
+	release, lockStats, err := acquireUpdateLockWithStats(exeDir)
+	stats.LockContended = lockStats.Contended
+	stats.LockWaitMs = lockStats.WaitMs
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 	defer release()
 
-	tmpPaths, tried, err := fetchAssets(updateHTTPClient(), updateFetchParams, sources, tagName, assets, exeDir)
+	tmpPaths, tried, fStats, err := fetchAssetsWithStats(updateHTTPClient(), updateFetchParams, sources, tagName, assets, exeDir)
+	stats.RaceWinner = fStats.RaceWinner
+	stats.ChinaKBps = fStats.ChinaKBps
+	stats.GlobalKBps = fStats.GlobalKBps
+	stats.SwitchedSource = fStats.SwitchedSource
+	stats.SlowTriggered = fStats.SlowTriggered
 	if err != nil {
-		return tried, err
+		return tried, stats, err
 	}
 
 	placed := 0
@@ -798,37 +1092,48 @@ func performUpdateAll(sources []updateSource, tagName string, assets []updateAss
 
 		if isExe {
 			oldPath := updateBackupPath(exePath)
-			if err := os.Rename(exePath, oldPath); err != nil {
-				return tried, &placeError{i18n.Errorf("failed to replace %s (rename): %v", asset.Name, err)}
+			if oldPath != exePath+".old" {
+				stats.UsedPIDBackup = true
 			}
-			if err := renameWithRetry(tmpPath, exePath); err != nil {
+			if err := os.Rename(exePath, oldPath); err != nil {
+				return tried, stats, &placeError{i18n.Errorf("failed to replace %s (rename): %v", asset.Name, err)}
+			}
+			retries, err := renameWithRetry(tmpPath, exePath)
+			stats.RenameRetries += retries
+			if err != nil {
 				os.Rename(oldPath, exePath)
-				return tried, &placeError{i18n.Errorf("failed to replace %s: %v", asset.Name, err)}
+				return tried, stats, &placeError{i18n.Errorf("failed to replace %s: %v", asset.Name, err)}
 			}
 			mainLog.Success("Replaced: %s", asset.Name)
 		} else {
 			os.Remove(targetPath)
-			if err := renameWithRetry(tmpPath, targetPath); err != nil {
-				return tried, &placeError{i18n.Errorf("failed to place %s: %v", asset.Name, err)}
+			retries, err := renameWithRetry(tmpPath, targetPath)
+			stats.RenameRetries += retries
+			if err != nil {
+				return tried, stats, &placeError{i18n.Errorf("failed to place %s: %v", asset.Name, err)}
 			}
 			mainLog.Success("Updated: %s", asset.Name)
 		}
 		placed++
 	}
-	return tried, nil
+	return tried, stats, nil
 }
 
-func renameWithRetry(src, dst string) error {
+func renameWithRetry(src, dst string) (int, error) {
 	var err error
+	retries := 0
 	for i := 0; i < 5; i++ {
+		if i > 0 {
+			retries++
+		}
 		err = os.Rename(src, dst)
 		if err == nil {
-			return nil
+			return retries, nil
 		}
 		mainLog.Info("File is in use, waiting for release (%d/5)...", i+1)
 		time.Sleep(1 * time.Second)
 	}
-	return err
+	return retries, err
 }
 
 // progressWriter 以 \r 原地刷新下载进度，不换行。
@@ -966,13 +1271,25 @@ func cleanupLegacyExe() {
 //
 // 本进程的映像此时是 updateBackupPath 选定的备份文件，等待期间它一直被占用：新进程的
 // cleanupOldExe 删不掉它，要到下一次启动才清理；新进程自己又要更新时，备份改用别的名字。
-func restartSelf() {
+func tryRestartSelf() error {
 	exePath, err := os.Executable()
-	if err == nil {
-		err = relaunchSelf(exePath)
+	if err != nil {
+		return err
 	}
+	return relaunchSelfWithEnv(exePath, withoutEnv(os.Environ(), envRenamedLaunch))
+}
+
+// 可注入，供测试覆盖重启失败收尾路径；生产路径恒为 tryRestartSelf 与 os.Exit。
+var (
+	restartSelfAttempt = tryRestartSelf
+	exitProcess        = os.Exit
+)
+
+func restartSelf() {
+	err := restartSelfAttempt()
 	mainLog.Error("Unable to restart automatically: %v, please restart the program manually", err)
-	os.Exit(1)
+	rum.Shutdown(rumFlushTimeout)
+	exitProcess(1)
 }
 
 // selfCommand 组装以 args 为参数、沿用本进程三个标准流运行 exePath 的命令。
@@ -982,6 +1299,42 @@ func selfCommand(exePath string, args []string) *exec.Cmd {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd
+}
+
+func appendEnv(base []string, extra []string) []string {
+	keys := make([]string, 0, len(extra))
+	for _, kv := range extra {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			keys = append(keys, k)
+		}
+	}
+	out := make([]string, 0, len(base)+len(extra))
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		dup := false
+		for _, ek := range keys {
+			if strings.EqualFold(k, ek) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, kv)
+		}
+	}
+	return append(out, extra...)
+}
+
+func withoutEnv(base []string, removeKey string) []string {
+	out := make([]string, 0, len(base))
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		if strings.EqualFold(k, removeKey) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // runAndWait 以 args 为参数启动 exePath 并等它结束，返回它的退出码。启动失败时返回 error，
@@ -1009,11 +1362,18 @@ func selfCommand(exePath string, args []string) *exec.Cmd {
 // 返回前 signal.Stop（经 runtime.signal_disable 清除 sig.wanted）：启动失败时调用方以当前进程
 // 继续运行，Ctrl+C 须恢复默认处理。
 func runAndWait(exePath string, args []string) (int, error) {
+	return runAndWaitWithEnv(exePath, args, nil)
+}
+
+func runAndWaitWithEnv(exePath string, args, env []string) (int, error) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
 	defer signal.Stop(sigCh)
 
 	cmd := selfCommand(exePath, args)
+	if env != nil {
+		cmd.Env = env
+	}
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
@@ -1025,7 +1385,11 @@ func runAndWait(exePath string, args []string) (int, error) {
 // relaunchSelf 以本进程的命令行参数运行 exePath，等它结束后以它的退出码退出本进程。
 // 只在启动失败时返回。ensureCanonicalName 与 restartSelf 共用。
 func relaunchSelf(exePath string) error {
-	code, err := runAndWait(exePath, os.Args[1:])
+	return relaunchSelfWithEnv(exePath, nil)
+}
+
+func relaunchSelfWithEnv(exePath string, env []string) error {
+	code, err := runAndWaitWithEnv(exePath, os.Args[1:], env)
 	if err != nil {
 		return err
 	}
@@ -1148,12 +1512,296 @@ func ensureCanonicalName() {
 
 	mainLog.Info("Copied to canonical filename: %s", canonicalExeName)
 
+	childEnv := appendEnv(os.Environ(), []string{envRenamedLaunch + "=1"})
 	if strings.EqualFold(currentName, legacyExeName) {
-		if err = selfCommand(canonicalPath, os.Args[1:]).Start(); err == nil {
+		cmd := selfCommand(canonicalPath, os.Args[1:])
+		cmd.Env = childEnv
+		if err = cmd.Start(); err == nil {
 			os.Exit(0)
 		}
 	} else {
-		err = relaunchSelf(canonicalPath)
+		err = relaunchSelfWithEnv(canonicalPath, childEnv)
 	}
 	mainLog.Warn("Failed to start %s: %v; continuing under the current filename", canonicalExeName, err)
+}
+
+// ============================================================================
+// RUM 生命周期与配置诊断属性构造
+// ============================================================================
+
+// rumRuntimeStats 是心跳与退出事件采集的运行期累计/峰值快照。
+// server 侧注入路由与客户端峰值读取，player 侧注入识曲总量读取；未注入前默认返回零值。
+type rumRuntimeStats struct {
+	TracksRecognized  uint64
+	RouteSwitches     uint64
+	PeakWSClients     int64
+	PeakAudioClients  int64
+	PeakEffectClients int64
+}
+
+var (
+	rumStatsMu                sync.RWMutex
+	rumServerStatsFn          func() rumRuntimeStats
+	rumServerHeartbeatStatsFn func() rumRuntimeStats
+	rumTracksTotalFn          func() uint64
+)
+
+func rumStatsSnapshot() rumRuntimeStats {
+	rumStatsMu.RLock()
+	srvFn := rumServerStatsFn
+	tracksFn := rumTracksTotalFn
+	rumStatsMu.RUnlock()
+
+	var s rumRuntimeStats
+	if srvFn != nil {
+		s = srvFn()
+	}
+	if tracksFn != nil {
+		s.TracksRecognized = tracksFn()
+	}
+	return s
+}
+
+func rumHeartbeatStatsSnapshot() rumRuntimeStats {
+	rumStatsMu.RLock()
+	hbFn := rumServerHeartbeatStatsFn
+	if hbFn == nil {
+		hbFn = rumServerStatsFn
+	}
+	tracksFn := rumTracksTotalFn
+	rumStatsMu.RUnlock()
+
+	var s rumRuntimeStats
+	if hbFn != nil {
+		s = hbFn()
+	}
+	if tracksFn != nil {
+		s.TracksRecognized = tracksFn()
+	}
+	return s
+}
+
+func setRUMServerStatsHooks(readonlyFn, heartbeatTakeFn func() rumRuntimeStats) {
+	rumStatsMu.Lock()
+	defer rumStatsMu.Unlock()
+	rumServerStatsFn = readonlyFn
+	rumServerHeartbeatStatsFn = heartbeatTakeFn
+}
+
+func setRUMTracksTotalHook(tracksFn func() uint64) {
+	rumStatsMu.Lock()
+	defer rumStatsMu.Unlock()
+	rumTracksTotalFn = tracksFn
+}
+
+func setRUMStatsHooksForTest(srvFn func() rumRuntimeStats, tracksFn func() uint64) {
+	rumStatsMu.Lock()
+	defer rumStatsMu.Unlock()
+	rumServerStatsFn = srvFn
+	rumServerHeartbeatStatsFn = nil
+	rumTracksTotalFn = tracksFn
+}
+
+func buildRUMBaseProps(p telemetry.SystemProfile) rum.Props {
+	return rum.Props{
+		"os_version":     p.OSVersion,
+		"os_build":       p.OSBuild,
+		"os_edition":     p.OSEdition,
+		"os_compat_shim": p.OSCompatShim,
+		"arch":           p.Arch,
+		"cpu_cores":      p.CPUCores,
+		"locale":         p.Locale,
+		"timezone":       p.TimeZone,
+		"is_elevated":    p.IsElevated,
+	}
+}
+
+func emitAppStart(cfg *config.Config, sysProfile telemetry.SystemProfile, effectStrategy string, res checkAndUpdateResult) {
+	rum.Track(rum.CatLifecycle, "app_start", buildAppStartProps(cfg, sysProfile, effectStrategy))
+	if !res.configLifecycleEmitted {
+		rum.Track(rum.CatUpdateCfg, "config_lifecycle", buildConfigLifecycleProps(cfg, res.readmeSyncErr, false, "", nil))
+	}
+}
+
+func emitAppExit(reason string, listenPort int) {
+	snap := rumStatsSnapshot()
+	rumDropped, droppedByScope := rum.DrainDropped()
+	if droppedByScope == nil {
+		droppedByScope = map[string]uint64{}
+	}
+	rum.Track(rum.CatLifecycle, "app_exit", rum.Props{
+		"exit_reason":      reason,
+		"listen_port":      listenPort,
+		"uptime_sec":       uptimeSec(time.Now()),
+		"tracks_total":     snap.TracksRecognized,
+		"rum_dropped":      rumDropped,
+		"dropped_by_scope": droppedByScope,
+	})
+}
+
+func buildAppStartProps(cfg *config.Config, sysProfile telemetry.SystemProfile, effectStrategy string) rum.Props {
+	knownPrior, unknownPriorCount := filterPriorPlayers(cfg.PriorPlayer, config.RegisteredPlayers())
+	return rum.Props{
+		"is_elevated":                sysProfile.IsElevated,
+		"renamed_relaunch":           os.Getenv(envRenamedLaunch) == "1",
+		"post_rebuild":               os.Getenv(envConfigBackup) != "",
+		"orphans_swept":              0,
+		"audio_loopback_supported":   sysProfile.OSBuild >= 19041,
+		"config_file_state":          configFileStateName(cfg.ConfigFileState),
+		"prior_players":              knownPrior,
+		"unknown_prior_player_count": unknownPriorCount,
+		"prior_player_expire_s":      cfg.PriorPlayerExpire,
+		"per_player_idle_hide_s":     cfg.PerPlayerIdleHide,
+		"audio_normalize":            cfg.AudioNormalize,
+		"audio_frame_rate":           cfg.AudioFrameRate,
+		"song_info_keep_first":       cfg.SongInfoKeepFirst,
+		"effect_strategy_cfg":        cfg.EffectStrategy,
+		"effect_strategy_eff":        effectStrategy,
+		"win11_park_downgraded":      cfg.EffectStrategy == "park" && effectStrategy != "park",
+		"customized_keys":            filterKnownBoolKeys(cfg.ExplicitKeys),
+	}
+}
+
+func buildConfigLifecycleProps(cfg *config.Config, readmeSyncErr string, rebuilt bool, rebuildFailKind string, diffKeys []string) rum.Props {
+	_, unknownPriorCount := filterPriorPlayers(cfg.PriorPlayer, config.RegisteredPlayers())
+	rejectedTypes := make(map[string]string)
+	for k, v := range cfg.RejectedValues {
+		if !config.IsKnownKey(k) {
+			continue
+		}
+		if v == nil {
+			rejectedTypes[k] = "nil"
+		} else {
+			rejectedTypes[k] = fmt.Sprintf("%T", v)
+		}
+	}
+	return rum.Props{
+		"file_state":                 configFileStateName(cfg.ConfigFileState),
+		"has_cwd_conflict":           cfg.HasCWDConflict,
+		"has_orphan_backup":          cfg.OrphanBackup != "",
+		"rewrite_state":              configRewriteStateName(cfg.FileRewrite),
+		"rewrite_fail_reason":        cfg.RewriteFailReason,
+		"migrated_keys":              filterKnownKeySlice(cfg.MigratedKeys),
+		"rejected_key_types":         rejectedTypes,
+		"clamped_keys":               filterKnownAnyKeys(cfg.WrittenValues),
+		"unknown_prior_player_count": unknownPriorCount,
+		"readme_sync_err":            readmeSyncErr,
+		"rebuilt":                    rebuilt,
+		"rebuild_fail_kind":          rebuildFailKind,
+		"diff_keys":                  filterKnownKeySlice(diffKeys),
+	}
+}
+
+func filterPriorPlayers(configured, registered []string) ([]string, int) {
+	allow := make(map[string]bool, len(registered))
+	for _, p := range registered {
+		allow[p] = true
+	}
+	known := make([]string, 0, len(configured))
+	unknownCount := 0
+	for _, p := range configured {
+		if allow[p] {
+			known = append(known, p)
+		} else {
+			unknownCount++
+		}
+	}
+	return known, unknownCount
+}
+
+func filterKnownBoolKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k, set := range m {
+		if set && config.IsKnownKey(k) {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func filterKnownAnyKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		if config.IsKnownKey(k) {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func filterKnownKeySlice(keys []string) []string {
+	if len(keys) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]bool, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if config.IsKnownKey(k) && !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func configFileStateName(s config.FileState) string {
+	switch s {
+	case config.FileLoaded:
+		return "loaded"
+	case config.FileGenerated:
+		return "generated"
+	case config.FileReadFailed:
+		return "read_failed"
+	case config.FileParseFailed:
+		return "parse_failed"
+	case config.FileGenerateFailed:
+		return "generate_failed"
+	default:
+		return "unknown"
+	}
+}
+
+func configRewriteStateName(s config.RewriteState) string {
+	switch s {
+	case config.RewriteNone:
+		return "none"
+	case config.RewriteStamped:
+		return "stamped"
+	case config.RewriteMigrated:
+		return "migrated"
+	case config.RewriteStampPending:
+		return "stamp_pending"
+	case config.RewriteMigratePending:
+		return "migrate_pending"
+	case config.RewriteNewerFile:
+		return "newer_file"
+	default:
+		return "unknown"
+	}
+}
+
+func uptimeSec(now time.Time) int64 {
+	if appStartTime.IsZero() {
+		return 0
+	}
+	sec := int64(now.Sub(appStartTime).Seconds())
+	if sec < 0 {
+		return 0
+	}
+	return sec
+}
+
+func listenPortFromAddr(addr string) int {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p < 0 {
+		return 0
+	}
+	return p
 }

@@ -99,6 +99,49 @@ type Config struct {
 	FileRewrite      RewriteState `yaml:"-"`
 	FileBackup       string       `yaml:"-"`
 	OrphanBackup     string       `yaml:"-"`
+	// 以下三项为只读诊断字段（非配置项），供 RUM 配置生命周期观测使用。
+	HasCWDConflict    bool     `yaml:"-"`
+	RewriteFailReason string   `yaml:"-"`
+	MigratedKeys      []string `yaml:"-"`
+}
+
+// knownGlobalKeys 与 knownPlayerKeySuffixes 定义已知配置键白名单，与 mergeYAML 支持的键集合一致。
+var knownGlobalKeys = map[string]bool{
+	"addr":                         true,
+	"offset":                       true,
+	"poll":                         true,
+	"prior-player":                 true,
+	"prior-player-expire":          true,
+	"per-player-idle-hide":         true,
+	"audio-normalize":              true,
+	"audio-normalize-target":       true,
+	"audio-normalize-max-gain":     true,
+	"audio-frame-rate":             true,
+	"song-info-keep-first":         true,
+	"cloudmusicv3-effect-strategy": true,
+}
+
+var knownPlayerKeySuffixes = []string{
+	"-offset",
+	"-poll",
+	"-idle-hide",
+	"-audio-normalize",
+}
+
+// IsKnownKey 报告 k 是否为已知的配置键（全局已知键或已注册播放器的专属已知键），
+// 用于过滤未知 YAML 自由键名，防止自由文本外泄。
+func IsKnownKey(k string) bool {
+	if knownGlobalKeys[k] {
+		return true
+	}
+	for _, p := range RegisteredPlayers() {
+		for _, suf := range knownPlayerKeySuffixes {
+			if k == p+suf {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FileState 是 Load 对 config.yml 的加载结果。除 FileLoaded 与 FileGenerated 外，config.yml 一层都没有生效，
@@ -240,12 +283,17 @@ var (
 // 永不触发**（exe 目录里 CI 那份 config.yml 永远在），所以别把它当兼容保证 —— 真正的
 // 兼容保护是下面两条日志。
 func configPath() string {
+	path, _ := resolveConfigPath()
+	return path
+}
+
+func resolveConfigPath() (path string, cwdConflict bool) {
 	exe, err := osExecutable()
 	if err != nil {
 		// 定位不了自己就维持旧行为（按 CWD），不 panic：配置读不到最多是用默认值，
 		// 不该让整个服务起不来。
 		log.Warn("Cannot locate executable path (%v); resolving config.yml against the current working directory", err)
-		return configName
+		return configName, false
 	}
 	exeDir := filepath.Dir(exe)
 	inExeDir := filepath.Join(exeDir, configName)
@@ -256,11 +304,12 @@ func configPath() string {
 		// 这条 Warn 精确命中他，把静默失效变成一行可见告警。
 		if cwd, err := osGetwd(); err == nil && cwd != exeDir {
 			if _, err := os.Stat(filepath.Join(cwd, configName)); err == nil {
+				cwdConflict = true
 				log.Warn("Found two config.yml files; using %s and ignoring %s",
 					inExeDir, filepath.Join(cwd, configName))
 			}
 		}
-		return inExeDir
+		return inExeDir, cwdConflict
 	}
 
 	// exe 目录没有 → CWD 有就用 CWD（开发者场景）
@@ -268,12 +317,12 @@ func configPath() string {
 		inCwd := filepath.Join(cwd, configName)
 		if _, err := os.Stat(inCwd); err == nil {
 			log.Warn("No config.yml in the executable directory; using %s from the current working directory instead", inCwd)
-			return inCwd
+			return inCwd, false
 		}
 	}
 
 	// 两处都没有 → 生成到 exe 目录（与 README 的「同目录」一致）
-	return inExeDir
+	return inExeDir, false
 }
 
 // Load 加载配置，优先级：命令行参数 > config.yml > 内置默认。programVersion 是程序版本（main.Version），
@@ -450,7 +499,8 @@ func loadFile(cfg *Config, programVersion string) { loadFileWithOps(osFileOps, c
 // 改写为盖章值并写回文件。交给 mergeYAML 的是迁移之后的解析结果，与文件有没有写成无关。
 func loadFileWithOps(ops *fileOps, cfg *Config, programVersion string) {
 	// 读、写、重读必须是同一个 path，否则会「写了读不到」（28b095c 修过这个坑）
-	path := configPath()
+	path, cwdConflict := resolveConfigPath()
+	cfg.HasCWDConflict = cwdConflict
 	cfg.ConfigFile = path
 	if abs, err := filepath.Abs(path); err == nil {
 		cfg.ConfigFile = abs // 定位不了 exe 时 configPath 返回相对路径，记下的仍须是绝对路径
@@ -903,7 +953,8 @@ audio-normalize-max-gain: 30
 audio-frame-rate: 25
 
 # 同一首歌内保持最早的歌名与歌手：开启时，换歌时发出的歌名、歌手（song_info_update 的 name、singer）在这首歌内
-# 不再改动，只有当时为空的可以补上；关闭时随播放器之后读到的写法更新（可能改写或清空）。title 在同一首歌内始终不变。
+# 不再改动，只有当时为空的可以补上；关闭时随播放器之后读到的写法更新（可能改写或清空）。
+# 组合标题（title，如「歌名 - 歌手」）在同一首歌内始终不变。
 song-info-keep-first: true
 
 # 全民K歌 配置

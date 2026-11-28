@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/park"
 	"Metabox-Nexus-PlayerCap/player/cloudmusic/watchdog"
 	"Metabox-Nexus-PlayerCap/telemetry"
@@ -294,14 +295,16 @@ const chromeInjectJS = `(function(){
 
 // Capturer 网易云特效画面捕获器。
 type Capturer struct {
-	sink          FrameSink
-	netEaseUp     func() bool // 取词 player 是否已连上网易云；未连上则静默待命，不独立探 9222
-	mode          string      // "purelayer"(默认，注入读 canvas) | "screencast"(兜底，Page.startScreencast)
-	showing       int32       // atomic：网易云是否正显示详情页特效（用于帧门控，不在详情页时停发帧）
-	minimized     int32       // atomic：仅 fadeout 策略下的最小化（并入 showing 触发淡出）
-	rawMinimized  int32       // atomic：真实最小化状态（任何策略下都门控帧 → 冻结最后一帧，不漏最小化动画）
-	gateUntilNano int64       // atomic：在此时间前门控帧（park 过渡期冻结，盖住最小化动画 + park 后冷渲染）
-	parkedAtNano  int64       // atomic：上次 park 的时刻，用于 post-park 冷却（避免 park 反激活立即触发 unpark 弹回）
+	sink             FrameSink
+	netEaseUp        func() bool                              // 取词 player 是否已连上网易云；未连上则静默待命，不独立探 9222
+	mode             string                                   // "purelayer"(默认，注入读 canvas) | "screencast"(兜底，Page.startScreencast)
+	showing          int32                                    // atomic：网易云是否正显示详情页特效（用于帧门控，不在详情页时停发帧）
+	minimized        int32                                    // atomic：仅 fadeout 策略下的最小化（并入 showing 触发淡出）
+	rawMinimized     int32                                    // atomic：真实最小化状态（任何策略下都门控帧 → 冻结最后一帧，不漏最小化动画）
+	gateUntilNano    int64                                    // atomic：在此时间前门控帧（park 过渡期冻结，盖住最小化动画 + park 后冷渲染）
+	parkedAtNano     int64                                    // atomic：上次 park 的时刻，用于 post-park 冷却（避免 park 反激活立即触发 unpark 弹回）
+	rumGate          player.SessionRUMGate[*effectSessionRUM] // 特效镜像 RUM 会话登记与退出 FlushRUM 同步闸门
+	testBeforeAttach func()                                   // 仅供单测注入登记完成屏障交错验证
 }
 
 func (c *Capturer) setShowing(v bool) {
@@ -310,6 +313,9 @@ func (c *Capturer) setShowing(v bool) {
 		iv = 1
 	}
 	atomic.StoreInt32(&c.showing, iv)
+	if s, ok := c.rumGate.Current(); ok && s != nil {
+		s.onShowingChange(v, time.Now())
+	}
 	c.sink.SetEffectShowing(v)
 }
 
@@ -339,6 +345,9 @@ func New(sink FrameSink, netEaseUp func() bool) *Capturer {
 func (c *Capturer) ingestFrame(jpeg []byte) {
 	if c.isShowing() && atomic.LoadInt32(&c.rawMinimized) == 0 && time.Now().UnixNano() >= atomic.LoadInt64(&c.gateUntilNano) {
 		c.sink.BroadcastEffectFrame(jpeg)
+		if s, ok := c.rumGate.Current(); ok && s != nil {
+			s.onBroadcastFrame()
+		}
 	}
 }
 
@@ -377,6 +386,9 @@ func (c *Capturer) doPark() {
 		return
 	}
 	if parkFn() {
+		if s, ok := c.rumGate.Current(); ok && s != nil {
+			s.onPark()
+		}
 		atomic.StoreInt64(&c.parkedAtNano, time.Now().UnixNano())
 		// 冻结一小段：盖住「最小化动画 + park 过渡 + park 后特效冷渲染」这几帧，前端 hold 住最后干净帧
 		atomic.StoreInt64(&c.gateUntilNano, time.Now().Add(700*time.Millisecond).UnixNano())
@@ -759,11 +771,29 @@ func (c *Capturer) purelayerSession() error {
 
 	log.Success("Pure-layer capture started (injected grab q%d, native resolution, fps%d)", quality, captureFPS)
 
+	// 先在闸门锁外完成首次 CDP 只读采样拿到基线初值，再经 rumGate 纯内存原子登记（绝不在持锁或登记间隙做 CDP I/O）。
+	var initStats purelayerStatsPayload
+	var hasInitStats bool
+	if raw, evalErr := eval(effectStatsExprJS); evalErr == nil {
+		initStats, hasInitStats = parseEffectStatsEval(raw)
+	}
+	rumSess := c.registerEffectSessionRUM("purelayer", func(s *effectSessionRUM) {
+		if hasInitStats {
+			s.initPurelayerBaseline(initStats.W, initStats.H, initStats.B, initStats.Y, initStats.T)
+		}
+	})
+	defer c.endEffectSessionRUM(rumSess)
+
 	// 维持连接：参数热更（gen 变）/ 无订阅者暂停退出 / 连接断重连
 	t := time.NewTicker(400 * time.Millisecond)
 	defer t.Stop()
 	for range t.C {
 		if !c.sink.HasEffectSubscribers() {
+			if raw, evalErr := eval(effectStatsExprJS); evalErr == nil {
+				if st, ok := parseEffectStatsEval(raw); ok {
+					rumSess.onPurelayerStats(st.W, st.H, st.B, st.Y, st.T)
+				}
+			}
 			eval("window.__mbxCapPaused=true;") // 暂停页面内抓帧循环，省网易云渲染进程 CPU
 			return nil
 		}
@@ -776,9 +806,13 @@ func (c *Capturer) purelayerSession() error {
 			}
 			continue
 		}
-		// 保活探活：一次轻量 eval，连接断则返回触发重连
-		if _, err := eval("1"); err != nil {
+		// 保活探活并只读采集 __mbxCapStats 与画布宽高快照（绝不写源 canvas 属性），连接断则返回触发重连
+		raw, err := eval(effectStatsExprJS)
+		if err != nil {
 			return err
+		}
+		if st, ok := parseEffectStatsEval(raw); ok {
+			rumSess.onPurelayerStats(st.W, st.H, st.B, st.Y, st.T)
 		}
 	}
 	return nil
@@ -881,6 +915,11 @@ func (c *Capturer) session() error {
 	conn.SetReadDeadline(time.Time{}) // 清除设置阶段的读超时，帧循环无限阻塞读
 	log.Success("Effect screencast started (%dx%d q%d scale%.2f)", maxW, maxH, quality, scale)
 
+	rumSess := c.registerEffectSessionRUM("screencast", func(s *effectSessionRUM) {
+		s.setCanvasSize(maxW, maxH)
+	})
+	defer c.endEffectSessionRUM(rumSess)
+
 	// 读循环阻塞，无读超时（gorilla 读超时会废连接）；
 	// 由 watcher 协程在「无订阅者」或「参数变更」时关闭连接来打断读循环。
 	var closed int32
@@ -928,6 +967,7 @@ func (c *Capturer) session() error {
 			jpeg, decErr := base64.StdEncoding.DecodeString(msg.Params.Data)
 			if decErr == nil && len(jpeg) > 0 {
 				c.sink.BroadcastEffectFrame(jpeg)
+				rumSess.onBroadcastFrame()
 			}
 		}
 		// 必须 ack，否则网易云停止推送后续帧

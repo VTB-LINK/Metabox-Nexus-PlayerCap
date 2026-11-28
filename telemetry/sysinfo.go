@@ -40,6 +40,7 @@ var (
 var (
 	rtlGetVersion          = windows.RtlGetVersion
 	rtlGetNtVersionNumbers = windows.RtlGetNtVersionNumbers
+	queryProcessElevation  = queryCurrentProcessElevation
 )
 
 // dynamicTimeZoneInformation 对应 DYNAMIC_TIME_ZONE_INFORMATION。
@@ -156,6 +157,65 @@ func collectOSInfo() osInfo {
 func OSSummary() (version, edition, arch string) {
 	o := collectOSInfo()
 	return o.version(), o.Edition, o.Arch
+}
+
+// SystemProfile 为进程级基础系统画像快照，供 RUM 填充基础环境属性。
+type SystemProfile struct {
+	OSVersion    string
+	OSBuild      uint32
+	OSEdition    string
+	OSCompatShim bool
+	Arch         string
+	CPUCores     uint32
+	Locale       string
+	TimeZone     string
+	IsElevated   bool
+}
+
+// IsProcessElevated 报告当前进程是否以管理员权限（提权令牌）运行；任何系统调用错误均安全返回 false。
+func IsProcessElevated() bool {
+	elevated, err := queryProcessElevation()
+	if err != nil {
+		return false
+	}
+	return elevated
+}
+
+// CollectSystemProfile 采集一次完整系统画像快照（复用 collectOSInfo 与 IsProcessElevated）。
+func CollectSystemProfile() SystemProfile {
+	o := collectOSInfo()
+	return SystemProfile{
+		OSVersion:    o.version(),
+		OSBuild:      o.Build,
+		OSEdition:    o.Edition,
+		OSCompatShim: o.Shimmed,
+		Arch:         o.Arch,
+		CPUCores:     o.CPUCores,
+		Locale:       o.Locale,
+		TimeZone:     o.TimeZone,
+		IsElevated:   IsProcessElevated(),
+	}
+}
+
+func queryCurrentProcessElevation() (bool, error) {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
+		return false, err
+	}
+	defer token.Close()
+
+	var elevation uint32
+	var outLen uint32
+	if err := windows.GetTokenInformation(
+		token,
+		windows.TokenElevation,
+		(*byte)(unsafe.Pointer(&elevation)),
+		uint32(unsafe.Sizeof(elevation)),
+		&outLen,
+	); err != nil {
+		return false, err
+	}
+	return elevation != 0, nil
 }
 
 // version 返回 "10.0.19045" 形态的真实版本号。

@@ -16,32 +16,35 @@ const (
 )
 
 // syncChineseReadme 在 dir 里，README.html 存在、而 使用说明.html 不存在或内容不同时，把前者复制为后者。
-// 先写临时文件再改名覆盖；失败只记 Detail 日志，不返回错误，不影响启动。
+// 先写临时文件再改名覆盖；失败只记 Detail 日志并返回不含路径的稳定短错误码，不影响启动。
 //
 // 在程序启动时做，不在下载流程里做：执行更新的是旧版程序，没有这段代码；新版重启后已是最新版，不再下载。
 // 内容相同时不写，免得每次启动都改动程序目录。
-func syncChineseReadme(dir string) {
+func syncChineseReadme(dir string) string {
 	src, err := os.ReadFile(filepath.Join(dir, readmeName))
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			mainLog.Detail("Failed to copy %s to %s: %v", readmeName, chineseReadmeName, err)
+			return "read_failed"
 		}
-		return
+		return ""
 	}
 	dst := filepath.Join(dir, chineseReadmeName)
 	if cur, err := os.ReadFile(dst); err == nil && bytes.Equal(cur, src) {
-		return
+		return ""
 	}
 	// 临时文件名固定：上一次写到一半留下的会被截断重写，不会越积越多。
 	tmp := dst + ".tmp"
-	err = os.WriteFile(tmp, src, 0o644)
-	if err == nil {
-		err = os.Rename(tmp, dst)
-	}
-	if err != nil {
+	if err := os.WriteFile(tmp, src, 0o644); err != nil {
 		os.Remove(tmp)
 		mainLog.Detail("Failed to copy %s to %s: %v", readmeName, chineseReadmeName, err)
-		return
+		return "write_failed"
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		mainLog.Detail("Failed to copy %s to %s: %v", readmeName, chineseReadmeName, err)
+		return "rename_failed"
 	}
 	mainLog.Detail("Copied %s to %s", readmeName, chineseReadmeName)
+	return ""
 }

@@ -128,19 +128,59 @@ func TestPrivacyNoticeENStatesPurposeAndRecipient(t *testing.T) {
 	}
 }
 
+// TestPrivacyNoticeENCoversRUMSection 钉死英文 RUM 隐私告知段已纳入全集且关键承诺完整。
+//
+// 变异自证：删掉 noticeRUMSectionEN 里的 "public IP" 或 "posthog.com" 即红。
+func TestPrivacyNoticeENCoversRUMSection(t *testing.T) {
+	for _, must := range []string{
+		"Release builds",
+		"MachineGuid",
+		"no additional local state file",
+		"administrator",
+		"public IP",
+		"song name",
+		"artist",
+		"album",
+		"lyric text",
+		"full local paths",
+		"Windows user name",
+		"full cover URLs",
+		"frontend query parameters",
+		"unknown config text",
+		"downsampled",
+		"Recipient",
+		"posthog.com",
+	} {
+		if !strings.Contains(noticeRUMSectionEN, must) {
+			t.Errorf("英文 RUM 隐私告知段缺少 %q", must)
+		}
+		if !strings.Contains(privacyNoticeEN, must) {
+			t.Errorf("英文隐私告知全集缺少 RUM 关键说明 %q", must)
+		}
+	}
+}
+
 // TestNoticeForSwitchesLanguage 钉死 noticeFor 按 i18n 语言产出对应语言的段落。
 func TestNoticeForSwitchesLanguage(t *testing.T) {
 	defer i18n.SetLanguage(i18n.Chinese)
 
 	i18n.SetLanguage(i18n.English)
-	en := noticeFor(true, true)
-	if !strings.Contains(en, "Reported:") || strings.Contains(en, "上报内容") {
-		t.Errorf("英文下 noticeFor 应产出英文段落、不含中文，得到：\n%s", en)
+	en := noticeFor(true, true, true)
+	if !strings.Contains(en, "Reported:") || strings.Contains(en, "上报内容") || !strings.Contains(en, "MachineGuid") {
+		t.Errorf("英文下 noticeFor 应产出含 RUM 的英文段落、不含中文，得到：\n%s", en)
+	}
+	enRUMOnly := noticeFor(false, false, true)
+	if !strings.Contains(enRUMOnly, "MachineGuid") || strings.Contains(enRUMOnly, "sentry.io") || strings.Contains(enRUMOnly, "gateway.vtb.link") || strings.Contains(enRUMOnly, "上报内容") {
+		t.Errorf("英文下单开 RUM 应仅产出英文 RUM 段，得到：\n%s", enRUMOnly)
 	}
 
 	i18n.SetLanguage(i18n.Chinese)
-	zh := noticeFor(true, true)
-	if !strings.Contains(zh, "上报内容") || strings.Contains(zh, "Reported:") {
-		t.Errorf("中文下 noticeFor 应产出中文段落、不含英文，得到：\n%s", zh)
+	zh := noticeFor(true, true, true)
+	if !strings.Contains(zh, "上报内容") || strings.Contains(zh, "Reported:") || !strings.Contains(zh, "MachineGuid") {
+		t.Errorf("中文下 noticeFor 应产出含 RUM 的中文段落、不含英文，得到：\n%s", zh)
+	}
+	zhRUMOnly := noticeFor(false, false, true)
+	if !strings.Contains(zhRUMOnly, "MachineGuid") || strings.Contains(zhRUMOnly, "sentry.io") || strings.Contains(zhRUMOnly, "gateway.vtb.link") || strings.Contains(zhRUMOnly, "Reported:") {
+		t.Errorf("中文下单开 RUM 应仅产出中文 RUM 段，得到：\n%s", zhRUMOnly)
 	}
 }

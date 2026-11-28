@@ -2,7 +2,9 @@ package helper
 
 import (
 	"math"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -468,6 +470,213 @@ func TestNormalizerBinsMayExceedOne(t *testing.T) {
 	newNormalizer(true, -14, 12, testSR).Apply(r, testHop)
 	if !(r.Bins[0] > 1) {
 		t.Fatalf("bin=1.0 施增益后应 >1（不钳）, got %v", r.Bins[0])
+	}
+}
+
+func TestNormalizerCapStatsAndDropDiag(t *testing.T) {
+	// -50 dBFS 远低于目标 -14 dBFS（需要 +36 dB >= maxGain 30 dB）→ 应记为触顶
+	nz := newNormalizer(true, -14, 30, testSR)
+	quiet := float32(math.Pow(10, -50.0/20.0))
+	nz.Apply(&dsp.Result{RMS: quiet, Bins: []float32{quiet}}, testHop)
+	// 正常电平 -16 dBFS（只需 +2 dB < 30 dB）→ 重新起步播种后不触顶
+	loud := float32(math.Pow(10, -16.0/20.0))
+	nz.Apply(&dsp.Result{RMS: loud, Bins: []float32{loud}}, testHop)
+
+	applied, capped := nz.CapStats()
+	if applied != 2 || capped != 1 {
+		t.Fatalf("CapStats() = (%d, %d)，期望 (2, 1)", applied, capped)
+	}
+
+	// 禁用归一化时不计数
+	disabled := newNormalizer(false, -14, 30, testSR)
+	disabled.Apply(&dsp.Result{RMS: quiet}, testHop)
+	if a, c := disabled.CapStats(); a != 0 || c != 0 {
+		t.Fatalf("disabled CapStats() = (%d, %d)，期望 (0, 0)", a, c)
+	}
+
+	// enqueueCountDrop 满通道丢最旧计 1 帧
+	ch := make(chan []byte, 2)
+	if d := enqueueCountDrop(ch, []byte{1}); d != 0 {
+		t.Fatalf("未满入队丢帧数 = %d，期望 0", d)
+	}
+	if d := enqueueCountDrop(ch, []byte{2}); d != 0 {
+		t.Fatalf("未满入队丢帧数 = %d，期望 0", d)
+	}
+	if d := enqueueCountDrop(ch, []byte{3}); d != 1 {
+		t.Fatalf("满通道入队丢帧数 = %d，期望 1", d)
+	}
+
+	// 诊断行格式前缀与字段完整性
+	sumLine := formatCaptureDiag("capture_summary", "wesing", 42, applied, capped, 4, 1)
+	if !strings.HasPrefix(sumLine, rumDiagPrefix) || !strings.Contains(sumLine, "sid=42") || !strings.Contains(sumLine, "capped_frames=1") || !strings.Contains(sumLine, "discontinuities=4") {
+		t.Fatalf("formatCaptureDiag 输出异常：%q", sumLine)
+	}
+	actLine := formatWASAPIActivateDiag("qqmusic", 99, "wasapi_wait_timeout_2s", "wait_2s", 0x102)
+	if !strings.HasPrefix(actLine, rumDiagPrefix) || !strings.Contains(actLine, "sid=99") || !strings.Contains(actLine, "hresult=0x00000102") {
+		t.Fatalf("formatWASAPIActivateDiag 输出异常：%q", actLine)
+	}
+}
+
+func TestParseControlOptionalSessionID(t *testing.T) {
+	got, err := parseControl("capture 123 kugou 1 -14 30 25 77")
+	if err != nil {
+		t.Fatalf("带可选 sid 的 capture 命令应合法: %v", err)
+	}
+	if got.sessionID != 77 || got.pid != 123 || got.player != "kugou" || got.fps != 25 {
+		t.Fatalf("解析结果异常: %+v", got)
+	}
+	if _, err := parseControl("capture 123 kugou 1 -14 30 25 77 extra"); err == nil {
+		t.Error("9 字段 capture 应报错")
+	}
+}
+
+func TestEnqueueFrameAttributesEvictionToEvictedOwner(t *testing.T) {
+	ch := make(chan queuedFrame, 2)
+	var statsA, statsB captureDiagStats
+
+	// 先用 B 的帧填满共享队列
+	enqueueFrame(ch, queuedFrame{data: []byte{1}, owner: &statsB})
+	enqueueFrame(ch, queuedFrame{data: []byte{2}, owner: &statsB})
+	// 再由 A 入队 1 帧，淘汰最旧的 B 帧：丢帧必须记到 B 而非 A
+	enqueueFrame(ch, queuedFrame{data: []byte{3}, owner: &statsA})
+
+	if gotB, gotA := statsB.framesDropped.Load(), statsA.framesDropped.Load(); gotB != 1 || gotA != 0 {
+		t.Fatalf("跨会话丢帧归账错误：B=%d A=%d，期望 B=1 A=0", gotB, gotA)
+	}
+	first := <-ch
+	second := <-ch
+	if len(first.data) != 1 || first.data[0] != 2 || len(second.data) != 1 || second.data[0] != 3 {
+		t.Fatalf("队列残留帧序错误：first=%v second=%v，期望 [2], [3]", first.data, second.data)
+	}
+}
+
+// TestCaptureDiagStatsWaitInFlightZeroOnEvictConsumeAndTimeout 覆盖 R3 残余：
+// 1) B 停止后其残留队列帧先被 A 淘汰 1 帧、再被写端消费 1 帧 → B 的 waitInFlightZero 归零唤醒并精确计入该次淘汰；
+// 2) 若写端卡死无人消费，waitInFlightZero 须在有界超时内返回且不死锁。
+func TestCaptureDiagStatsWaitInFlightZeroOnEvictConsumeAndTimeout(t *testing.T) {
+	ch := make(chan queuedFrame, 2)
+	var statsA, statsB captureDiagStats
+
+	enqueueFrame(ch, queuedFrame{data: []byte{1}, owner: &statsB})
+	enqueueFrame(ch, queuedFrame{data: []byte{2}, owner: &statsB})
+	if got := statsB.inFlight.Load(); got != 2 {
+		t.Fatalf("前置：B 在途帧数 = %d，期望 2", got)
+	}
+
+	// B 退出并等待在途归零，期间 A 淘汰 1 帧 B、写端消费剩余 1 帧 B
+	waited := make(chan bool, 1)
+	go func() {
+		waited <- statsB.waitInFlightZero(500 * time.Millisecond)
+	}()
+	time.Sleep(15 * time.Millisecond)
+	// A 入队淘汰 B 的第 1 帧
+	enqueueFrame(ch, queuedFrame{data: []byte{3}, owner: &statsA})
+	// 写端消费 B 的第 2 帧与 A 的帧
+	for range 2 {
+		qf := <-ch
+		if qf.owner != nil {
+			qf.owner.decInFlight()
+		}
+	}
+
+	select {
+	case ok := <-waited:
+		if !ok {
+			t.Fatal("B 全部在途帧已处理，waitInFlightZero 应返回 true")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waitInFlightZero 未能在在途归零后唤醒")
+	}
+	if gotB, gotA := statsB.framesDropped.Load(), statsA.framesDropped.Load(); gotB != 1 || gotA != 0 {
+		t.Fatalf("归零唤醒后丢帧归账错误：B=%d A=%d，期望 B=1 A=0", gotB, gotA)
+	}
+
+	// 场景 2：队列卡死无人消费，有界超时准时返回 false 不死锁
+	var stuck captureDiagStats
+	enqueueFrame(ch, queuedFrame{data: []byte{9}, owner: &stuck})
+	start := time.Now()
+	if ok := stuck.waitInFlightZero(30 * time.Millisecond); ok {
+		t.Fatal("无人消费时 waitInFlightZero 不应返回 true")
+	}
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Fatalf("waitInFlightZero 超时耗时过长：%v", elapsed)
+	}
+}
+
+// TestCaptureDiagStatsStaleDecInFlightDoesNotCloseNewWait 固定精确交错回归测试：
+// 旧帧 decInFlight 将 inFlight 从 1 减到 0 后在取锁前暂停 → 生产者 incInFlight 回到 1 并进入 waitInFlightZero →
+// 放行旧 decInFlight，断言 waitInFlightZero 绝不在 inFlight==1 时提前返回 true，且真正再次 decInFlight 归零后立即返回 true。
+func TestCaptureDiagStatsStaleDecInFlightDoesNotCloseNewWait(t *testing.T) {
+	var stats captureDiagStats
+	inStaleZero := make(chan struct{})
+	releaseStaleZero := make(chan struct{})
+	var hooked atomic.Bool
+
+	stats.testBeforeZeroLock = func() {
+		if hooked.CompareAndSwap(false, true) {
+			close(inStaleZero)
+			<-releaseStaleZero
+		}
+	}
+
+	// 旧帧入队并被消费至 0，在取 s.mu 前暂停
+	stats.incInFlight()
+	staleDone := make(chan struct{})
+	go func() {
+		defer close(staleDone)
+		stats.decInFlight()
+	}()
+	<-inStaleZero
+
+	// 新一轮帧入队（inFlight 回到 1）并进入 waitInFlightZero
+	stats.incInFlight()
+	waitRes := make(chan bool, 1)
+	go func() {
+		waitRes <- stats.waitInFlightZero(500 * time.Millisecond)
+	}()
+
+	// 等 waitInFlightZero 进入持锁建 zeroCh 并开始等待
+	waitZeroChDeadline := time.Now().Add(time.Second)
+	for time.Now().Before(waitZeroChDeadline) {
+		stats.mu.Lock()
+		ready := stats.zeroCh != nil
+		stats.mu.Unlock()
+		if ready {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// 放行旧 decInFlight：锁内重查 inFlight 仍为 1，绝不得关闭新一轮 zeroCh
+	close(releaseStaleZero)
+	<-staleDone
+
+	select {
+	case ok := <-waitRes:
+		t.Fatalf("inFlight 仍为 %d，waitInFlightZero 不得因旧归零通知提前返回 %v", stats.inFlight.Load(), ok)
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	// 真正消费掉新一轮帧，inFlight 归零后 waitInFlightZero 应立即返回 true
+	stats.decInFlight()
+	select {
+	case ok := <-waitRes:
+		if !ok {
+			t.Fatal("新一轮帧真正归零后 waitInFlightZero 应返回 true")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("新一轮帧归零后 waitInFlightZero 超时未唤醒")
+	}
+}
+
+func TestFormatCaptureSummaryDiagIncompleteFlag(t *testing.T) {
+	completeLine := formatCaptureSummaryDiag("wesing", 42, 200, 50, 3, 7, false)
+	if !strings.HasPrefix(completeLine, rumDiagPrefix) || !strings.Contains(completeLine, "kind=capture_summary") || !strings.Contains(completeLine, "incomplete=0") {
+		t.Fatalf("正常排空 capture_summary 应含 incomplete=0：%q", completeLine)
+	}
+	incompleteLine := formatCaptureSummaryDiag("wesing", 42, 200, 50, 3, 7, true)
+	if !strings.HasPrefix(incompleteLine, rumDiagPrefix) || !strings.Contains(incompleteLine, "kind=capture_summary") || !strings.Contains(incompleteLine, "incomplete=1") {
+		t.Fatalf("排空超时 capture_summary 应含 incomplete=1：%q", incompleteLine)
 	}
 }
 

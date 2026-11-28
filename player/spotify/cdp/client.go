@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/i18n"
@@ -119,10 +120,12 @@ type Client struct {
 	closed  bool
 	done    chan struct{}
 
-	headersMu sync.Mutex
-	token     string
-	appPlat   string
-	appVer    string
+	headersMu    sync.Mutex
+	token        string
+	appPlat      string
+	appVer       string
+	connectedAt  time.Time
+	firstTokenMs atomic.Int64 // -1 表示本会话尚未捕获到 Bearer Token
 }
 
 // connectTimeout 是一次 Connect（取 /json/list、读完响应体、WebSocket 握手、开两个域）的上限。调用方 Start 跑在 Spotify
@@ -188,11 +191,13 @@ func connect(ctx context.Context, base string, timeout time.Duration) (*Client, 
 		return nil, i18n.Errorf("WebSocket connection failed: %w", err)
 	}
 	c := &Client{
-		conn:    conn,
-		msgID:   0,
-		pending: make(map[int]chan []byte),
-		done:    make(chan struct{}),
+		conn:        conn,
+		msgID:       0,
+		pending:     make(map[int]chan []byte),
+		done:        make(chan struct{}),
+		connectedAt: time.Now(),
 	}
+	c.firstTokenMs.Store(-1)
 	go c.readLoop()
 	// 开域的两次调用各有 controlTimeout，另随 ctx 中止：到期或停止即关闭会话，等待中的调用随之返回。
 	stop := context.AfterFunc(ctx, c.Close)
@@ -296,6 +301,16 @@ func (c *Client) noteRequestHeaders(frame []byte) {
 	defer c.headersMu.Unlock()
 	if token != "" && token != c.token {
 		c.token = token
+		if c.firstTokenMs.Load() < 0 {
+			var ms int64
+			if !c.connectedAt.IsZero() {
+				ms = time.Since(c.connectedAt).Milliseconds()
+				if ms < 0 {
+					ms = 0
+				}
+			}
+			c.firstTokenMs.CompareAndSwap(-1, ms)
+		}
 	}
 	if platform != "" {
 		c.appPlat = platform
@@ -323,6 +338,15 @@ func (c *Client) AppVersion() string {
 	c.headersMu.Lock()
 	defer c.headersMu.Unlock()
 	return c.appVer
+}
+
+// FirstTokenCaptureMs 返回本会话首次被动捕获到 Bearer Token 的耗时毫秒数；尚未捕获时返回 (0, false)。
+func (c *Client) FirstTokenCaptureMs() (int64, bool) {
+	ms := c.firstTokenMs.Load()
+	if ms < 0 {
+		return 0, false
+	}
+	return ms, true
 }
 
 // call 发一条 CDP 命令并等回复。

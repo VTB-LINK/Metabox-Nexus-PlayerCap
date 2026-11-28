@@ -23,6 +23,7 @@ import (
 
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/launch"
+	"Metabox-Nexus-PlayerCap/rum"
 
 	"Metabox-Nexus-PlayerCap/i18n"
 	"github.com/shirou/gopsutil/v3/process"
@@ -138,6 +139,31 @@ var (
 //
 // 商店版门禁（issue #212）在开头，先于「9229 已可用」的早退：门禁不过时原样返回它的错误，上层不连接、不注入，
 // 并给出改用官网安装版的提示。
+func emitActivateIntervention(outcome string, elapsedMs int64) {
+	if elapsedMs < 0 {
+		elapsedMs = 0
+	}
+	rum.Track(rum.CatPlayer, "player_intervention", rum.Props{
+		"player":     "sodamusic",
+		"kind":       "sodamusic_activate_9229",
+		"outcome":    outcome,
+		"elapsed_ms": elapsedMs,
+	})
+}
+
+func waitInspectorReady(pid int, start time.Time, timeout, step time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if upFn() {
+			emitActivateIntervention("ok", time.Since(start).Milliseconds())
+			return nil
+		}
+		time.Sleep(step)
+	}
+	emitActivateIntervention("port_timeout", time.Since(start).Milliseconds())
+	return i18n.Errorf("inspector activated but port 9229 not ready in time (pid=%d)", pid)
+}
+
 func EnsureInspector(pid int) error {
 	if err := gateFn(pid); err != nil {
 		return err
@@ -145,18 +171,13 @@ func EnsureInspector(pid int) error {
 	if upFn() {
 		return nil
 	}
+	start := time.Now()
 	if err := activateInspector(pid); err != nil {
+		emitActivateIntervention("err", time.Since(start).Milliseconds())
 		return err
 	}
 	// 激活是异步的（远程线程去拉起 I/O 线程），轮询等 9229 就绪。
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if upFn() {
-			return nil
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	return i18n.Errorf("inspector activated but port 9229 not ready in time (pid=%d)", pid)
+	return waitInspectorReady(pid, start, 3*time.Second, 150*time.Millisecond)
 }
 
 // activateInspector 复刻 process._debugProcess(pid) 的 Windows 机制。

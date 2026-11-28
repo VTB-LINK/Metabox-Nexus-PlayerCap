@@ -307,6 +307,17 @@ func releaseUnknown(obj unsafe.Pointer) uintptr {
 // 异步激活 → 同步拿到 IAudioClient
 // ---------------------------------------------------------------------------
 
+// ActivateError 携带进程 loopback 激活失败的结构化阶段、HRESULT 与超时标记，供上层脱敏遥测归类。
+type ActivateError struct {
+	Stage   string // 激活阶段枚举，不含任何路径或敏感文本
+	HRESULT uint32 // 失败时的 HRESULT（或等待返回码），无则为 0
+	Timeout bool   // true 表示 WaitForSingleObject 2s 超时
+	Err     error  // 底层已本地化错误，保留原有日志输出文案
+}
+
+func (e *ActivateError) Error() string { return e.Err.Error() }
+func (e *ActivateError) Unwrap() error { return e.Err }
+
 // activateProcessLoopbackClient 对目标 PID（连/不连子进程树）异步激活进程 loopback 虚拟设备，等 2s 转同步，
 // 返回 IAudioClient*（unsafe.Pointer，调用方负责 Release）。
 //
@@ -316,7 +327,7 @@ func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer
 	mmdev := windows.NewLazySystemDLL("Mmdevapi.dll")
 	proc := mmdev.NewProc("ActivateAudioInterfaceAsync")
 	if err := proc.Find(); err != nil {
-		return nil, i18n.Errorf("ActivateAudioInterfaceAsync unavailable: %w", err)
+		return nil, &ActivateError{Stage: "proc_find", Err: i18n.Errorf("ActivateAudioInterfaceAsync unavailable: %w", err)}
 	}
 
 	mode := uint32(processLoopbackModeIncludeTree)
@@ -335,12 +346,12 @@ func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer
 	}
 	devPath, err := windows.UTF16PtrFromString(virtualAudioDeviceProcessLoopback)
 	if err != nil {
-		return nil, err
+		return nil, &ActivateError{Stage: "dev_path", Err: err}
 	}
 
 	h, err := newCompletionHandler()
 	if err != nil {
-		return nil, err
+		return nil, &ActivateError{Stage: "completion_event", Err: err}
 	}
 
 	var asyncOp unsafe.Pointer
@@ -359,24 +370,24 @@ func activateProcessLoopbackClient(pid uint32, includeTree bool) (unsafe.Pointer
 	}
 	if failed(ret) {
 		handlerRelease(h) // 同步失败：不会再有回调，安全释放 owner 引用
-		return nil, i18n.Errorf("ActivateAudioInterfaceAsync failed: 0x%08X", uint32(ret))
+		return nil, &ActivateError{Stage: "async_call", HRESULT: uint32(ret), Err: i18n.Errorf("ActivateAudioInterfaceAsync failed: 0x%08X", uint32(ret))}
 	}
 
 	// 异步转同步：等 2s。超时则 ABANDON —— 不释放 owner 引用（对象连同 event 泄漏），system 仍持引用，
 	// 晚到的 ActivateCompleted 落在存活对象上，绝不 UAF。
 	wr, _ := windows.WaitForSingleObject(h.event, 2000)
 	if wr != windows.WAIT_OBJECT_0 {
-		return nil, i18n.Errorf("activation timed out (not completed within 2s; abandoned, leaking the handler to avoid UAF; wait=0x%X)", wr)
+		return nil, &ActivateError{Stage: "wait_2s", HRESULT: uint32(wr), Timeout: true, Err: i18n.Errorf("activation timed out (not completed within 2s; abandoned, leaking the handler to avoid UAF; wait=0x%X)", wr)}
 	}
 	if failed(h.result) {
 		handlerRelease(h)
-		return nil, i18n.Errorf("activation result failed: 0x%08X", uint32(h.result))
+		return nil, &ActivateError{Stage: "async_result", HRESULT: uint32(h.result), Err: i18n.Errorf("activation result failed: 0x%08X", uint32(h.result))}
 	}
 	client := h.client
 	h.client = nil    // 所有权转移给调用方
 	handlerRelease(h) // 释放 owner 引用（成功路径：completion handler 与其 event 在此归零回收）
 	if client == nil {
-		return nil, i18n.Errorf("activation succeeded but IAudioClient is nil")
+		return nil, &ActivateError{Stage: "nil_client", Err: i18n.Errorf("activation succeeded but IAudioClient is nil")}
 	}
 	return client, nil
 }
@@ -435,19 +446,19 @@ func Activate(pid uint32, includeTree bool) (*Capturer, error) {
 	)
 	if failed(hr) {
 		c.Close()
-		return nil, i18n.Errorf("IAudioClient.Initialize failed: 0x%08X", uint32(hr))
+		return nil, &ActivateError{Stage: "initialize", HRESULT: uint32(hr), Err: i18n.Errorf("IAudioClient.Initialize failed: 0x%08X", uint32(hr))}
 	}
 
 	// 采集事件（auto-reset），SetEventHandle 绑定。
 	ev, err := windows.CreateEvent(nil, 0, 0, nil)
 	if err != nil && ev == 0 {
 		c.Close()
-		return nil, i18n.Errorf("CreateEvent(capture) failed: %w", err)
+		return nil, &ActivateError{Stage: "capture_event", Err: i18n.Errorf("CreateEvent(capture) failed: %w", err)}
 	}
 	c.event = ev
 	if hr := comCall(client, idxAudioClientSetEvt, uintptr(ev)); failed(hr) {
 		c.Close()
-		return nil, i18n.Errorf("SetEventHandle failed: 0x%08X", uint32(hr))
+		return nil, &ActivateError{Stage: "set_event", HRESULT: uint32(hr), Err: i18n.Errorf("SetEventHandle failed: 0x%08X", uint32(hr))}
 	}
 
 	// GetService(IID_IAudioCaptureClient)
@@ -457,13 +468,13 @@ func Activate(pid uint32, includeTree bool) (*Capturer, error) {
 		uintptr(unsafe.Pointer(&capClient)),
 	); failed(hr) || capClient == nil {
 		c.Close()
-		return nil, i18n.Errorf("GetService(IAudioCaptureClient) failed: 0x%08X", uint32(hr))
+		return nil, &ActivateError{Stage: "get_service", HRESULT: uint32(hr), Err: i18n.Errorf("GetService(IAudioCaptureClient) failed: 0x%08X", uint32(hr))}
 	}
 	c.captureClient = capClient
 
 	if hr := comCall(client, idxAudioClientStart); failed(hr) {
 		c.Close()
-		return nil, i18n.Errorf("IAudioClient.Start failed: 0x%08X", uint32(hr))
+		return nil, &ActivateError{Stage: "start", HRESULT: uint32(hr), Err: i18n.Errorf("IAudioClient.Start failed: 0x%08X", uint32(hr))}
 	}
 	return c, nil
 }

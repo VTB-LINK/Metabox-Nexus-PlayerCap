@@ -12,13 +12,30 @@ import (
 
 // coverFetchOps 是封面 goroutine 用到的外部操作，测试里换成假的。
 type coverFetchOps struct {
-	openProc  func(pid uint32) (syscall.Handle, error)
-	closeProc func(syscall.Handle)
-	findInfo  func(h syscall.Handle, expectedName string) (lyric.SongInfo, error)
-	findByMID func(h syscall.Handle, songMID string) (lyric.SongInfo, bool) // PCM 模式补读；兜底模式补歌手（#146）
-	findAlbum func(h syscall.Handle, songMID string) string                 // 返回专辑 mid（#146）
-	download  func(url string) string                                       // 返回封面 base64，失败为空串
-	sleep     func(time.Duration)
+	openProc            func(pid uint32) (syscall.Handle, error)
+	closeProc           func(syscall.Handle)
+	findInfo            func(h syscall.Handle, expectedName string) (lyric.SongInfo, error)
+	findByMID           func(h syscall.Handle, songMID string) (lyric.SongInfo, bool) // PCM 模式补读；兜底模式补歌手（#146）
+	findAlbum           func(h syscall.Handle, songMID string) string                 // 返回专辑 mid（#146）
+	download            func(url string) string                                       // 返回封面 base64，失败为空串（旧测试缝）
+	downloadWithOutcome func(url string) (string, player.CoverOutcome)                // 可选：带脱敏规范化结果，未设时回退 download
+	sleep               func(time.Duration)
+}
+
+func (o coverFetchOps) fetchCover(url string) (string, player.CoverOutcome) {
+	if o.downloadWithOutcome != nil {
+		return o.downloadWithOutcome(url)
+	}
+	if o.download == nil {
+		return "", player.CoverOutcome{Action: player.CoverActionNone}
+	}
+	start := time.Now()
+	b64 := o.download(url)
+	durMs := time.Since(start).Milliseconds()
+	if b64 == "" {
+		return "", player.CoverOutcome{Action: player.CoverActionErr, FallbackReason: "http_err", DurationMs: durMs}
+	}
+	return b64, player.CoverOutcome{Action: player.CoverActionResized800, DurationMs: durMs}
 }
 
 var realCoverFetchOps = coverFetchOps{
@@ -28,7 +45,10 @@ var realCoverFetchOps = coverFetchOps{
 	findByMID: lyric.FindSongInfoByMID,
 	findAlbum: lyric.FindAlbumMID,
 	download:  func(url string) string { return player.FetchCoverBase64("WeSing", url, 5*time.Second) },
-	sleep:     time.Sleep,
+	downloadWithOutcome: func(url string) (string, player.CoverOutcome) {
+		return player.FetchCoverBase64WithOutcome("WeSing", url, 5*time.Second)
+	},
+	sleep: time.Sleep,
 }
 
 // startCoverFetch 起一个 goroutine 异步取封面 base64（带重试），完成后补发 song_info_update，回写经
@@ -58,12 +78,22 @@ func (p *WesingPlayer) startCoverFetch(ops coverFetchOps, gen uint64, pid uint32
 	if pcm {
 		scan = mid != "" && (url == "" || unconfirmed)
 	}
+	trigger := "cover_only"
+	if scan {
+		if pcm {
+			trigger = "pcm_retry"
+		} else {
+			trigger = "fallback_retry"
+		}
+	}
+	openFailed := false
 	var h syscall.Handle
 	if scan {
 		var err error
 		if h, err = ops.openProc(pid); err != nil {
 			log.Warn("Cannot open the WeSing process for cover retries: %v", err)
 			scan = false
+			openFailed = true
 		}
 	}
 	done := make(chan struct{})
@@ -73,6 +103,16 @@ func (p *WesingPlayer) startCoverFetch(ops coverFetchOps, gen uint64, pid uint32
 		if scan {
 			defer ops.closeProc(h)
 		}
+		scanStart := time.Now()
+		verdict := "no_cover_url"
+		if openFailed {
+			verdict = "open_proc_failed"
+		}
+		coverOut := player.CoverOutcome{Action: player.CoverActionNone}
+		suppDecision := ""
+		defer func() {
+			emitWesingCoverScanSample(trigger, verdict, time.Since(scanStart).Milliseconds(), coverOut, suppDecision)
+		}()
 		coverURL := url
 		infoFound := false       // PCM 模式：已按路径 mid 查到歌曲信息（name、singer 已更新），但回写未必已入队
 		fallbackPending := false // 兜底模式：已更新 name、singer，但回写尚未入队，后续重试继续重发
@@ -84,7 +124,9 @@ func (p *WesingPlayer) startCoverFetch(ops coverFetchOps, gen uint64, pid uint32
 					if unconfirmed {
 						if !infoFound {
 							if info, ok := ops.findByMID(h, mid); ok {
-								nn, ns := player.SupplementField(name, info.Name), player.SupplementField(singer, info.Singer)
+								nn, nDec := player.SupplementDecision(name, info.Name)
+								ns, sDec := player.SupplementDecision(singer, info.Singer)
+								suppDecision = player.CombineSupplementDecisions(suppDecision, nDec, sDec)
 								if info.Name != name || info.Singer != singer {
 									log.Detail("Song info read after the announcement: %s / %s; sent: %s / %s", info.Name, info.Singer, nn, ns)
 								}
@@ -116,7 +158,9 @@ func (p *WesingPlayer) startCoverFetch(ops coverFetchOps, gen uint64, pid uint32
 								info.Singer = s.Singer
 							}
 						}
-						nn, ns := player.SupplementField(name, info.Name), player.SupplementField(singer, info.Singer)
+						nn, nDec := player.SupplementDecision(name, info.Name)
+						ns, sDec := player.SupplementDecision(singer, info.Singer)
+						suppDecision = player.CombineSupplementDecisions(suppDecision, nDec, sDec)
 						if info.Name != name || info.Singer != singer {
 							log.Detail("Song info read after the announcement: %s / %s; sent: %s / %s", info.Name, info.Singer, nn, ns)
 						}
@@ -153,12 +197,16 @@ func (p *WesingPlayer) startCoverFetch(ops coverFetchOps, gen uint64, pid uint32
 			log.Warn("Cover URL fetch failed, skipping base64 encoding")
 			return
 		}
-		if b64 := ops.download(coverURL); b64 != "" {
+		var b64 string
+		b64, coverOut = ops.fetchCover(coverURL)
+		if b64 != "" {
+			verdict = "ok"
 			p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
 				Name: name, Singer: singer, Title: title,
 				Cover: coverURL, CoverBase64: b64,
 			})
 		} else {
+			verdict = "download_failed"
 			log.Warn("Cover download failed: %s", coverURL)
 		}
 	}()

@@ -43,10 +43,12 @@ var (
 // session has one owner: the polling loop. Workers return values, never emit
 // events. Generation AND RID checks prevent late assets crossing songs/idle.
 type session struct {
-	p    *KuwoPlayer
-	gen  uint64
-	rid  string
-	song player.SongInfo
+	p             *KuwoPlayer
+	rum           *kuwoSessionRUM
+	clockModeHint string
+	gen           uint64
+	rid           string
+	song          player.SongInfo
 	// metaTitle is the platform's latest assembled title for this tick, used only
 	// to recognise Kuwo's pure-music hint lyrics in accept (player.PureMusicHint),
 	// never published externally (#229). Resets with *s = session{...}.
@@ -182,8 +184,8 @@ func (s *session) clear() bool {
 	first := !s.idle
 	if first {
 		s.p.NewSongGen()
-		p := s.p
-		*s = session{p: p, idle: true, clearPending: true, lineIndex: -2}
+		p, r, cm := s.p, s.rum, s.clockModeHint
+		*s = session{p: p, rum: r, clockModeHint: cm, idle: true, clearPending: true, lineIndex: -2}
 	}
 	// 先报状态、后清空，同 Start（设计 §4.4、§4.5）。通道满或仅余 1 槽时状态或清空可能被非阻塞
 	// 丢弃，保留 clearPending 在后续无歌拍重试；清空以最近一次成功入队的状态是否为 no_song 门控
@@ -227,8 +229,10 @@ func (s *session) hold(meta cdp.Snapshot, snapAt time.Time, sample pos.Sample) b
 	if snapAt.Before(s.heldAt.Add(switchConfirmAfter)) {
 		return true
 	}
+	heldMs := sample.ObservedAt.Sub(s.heldAt).Milliseconds()
 	log.Detail("Kuwo core position went back at %s to %d ms; held %d ms, released: the bridge still reports the song",
-		s.heldAt.Format("15:04:05.000"), s.heldMs, sample.ObservedAt.Sub(s.heldAt).Milliseconds())
+		s.heldAt.Format("15:04:05.000"), s.heldMs, heldMs)
+	emitKuwoClockGuard("switch_hold_300ms", "released", 0, heldMs)
 	s.heldAt = time.Time{}
 	return false
 }
@@ -241,8 +245,10 @@ func (s *session) dropHold(now time.Time) {
 	if s.heldAt.IsZero() {
 		return
 	}
+	heldMs := now.Sub(s.heldAt).Milliseconds()
 	log.Detail("Kuwo core position went back at %s to %d ms; held %d ms, discarded unpublished",
-		s.heldAt.Format("15:04:05.000"), s.heldMs, now.Sub(s.heldAt).Milliseconds())
+		s.heldAt.Format("15:04:05.000"), s.heldMs, heldMs)
+	emitKuwoClockGuard("switch_hold_300ms", "intercepted", 0, heldMs)
 	s.heldAt = time.Time{}
 }
 
@@ -253,9 +259,10 @@ func (s *session) observe(meta cdp.Snapshot, sample pos.Sample) bool {
 	changed := s.rid != sample.RID
 	if changed {
 		gen := s.p.NewSongGen()
-		p := s.p
-		*s = session{p: p, gen: gen, rid: sample.RID, lineIndex: -2, lines: []player.LyricLine{}}
+		p, r, cm := s.p, s.rum, s.clockModeHint
+		*s = session{p: p, rum: r, clockModeHint: cm, gen: gen, rid: sample.RID, lineIndex: -2, lines: []player.LyricLine{}}
 		s.p.Emit(player.EventClearSongData, nil)
+		s.rum.beginTrack(gen, cm)
 	}
 	s.idle, s.clearPending = false, false
 	s.coreMs, s.haveCore = sample.CoreMs, true
@@ -297,8 +304,10 @@ func (s *session) observe(meta cdp.Snapshot, sample pos.Sample) bool {
 	if !changed {
 		// 同一个 RID 是同一次宣告（#229）：标题保持宣告时的，歌名、歌手按 song-info-keep-first 取舍。
 		readName, readSinger := info.Name, info.Singer
-		info.Name = player.SupplementField(s.song.Name, readName)
-		info.Singer = player.SupplementField(s.song.Singer, readSinger)
+		var nameDec, singerDec string
+		info.Name, nameDec = player.SupplementDecision(s.song.Name, readName)
+		info.Singer, singerDec = player.SupplementDecision(s.song.Singer, readSinger)
+		s.rum.noteSupplement(s.gen, player.CombineSupplementDecisions(nameDec, singerDec))
 		info.Title = s.song.Title
 		if (readName != s.song.Name || readSinger != s.song.Singer) &&
 			(!s.hasLastRead || readName != s.lastReadName || readSinger != s.lastReadSinger) {
@@ -449,6 +458,7 @@ func (s *session) accept(r assetResult, now time.Time) {
 		return
 	}
 	if r.cover {
+		s.rum.onCoverOutcome(r.gen, r.art, r.err)
 		if r.err != nil {
 			log.Detail("Kuwo cover unavailable: %v", r.err)
 			return
@@ -464,6 +474,11 @@ func (s *session) accept(r assetResult, now time.Time) {
 			s.retryAt = now.Add(5 * time.Second)
 		} else {
 			s.settled = true
+			src := "err"
+			if errors.Is(r.err, lyric.ErrNoLyrics) {
+				src = "none"
+			}
+			s.rum.onTrackLyricSettled(r.gen, src, nil, "", 0, true)
 		}
 		log.Detail("Kuwo lyrics unavailable: %v", r.err)
 		return
@@ -477,6 +492,11 @@ func (s *session) accept(r assetResult, now time.Time) {
 	} else {
 		s.hint = ""
 	}
+	src := "none"
+	if len(s.lines) > 0 || s.hint != "" {
+		src = "online"
+	}
+	s.rum.onTrackLyricSettled(r.gen, src, s.lines, s.hint, 0, true)
 	s.emitAll()
 }
 

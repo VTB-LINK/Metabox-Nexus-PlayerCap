@@ -139,38 +139,40 @@ func TestPrivacyNoticeSkippedWhenDisabled(t *testing.T) {
 	dsn = ""
 
 	start := time.Now()
-	PrintPrivacyNotice(10*time.Second, false)
+	PrintPrivacyNotice(10*time.Second, false, false)
 
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Errorf("遥测未启用、也不查版本时 PrintPrivacyNotice 等了 %v（应当立即返回）—— "+
+		t.Errorf("遥测、版本检查与使用统计均未启用时 PrintPrivacyNotice 等了 %v（应当立即返回）—— "+
 			"本地每次调试都要白等这么久", elapsed)
 	}
 }
 
-// TestNoticeSectionsFollowTheirOwnSwitch 钉死两段各归各的开关。
+// TestNoticeSectionsFollowTheirOwnSwitch 钉死三段（遥测、版本检查、匿名使用统计）各归各的开关。
 //
-// 这是加入版本检查上报时**两个方向的谎**：印多了（遥测关着却说会上报崩溃栈到
-// sentry.io）与印少了（发布版把设备标识发出去却只字不提）。整块文案共用一个开关时
-// 两种都会发生，而且都不会有人发现——没人会去核对一段没打印出来的文字。
+// 这是加入新上报通路时**两个方向的谎**：印多了（未启用却声称会上报）与印少了（实际会上报却只字不提）。
+// 整块文案共用一个开关时两种都会发生，而且都不会有人发现——没人会去核对一段没打印出来的文字。
 func TestNoticeSectionsFollowTheirOwnSwitch(t *testing.T) {
 	cases := []struct {
-		name                      string
-		telemetryOn, versionCheck bool
-		wantTelemetry, wantUpdate bool
+		name                             string
+		telemetryOn, versionCheck, rumOn bool
 	}{
-		{"两个都开：正式发布版的常态", true, true, true, true},
-		{"只有遥测：注入了 DSN 的本地构建", true, false, true, false},
-		{"只查版本：未注入 DSN 的发布版", false, true, false, true},
-		{"两个都关：本地 go build 的常态", false, false, false, false},
+		{"三个全开：正式发布版的常态", true, true, true},
+		{"遥测+版本检查：未配 RUM 的发布版", true, true, false},
+		{"遥测+RUM：异常独立组合", true, false, true},
+		{"版本检查+RUM：未配 DSN 的发布版", false, true, true},
+		{"只有遥测：注入了 DSN 的本地构建", true, false, false},
+		{"只查版本：未注入 DSN 与 RUM 的发布版", false, true, false},
+		{"只有 RUM：单开使用统计", false, false, true},
+		{"三个全关：本地 go build 的常态", false, false, false},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			text := noticeFor(c.telemetryOn, c.versionCheck)
+			text := noticeFor(c.telemetryOn, c.versionCheck, c.rumOn)
 
-			if !c.wantTelemetry && !c.wantUpdate {
+			if !c.telemetryOn && !c.versionCheck && !c.rumOn {
 				if text != "" {
-					t.Fatalf("两段都不适用时仍拼出了文案：\n%s", text)
+					t.Fatalf("三段都不适用时仍拼出了文案：\n%s", text)
 				}
 				return
 			}
@@ -180,15 +182,92 @@ func TestNoticeSectionsFollowTheirOwnSwitch(t *testing.T) {
 
 			// 用各段独有的关键词判在不在，别拿整段做子串比较——那样改一个字就红，
 			// 门禁会变成「谁也不敢动文案」而不是「文案不许落后于代码」。
-			if got := strings.Contains(text, "sentry.io"); got != c.wantTelemetry {
-				t.Errorf("遥测段出现=%v，期望 %v", got, c.wantTelemetry)
+			if got := strings.Contains(text, "sentry.io"); got != c.telemetryOn {
+				t.Errorf("遥测段出现=%v，期望 %v", got, c.telemetryOn)
 			}
-			if got := strings.Contains(text, "gateway.vtb.link"); got != c.wantUpdate {
-				t.Errorf("更新段出现=%v，期望 %v", got, c.wantUpdate)
+			if got := strings.Contains(text, "gateway.vtb.link"); got != c.versionCheck {
+				t.Errorf("更新段出现=%v，期望 %v", got, c.versionCheck)
+			}
+			if got := strings.Contains(text, "MachineGuid"); got != c.rumOn {
+				t.Errorf("RUM 使用统计段出现=%v，期望 %v", got, c.rumOn)
 			}
 		})
 	}
 }
+
+// TestPrivacyNoticeCoversRUMSection 钉死中文 RUM 隐私告知段已纳入全集且关键承诺完整。
+//
+// 变异自证：删掉 noticeRUMSection 里的「公网 IP」或「posthog.com」即红。
+func TestPrivacyNoticeCoversRUMSection(t *testing.T) {
+	for _, must := range []string{
+		"正式发布版",
+		"MachineGuid",
+		"不新增本地状态文件",
+		"管理员权限",
+		"公网 IP",
+		"歌名",
+		"歌手",
+		"专辑名",
+		"歌词正文",
+		"完整本地路径",
+		"Windows 用户名",
+		"封面完整 URL",
+		"前端查询参数",
+		"未知配置文本",
+		"降采样",
+		"接收方",
+		"posthog.com",
+	} {
+		if !strings.Contains(noticeRUMSection, must) {
+			t.Errorf("RUM 中文隐私告知段缺少 %q", must)
+		}
+		if !strings.Contains(privacyNotice, must) {
+			t.Errorf("中文隐私告知全集缺少 RUM 关键说明 %q", must)
+		}
+	}
+}
+
+// TestIsProcessElevatedAndCollectSystemProfile 钉死提权查询与系统画像采集行为。
+func TestIsProcessElevatedAndCollectSystemProfile(t *testing.T) {
+	// 真实 Windows API 调用不得 panic；结果应为稳定 bool。
+	_ = IsProcessElevated()
+
+	origQuery := queryProcessElevation
+	t.Cleanup(func() { queryProcessElevation = origQuery })
+
+	fakeVersions(t, 10, 0, 22631, 6, 2, 9200)
+
+	queryProcessElevation = func() (bool, error) { return true, nil }
+	if !IsProcessElevated() {
+		t.Fatal("提权查询返回 true 时 IsProcessElevated 应返回 true")
+	}
+	prof := CollectSystemProfile()
+	if prof.OSVersion != "10.0.22631" || prof.OSBuild != 22631 || !prof.OSCompatShim || !prof.IsElevated {
+		t.Errorf("CollectSystemProfile 返回 %+v，期望 version=10.0.22631 build=22631 shim=true elevated=true", prof)
+	}
+	if prof.Arch == "" || prof.CPUCores == 0 {
+		t.Errorf("CollectSystemProfile 应采集 Arch 与 CPUCores，实际 %+v", prof)
+	}
+
+	queryProcessElevation = func() (bool, error) { return false, nil }
+	if IsProcessElevated() {
+		t.Fatal("提权查询返回 false 时 IsProcessElevated 应返回 false")
+	}
+	if CollectSystemProfile().IsElevated {
+		t.Error("未提权时 CollectSystemProfile().IsElevated 应为 false")
+	}
+
+	queryProcessElevation = func() (bool, error) { return true, errElevationProbeFailed }
+	if IsProcessElevated() {
+		t.Fatal("提权查询报错时 IsProcessElevated 必须安全返回 false")
+	}
+}
+
+var errElevationProbeFailed = &elevationProbeError{}
+
+type elevationProbeError struct{}
+
+func (*elevationProbeError) Error() string { return "probe failed" }
 
 // TestCountdownZeroReturnsImmediately wait 为 0 时不能卡住。
 func TestCountdownZeroReturnsImmediately(t *testing.T) {

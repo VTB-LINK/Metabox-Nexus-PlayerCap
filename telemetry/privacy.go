@@ -89,6 +89,22 @@ const (
    接收方：更新服务器（gateway.vtb.link）。
 `
 
+	// RUM 匿名设备活跃与产品使用统计段（正式发布版且构建期注入配置时启用）。
+	noticeRUMSection = `   正式发布版还会上报匿名的设备活跃与产品使用统计（可经远端策略按需关闭或降采样）。
+
+   上报内容：
+     · 匿名设备标识：复用基于注册表 MachineGuid 单向哈希生成的匿名标识，不新增本地状态文件
+     · 生命周期与更新配置：启动、跨日心跳、退出，自动更新与配置加载、迁移、重建状态
+     · 功能与运行指标：播放器健康、阻断、干预与兼容信号，歌词与音画功能运行指标，脱敏后的客户端来源分类
+     · 基础系统画像：Windows 版本与 edition、语言、时区、CPU 架构与核数、是否以管理员权限运行
+     · 网络：本机公网 IP（随网络请求到达网关与统计服务端）
+
+   不上报：歌名、歌手、专辑名、歌词正文、完整本地路径、Windows 用户名、封面完整 URL、前端查询参数与未知配置文本。
+
+   用途：统计设备活跃与功能使用情况，及时定位版本兼容与更新问题。除此之外不作他用。
+   接收方：经网关转发至统计服务端（posthog.com）。
+`
+
 	noticeFooter = `===========================================================`
 )
 
@@ -128,16 +144,31 @@ const (
    Purpose: counting how many devices run the software and which versions are in use. Nothing else.
    Recipient: update server (gateway.vtb.link).
 `
+
+	noticeRUMSectionEN = `   Release builds also report anonymous device-activity and product-usage statistics (which can be disabled or downsampled remotely on demand).
+
+   Reported:
+     · Anonymous device ID: reuses the one-way hash derived from the registry MachineGuid, with no additional local state file
+     · Lifecycle, updates and config: startup, daily heartbeat, exit, auto-update status, and config load/migration/rebuild states
+     · Feature and runtime metrics: player health, blocking, intervention and compatibility signals, lyric and audio/effect metrics, and sanitized client surface categories
+     · Basic system profile: Windows version and edition, language, time zone, CPU architecture and core count, and whether running as administrator
+     · Network: this machine's public IP (received with the network request by the gateway and analytics server)
+
+   Not reported: song name, artist, album, lyric text, full local paths, Windows user name, full cover URLs, frontend query parameters, or unknown config text.
+
+   Purpose: measuring active devices and feature usage, and spotting compatibility or update issues early. Nothing else.
+   Recipient: forwarded via the gateway to the analytics server (posthog.com).
+`
 )
 
 // privacyNotice 是**全部**段落拼起来的完整文案，供门禁核对采集面。
 //
 // 它不一定等于主播看到的那一份 —— 实际打印的内容由 PrintPrivacyNotice 按开关拼装。
 // 门禁要核的是「所有可能发出去的东西都在文案里有交代」，所以这里必须是全集。
-const privacyNotice = noticeHeader + noticeTelemetrySection + noticeDivider + noticeUpdateSection + noticeFooter
+const privacyNotice = noticeHeader + noticeTelemetrySection + noticeDivider + noticeUpdateSection + noticeDivider + noticeRUMSection + noticeFooter
 
 // privacyNoticeEN 是英文全集，供英文门禁核对采集面（同 privacyNotice 之于中文）。
-const privacyNoticeEN = noticeHeaderEN + noticeTelemetrySectionEN + noticeDivider + noticeUpdateSectionEN + noticeFooter
+const privacyNoticeEN = noticeHeaderEN + noticeTelemetrySectionEN + noticeDivider + noticeUpdateSectionEN + noticeDivider + noticeRUMSectionEN + noticeFooter
 
 // bannerLogo 是启动 Banner 顶部 VTB-LIVE ASCII logo 的副本（与 main.go 各存一份）。
 // 隐私提示停留最久、用户看得最清，在其顶部再打印一份以提高 logo 曝光。有意复制而非跨包引用：
@@ -157,8 +188,8 @@ _____/   /_/     /_____/          /_____//___/   _____/   /_____/   `
 //
 // 不做「按任意键跳过」：那要读 stdin，而 stdin 在服务化/重定向场景下会立刻 EOF 或永久阻塞，
 // 两种都比单纯等 10 秒糟。主播看不完可以回头翻日志——这段也在 stdout 里。
-func PrintPrivacyNotice(wait time.Duration, versionCheckActive bool) {
-	text := noticeFor(Enabled(), versionCheckActive)
+func PrintPrivacyNotice(wait time.Duration, versionCheckActive, rumActive bool) {
+	text := noticeFor(Enabled(), versionCheckActive, rumActive)
 	if text == "" {
 		return
 	}
@@ -171,21 +202,24 @@ func PrintPrivacyNotice(wait time.Duration, versionCheckActive bool) {
 	Countdown(wait)
 }
 
-// noticeFor 按两个开关拼出**这次真正要打印的**文案；两段都不适用时返回空串。
+// noticeFor 按三个开关拼出**这次真正要打印的**文案；三段都不适用时返回空串。
 //
 // 拆出来是为了可测：拼装逻辑（哪段该出现、哪段不该出现）才是这里唯一会出错的地方，
 // 而它一旦藏在 PrintPrivacyNotice 里就只能靠抓 stdout 来验，那种测试脆且读不出意图。
-func noticeFor(telemetryOn, versionCheckOn bool) string {
-	header, telemetrySec, updateSec := noticeHeader, noticeTelemetrySection, noticeUpdateSection
+func noticeFor(telemetryOn, versionCheckOn, rumOn bool) string {
+	header, telemetrySec, updateSec, rumSec := noticeHeader, noticeTelemetrySection, noticeUpdateSection, noticeRUMSection
 	if i18n.Language() == i18n.English {
-		header, telemetrySec, updateSec = noticeHeaderEN, noticeTelemetrySectionEN, noticeUpdateSectionEN
+		header, telemetrySec, updateSec, rumSec = noticeHeaderEN, noticeTelemetrySectionEN, noticeUpdateSectionEN, noticeRUMSectionEN
 	}
-	sections := make([]string, 0, 2)
+	sections := make([]string, 0, 3)
 	if telemetryOn {
 		sections = append(sections, telemetrySec)
 	}
 	if versionCheckOn {
 		sections = append(sections, updateSec)
+	}
+	if rumOn {
+		sections = append(sections, rumSec)
 	}
 	if len(sections) == 0 {
 		return ""

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"Metabox-Nexus-PlayerCap/i18n"
 
@@ -34,11 +35,22 @@ const updateLockName = "Metabox-Nexus-PlayerCap.update.lock"
 // syscall.Open 打开，共享模式只有 FILE_SHARE_READ | FILE_SHARE_WRITE、不带 FILE_SHARE_DELETE（读 Go 1.26.1 源码
 // 得出），等锁的进程持有打开的句柄时删除失败（忽略）；无人持有时删掉，后来者新建同名文件重新加锁。
 // 一个文件只在没有任何句柄时才删得掉，所以任一时刻所有句柄都指向同一个文件，只有一个持锁者。
+// updateLockStats 记录获取更新锁时的竞争情况，供 update_transfer 观测使用。
+type updateLockStats struct {
+	Contended bool
+	WaitMs    int64
+}
+
 func acquireUpdateLock(dir string) (release func(), err error) {
+	release, _, err = acquireUpdateLockWithStats(dir)
+	return release, err
+}
+
+func acquireUpdateLockWithStats(dir string) (release func(), stats updateLockStats, err error) {
 	path := filepath.Join(dir, updateLockName)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
-		return nil, i18n.Errorf("failed to acquire the update lock: %v", err)
+		return nil, stats, i18n.Errorf("failed to acquire the update lock: %v", err)
 	}
 	h := windows.Handle(f.Fd())
 	lock := func(flags uint32) error {
@@ -46,12 +58,15 @@ func acquireUpdateLock(dir string) (release func(), err error) {
 	}
 	err = lock(windows.LOCKFILE_FAIL_IMMEDIATELY)
 	if err == windows.ERROR_LOCK_VIOLATION {
+		stats.Contended = true
+		waitStart := time.Now()
 		mainLog.Info("Another instance is updating this program, waiting for it to finish...")
 		err = lock(0)
+		stats.WaitMs = time.Since(waitStart).Milliseconds()
 	}
 	if err != nil {
 		f.Close()
-		return nil, i18n.Errorf("failed to acquire the update lock: %v", err)
+		return nil, stats, i18n.Errorf("failed to acquire the update lock: %v", err)
 	}
 	var once sync.Once
 	return func() {
@@ -60,5 +75,5 @@ func acquireUpdateLock(dir string) (release func(), err error) {
 			f.Close()
 			os.Remove(path)
 		})
-	}, nil
+	}, stats, nil
 }

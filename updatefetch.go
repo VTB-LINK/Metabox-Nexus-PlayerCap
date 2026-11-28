@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -87,6 +88,77 @@ func (e *sourceError) Unwrap() error { return e.err }
 func isSourceError(err error) bool {
 	var se *sourceError
 	return errors.As(err, &se)
+}
+
+// slowError、sizeMismatchError、sha256MismatchError 仅作内部错误分类标签，
+// 供 update_transfer 产出稳定短枚举，不改变对外错误文案与可换源判定。
+type slowError struct{ err error }
+
+func (e *slowError) Error() string { return e.err.Error() }
+func (e *slowError) Unwrap() error { return e.err }
+
+type sizeMismatchError struct{ err error }
+
+func (e *sizeMismatchError) Error() string { return e.err.Error() }
+func (e *sizeMismatchError) Unwrap() error { return e.err }
+
+type sha256MismatchError struct{ err error }
+
+func (e *sha256MismatchError) Error() string { return e.err.Error() }
+func (e *sha256MismatchError) Unwrap() error { return e.err }
+
+func isSlowError(err error) bool {
+	var se *slowError
+	return errors.As(err, &se)
+}
+
+// fetchStats 记录单轮 fetchAssets 的双源测速、切线与低速观测指标。
+type fetchStats struct {
+	RaceWinner     string // "gitee" | "github" | "single"
+	ChinaKBps      int64
+	GlobalKBps     int64
+	SwitchedSource bool
+	SlowTriggered  bool
+}
+
+func raceEntryKBps(e raceEntry) int64 {
+	if e.err != nil || e.bytes <= 0 || e.elapsed <= 0 {
+		return 0
+	}
+	return int64(float64(e.bytes) / 1024.0 / e.elapsed.Seconds())
+}
+
+func classifyRaceWinner(src updateSource, isSecondSource bool) string {
+	lower := strings.ToLower(src.Name)
+	switch {
+	case strings.Contains(lower, "gitee"):
+		return "gitee"
+	case strings.Contains(lower, "github"):
+		return "github"
+	case isSecondSource:
+		return "github"
+	default:
+		return "gitee"
+	}
+}
+
+func classifyUpdateOutcome(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var pe *placeError
+	if errors.As(err, &pe) {
+		return "place_err"
+	}
+	var shaErr *sha256MismatchError
+	if errors.As(err, &shaErr) {
+		return "sha256_mismatch"
+	}
+	var sizeErr *sizeMismatchError
+	if errors.As(err, &sizeErr) {
+		return "size_mismatch"
+	}
+	return "source_err"
 }
 
 // transfer 是对一个来源的一次 GET。时限与低速判据都挂在请求的 context 上：取消它，阻塞中的
@@ -199,7 +271,7 @@ func watchSlow(ctx context.Context, cancel context.CancelCauseFunc, n *atomic.In
 			}
 			got := samples[len(samples)-1] - samples[0]
 			if now.Sub(start) >= p.SlowWindow && got < p.SlowMin {
-				cancel(i18n.Errorf("too slow: %d KB in the last %d s", got>>10, int(p.SlowWindow/time.Second)))
+				cancel(&slowError{i18n.Errorf("too slow: %d KB in the last %d s", got>>10, int(p.SlowWindow/time.Second))})
 				return
 			}
 		}
@@ -275,15 +347,15 @@ func receive(t *transfer, prefix []byte, done bool, asset updateAsset, destPath 
 	}
 
 	if asset.Size > 0 && n > asset.Size {
-		return &sourceError{i18n.Errorf("received more than the expected %d bytes", asset.Size)}
+		return &sourceError{&sizeMismatchError{i18n.Errorf("received more than the expected %d bytes", asset.Size)}}
 	}
 	if asset.Size > 0 && n != asset.Size {
-		return &sourceError{i18n.Errorf("size mismatch: expected %d bytes, got %d", asset.Size, n)}
+		return &sourceError{&sizeMismatchError{i18n.Errorf("size mismatch: expected %d bytes, got %d", asset.Size, n)}}
 	}
 	if asset.Digest != "" {
 		actual := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 		if actual != asset.Digest {
-			return i18n.Errorf("SHA256 verification failed: expected %s, got %s", asset.Digest, actual)
+			return &sha256MismatchError{i18n.Errorf("SHA256 verification failed: expected %s, got %s", asset.Digest, actual)}
 		}
 		mainLog.Success("SHA256 verification succeeded")
 	}
@@ -449,8 +521,14 @@ func updateHTTPClient() *http.Client { return &http.Client{} }
 // 下一次启动已是新版、不再更新，那些附件一直是旧的或缺失）。tried 是下载阶段请求过的来源，按首次请求的顺序，
 // 测速败者不计。
 func fetchAssets(client *http.Client, p fetchParams, sources []updateSource, tag string, assets []updateAsset, dir string) (tmpPaths []string, tried []updateSource, err error) {
+	tmpPaths, tried, _, err = fetchAssetsWithStats(client, p, sources, tag, assets, dir)
+	return tmpPaths, tried, err
+}
+
+func fetchAssetsWithStats(client *http.Client, p fetchParams, sources []updateSource, tag string, assets []updateAsset, dir string) (tmpPaths []string, tried []updateSource, stats fetchStats, err error) {
+	stats.RaceWinner = "single"
 	if len(sources) == 0 {
-		return nil, nil, i18n.Errorf("no download source provided")
+		return nil, nil, stats, i18n.Errorf("no download source provided")
 	}
 	defer func() {
 		if err != nil {
@@ -470,8 +548,17 @@ func fetchAssets(client *http.Client, p fetchParams, sources []updateSource, tag
 	if spare >= 0 && len(assets) > 0 {
 		mainLog.Info("Testing download speed: %s", assets[0].Name)
 		res := raceSources(client, p, sources[:2], tag, assets[0].Name)
+		if len(res.entries) > 0 {
+			stats.ChinaKBps = raceEntryKBps(res.entries[0])
+		}
+		if len(res.entries) > 1 {
+			stats.GlobalKBps = raceEntryKBps(res.entries[1])
+		}
 		for _, e := range res.entries {
 			if e.err != nil {
+				if isSlowError(e.err) {
+					stats.SlowTriggered = true
+				}
 				mainLog.Info("%s: speed test failed: %v", e.src.Name, e.err)
 			} else {
 				mainLog.Info("%s: %d KB / %.1f s", e.src.Name, e.bytes>>10, e.elapsed.Seconds())
@@ -480,9 +567,11 @@ func fetchAssets(client *http.Client, p fetchParams, sources []updateSource, tag
 		if res.winner == nil {
 			mainLog.Warn("Speed test failed on all sources, trying %s first", sources[cur].Name)
 		} else {
-			if res.winner.src == sources[1] {
+			isSecond := res.winner.src == sources[1]
+			if isSecond {
 				cur, spare = 1, 0
 			}
+			stats.RaceWinner = classifyRaceWinner(res.winner.src, isSecond)
 			mainLog.Info("Using %s", sources[cur].Name)
 			race = &res
 		}
@@ -515,14 +604,18 @@ func fetchAssets(client *http.Client, p fetchParams, sources []updateSource, tag
 			if e == nil {
 				break
 			}
+			if isSlowError(e) {
+				stats.SlowTriggered = true
+			}
 			if !isSourceError(e) || spare < 0 {
 				// %w：调用方仍可区分来源失败与 SHA256 不符、本地错误。
-				return tmpPaths, tried, i18n.Errorf("failed to download %s: %w", a.Name, e)
+				return tmpPaths, tried, stats, i18n.Errorf("failed to download %s: %w", a.Name, e)
 			}
+			stats.SwitchedSource = true
 			mainLog.Warn("Download from %s failed: %v, switching to %s", src.Name, e, sources[spare].Name)
 			cur, spare = spare, -1
 		}
 		tmpPaths = append(tmpPaths, dest)
 	}
-	return tmpPaths, tried, nil
+	return tmpPaths, tried, stats, nil
 }

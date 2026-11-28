@@ -35,6 +35,10 @@ type KuwoPlayer struct {
 	offsetMs, pollMs int
 	seen             bool // 本次服务期间是否曾见过酷我进程在运行（仅 Start goroutine 读写）
 	stopOnce         sync.Once
+	rumGate          player.SessionRUMGate[*kuwoSessionRUM]
+	testBeforeAttach func() // 仅供单测注入 Register 锁外发 attached 前的并发交错屏障
+	attachMetaMu     sync.Mutex
+	attachMeta       kuwoAttachMeta
 }
 
 func New(offsetMs, pollMs int) *KuwoPlayer {
@@ -146,17 +150,34 @@ func (p *KuwoPlayer) Start() {
 		}
 	}()
 	lastReason := ""
+	var bt kuwoBlockTracker
 	for ctx.Err() == nil {
 		err := ensureDebugMode(ctx)
 		if err == nil {
 			p.seen = true
-			err = p.connectSession(ctx)
+			err = p.connectSessionWithBT(ctx, &bt)
 		}
 		if ctx.Err() != nil {
 			return
 		}
 		if err == nil || !errors.Is(err, watchdog.ErrNotRunning) {
 			p.seen = true
+		}
+		switch {
+		case errors.Is(err, watchdog.ErrNotRunning):
+			bt.onNotRunning()
+		case errors.As(err, new(*launch.PackagedError)):
+			bt.onBlocked("store_install")
+		case errors.Is(err, launch.ErrExeUnknown):
+			bt.onBlocked("no_admin")
+		case errors.Is(err, pos.ErrUnsupportedCore):
+			bt.onBlocked("kuwo_unsupported_core")
+		case errors.Is(err, cdp.ErrVersionUnsupported) || errors.Is(err, watchdog.ErrVersionUnsupported):
+			bt.onBlocked("version_unsupported")
+		case errors.Is(err, watchdog.ErrAmbiguous):
+			bt.onBlocked("kuwo_ambiguous_proc")
+		case err != nil:
+			bt.onBlocked("cdp_port_not_ready")
 		}
 		p.EmitStatusIfChanged(statusFor(err, p.seen))
 		p.Emit(player.EventClearSongData, nil)
@@ -195,6 +216,10 @@ type positionSource interface {
 	Close()
 }
 
+type lagUnsupportedSource struct {
+	positionSource
+}
+
 // 以下为离线测试 Start / connectSession 用的包级 seam，生产恒指向真实实现。
 var (
 	ensureDebugMode = watchdog.EnsureDebugMode
@@ -214,33 +239,47 @@ var (
 		}
 		timestamp, slot := reader.Build()
 		log.Detail("Kuwo core bound: build %s, PlayerCore timestamp 0x%08X, read slot %d", build, timestamp, slot)
-		return withLag(reader, func() (lagReader, string, error) {
+		lagUnsupported := false
+		src := withLagNotifying(reader, func() (lagReader, string, error) {
 			lag, err := pos.OpenLag(pid)
 			if err != nil {
 				// Likewise for a nil *LagReader.
 				return nil, "", err
 			}
 			return lag, lag.Build(), nil
-		}, warned, pollMs), nil
+		}, warned, pollMs, func() { lagUnsupported = true })
+		if lagUnsupported {
+			return lagUnsupportedSource{positionSource: src}, nil
+		}
+		return src, nil
 	}
 )
 
 func (p *KuwoPlayer) connectSession(ctx context.Context) error {
+	return p.connectSessionWithBT(ctx, nil)
+}
+
+func (p *KuwoPlayer) connectSessionWithBT(ctx context.Context, bt *kuwoBlockTracker) error {
 	pid, err := findMainPID()
 	if err != nil {
 		return err
 	}
 	p.seen = true
+	connectStart := time.Now()
 	client, err := connectCDP(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
+	if bt != nil {
+		bt.onRecoveredExcept("kuwo_unsupported_core")
+	}
+	p.setSessionAttachMeta(time.Since(connectStart).Milliseconds(), client.Build())
 	// Per connection: the first seek-lag drift is logged as a warning.
 	warned := false
-	return p.runSession(ctx, client, func() (positionSource, error) {
+	return p.runSessionWithBT(ctx, client, func() (positionSource, error) {
 		return openPosition(pid, client.Build(), &warned, p.pollMs)
-	})
+	}, bt)
 }
 
 // switchWatch returns the reader to keep and watch through a switch (#198): a
@@ -252,7 +291,34 @@ func switchWatch(reader positionSource, s *session) (*correctedSource, bool) {
 }
 
 func (p *KuwoPlayer) runSession(ctx context.Context, client snapshotSource, open func() (positionSource, error)) error {
+	return p.runSessionWithBT(ctx, client, open, nil)
+}
+
+func (p *KuwoPlayer) runSessionWithBT(ctx context.Context, client snapshotSource, open func() (positionSource, error), bt *kuwoBlockTracker) (retErr error) {
+	meta := p.takeSessionAttachMeta()
+	rumSess := p.startSessionRUM(meta.build, meta.attachMs)
+	defer func() {
+		if rumSess == nil {
+			return
+		}
+		cause := "cdp_closed"
+		switch {
+		case ctx.Err() != nil:
+			cause = "stopped"
+		case errors.Is(retErr, pos.ErrClockStalled):
+			cause = "clock_stalled_20s"
+		case errors.Is(retErr, pos.ErrUnsupportedCore):
+			cause = "unsupported_core"
+		default:
+			if _, err := findMainPID(); errors.Is(err, watchdog.ErrNotRunning) {
+				cause = "process_exited"
+			}
+		}
+		p.endSessionRUM(rumSess, cause)
+	}()
+
 	s := newSession(p)
+	s.rum = rumSess
 	jobs := newAssetJobs(ctx)
 	defer jobs.close()
 	defer func() {
@@ -352,6 +418,10 @@ func (p *KuwoPlayer) runSession(ctx context.Context, client snapshotSource, open
 				// A failed open owns no usable reader. In particular, retaining
 				// a typed nil here would skip retry and panic in Read or Close.
 				if err == nil {
+					if u, ok := candidate.(lagUnsupportedSource); ok {
+						rumSess.onCompat("unknown_audio_plugin_lag_off", "")
+						candidate = u.positionSource
+					}
 					reader = candidate
 					if reader == nil {
 						err = cdp.ErrUnavailable
@@ -361,6 +431,17 @@ func (p *KuwoPlayer) runSession(ctx context.Context, client snapshotSource, open
 			var sample pos.Sample
 			if err == nil {
 				sample, err = reader.Read(snap.RID, snap.Status == 1)
+				if err == nil {
+					if bt != nil {
+						bt.onRecovered()
+					}
+					if cm, ok := reader.(interface{ clockMode() string }); ok {
+						if m := cm.clockMode(); m != "" {
+							s.clockModeHint = m
+							rumSess.updateClockMode(s.gen, m)
+						}
+					}
+				}
 			}
 			if err != nil {
 				// Reject a torn/song-transition sample immediately. A persistent
@@ -390,6 +471,7 @@ func (p *KuwoPlayer) runSession(ctx context.Context, client snapshotSource, open
 				// base and a change of the correction moves the public position, neither
 				// of which is core movement (design §3.2).
 				if s.stall.stalled(snap.Status == 1, sample.CoreMs, now) {
+					rumSess.onCompat("clock_stalled_20s", "")
 					log.Warn("Kuwo is playing but the core position has not advanced for %s; failing closed", livenessThreshold)
 					return pos.ErrClockStalled
 				}

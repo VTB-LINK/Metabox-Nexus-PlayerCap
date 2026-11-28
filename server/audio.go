@@ -3,7 +3,10 @@ package server
 import (
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"Metabox-Nexus-PlayerCap/rum"
 
 	"github.com/gorilla/websocket"
 )
@@ -20,9 +23,11 @@ import (
 // audioSub 是一个音频帧订阅者。player=="" 为 root（跟随 activePlayer 缓存）；非空为固定那一家。
 // addr 是客户端的 RemoteAddr，仅供 /service-status 的 audio_ws_connected 回显。
 type audioSub struct {
-	ch     chan []byte
-	player string
-	addr   string
+	ch      chan []byte
+	player  string
+	addr    string
+	dropped atomic.Uint64
+	session *clientSessionMeta
 }
 
 // audioHub 按 player 键 fan-out 音频帧。
@@ -31,9 +36,10 @@ type audioSub struct {
 // 路由判定（root 该不该收某家帧）一律读本缓存——**绝不在持 h.mu 时回读 Server 的
 // s.activePlayer（s.mu）**，以免形成 h.mu→s.mu 的反向锁序（§3.4）。
 type audioHub struct {
-	mu     sync.Mutex
-	subs   map[*audioSub]struct{}
-	active string // 当前 activePlayer 缓存（由 onActivePlayerChanged 写）
+	mu       sync.Mutex
+	subs     map[*audioSub]struct{}
+	peakSubs uint64 // 本周期音频订阅并发峰值（受 h.mu 保护）
+	active   string // 当前 activePlayer 缓存（由 onActivePlayerChanged 写）
 }
 
 func newAudioHub() *audioHub {
@@ -111,13 +117,20 @@ func (h *audioHub) BroadcastAudioFrame(player string, payload []byte) {
 		case sub.ch <- payload:
 		default:
 			// 通道已满：丢弃最旧一帧，再写入最新帧，两步都非阻塞，保证低延迟且永不回压。
+			var dropped uint64
 			select {
 			case <-sub.ch:
+				dropped++
 			default:
 			}
 			select {
 			case sub.ch <- payload:
 			default:
+				dropped++
+			}
+			if dropped > 0 {
+				sub.dropped.Add(dropped)
+				rum.AddDropped("audio_sub", dropped)
 			}
 		}
 	}
@@ -129,6 +142,9 @@ func (h *audioHub) BroadcastAudioFrame(player string, payload []byte) {
 func (h *audioHub) addSub(s *audioSub) {
 	h.mu.Lock()
 	h.subs[s] = struct{}{}
+	if n := uint64(len(h.subs)); n > h.peakSubs {
+		h.peakSubs = n
+	}
 	h.mu.Unlock()
 }
 
@@ -178,13 +194,26 @@ func audioRecover(label string) {
 //     由 net/http 自身 recover 兜底（不经 telemetry.Guard），且 conn.ReadMessage 只返回 err 不 panic。
 func (s *Server) handleAudioWS(playerName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		surface := classifyRequestSurface(r)
 		conn, err := s.upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			serverLog.Warn("Audio WS upgrade failed: %v", err)
 			return
 		}
 
-		sub := &audioSub{ch: make(chan []byte, 8), player: playerName, addr: conn.RemoteAddr().String()}
+		channel := "audio_ws_root"
+		if playerName != "" {
+			channel = "audio_ws_player"
+		}
+		sub := &audioSub{
+			ch:     make(chan []byte, 8),
+			player: playerName,
+			addr:   conn.RemoteAddr().String(),
+		}
+		sub.session = s.registerClientSession(
+			newClientSessionMeta(channel, playerName, surface, time.Now()),
+			sub.dropped.Load,
+		)
 		s.audioHub.addSub(sub)
 		serverLog.Info("Audio WS connected: %s player=%q", conn.RemoteAddr(), playerName)
 
@@ -204,6 +233,7 @@ func (s *Server) handleAudioWS(playerName string) http.HandlerFunc {
 			for payload := range sub.ch {
 				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+					sub.session.markWriteFailed()
 					serverLog.Warn("Audio WS write failed, closing connection: %s player=%q: %v", conn.RemoteAddr(), playerName, err)
 					return
 				}
@@ -222,6 +252,7 @@ func (s *Server) handleAudioWS(playerName string) http.HandlerFunc {
 		close(sub.ch)
 		conn.Close()
 		<-done
+		s.endClientSession(sub.session, sub.dropped.Load(), time.Now())
 		serverLog.Info("Audio WS disconnected: %s player=%q", conn.RemoteAddr(), playerName)
 	}
 }

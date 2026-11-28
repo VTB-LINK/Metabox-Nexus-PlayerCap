@@ -129,12 +129,16 @@ func (s *localSession) note(res assoc.Result) {
 type localAwait struct {
 	lines          []klyric.Line
 	src            assoc.Source
+	fromMemory     bool
 	lyricOffsetMs  int
 	found          bool
 	unassociated   bool
 	none           bool // 合 localNone（本地文件确实无词，换歌拍不沿用同名上一首）
 	hasMemoryLyric bool
 	stopped        bool
+	waited         bool
+	verdict        string
+	elapsedMs      int64
 }
 
 // await 在换歌拍写入 hash，在 stop、localWait 与结果通道上等这一首的结果（其他 hash 的丢弃）：
@@ -151,13 +155,14 @@ func (s *localSession) await(stop <-chan struct{}, hash string) localAwait {
 	if s.r == nil || hash == "" {
 		return localAwait{}
 	}
+	awaitStart := time.Now()
 	stuck := !s.unanswered.IsZero() && time.Since(s.unanswered) >= stuckAfter
 	s.r.SetHash(hash)
 	if s.unanswered.IsZero() {
 		s.unanswered = time.Now()
 	}
 	if stuck {
-		return localAwait{}
+		return localAwait{waited: true, verdict: "stuck", elapsedMs: time.Since(awaitStart).Milliseconds()}
 	}
 	timer := time.NewTimer(localWait)
 	defer timer.Stop()
@@ -166,30 +171,35 @@ func (s *localSession) await(stop <-chan struct{}, hash string) localAwait {
 		case <-stop:
 			return localAwait{stopped: true}
 		case <-timer.C:
-			return localAwait{}
+			return localAwait{waited: true, verdict: "timeout", elapsedMs: time.Since(awaitStart).Milliseconds()}
 		case res := <-s.results():
 			s.note(res)
 			switch {
 			case s.r == nil: // 停用
-				return localAwait{}
+				return localAwait{waited: true, verdict: "disabled", elapsedMs: time.Since(awaitStart).Milliseconds()}
 			case res.Hash != hash:
 				continue
 			}
 			s.seen(res)
+			elapsed := time.Since(awaitStart).Milliseconds()
 			switch res.Kind {
 			case assoc.KindUnassociated:
-				return localAwait{unassociated: true}
+				return localAwait{unassociated: true, fromMemory: res.FromMemory, waited: true, verdict: "unassociated", elapsedMs: elapsed}
 			case assoc.KindFound:
 				if len(res.Lines) > 0 {
 					s.cur, s.curPlayedAt = res.Source, res.PlayedAt
 					return localAwait{
 						lines:         res.Lines,
 						src:           res.Source,
+						fromMemory:    res.FromMemory,
 						lyricOffsetMs: res.LyricOffsetMs,
 						found:         true,
+						waited:        true,
+						verdict:       "found",
+						elapsedMs:     elapsed,
 					}
 				}
-				return localAwait{}
+				return localAwait{waited: true, verdict: "none", elapsedMs: elapsed}
 			case assoc.KindNone:
 				off := 0
 				if res.HasMemoryLyric {
@@ -199,9 +209,12 @@ func (s *localSession) await(stop <-chan struct{}, hash string) localAwait {
 					none:           s.localNone(res),
 					lyricOffsetMs:  off,
 					hasMemoryLyric: res.HasMemoryLyric,
+					waited:         true,
+					verdict:        "none",
+					elapsedMs:      elapsed,
 				}
 			default:
-				return localAwait{}
+				return localAwait{waited: true, verdict: "other", elapsedMs: elapsed}
 			}
 		}
 	}

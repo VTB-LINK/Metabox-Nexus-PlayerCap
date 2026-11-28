@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
@@ -27,8 +28,11 @@ var log = logger.New("QQMusic")
 // QQMusicPlayer QQ 音乐播放器
 type QQMusicPlayer struct {
 	player.BaseEmitter
-	offsetMs int
-	pollMs   int
+	offsetMs         int
+	pollMs           int
+	rumGate          player.SessionRUMGate[*qqSessionRUM]
+	testBeforeAttach func() // 仅供单测注入 Register 锁外发 attached 前的并发交错屏障
+	lastAttachMs     atomic.Int64
 }
 
 // New 创建 QQ 音乐播放器
@@ -91,6 +95,7 @@ func (p *QQMusicPlayer) Start() {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	d := qqMusicDetails()
 	seen := false // 本次服务期间见过 QQMusic.exe 在运行：区分 process_exited 与 process_not_running
+	var blockTrack qqBlockTracker
 
 	for {
 		select {
@@ -99,16 +104,30 @@ func (p *QQMusicPlayer) Start() {
 		default:
 		}
 
+		attachStart := time.Now()
 		mem, err := ConnectQQMusic()
 		if err != nil {
 			switch {
 			case errors.Is(err, errQQMusicAccessDenied):
 				seen = true
-				p.EmitStatusIfChanged(player.ProcessStatus(qqProcessRunning(), true, d, qqMusicNoAdminBlocked()))
+				running := qqProcessRunning()
+				if running {
+					blockTrack.onBlocked(player.ReasonNoAdmin)
+				} else {
+					blockTrack.onNotRunning()
+				}
+				p.EmitStatusIfChanged(player.ProcessStatus(running, true, d, qqMusicNoAdminBlocked()))
 			case errors.Is(err, errQQMusicModuleNotReady):
 				seen = true
-				p.EmitStatusIfChanged(player.ProcessStatus(qqProcessRunning(), true, d, player.Blocked{}))
+				running := qqProcessRunning()
+				if running {
+					blockTrack.onBlocked("cdp_port_not_ready")
+				} else {
+					blockTrack.onNotRunning()
+				}
+				p.EmitStatusIfChanged(player.ProcessStatus(running, true, d, player.Blocked{}))
 			default:
+				blockTrack.onNotRunning()
 				p.EmitStatusIfChanged(player.ProcessStatus(false, seen, d, player.Blocked{}))
 			}
 			p.Emit(player.EventClearSongData, nil)
@@ -119,12 +138,18 @@ func (p *QQMusicPlayer) Start() {
 		}
 
 		seen = true
+		p.lastAttachMs.Store(time.Since(attachStart).Milliseconds())
+		blockTrack.onRecovered()
 		log.Info("Connected to QQMusic.exe (PID: %d, version: %s)", mem.pid, mem.Version())
 
 		p.runSession(mem, offsetSec)
 
 		p.InvalidateSongGen() // 作废在飞的封面回写，别让它在 ClearSongData 之后复活已清空的 SongInfo
-		p.EmitStatusIfChanged(player.ProcessStatus(qqProcessRunning(), true, d, player.Blocked{}))
+		running := qqProcessRunning()
+		if !running {
+			blockTrack.onNotRunning()
+		}
+		p.EmitStatusIfChanged(player.ProcessStatus(running, true, d, player.Blocked{}))
 		p.Emit(player.EventClearSongData, nil)
 		log.Info("Session ended; waiting for a new QQMusic process...")
 		if p.sleepOrStop(2 * time.Second) {
@@ -135,6 +160,11 @@ func (p *QQMusicPlayer) Start() {
 
 func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	defer mem.Close()
+	rumSess := p.startSessionRUM(mem.Version(), mem.fallbackTo, p.lastAttachMs.Load())
+	disconnectCause := "process_exited"
+	defer func() {
+		p.endSessionRUM(rumSess, disconnectCause)
+	}()
 
 	// 滑块 AOB 探针已暂时关闭，详见 #39（含完整设计文档与恢复条件）。
 	//
@@ -240,12 +270,15 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	// drainAssoc 非阻塞地取至多一条读取者结果并在无变化时检查首轮本地认定截止（#248），有变化即按锚点经 showLyrics 发出。
 	// 每拍尾部与 ReadAllMetadata() 失败拍的未决态共用，确保读失败跳过尾部时未决态也能在 1s 上界内解除。
 	drainAssoc := func(now time.Time) {
+		prevSrc, prevShift, prevContent, prevUndecided := lyricSt.source(), lyricSt.shown.lyricOffsetMs, lyricSt.shown.content, lyricSt.undecided()
 		lines, changed := takeResult(&lyricSt, reader.Results(), assocKey.hasIDs(), offsetSec)
+		fromTake := changed
 		if !changed {
 			lines, changed = lyricSt.expireWait(now, assocKey.hasIDs(), offsetSec)
 		}
 		if changed {
 			showLyrics(lines, float32(anchorProgressMs)/1000.0, anchorTime)
+			rumSess.onDrainChanged(assocKey.gen, prevSrc, prevShift, prevContent, prevUndecided, !fromTake, &lyricSt, lines)
 		}
 	}
 
@@ -264,6 +297,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		} else {
 			log.Detail("Same song reopened (progress returned to the start)")
 		}
+		rumSess.onReopen(byLoading, &lyricSt)
 	}
 
 	// noteDetail 在两处 fetchCoverURL 之后打会话一侧的「核验不过」Detail（设计 §6.9，条件见 unconfirmedDetail：收到了响应而核验
@@ -296,6 +330,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		if coverURL == "" {
 			coverURL = currentCoverURL // 认领时的任务已作废：取不到新地址时用认领时的地址，这首仍有封面
 		}
+		rumSess.bindCoverGen(assocKey.gen, coverGen, coverURL != "")
 		p.startCover(realQQCoverOps, coverGen, coverURL, name, singer, title)
 	}
 
@@ -305,6 +340,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 	for {
 		select {
 		case <-p.StopCh:
+			disconnectCause = "stopped"
 			return
 		default:
 		}
@@ -314,6 +350,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 		}
 
 		if !mem.CheckValid() {
+			if qqProcessRunning() {
+				disconnectCause = "disconnected"
+			}
 			return
 		}
 
@@ -417,6 +456,8 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			assocKey = songKey{gen: assocKey.gen + 1, songID: sid, songMid: meta.SongMid, name: meta.Name, excludeLocal: excludeFor(prevLocal, renamed)}
 			lyricSt.reset(assocKey.gen, reader.LocalCheckPossible(), sampleTime.Add(localDecideWindow))
 			reader.Submit(assocKey)
+			lyricStart := time.Now()
+			rumSess.beginTrack(assocKey.gen, qqClockMode(mem, judge.bad, pollInterval), qqIDSource(sid, meta.SongMid, false))
 
 			cookie := mem.FindCookie()
 			var lrcName, lrcSinger string
@@ -536,7 +577,11 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 
 			// 异步封面下载（带代次守卫，理由同 cloudmusic：迟到的回写会盖住下一首）
 			currentCoverURL = coverURL
+			rumSess.bindCoverGen(assocKey.gen, coverGen, coverURL != "")
 			p.startCover(realQQCoverOps, coverGen, coverURL, currentName, currentSinger, title)
+			if !lyricsPending && !lyricsUndecided(currentLyrics, lyricsPending, lyricSt.source(), lyricSt.undecided()) {
+				rumSess.onTrackLyricSettled(assocKey.gen, lyricSt.source(), currentLyrics, false, lyricSt.hint(), false, time.Since(lyricStart).Milliseconds())
+			}
 		} else if meta.Name == lastName {
 			// 等进度的时候又切回了已认领的歌：这次等待作废。不清的话，之后再切到那首歌，闸门按歌名认出它、
 			// 沿用早已过期的等窗，当拍就按上一首的进度认领。
@@ -589,6 +634,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				} else {
 					log.Warn("Lyric backfill timed out (%v); continuing without lyrics (local file playback?)", lyricRetryWindow)
 				}
+				rumSess.onTrackLyricSettled(assocKey.gen, lyricSt.source(), currentLyrics, lyricSt.source() != srcLocal, lyricSt.hint(), false, 0)
 			case backfillHold:
 				if k, ok := exhaustDetail(assocKey); ok {
 					assocKey = k
@@ -600,9 +646,11 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				if mem.Offsets().SongMidParamsOff != 0 {
 					sid = 0 // v20.05：结构体 songID 是伪值，只认 songMid
 				}
+				heapMid := false
 				// songID 缺位时才回退堆扫描 songMid（FindSongMid 是全内存扫描，靠外层节流约束）
 				if mem.Offsets().SongMidFromHeap && sid == 0 && smid == "" {
 					smid = mem.FindSongMid(meta.DurationMs)
+					heapMid = smid != ""
 				}
 				if sid != 0 || smid != "" {
 					if !assocKey.hasIDs() {
@@ -633,6 +681,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 						// 先作废认领时起的封面任务，再发任何新的元数据：它带着认领时的歌名、歌手，在下面阻塞的 fetchCoverURL
 						// 期间完成即会回写，把补发的值盖回去（#229）。
 						coverGen := p.NewSongGen()
+						rumSess.bindCoverGen(assocKey.gen, coverGen, true)
 						lyricsPending = false
 						// 补取到的写法按 song-info-keep-first 取舍，标题恒为认领时的（#229）。
 						readName, readSinger := lrcName, lrcSinger
@@ -644,6 +693,8 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 						}
 						prevName, prevSinger := currentName, currentSinger
 						currentName, currentSinger = backfillNames(currentName, currentSinger, meta.Name, meta.Singer, lrcName, lrcSinger)
+						rumSess.noteSupplement(prevName, prevSinger, readName, readSinger)
+						rumSess.updateIDSource(assocKey.gen, qqIDSource(sid, smid, heapMid))
 						if readName != prevName || readSinger != prevSinger {
 							log.Detail("Song info read after the announcement: %s / %s; sent: %s / %s", readName, readSinger, currentName, currentSinger)
 						}
@@ -670,6 +721,9 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 						// 位置取本轮的读数：重读成功时即刚读到的进度；没有重读到则是取词前的读数，上一轮未判
 						// 暂停时按经过的时间推算。
 						showLyrics(shown, float32(meta.ProgressMs)/1000.0, sampleTime)
+						if !lyricsUndecided(shown, lyricsPending, lyricSt.source(), lyricSt.undecided()) {
+							rumSess.onTrackLyricSettled(assocKey.gen, lyricSt.source(), shown, false, lyricSt.hint(), true, 0)
+						}
 						// 本地首轮认定仍未决时不在此处同步阻塞调 fetchCoverURL（超时 10s），改为暂存到 pendingCover，
 						// 确保本拍及后续拍的 takeResult / expireWait 在 1s 上界内解除未决（#248）；非未决态立即执行。
 						if pendingCover.schedule(lyricSt.undecided(), assocKey.gen, coverGen, sid, smid, name, singer, title) {
@@ -718,6 +772,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 			}
 			if seekDetected {
 				lastLineIdx = -1 // 重置歌词行号
+				rumSess.notePendingFallback(released && meta.ProgressMs < lastMemProgress, "reopen_r2")
 				// 暂扣放行按回跳补发（回到开头 1 秒以内、暂扣期间没有换歌）：无载入边沿或漏采超短载入时的同一首重开兜底
 				// （#245，设计 §3.3 规则 R2）；经 shouldReopenByFallback 核对歌名并在占位串拍挂起、由 reopenG.consumed 去重。
 				if reopenG.shouldReopenByFallback(released && meta.ProgressMs < lastMemProgress, meta.Name, lastName, assocKey.hasIDs()) && !reopenedThisTick {
@@ -763,6 +818,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				"QQ 音乐播放状态与进度矛盾，本次连接改按进度停走判暂停（附哪一条核对、取值与时长，供核对该版本的偏移）",
 				map[string]string{"qqmusic.version": mem.Version()},
 				map[string]any{"check": v.tripped, "value": meta.PlayState, "ms": ms})
+			rumSess.onPlayStateMismatch(v.tripped)
 		}
 		if v.flash > 0 {
 			// 供真机核对去抖时长的余量（20.05 换歌那一拍的暂停值闪烁）。时长是上界，按拍取样可能大于去抖时长。
@@ -787,6 +843,7 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 				// 补取窗口重设（#227）：窗口在暂停中用尽时补取保持未了结，ID 要开播才落位；下一拍即重试。
 				backfill.arm(sampleTime)
 			}
+			rumSess.notePendingFallback(anchorProgressMs < switchStartBandMs, "reopen_r3")
 			// 暂停在开头 1 秒以内重开且漏采超短载入时的同一首重开兜底（#245，设计 §3.3 规则 R3）；
 			// 经 shouldReopenByFallback 核对歌名并在占位串拍挂起（防切换新歌时误重开旧歌）、由 reopenG.consumed 去重。
 			if reopenG.shouldReopenByFallback(anchorProgressMs < switchStartBandMs, meta.Name, lastName, assocKey.hasIDs()) && !reopenedThisTick {
@@ -856,22 +913,53 @@ func (p *QQMusicPlayer) runSession(mem *QQMusicMem, offsetSec float32) {
 }
 
 // qqCoverOps 是封面任务用到的外部操作，测试里换成假的。
-type qqCoverOps struct{ download func(url string) string }
+type qqCoverOps struct {
+	download            func(url string) string
+	downloadWithOutcome func(url string) (string, player.CoverOutcome)
+}
 
-var realQQCoverOps = qqCoverOps{download: func(u string) string { return player.FetchCoverBase64("QQMusic", u, 5*time.Second) }}
+func (o qqCoverOps) fetch(u string) (string, player.CoverOutcome) {
+	if o.downloadWithOutcome != nil {
+		return o.downloadWithOutcome(u)
+	}
+	if o.download == nil {
+		return "", player.CoverOutcome{Action: player.CoverActionNone}
+	}
+	start := time.Now()
+	b64 := o.download(u)
+	durMs := time.Since(start).Milliseconds()
+	if b64 == "" {
+		return "", player.CoverOutcome{Action: player.CoverActionErr, FallbackReason: "http_err", DurationMs: durMs}
+	}
+	return b64, player.CoverOutcome{Action: player.CoverActionResized800, DurationMs: durMs}
+}
+
+var realQQCoverOps = qqCoverOps{
+	download: func(u string) string { return player.FetchCoverBase64("QQMusic", u, 5*time.Second) },
+	downloadWithOutcome: func(u string) (string, player.CoverOutcome) {
+		return player.FetchCoverBase64WithOutcome("QQMusic", u, 5*time.Second)
+	},
+}
 
 // startCover 起封面任务：下载 url 的封面，取到后经 EmitForGen 以代次 gen 回写 name、singer、title 与封面。url 为空时
 // 不起任务。返回的通道在任务结束时关闭，生产代码不用，测试据此等它收尾。
 func (p *QQMusicPlayer) startCover(ops qqCoverOps, gen uint64, url, name, singer, title string) <-chan struct{} {
 	done := make(chan struct{})
 	if url == "" {
+		if s, ok := p.rumGate.Current(); ok && s != nil {
+			s.onCoverOutcome(gen, player.CoverOutcome{Action: player.CoverActionNone})
+		}
 		close(done)
 		return done
 	}
 	go func() {
 		defer telemetry.Guard()
 		defer close(done)
-		if b64 := ops.download(url); b64 != "" {
+		b64, out := ops.fetch(url)
+		if s, ok := p.rumGate.Current(); ok && s != nil {
+			s.onCoverOutcome(gen, out)
+		}
+		if b64 != "" {
 			p.EmitForGen(gen, player.EventSongInfoUpdate, &player.SongInfo{
 				Name: name, Singer: singer, Title: title, Cover: url, CoverBase64: b64,
 			})
@@ -978,9 +1066,11 @@ func (h *switchHold) step(prevMs, ms uint32, now time.Time) (held, released bool
 	if now.Sub(h.since) < switchConfirmAfter {
 		return true, false
 	}
+	heldMs := now.Sub(h.since).Milliseconds()
 	log.Detail("progress went back at %s from %.2fs to %.2fs; held %dms, released (now %.2fs): no song change",
 		h.since.Format("15:04:05.000"), float32(h.fromMs)/1000.0, float32(h.toMs)/1000.0,
-		now.Sub(h.since).Milliseconds(), float32(ms)/1000.0)
+		heldMs, float32(ms)/1000.0)
+	emitQQSwitchHoldGuard("released", heldMs)
 	*h = switchHold{}
 	return false, true
 }
@@ -991,9 +1081,11 @@ func (h *switchHold) drop(now time.Time) {
 	if h.since.IsZero() {
 		return
 	}
+	heldMs := now.Sub(h.since).Milliseconds()
 	log.Detail("progress went back at %s from %.2fs to %.2fs; held %dms, discarded: song changed",
 		h.since.Format("15:04:05.000"), float32(h.fromMs)/1000.0, float32(h.toMs)/1000.0,
-		now.Sub(h.since).Milliseconds())
+		heldMs)
+	emitQQSwitchHoldGuard("intercepted", heldMs)
 	*h = switchHold{}
 }
 

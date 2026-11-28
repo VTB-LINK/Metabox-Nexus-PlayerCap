@@ -503,6 +503,7 @@ func fetchLRC(songID uint32, songMid string, cookie string, durationMs uint32) (
 				"error":   err.Error(), // decryptIfNeeded 已把 crypt 与 len 拼进来了
 				"song_id": data.SongID,
 			})
+		emitQQQRCDecryptFailed("main")
 		return nil, "", "", err
 	}
 	if didDecrypt {
@@ -545,6 +546,7 @@ func attachTrans(lines []lyricLine, rawTrans string, crypt int) {
 			"QQ 音乐翻译歌词解密失败（是密文但解不开）—— 本首无 sub_text",
 			nil,
 			map[string]any{"error": err.Error()})
+		emitQQQRCDecryptFailed("trans")
 		return
 	}
 	mergeTrans(lines, html.UnescapeString(transPlain))
@@ -667,6 +669,7 @@ func attachRoma(lines []lyricLine, rawRoma string, crypt int) {
 			"QQ 音乐音译歌词解密失败（是密文但解不开）—— 本首无 roma_text",
 			nil,
 			map[string]any{"error": err.Error()})
+		emitQQQRCDecryptFailed("roma")
 		return
 	}
 	romaPlain = html.UnescapeString(romaPlain)
@@ -760,6 +763,11 @@ func applyKana(lines []lyricLine, kc *kanaCollector, local bool) {
 	}
 	switch {
 	case !ok:
+		if kc.budgetExceeded {
+			emitQQFuriganaSignal("furigana_budget_exceeded")
+		} else {
+			emitQQFuriganaSignal("furigana_conservation_dropped")
+		}
 		if local {
 			log.Detail("Skipped QQ Music local furigana: %s", reason)
 		} else {

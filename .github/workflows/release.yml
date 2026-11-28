@@ -171,19 +171,20 @@ jobs:
       - name: Build Windows executable
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
         run: |
           # 输出文件名保持固定名（由 job env.OUTPUT_NAME 控制）
           $EXE_NAME = "${env:OUTPUT_NAME}.exe"
           Add-Content -Path $env:GITHUB_ENV -Value "EXE_NAME=${EXE_NAME}" -Encoding utf8
 
-          # Sentry DSN 从 secret 注入。secret 没配 → 空串 → 客户端自动禁用遥测，构建照常成功
-          # （telemetry.Enabled 只看这个变量）。启动日志第一行会说「未注入 DSN，遥测已禁用」，
-          # 那就是 secret 没生效的信号。
+          # Sentry DSN 与 PostHog RUM 凭据均从 secret 注入。secret 没配 → 空串 → 客户端自动禁用对应上报，构建照常成功。
+          # （telemetry.Enabled 只看 telemetry.dsn；rum.Configured 只看 rum.apiKey 与 rum.host）。
           #
           # 发布时 VERSION 是剥掉 v 前缀的 semver，会把遥测送进 production 环境，且直接用作
           # Sentry 的 release 名 —— 下面建 Sentry release 用的就是同一个 VERSION。
           # 演练时 VERSION 不是 semver，遥测进 development 环境，与开发构建相同。
-          go build -ldflags "-X 'main.Version=${env:VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${env:SENTRY_DSN}'" -o "${EXE_NAME}"
+          go build -ldflags "-X 'main.Version=${env:VERSION}' -X 'Metabox-Nexus-PlayerCap/telemetry.dsn=${env:SENTRY_DSN}' -X 'Metabox-Nexus-PlayerCap/rum.apiKey=${env:POSTHOG_API_KEY}' -X 'Metabox-Nexus-PlayerCap/rum.host=${env:POSTHOG_HOST}'" -o "${EXE_NAME}"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
           if (Test-Path -LiteralPath $EXE_NAME) {
@@ -197,11 +198,11 @@ jobs:
       - name: Show build info
         run: |
           # 演练与首发的证据：main.Version、CGO_ENABLED、GOOS、GOARCH、vcs.revision。
-          # -ldflags 一行含注入的 DSN，打印前把它的值换掉，不依赖日志对 secret 的脱敏；
+          # -ldflags 一行含注入的 DSN 与 PostHog API Key，打印前把它们的值换掉，不依赖日志对 secret 的脱敏；
           # 未注入时保持空值原样，看得出来。
           $info = go version -m $env:EXE_NAME
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $info -replace "telemetry\.dsn=[^'\s]+", 'telemetry.dsn=<redacted>' | ForEach-Object { Write-Output $_ }
+          $info -replace "telemetry\.dsn=[^'\s]+", 'telemetry.dsn=<redacted>' -replace "rum\.apiKey=[^'\s]+", 'rum.apiKey=<redacted>' | ForEach-Object { Write-Output $_ }
 
       - name: Prepare files for packaging
         run: |

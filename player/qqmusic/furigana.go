@@ -35,11 +35,12 @@ type subToken struct {
 // 一旦遇到缺闭合 ']'、累计字节超限或词条语法非法，立即置为无效并释放已收集切片，
 // 后续再遇 [kana:] 行仍消费该行但不分配也不解析。
 type kanaCollector struct {
-	seen       bool
-	invalid    bool
-	reason     string
-	totalBytes int
-	items      []kanaEntry
+	seen           bool
+	invalid        bool
+	budgetExceeded bool
+	reason         string
+	totalBytes     int
+	items          []kanaEntry
 }
 
 // matchKanaLine 检查单行是否为 [kana:...] 元数据行（含紧贴的 QRC XML LyricContent 头壳）；
@@ -81,6 +82,7 @@ func (c *kanaCollector) feedRest(rest string) {
 	}
 	body := rest[:end]
 	if len(body) > maxKanaTagBytes-c.totalBytes {
+		c.budgetExceeded = true
 		c.fail(i18n.T("[kana:] tag exceeds size limit"))
 		return
 	}

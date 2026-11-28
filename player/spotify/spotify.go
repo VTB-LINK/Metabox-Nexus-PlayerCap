@@ -24,7 +24,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
@@ -47,8 +49,12 @@ var log = logger.New("Spotify")
 // SpotifyPlayer Spotify 播放器（CDP + DOM 实现）。
 type SpotifyPlayer struct {
 	player.BaseEmitter
-	offsetMs int
-	pollMs   int
+	offsetMs         int
+	pollMs           int
+	rumGate          player.SessionRUMGate[*spotifySessionRUM]
+	testBeforeAttach func() // 仅供单测注入 Register 锁外发 attached 前的并发交错屏障
+	attachMetaMu     sync.Mutex
+	attachMeta       spotifyAttachMeta
 }
 
 // New 创建 Spotify 播放器。
@@ -328,6 +334,7 @@ func (p *SpotifyPlayer) Start() {
 	unsupportedWarned := false
 	storeWarned := false // 微软商店版只警告一次，理由同版本不支持（issue #212）
 	exeUnknown := false  // 上一轮读不到安装路径（issue #212）：只警告一次
+	var bt spotifyBlockTracker
 
 	// 连接 CDP 随停止中止（cdp.Connect 自身另有单次上限）：9223 端口接受连接而不完成响应时，轮询 goroutine 不被挡在连接里。
 	ctx, cancel := context.WithCancel(context.Background())
@@ -360,8 +367,10 @@ func (p *SpotifyPlayer) Start() {
 		switch {
 		case !running:
 			// 未运行——用户可能稍后启动，静默等待重试（不代用户启动）。
+			bt.onNotRunning()
 		case errors.Is(err, watchdog.ErrVersionUnsupported):
 			// 近乎永久的状态：不空转、不每次刷屏，但给用户升级后自动恢复的机会。
+			bt.onBlocked("spotify_flag_absent")
 			if !unsupportedWarned {
 				unsupportedWarned = true
 				log.Warn("Spotify does not support the remote debugging port; lyric capture is unavailable (reason: %v)", err)
@@ -371,6 +380,7 @@ func (p *SpotifyPlayer) Start() {
 		case errors.As(err, &packaged):
 			// 微软商店版：watchdog 已在杀、拉起之前挡住（门禁）。形状同上面的版本不支持：只警告一次、
 			// standby + version_unsupported、按 unsupportedRecheck 重探，用户改装官网版后不必重启服务。
+			bt.onBlocked("store_install")
 			if !storeWarned {
 				storeWarned = true
 				log.Warn("Spotify is the Microsoft Store version (%s) and cannot be started with the debug flags; skipped Spotify lyric capture. To use it, uninstall it and install the official installer version: %s", packaged.ExePath, installerURL)
@@ -380,12 +390,14 @@ func (p *SpotifyPlayer) Start() {
 			recheck = true
 		case errors.Is(err, launch.ErrExeUnknown):
 			// 有 Spotify.exe 在运行而读不到它的映像路径：无从确知不是商店版，watchdog 已拒绝杀、重启。只警告一次。
+			bt.onBlocked("no_admin")
 			if !exeUnknown {
 				log.Warn("Cannot read the installation path of Spotify; it was not restarted automatically. Run Spotify with the same privileges as this program")
 			}
 			block = player.Blocked{Reason: player.ReasonNoAdmin, Detail: i18n.T("Cannot read the Spotify installation path (Spotify may be running as administrator)")}
 		case errors.Is(err, watchdog.ErrPortNotReady):
 			// 刚带 flag 启动 / 端口被别的程序占着：短退避重试。
+			bt.onBlocked("cdp_port_not_ready")
 			wait = time.Second
 		case err != nil:
 			log.Error("watchdog error: %v", err)
@@ -400,8 +412,10 @@ func (p *SpotifyPlayer) Start() {
 		p.EmitStatusIfChanged(player.ProcessStatus(running, seen, d, block))
 		p.Emit(player.EventClearSongData, nil)
 		if recheck {
-			if stopped, _ := player.RecheckWait(p.StopCh, unsupportedRecheck, recheckStep, spotifyRunning); stopped {
+			if stopped, exited := player.RecheckWait(p.StopCh, unsupportedRecheck, recheckStep, spotifyRunning); stopped {
 				return
+			} else if exited {
+				bt.onNotRunning()
 			}
 			continue
 		}
@@ -412,8 +426,14 @@ func (p *SpotifyPlayer) Start() {
 			continue
 		}
 
+		connectStart := time.Now()
 		client, err := connectCDP(ctx)
 		if err != nil {
+			if spotifyRunning() {
+				bt.onBlocked("cdp_port_not_ready")
+			} else {
+				bt.onNotRunning()
+			}
 			log.Warn("CDP connection failed: %v", err)
 			if p.sleepOrStop(2 * time.Second) {
 				return
@@ -421,6 +441,8 @@ func (p *SpotifyPlayer) Start() {
 			continue
 		}
 
+		bt.onRecovered()
+		p.setSessionAttachMeta(time.Since(connectStart).Milliseconds())
 		log.Info("CDP connected, monitoring playback state")
 		p.runSession(client)
 		client.Close()
@@ -440,11 +462,35 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	pollInterval := EffectivePollInterval(p.pollMs)
 
+	attachMeta := p.takeSessionAttachMeta()
+	rumSess := p.startSessionRUM(client.AppVersion(), attachMeta.attachMs)
+	defer func() {
+		if rumSess == nil {
+			return
+		}
+		cause := "cdp_closed"
+		select {
+		case <-p.StopCh:
+			cause = "stopped"
+		default:
+			if !spotifyRunning() {
+				cause = "process_exited"
+			}
+		}
+		p.endSessionRUM(rumSess, cause)
+	}()
+
+	var trackGen uint64
+	var trackStartedAt time.Time
+	var tokenCapturedReported bool
+	tokenProbe, _ := client.(interface{ FirstTokenCaptureMs() (int64, bool) })
+
 	// cliPath 只在这里取一次：spotify_cli.exe 随 Spotify 安装、路径不会中途变；
 	// 取不到就整场没有歌词（标题/歌手/进度照常），并在下面告警一次。
 	cliPath, cliErr := findCLI()
 	if cliErr != nil {
 		log.Warn("Spotify CLI not found (%v); lyrics are unavailable this session, playback state still works", cliErr)
+		rumSess.onCompat("spotify_cli_error", "cli_not_found", 0)
 	}
 
 	var clk clock
@@ -499,6 +545,13 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 		}
 
 		now := time.Now()
+		if !tokenCapturedReported && tokenProbe != nil {
+			if ms, ok := tokenProbe.FirstTokenCaptureMs(); ok {
+				tokenCapturedReported = true
+				rumSess.updateVersion(client.AppVersion())
+				rumSess.onCompat("passive_token_captured", "", ms)
+			}
+		}
 
 		// ── 取词结果落地（换歌后的首次与补取共用）──
 		// 放在每一拍开头、Snapshot 之前：下面几处提前 continue 的分支不会把结果晾着，送结果的 goroutine 不会久等。
@@ -508,9 +561,13 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 			if !jobs.accept(r.gen) {
 				break
 			}
+			if r.cliErr {
+				rumSess.onCompat("spotify_cli_error", "now_playing_err", 0)
+			}
 			if r.cliMismatch && !cliMismatchWarned {
 				cliMismatchWarned = true
 				log.Warn("play state from the page icon disagrees with spotify_cli (page=%v cli=%v); check the icon constants", r.pagePlaying, !r.pagePlaying)
+				rumSess.onCompat("cli_state_mismatch", "", 0)
 			}
 			s := settleLyrics(r)
 			if s.hint != "" {
@@ -527,8 +584,10 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 				lastLineIdx = -1 // all_lyrics 会清掉服务端缓存的 lyric_update，让当前行随后重发
 				if r.retry {
 					log.Info("Lyrics arrived late; re-sending all_lyrics (%d lines)", len(currentLyricItems))
+					rumSess.onLateTokenRetry()
 				} else {
 					log.Info("Lyrics loaded: %d lines (provider %s, %s)", len(currentLyrics), lyric.Provider(r.resp), lyric.SyncType(r.resp))
+					rumSess.onTrackLyricSettled(trackGen, r.lyricSource, s.lines, false, time.Since(trackStartedAt).Milliseconds(), true)
 				}
 				p.Emit(player.EventAllLyrics, &player.AllLyricsData{
 					Title:    currentTitle,
@@ -543,6 +602,8 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 				// 漏写零值兜 0 会与 all_lyrics.progress 自相矛盾——lyricupdate_lint_test 全仓强制）。
 				log.Info("Instrumental / no lyrics; word-by-word: %s", i18n.T("no"))
 				p.Emit(player.EventLyricUpdate, noLine)
+				isPure := s.hint != ""
+				rumSess.onTrackLyricSettled(trackGen, r.lyricSource, nil, isPure, time.Since(trackStartedAt).Milliseconds(), true)
 				if r.resp != nil && s.hint == "" {
 					// 平台答复了、只是没有行级时间轴：不起补取（见 settleLyrics），但要留痕，与「取词链路坏了」区分开。
 					log.Detail("Lyrics has no line-level timing (syncType %s); keeping this track without lyrics", lyric.SyncType(r.resp))
@@ -595,6 +656,7 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 
 		if untitled.observe(snap.Title, snap.DurationMs, now) {
 			log.Warn("the progress bar shows a track but its title has been unreadable for %v; Spotify's page structure may have changed, so nothing is reported for this track", untitledWarnAfter)
+			rumSess.onMetadataBlocked(now)
 		}
 
 		// 本拍的播放态先于歌名判断算出：歌名为空时它是「曲目在」的证据之一（classifyTrack）。playingSeen 是这份证据：
@@ -616,6 +678,7 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 			if !unknownIconWarned && shouldWarnUnknownIcon(snap, playingSeen) {
 				unknownIconWarned = true
 				log.Warn("play/pause icon not recognised; falling back to position-advance detection")
+				rumSess.onCompat("unknown_play_icon", "", 0)
 			}
 		}
 
@@ -631,6 +694,7 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 			time.Sleep(pollInterval)
 			continue
 		}
+		rumSess.onMetadataRecovered(now)
 
 		name := snap.Title
 		singer := strings.Join(snap.Artists, " / ")
@@ -671,9 +735,16 @@ func (p *SpotifyPlayer) runSession(client sessionClient) {
 			if coverCancel != nil {
 				coverCancel()
 			}
+			trackGen++
+			trackStartedAt = time.Now()
+			clkMode := "dom_icon"
+			if !iconKnown {
+				clkMode = "stall"
+			}
+			rumSess.beginTrack(trackGen, clkMode)
 			var ctx context.Context
 			ctx, coverCancel = context.WithCancel(context.Background())
-			go p.runCoverFetch(ctx, snap.Cover, name, singer, currentTitle)
+			go p.runCoverFetchWithRUM(ctx, snap.Cover, name, singer, currentTitle, rumSess, trackGen)
 
 			// 歌词：取 URI（CLI）与取词都在 runLyricsJob 里异步做，这里不等 —— 网络差时三步取词最坏约 11s，
 			// 同步等就这么久不读位置、不发事件（issue #107）。先以空歌词发 all_lyrics（与「还没拿到」同形），
@@ -890,11 +961,13 @@ type lyricsResult struct {
 	lyricsJob
 	// cliMismatch 报告 CLI 的播放态与页面图标不一致（只在换歌那次、图标认得出时判）：图标常量可能过期。
 	cliMismatch bool
+	cliErr      bool
 	lines       []lyric.Line
 	resp        *lyric.Response
 	diag        string
 	// notFound 报告平台答复了 HTTP 404（没有这首歌的歌词，见 fetchLyrics）。
-	notFound bool
+	notFound    bool
+	lyricSource string
 }
 
 // lyricsClient 是取词用到的 CDP 会话方法（*cdp.Client 实现它）；抽成接口只为离线测试注入桩。
@@ -928,6 +1001,7 @@ func runLyricsJob(ctx context.Context, job lyricsJob, cliPath string, client lyr
 		if cliPath != "" {
 			np, err := readNowPlaying(cliPath)
 			if err != nil {
+				r.cliErr = true
 				log.Warn("spotify_cli now-playing failed: %v", err)
 			} else if np.HasTrack {
 				r.trackID = lyric.TrackIDFromURI(np.URI)
@@ -939,7 +1013,7 @@ func runLyricsJob(ctx context.Context, job lyricsJob, cliPath string, client lyr
 		}
 		log.Info("♪ Song: %s - %s (id: %s)", job.name, job.singer, r.trackID)
 	}
-	r.lines, r.resp, r.diag, r.notFound = fetchLyrics(ctx, client, r.trackID)
+	r.lines, r.resp, r.diag, r.notFound, r.lyricSource = fetchLyricsWithSource(ctx, client, r.trackID)
 	if ctx.Err() != nil {
 		return
 	}
@@ -1145,29 +1219,34 @@ func (c *posConverter) convertTick(rawSec, durationSec float32, playing, iconKno
 //
 // 每一层之前查 ctx：被作废（换歌、会话结束）就不再发下一层的请求，返回空（调用方不会用它）。
 func fetchLyrics(ctx context.Context, client lyricsClient, trackID string) ([]lyric.Line, *lyric.Response, string, bool) {
+	lines, resp, diag, notFound, _ := fetchLyricsWithSource(ctx, client, trackID)
+	return lines, resp, diag, notFound
+}
+
+func fetchLyricsWithSource(ctx context.Context, client lyricsClient, trackID string) ([]lyric.Line, *lyric.Response, string, bool, string) {
 	if trackID == "" || ctx.Err() != nil {
-		return nil, nil, "", false
+		return nil, nil, "", false, "none"
 	}
 	tokenErr, notFound := "", false
 	if token := client.Token(); token != "" {
 		if resp, err := fetchLyricsDirect(trackID, token, client.AppPlatform(), client.AppVersion(), lyricsTimeout); err == nil {
 			if lines := lyric.Parse(resp); len(lines) > 0 {
-				return lines, resp, "", false
+				return lines, resp, "", false, "spotify_l1_go"
 			} else {
-				return nil, resp, noLineLyricsDiag(resp), false
+				return nil, resp, noLineLyricsDiag(resp), false, "none"
 			}
 		} else {
 			tokenErr = err.Error()
 		}
 		if ctx.Err() != nil {
-			return nil, nil, "", false
+			return nil, nil, "", false, "none"
 		}
 		if raw, err := client.FetchLyrics(trackID, token); err == nil && raw != "" {
 			if resp, perr := lyric.ParseBody([]byte(raw)); perr == nil {
 				if lines := lyric.Parse(resp); len(lines) > 0 {
-					return lines, resp, "", false
+					return lines, resp, "", false, "spotify_l2_page"
 				} else {
-					return nil, resp, noLineLyricsDiag(resp), false
+					return nil, resp, noLineLyricsDiag(resp), false, "none"
 				}
 			}
 		} else if err != nil {
@@ -1176,24 +1255,30 @@ func fetchLyrics(ctx context.Context, client lyricsClient, trackID string) ([]ly
 		}
 	}
 	if ctx.Err() != nil {
-		return nil, nil, "", false
+		return nil, nil, "", false, "none"
 	}
 	raw, err := client.FetchViaPageCache(trackID)
 	if err == nil && raw != "" {
 		if resp, perr := lyric.ParseBody([]byte(raw)); perr == nil {
 			if lines := lyric.Parse(resp); len(lines) > 0 {
-				return lines, resp, "", false
+				return lines, resp, "", false, "spotify_l3_cache"
 			} else {
-				return nil, resp, noLineLyricsDiag(resp), false
+				return nil, resp, noLineLyricsDiag(resp), false, "none"
 			}
 		}
 	} else if lyric.IsNotFound(err) {
 		notFound = true
 	}
-	if tokenErr != "" {
-		return nil, nil, tokenErr, notFound
+	if notFound {
+		if tokenErr != "" {
+			return nil, nil, tokenErr, true, "none"
+		}
+		return nil, nil, i18n.T("lyrics unavailable"), true, "none"
 	}
-	return nil, nil, i18n.T("lyrics unavailable"), notFound
+	if tokenErr != "" {
+		return nil, nil, tokenErr, false, "err"
+	}
+	return nil, nil, i18n.T("lyrics unavailable"), false, "none"
 }
 
 // noLineLyricsDiag 是「取到了但平台没有行级歌词」的诊断串。它作为 %s 注入日志，不会被 logger 翻译，
@@ -1207,7 +1292,24 @@ func noLineLyricsDiag(resp *lyric.Response) string {
 // 先发一条只带 URL、不带 base64 的信息让标题与封面尽快上屏，再下载 base64 补发完整信息。
 // **不变量：即使 b64 拿不到（超时/过大/失败）也照发带 URL 的信息**——绝不为封面吞掉歌曲信息，
 // 否则 OBS 整首停在上一首（轮询只在换歌时发、不自愈）。理由详见 sodamusic.go 的同名函数。
+func doFetchCoverWithOutcome(playerName, coverURL string, timeout time.Duration) (string, player.CoverOutcome) {
+	if reflect.ValueOf(fetchCoverBase64).Pointer() == reflect.ValueOf(player.FetchCoverBase64).Pointer() {
+		return player.FetchCoverBase64WithOutcome(playerName, coverURL, timeout)
+	}
+	start := time.Now()
+	b64 := fetchCoverBase64(playerName, coverURL, timeout)
+	durMs := time.Since(start).Milliseconds()
+	if b64 != "" {
+		return b64, player.CoverOutcome{Action: player.CoverActionResized800, DurationMs: durMs}
+	}
+	return "", player.CoverOutcome{Action: player.CoverActionErr, FallbackReason: "http_err", DurationMs: durMs}
+}
+
 func (p *SpotifyPlayer) runCoverFetch(ctx context.Context, coverURL, name, singer, title string) {
+	p.runCoverFetchWithRUM(ctx, coverURL, name, singer, title, nil, 0)
+}
+
+func (p *SpotifyPlayer) runCoverFetchWithRUM(ctx context.Context, coverURL, name, singer, title string, rumSess *spotifySessionRUM, trackGen uint64) {
 	defer telemetry.Guard()
 	select {
 	case <-ctx.Done():
@@ -1219,23 +1321,33 @@ func (p *SpotifyPlayer) runCoverFetch(ctx context.Context, coverURL, name, singe
 		Cover: coverURL,
 	})
 	if coverURL == "" {
+		if rumSess != nil {
+			rumSess.onCoverOutcome(trackGen, player.CoverOutcome{Action: player.CoverActionNone})
+		}
 		return
 	}
 	// base64 先取 LARGE 档；取不到再用页面原 URL。对外的 Cover 两条都是页面原 URL：前端按它判断是不是同一首歌。
 	b64 := ""
+	var coverOut player.CoverOutcome
 	if large := largeCoverURL(coverURL); large != coverURL {
-		if b64 = fetchCoverBase64("Spotify", large, coverBudget); b64 == "" && ctx.Err() == nil {
+		b64, coverOut = doFetchCoverWithOutcome("Spotify", large, coverBudget)
+		if b64 == "" && ctx.Err() == nil {
 			log.Detail("Large cover unavailable; falling back to the page's cover URL")
 		}
 	}
 	if b64 == "" && ctx.Err() == nil {
-		b64 = fetchCoverBase64("Spotify", coverURL, coverBudget)
+		prevMs := coverOut.DurationMs
+		b64, coverOut = doFetchCoverWithOutcome("Spotify", coverURL, coverBudget)
+		coverOut.DurationMs += prevMs
 	}
 
 	select {
 	case <-ctx.Done():
 		return
 	default:
+	}
+	if rumSess != nil {
+		rumSess.onCoverOutcome(trackGen, coverOut)
 	}
 	p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 		Name: name, Singer: singer, Title: title,

@@ -557,6 +557,7 @@ func (w *assocWorker) parseFailed(st fileStat, err error) {
 			reportOnce("qqmusic.assoc_unsupported", "QQ 音乐歌词关联表两次读到同一份无法解析的文件，本会话已停用歌词关联",
 				map[string]string{"qqmusic.version": w.d.qqVersion},
 				map[string]any{"error": redactHome(err.Error())})
+			emitQQAssocCompat(w.d.qqVersion, "assoc_dat_disabled")
 			w.stop(i18n.Errorf("the lyric association table is not supported: %w", err))
 			return
 		}
@@ -712,25 +713,35 @@ func (w *assocWorker) attemptLocal() bool {
 		}
 		return false
 	}
+	rmStart := time.Now()
 	path, held, err := assoc.IdentifyLocal(cands, w.cur.name, w.d.qqPID, w.holders)
+	rmDurMs := time.Since(rmStart).Milliseconds()
 	switch {
 	case w.ctx.Err() != nil:
 	case restartmgr.IsFatal(err):
 		w.localOff = true
 		w.updateLocalPossible()
+		emitQQAssocCompat(w.d.qqVersion, "rm_local_disabled")
+		emitQQRMLocalScanSample(rmDurMs, "fatal_err")
 		log.Warn("Restart Manager failed; not identifying the local file QQ Music is playing for this session: %v", err)
 	case err != nil:
+		emitQQRMLocalScanSample(rmDurMs, "err")
 		if w.once("identify " + err.Error()) {
 			log.Detail("Cannot identify the local file QQ Music is playing: %v", err)
 		}
 	case path != "":
 		w.localPath = path
+		emitQQRMLocalScanSample(rmDurMs, "found")
 		if w.online() {
 			log.Detail("Identified the local file QQ Music is playing: %s (the song has online IDs; %d candidates open in QQ Music)", path, held)
 		} else {
 			log.Detail("Identified the local file QQ Music is playing: %s (the song has no online IDs; %d candidates open in QQ Music)", path, held)
 		}
 		return true
+	default:
+		if len(cands) > 0 {
+			emitQQRMLocalScanSample(rmDurMs, "not_found")
+		}
 	}
 	return false
 }
@@ -834,6 +845,7 @@ func (w *assocWorker) scanCurrentRecord() (c assoc.RecordConclusion, ok bool) {
 	}
 	id, mid := w.ids()
 	c = assoc.ConcludeRecord(sc, id, mid)
+	emitQQSongRecordScanSample(st, c.Verdict)
 	w.logRecord(c, sc.Complete, st)
 	return c, true
 }
@@ -1065,6 +1077,7 @@ func (w *assocWorker) recoverStop() {
 	reportOnce("qqmusic.assoc_reader_panic", "QQ 音乐歌词关联读取者 panic，本会话已停用歌词关联",
 		map[string]string{"qqmusic.version": w.d.qqVersion},
 		map[string]any{"panic": redactHome(fmt.Sprint(p)), "stack": redactHome(string(debug.Stack()))})
+	emitQQAssocCompat(w.d.qqVersion, "assoc_reader_panic")
 	w.stop(i18n.Errorf("internal error in the lyric association reader: %v", p))
 }
 

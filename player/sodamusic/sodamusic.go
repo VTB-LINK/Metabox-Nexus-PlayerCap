@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
@@ -36,8 +37,12 @@ var log = logger.New("Soda")
 // SodaMusicPlayer 汽水音乐播放器（CDP 实现）。
 type SodaMusicPlayer struct {
 	player.BaseEmitter
-	offsetMs int
-	pollMs   int
+	offsetMs         int
+	pollMs           int
+	rumGate          player.SessionRUMGate[*sodaSessionRUM]
+	testBeforeAttach func() // 仅供单测注入 Register 锁外发 attached 前的并发交错屏障
+	attachMetaMu     sync.Mutex
+	attachMeta       sodaAttachMeta
 }
 
 // New 创建汽水音乐播放器。
@@ -165,6 +170,7 @@ func (p *SodaMusicPlayer) Start() {
 	storeWarned := false    // 微软商店版只警告一次（issue #212）
 	exeUnknown := false     // 上一轮读不到汽水的安装路径（issue #212）：只警告一次
 	mainUnreadable := false // 上一轮读不到主进程的命令行：只警告一次
+	var bt sodaBlockTracker
 
 	// 连接 CDP 随停止中止（cdp.Connect 自身另有单次上限）：9229 端口接受连接而不完成响应时，轮询 goroutine 不被挡在连接里。
 	ctx, cancel := context.WithCancel(context.Background())
@@ -199,6 +205,14 @@ func (p *SodaMusicPlayer) Start() {
 			// 未运行——用户可能稍后启动，静默等待重试。在运行而认不出主进程（命令行读不到）报 standby / no_admin；
 			// 枚举进程出错、刚释放的那个主进程正在退出（冷却期内）按在运行报 standby，同样等待。
 			storeWarned, exeUnknown = false, false
+			switch {
+			case !running:
+				bt.onNotRunning()
+			case unreadable:
+				bt.onBlocked("no_admin")
+			case err != nil:
+				bt.onBlocked("cdp_port_not_ready")
+			}
 			var block player.Blocked
 			if unreadable {
 				block = player.Blocked{Reason: player.ReasonNoAdmin, Detail: i18n.T("Cannot read the Soda Music main process (Soda Music may be running as administrator)")}
@@ -225,6 +239,7 @@ func (p *SodaMusicPlayer) Start() {
 		if packaged != nil {
 			// 微软商店版：门禁已在开 inspector（注入）之前挡住。只警告一次、按 storeRecheck 重查，用户改装官网版后
 			// 不必重启 PlayerCap。不连接。
+			bt.onBlocked("store_install")
 			if !storeWarned {
 				storeWarned = true
 				log.Warn("Soda Music is the Microsoft Store version (%s) and its inspector cannot be opened; skipped Soda Music lyric capture. To use it, uninstall it and install the official installer version", packaged.ExePath)
@@ -238,6 +253,7 @@ func (p *SodaMusicPlayer) Start() {
 		storeWarned = false
 		if errors.Is(err, launch.ErrExeUnknown) {
 			// 汽水在运行而读不到它的映像路径：无从确知不是商店版，门禁已拒绝注入。不连接。
+			bt.onBlocked("no_admin")
 			if !exeUnknown {
 				exeUnknown = true
 				log.Warn("Cannot read the installation path of Soda Music; its inspector was not opened. Run Soda Music with the same privileges as this program")
@@ -249,6 +265,7 @@ func (p *SodaMusicPlayer) Start() {
 		}
 		exeUnknown = false
 		if err != nil {
+			bt.onBlocked("cdp_port_not_ready")
 			log.Warn("failed to open SodaMusic inspector: %v", err)
 			if p.sleepOrStop(3 * time.Second) {
 				return
@@ -256,17 +273,21 @@ func (p *SodaMusicPlayer) Start() {
 			continue
 		}
 
+		connectStart := time.Now()
 		client, err := connectCDP(ctx)
 		if err != nil {
+			bt.onBlocked("cdp_port_not_ready")
 			log.Warn("CDP connection failed: %v", err)
 			if p.sleepOrStop(2 * time.Second) {
 				return
 			}
 			continue
 		}
+		bt.onRecovered()
+		p.setSessionAttachMeta(time.Since(connectStart).Milliseconds(), "")
 
 		log.Info("CDP connected, monitoring playback state")
-		exiting := p.runSession(client)
+		exiting := p.runSessionInternal(client, true)
 		if exiting {
 			releasedPID, releasedAt = pid, time.Now()
 		}
@@ -285,8 +306,20 @@ func (p *SodaMusicPlayer) Start() {
 // runSession 轮询 sharedState 播放态并 emit 事件，直到 CDP 断开、收到停止信号，或察觉汽水正在退出。
 // 返回 true 表示察觉退出：调用方须立即关闭 client，汽水主进程才能结束（见 exitFailGrace）。
 func (p *SodaMusicPlayer) runSession(client extractSource) bool {
+	return p.runSessionInternal(client, false)
+}
+
+func (p *SodaMusicPlayer) runSessionInternal(client extractSource, checkProcOnDisconnect bool) bool {
+	meta := p.takeSessionAttachMeta()
+	rumSess := p.startSessionRUM(meta.version, meta.attachMs)
+	disconnectCause := "cdp_closed"
+	defer func() {
+		p.endSessionRUM(rumSess, disconnectCause)
+	}()
+
 	offsetSec := float32(p.offsetMs) / 1000.0
 	pollInterval := EffectivePollInterval(p.pollMs)
+	var trackSeq uint64
 
 	// failSince 是这一段连续取数失败的起点，取数成功即清零。
 	var failSince time.Time
@@ -373,6 +406,7 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 	for {
 		select {
 		case <-p.StopCh:
+			disconnectCause = "stopped"
 			if coverCancel != nil {
 				coverCancel()
 			}
@@ -381,6 +415,11 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 		}
 
 		if client.IsClosed() {
+			if checkProcOnDisconnect && !sodaRunning() {
+				disconnectCause = "process_exited"
+			} else {
+				disconnectCause = "cdp_closed"
+			}
 			if coverCancel != nil {
 				coverCancel()
 			}
@@ -404,9 +443,15 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 				continue
 			}
 			if hostExiting {
+				disconnectCause = "host_exiting"
 				log.Info("SodaMusic main process is exiting; releasing the inspector session")
 			} else if exiting {
+				disconnectCause = "fail_grace_10s"
 				log.Warn("SodaMusic data unavailable for %s (%v); treating it as exiting and releasing the inspector session", exitFailGrace, err)
+			} else if checkProcOnDisconnect && !sodaRunning() {
+				disconnectCause = "process_exited"
+			} else {
+				disconnectCause = "cdp_closed"
 			}
 			if coverCancel != nil {
 				coverCancel()
@@ -458,6 +503,7 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 
 		if data.Throttled && !throttleWarned {
 			throttleWarned = true
+			rumSess.onCompat("background_throttling_stuck", "")
 			log.Warn("SodaMusic renderer background throttling could not be disabled: after the window stays minimized, the progress source drops to 1/60Hz, so seek/pause may take up to 60s to be detected")
 		}
 
@@ -538,14 +584,18 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 			lastPlaying = boolToInt(isPlaying)
 
 			// 封面：取消上一首、起本首。URL 已随 Extract 就绪，直接传。
+			trackSeq++
+			waitCover := data.CoverURL != ""
+			rumSess.beginTrack(trackSeq, waitCover)
 			if coverCancel != nil {
 				coverCancel()
 			}
 			var ctx context.Context
 			ctx, coverCancel = context.WithCancel(context.Background())
-			go p.runCoverFetch(ctx, data.CoverURL, name, singer, currentTitle)
+			go p.runCoverFetchWithRUM(ctx, data.CoverURL, name, singer, currentTitle, rumSess, trackSeq)
 
 			// 歌词：明文 KRC 解析 + 翻译轨合并 + 套 offset，逐字有无由 detailedFlag 如实反映。
+			lyricStart := time.Now()
 			currentLyrics = parseSodaLyrics(data, offsetSec)
 			if len(currentLyrics) > 0 {
 				log.Info("Lyrics loaded: %d lines; per-character: %s", len(currentLyrics), detailedFlag(currentLyrics))
@@ -565,6 +615,18 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 				currentLyrics = nil
 				lyricItems = []player.LyricLine{} // 显式空 slice——nil 会序列化成 null
 			}
+
+			lyricSource := "none"
+			if len(currentLyrics) > 0 || currentPureHint != "" {
+				lyricSource = "online"
+			} else if data.Err != "" {
+				lyricSource = "err"
+			}
+			romaInitOutcome := "skipped"
+			if len(currentLyrics) > 0 {
+				romaInitOutcome = "pending"
+			}
+			rumSess.onTrackLyricReady(trackSeq, lyricSource, currentLyrics, currentPureHint, time.Since(lyricStart).Milliseconds(), waitCover, romaInitOutcome)
 
 			currentLyricItems = lyricItems
 			p.Emit(player.EventAllLyrics, &player.AllLyricsData{
@@ -589,7 +651,7 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 			romaCh = make(chan []krc.Line, 1)
 			if len(currentLyrics) > 0 {
 				snapshot := append([]krc.Line(nil), currentLyrics...)
-				go p.fetchKugouRoma(romaCh, snapshot, name, singer, int(currentDurationSec*1000))
+				go p.fetchKugouRomaWithRUM(romaCh, snapshot, name, singer, int(currentDurationSec*1000), rumSess, trackSeq)
 			}
 		}
 
@@ -768,6 +830,10 @@ func (p *SodaMusicPlayer) runSession(client extractSource) bool {
 // 对照 kugou：它首条不带封面是**因为那时确实还没拿到 URL**（`if coverURL == ""` 才发那一条）；
 // 汽水的 URL 随 Extract 一起到、就在入参里，没有理由丢掉。
 func (p *SodaMusicPlayer) runCoverFetch(ctx context.Context, coverURL, name, singer, title string) {
+	p.runCoverFetchWithRUM(ctx, coverURL, name, singer, title, nil, 0)
+}
+
+func (p *SodaMusicPlayer) runCoverFetchWithRUM(ctx context.Context, coverURL, name, singer, title string, rumSess *sodaSessionRUM, trackSeq uint64) {
 	defer telemetry.Guard()
 	select {
 	case <-ctx.Done():
@@ -783,13 +849,14 @@ func (p *SodaMusicPlayer) runCoverFetch(ctx context.Context, coverURL, name, sin
 	if coverURL == "" {
 		return // 汽水一般都给封面；确实没有则标题已发，无新东西可补
 	}
-	b64 := player.FetchCoverBase64("Soda", coverURL, coverBudget)
+	b64, coverOut := player.FetchCoverBase64ContextWithOutcome(ctx, "Soda", coverURL, coverBudget)
 
 	select {
 	case <-ctx.Done():
 		return
 	default:
 	}
+	rumSess.onCoverOutcome(trackSeq, coverOut)
 	p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 		Name: name, Singer: singer, Title: title,
 		Cover: coverURL, CoverBase64: b64,

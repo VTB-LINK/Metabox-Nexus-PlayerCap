@@ -5,6 +5,7 @@ package helper
 import (
 	"math"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -402,5 +403,68 @@ func TestPumpCaptureStartupNoOvershoot(t *testing.T) {
 	}
 	if k != 50 {
 		t.Fatalf("2 秒的样本解出 %d 帧，期望 50", k)
+	}
+}
+
+// TestPumpCaptureWithStatsDrainIncompleteFlag 验证排空超时时 captureStats.incomplete 置真且摘要含 incomplete=1；
+// 正常排空时 incomplete 置假且摘要含 incomplete=0。
+func TestPumpCaptureWithStatsDrainIncompleteFlag(t *testing.T) {
+	makeRead := func() (readFunc, func() time.Time) {
+		clk := time.Unix(2000, 0)
+		i := 0
+		return func(dst []float32) (int, bool, error) {
+			defer func() { i++ }()
+			if i >= 4 {
+				return 0, false, errStopPump
+			}
+			clk = clk.Add(10 * time.Millisecond)
+			for j := 0; j < 960; j++ {
+				dst[j] = 0.05
+			}
+			return 480, false, nil
+		}, func() time.Time { return clk }
+	}
+
+	ctl := control{op: "capture", pid: 1, player: "wesing", norm: true, target: -14, maxGain: 30, fps: 25, sessionID: 7}
+
+	// 场景 1：无人消费共享队列 → waitInFlightZero 超时返回 false → incomplete=true → incomplete=1
+	read1, now1 := makeRead()
+	stuckFrames := make(chan queuedFrame, 8)
+	st1, err := pumpCaptureWithStats(read1, now1, ctl, 1, nil, make(chan struct{}), stuckFrames, nil, nil)
+	if err != errStopPump {
+		t.Fatalf("pumpCaptureWithStats 返回错误异常：%v", err)
+	}
+	if !st1.incomplete {
+		t.Fatalf("残留帧未排空超时后 stats.incomplete 应为 true，实得 %+v", st1)
+	}
+	line1 := formatCaptureSummaryDiag(ctl.player, ctl.sessionID, st1.normFrames, st1.cappedFrames, 0, st1.framesDropped, st1.incomplete)
+	if !strings.Contains(line1, "incomplete=1") {
+		t.Fatalf("排空超时摘要行应包含 incomplete=1，实得 %q", line1)
+	}
+
+	// 场景 2：写端正常消费并递减在途计数 → 排空成功 → incomplete=false → incomplete=0
+	read2, now2 := makeRead()
+	okFrames := make(chan queuedFrame, 8)
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		for f := range okFrames {
+			if f.owner != nil {
+				f.owner.decInFlight()
+			}
+		}
+	}()
+	st2, err := pumpCaptureWithStats(read2, now2, ctl, 2, nil, make(chan struct{}), okFrames, nil, nil)
+	close(okFrames)
+	<-consumerDone
+	if err != errStopPump {
+		t.Fatalf("pumpCaptureWithStats 返回错误异常：%v", err)
+	}
+	if st2.incomplete {
+		t.Fatalf("正常排空后 stats.incomplete 应为 false，实得 %+v", st2)
+	}
+	line2 := formatCaptureSummaryDiag(ctl.player, ctl.sessionID, st2.normFrames, st2.cappedFrames, 0, st2.framesDropped, st2.incomplete)
+	if !strings.Contains(line2, "incomplete=0") {
+		t.Fatalf("正常排空摘要行应包含 incomplete=0，实得 %q", line2)
 	}
 }

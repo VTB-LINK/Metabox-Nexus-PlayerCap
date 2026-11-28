@@ -98,6 +98,7 @@ type Result struct {
 	HasMemoryLyric bool // 内存模式下酷狗 CLyric 已加载歌词行但磁盘路径为空或不可读，供会话触发在线恢复
 	MemoryNoLyric  bool // 内存模式下酷狗 CLyric 已置空或明确判定无歌词（区别于外部磁盘文件暂缺），供会话撤销双拍超窗误采纳的旧词并恢复在线取词
 	Source         Source
+	FromMemory     bool // 由内存只读读取模式产出（区分 local_assoc_mem 与 local_assoc_db）
 	Retry          bool
 	AssocSkipped   bool
 	PlayedAt       int64

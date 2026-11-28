@@ -47,6 +47,7 @@ import (
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/launch"
+	"Metabox-Nexus-PlayerCap/rum"
 
 	"github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/sys/windows/registry"
@@ -212,6 +213,11 @@ func startDetached(exePath string, args []string) error {
 	detached, err := detachFn(exePath, args, "")
 	if err == nil && !detached {
 		log.Warn("%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well", TargetProcessName)
+		rum.Track(rum.CatPlayer, "player_intervention", rum.Props{
+			"player":  "spotify",
+			"kind":    "controlled_restart",
+			"outcome": "detached_cmd_fallback",
+		})
 	}
 	return err
 }
@@ -331,6 +337,7 @@ func EnsureDebugMode() error {
 		log.Warn("%s is running without %s; restarting it with the debug and anti-throttling flags (playback resumes automatically)", TargetProcessName, DebugFlag)
 	}
 	restartedThisRun.Store(true)
+	restartStart := time.Now()
 	if err := killFn(); err != nil {
 		// 没有可杀的实例时 taskkill 返回非零；此处不致命，靠下面的等待判据决定成败。
 		log.Warn("taskkill returned: %v", err)
@@ -347,10 +354,22 @@ func EnsureDebugMode() error {
 	for time.Now().Before(deadline) {
 		if portUpFn() {
 			log.Success("Spotify restarted with the debug port on %d", DebugPort)
+			rum.Track(rum.CatPlayer, "player_intervention", rum.Props{
+				"player":     "spotify",
+				"kind":       "controlled_restart",
+				"outcome":    "ok",
+				"elapsed_ms": time.Since(restartStart).Milliseconds(),
+			})
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+	rum.Track(rum.CatPlayer, "player_intervention", rum.Props{
+		"player":     "spotify",
+		"kind":       "controlled_restart",
+		"outcome":    "port_timeout",
+		"elapsed_ms": time.Since(restartStart).Milliseconds(),
+	})
 	return i18n.Errorf("Spotify did not open the debug port within %s", portWait)
 }
 
@@ -495,6 +514,11 @@ func patchAutostartAt(keyPath, name string) {
 	key, err := registry.OpenKey(registry.CURRENT_USER, keyPath, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		log.Error("Failed to open registry Run key: %v", err)
+		rum.Track(rum.CatPlayer, "player_intervention", rum.Props{
+			"player":  "spotify",
+			"kind":    "autostart_reg_patch",
+			"outcome": "reg_err",
+		})
 		return
 	}
 	defer key.Close()
@@ -516,9 +540,19 @@ func patchAutostartAt(keyPath, name string) {
 	}
 	if err := set(name, newVal); err != nil {
 		log.Error("Failed to set registry Run value: %v", err)
+		rum.Track(rum.CatPlayer, "player_intervention", rum.Props{
+			"player":  "spotify",
+			"kind":    "autostart_reg_patch",
+			"outcome": "reg_err",
+		})
 		return
 	}
 	log.Success("Patched Spotify autostart flags: %s", newVal)
+	rum.Track(rum.CatPlayer, "player_intervention", rum.Props{
+		"player":  "spotify",
+		"kind":    "autostart_reg_patch",
+		"outcome": "ok",
+	})
 }
 
 // patchAutostartValue 返回补齐 LaunchFlags 之后的自启值，以及是否有改动。

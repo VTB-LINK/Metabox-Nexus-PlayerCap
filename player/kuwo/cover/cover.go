@@ -23,6 +23,7 @@ type Result struct {
 	RID     string
 	URL     string
 	DataURI string
+	Outcome player.CoverOutcome
 }
 
 // Fetch resolves and downloads artwork, including the shared 800x800 normalization.
@@ -30,10 +31,22 @@ type Result struct {
 // Cancellation propagates to both the URL lookup and the image download, and any
 // result observed after cancellation is discarded.
 func Fetch(ctx context.Context, rid string, timeout time.Duration) (Result, error) {
-	return fetch(ctx, rid, timeout, endpoint, player.FetchCoverBase64Context)
+	return fetchWithOutcome(ctx, rid, timeout, endpoint, player.FetchCoverBase64ContextWithOutcome)
 }
 
 func fetch(ctx context.Context, rid string, timeout time.Duration, endpointURL string, download func(context.Context, string, string, time.Duration) string) (Result, error) {
+	return fetchWithOutcome(ctx, rid, timeout, endpointURL, func(ctx context.Context, playerName, coverURL string, t time.Duration) (string, player.CoverOutcome) {
+		start := time.Now()
+		uri := download(ctx, playerName, coverURL, t)
+		durMs := time.Since(start).Milliseconds()
+		if uri != "" {
+			return uri, player.CoverOutcome{Action: player.CoverActionResized800, DurationMs: durMs}
+		}
+		return "", player.CoverOutcome{Action: player.CoverActionErr, FallbackReason: "http_err", DurationMs: durMs}
+	})
+}
+
+func fetchWithOutcome(ctx context.Context, rid string, timeout time.Duration, endpointURL string, download func(context.Context, string, string, time.Duration) (string, player.CoverOutcome)) (Result, error) {
 	id, err := numericRID(rid)
 	if err != nil {
 		return Result{}, err
@@ -62,7 +75,7 @@ func fetch(ctx context.Context, rid string, timeout time.Duration, endpointURL s
 	if remaining <= 0 {
 		return result, context.DeadlineExceeded
 	}
-	result.DataURI = download(ctx, "kuwo", result.URL, remaining)
+	result.DataURI, result.Outcome = download(ctx, "kuwo", result.URL, remaining)
 	if err := ctx.Err(); err != nil {
 		result.DataURI = ""
 		return result, err

@@ -63,6 +63,8 @@ type RebuildReport struct {
 	// BackupLegacy 报告备份里的 offset 是不是旧写法（正值=提前），按备份内容自己的版本键判断，不看名字：
 	// 名字里的版本在文件被别的程序改过时可能不准。
 	BackupLegacy bool
+	// FailKind 为重建失败时的稳定短枚举（不含路径与错误原文）；重建成功时为空串。
+	FailKind string
 }
 
 // ForceRebuild 把 config.yml 换成当前版本的模板，被替换的那一份改名为备份（设计 §5.4）。不询问用户。
@@ -80,7 +82,7 @@ func forceRebuild(ops *fileOps, c *Config, programVersion string) RebuildReport 
 	path := c.ConfigFile
 	template := []byte(templateContent(StampVersion(programVersion)))
 	res := replaceFile(ops, path, template, nil, c.diskVersionLabel(), true)
-	rep := RebuildReport{Done: res.failure == replaceDone, Backup: res.backup}
+	rep := RebuildReport{Done: res.failure == replaceDone, Backup: res.backup, FailKind: replaceFailureKind(res.failure)}
 	switch {
 	case rep.Done:
 		log.Info("Rebuilt %s from the template of this version; the previous file is kept as %s", path, res.backup)

@@ -3,11 +3,14 @@ package watchdog
 import (
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/i18n"
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/launch"
+	"Metabox-Nexus-PlayerCap/rum"
 
 	"github.com/shirou/gopsutil/v3/process"
 )
@@ -99,6 +102,40 @@ func GateRunning() error {
 	return gateAll(procs)
 }
 
+var (
+	lastVerMu   sync.Mutex
+	lastVerExe  string
+	lastVerText string
+)
+
+func cacheVersionFromExe(exePath string) {
+	if exePath == "" {
+		return
+	}
+	lastVerMu.Lock()
+	same := lastVerExe == exePath && lastVerText != ""
+	lastVerMu.Unlock()
+	if same {
+		return
+	}
+	v := player.SanitizeVersion(ReadExeVersion(exePath))
+	if v == "" {
+		return
+	}
+	lastVerMu.Lock()
+	lastVerExe = exePath
+	lastVerText = v
+	lastVerMu.Unlock()
+}
+
+// LastVersion 返回最近一次检测到的网易云清洗后版本号（只读，不含路径）。
+func LastVersion() string {
+	lastVerMu.Lock()
+	v := lastVerText
+	lastVerMu.Unlock()
+	return v
+}
+
 // EnsureDebugMode checks if cloudmusic is running. If so, checks if it has the debug flag.
 // If not, it kills it and restarts it with the debug flag.
 // Returns true if the process was restarted, so we can wait a bit before connecting.
@@ -124,11 +161,19 @@ func EnsureDebugMode() (bool, error) {
 	for _, p := range procs {
 		if strings.Contains(p.Cmdline, keepaliveMarker) {
 			// Already running with debug + keepalive flags
+			cacheVersionFromExe(procs[0].ExePath)
 			return false, nil
 		}
 	}
 
 	exePath := procs[0].ExePath // 门禁已确认每个都读得到、都不在 WindowsApps 下
+	v := ReadExeVersion(exePath)
+	if v != "" {
+		lastVerMu.Lock()
+		lastVerExe = exePath
+		lastVerText = player.SanitizeVersion(v)
+		lastVerMu.Unlock()
+	}
 
 	// v2 检查必须在这里 —— 在 taskkill 之前、在上面 hasFlags 早退之后。
 	//
@@ -138,7 +183,7 @@ func EnsureDebugMode() (bool, error) {
 	//
 	// 放在 hasFlags 之后是为了省一次文件版本读取：已经带着我们的参数在跑的，必然是被我们
 	// 重启过的 v3（v2 不会走到那一步）。
-	if v := ReadExeVersion(exePath); IsUnsupportedVersion(v) {
+	if IsUnsupportedVersion(v) {
 		return false, &UnsupportedVersionError{Version: v, ExePath: exePath}
 	}
 
@@ -159,6 +204,11 @@ func EnsureDebugMode() (bool, error) {
 	}
 	if !detached {
 		log.Warn("%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well", TargetProcessName)
+		rum.Track(rum.CatPlayer, "player_intervention", rum.Props{
+			"player":  "cloudmusicv3",
+			"kind":    "controlled_restart",
+			"outcome": "detached_cmd_fallback",
+		})
 	}
 
 	// Wait a few seconds for CEF to initialize

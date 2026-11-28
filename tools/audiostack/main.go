@@ -47,6 +47,7 @@ func main() {
 	srv := server.NewServer(names)
 	norm := func(string) manager.NormParams { return manager.NormParams{Enabled: false, Target: -14, MaxGain: 30} }
 	mgr := manager.New(srv.AudioHub(), srv.GetPlayerStatus, norm, 25, abs)
+	mgr.SetPlayingQuery(srv.IsPlayerPlaying)
 	srv.SetAudioWake(mgr.Wake)
 	go mgr.Run()
 

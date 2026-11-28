@@ -143,6 +143,7 @@ func startExact(exe string, args []string) error {
 	}
 	if !detached {
 		log.Warn("%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well", TargetProcessName)
+		emitKuwoRestartIntervention("detached_cmd_fallback", channelSuffixFromExe(exe), 0)
 	}
 	return nil
 }

@@ -8,8 +8,10 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/config"
@@ -33,9 +35,13 @@ var log = logger.New("KuGou")
 // KuGouPlayer 酷狗音乐播放器（CDP 实现）
 type KuGouPlayer struct {
 	player.BaseEmitter
-	offsetMs int
-	pollMs   int
-	seen     bool // 本次服务期间见过酷狗在运行（player.ProcessStatus 的 seen），只由 Start 所在的 goroutine 读写
+	offsetMs         int
+	pollMs           int
+	seen             bool // 本次服务期间见过酷狗在运行（player.ProcessStatus 的 seen），只由 Start 所在的 goroutine 读写
+	rumGate          player.SessionRUMGate[*kugouSessionRUM]
+	testBeforeAttach func() // 仅供单测注入 Register 锁外发 attached 前的并发交错屏障
+	attachMetaMu     sync.Mutex
+	attachMeta       kugouAttachMeta
 }
 
 // New 创建酷狗音乐播放器
@@ -74,24 +80,31 @@ const (
 // 故测试改注入桩而非起真实回环服务。生产恒为 player.FetchCoverBase64，不导出、外部无法改动。
 var fetchCoverBase64 = player.FetchCoverBase64
 
-// runCoverFetch 取封面并发出 song_info_update；每首歌一个，换歌时由 ctx 取消。
-//
-//	阶段1: 等 coverEarlyWait 取封面 URL（**常见情况下 URL 已预置在缓冲 channel 里，立即命中**）
-//	  - 取到   → 等 b64（coverTotalBudget 内）→ 一次性发完整信息
-//	  - 超时   → 先发不含封面的信息 → 继续等到 coverTotalBudget
-//	    → 取到 → 等 b64 → 补发完整信息
-//	    → 超时 → 调 API 兜底（歌手艺术照，coverAPIFallbackTimeout）
-//	      → 仍无 URL → 不再发（不含封面的信息上面已发过）
-//	阶段2: 拿到 URL 而 b64 为空 → 照发带 URL 的信息 → 再下载一次（coverRetryTimeout）→ 取到则补发带 b64 的信息
-//
-// **不变量：只要拿到了封面 URL，就必须发出 song_info_update，无论 b64 成功与否。**
-// 常见路径上封面 URL 立即命中，走的是「跳过上面整个分支」——此前一次 song_info_update
-// 都没发过。此时为 b64 失败而 return，OBS 上整首歌都会停在上一首的标题和封面，而轮询
-// 循环只在换歌时发、不会自愈。b64 只是加速手段（省掉前端自己取图），拿不到就带 URL 发，
-// 前端自行加载——FetchCoverBase64 在图片超限时本来就是这个约定。
+func doFetchCoverWithOutcome(playerName, coverURL string, timeout time.Duration) (string, player.CoverOutcome) {
+	if reflect.ValueOf(fetchCoverBase64).Pointer() == reflect.ValueOf(player.FetchCoverBase64).Pointer() {
+		return player.FetchCoverBase64WithOutcome(playerName, coverURL, timeout)
+	}
+	start := time.Now()
+	b64 := fetchCoverBase64(playerName, coverURL, timeout)
+	durMs := time.Since(start).Milliseconds()
+	if b64 != "" {
+		return b64, player.CoverOutcome{Action: player.CoverActionResized800, DurationMs: durMs}
+	}
+	return "", player.CoverOutcome{Action: player.CoverActionErr, FallbackReason: "http_err", DurationMs: durMs}
+}
+
 func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name, singer, title, hash string) {
+	p.runCoverFetchWithRUM(ctx, ch, name, singer, title, hash, nil, 0)
+}
+
+func (p *KuGouPlayer) runCoverFetchWithRUM(ctx context.Context, ch <-chan string, name, singer, title, hash string, rumSess *kugouSessionRUM, trackGen uint64) {
 	defer telemetry.Guard()
 	start := time.Now()
+	reportCover := func(out player.CoverOutcome) {
+		if rumSess != nil {
+			rumSess.onCoverOutcome(trackGen, out)
+		}
+	}
 
 	var coverURL string
 	select {
@@ -132,6 +145,7 @@ func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name,
 			return
 		}
 		if coverURL == "" {
+			reportCover(player.CoverOutcome{Action: player.CoverActionNone})
 			return // 不含封面的歌曲信息已在上面发过，这里没有新东西可补
 		}
 	}
@@ -142,8 +156,9 @@ func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name,
 		b64Timeout = coverAPIFallbackTimeout
 	}
 	var b64 string
+	coverOut := player.CoverOutcome{Action: player.CoverActionErr, FallbackReason: "timeout"}
 	if b64Timeout > 0 {
-		b64 = fetchCoverBase64("Kugou", coverURL, b64Timeout)
+		b64, coverOut = doFetchCoverWithOutcome("Kugou", coverURL, b64Timeout)
 	}
 
 	select {
@@ -156,21 +171,29 @@ func (p *KuGouPlayer) runCoverFetch(ctx context.Context, ch <-chan string, name,
 		Name: name, Singer: singer, Title: title,
 		Cover: coverURL, CoverBase64: b64,
 	})
-	if b64 != "" || ctx.Err() != nil {
+	if b64 != "" {
+		reportCover(coverOut)
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 
 	// 补取（#194）：带 URL 的一条已经发出，这里再下载一次不推迟任何东西。上面那次可能只是没赶上：
 	// 封面地址在 coverTotalBudget 末尾才到时只剩几十毫秒、甚至没有下载时间，网络抖动也会失败。
 	// 只补一次；仍取不到就停，前端按 URL 自行加载。补发的 cover 与上一条相同。
-	b64 = fetchCoverBase64("Kugou", coverURL, coverRetryTimeout)
+	b64, retryOut := doFetchCoverWithOutcome("Kugou", coverURL, coverRetryTimeout)
 	if b64 == "" {
 		log.Warn("Cover download failed: %s", coverURL)
+		if ctx.Err() == nil {
+			reportCover(retryOut)
+		}
 		return
 	}
 	if ctx.Err() != nil {
 		return
 	}
+	reportCover(retryOut)
 	p.Emit(player.EventSongInfoUpdate, &player.SongInfo{
 		Name: name, Singer: singer, Title: title,
 		Cover: coverURL, CoverBase64: b64,
@@ -261,6 +284,7 @@ var (
 	ensurePatched          = watchdog.EnsurePatched
 	ensurePatchedNoElevate = watchdog.EnsurePatchedNoElevate
 	isKuGouRunning         = watchdog.IsKuGouRunning
+	lastInstallMeta        = watchdog.LastInstallMeta
 )
 
 // storeRecheck 是修补受阻（微软商店版、版本不支持、在运行而找不到安装、提权已放弃）之后多久重做一次修补检查
@@ -371,6 +395,9 @@ func (p *KuGouPlayer) Start() {
 	var elevation elevationGate
 	var install installWait
 	var rs repairState
+	var bt kugouBlockTracker
+	var blockReason, blockVer string
+	var blockMismatchIdx int
 	var lastRetryWarn string // ensureRetryLater 非 ErrInstallNotFound 的上一条告警文本，用于每 2s 重试去重
 	runningMisses := 0       // 酷狗在运行却找不到安装的连续轮数，见 maxRunningInstallMisses
 	for {
@@ -384,6 +411,9 @@ func (p *KuGouPlayer) Start() {
 		running := p.running()
 		if !running {
 			lastRetryWarn = ""
+			bt.onNotRunning()
+		} else if rs.block != (player.Blocked{}) && blockReason != "" {
+			bt.onBlocked(blockReason, blockVer, blockMismatchIdx)
 		}
 		p.EmitStatusIfChanged(player.ProcessStatus(running, p.seen, kugouDetails(), rs.block))
 		p.Emit(player.EventClearSongData, nil)
@@ -426,6 +456,7 @@ func (p *KuGouPlayer) Start() {
 		case err == nil:
 			elevation.reset() // 提权成功（或本就无需提权）：下次失败重新从最短退避算起
 			rs.set(player.Blocked{}, 0)
+			blockReason, blockVer, blockMismatchIdx = "", "", 0
 			// 修补检查返回 nil 即酷狗已在运行过：CDP 已可用、等到了它启动，或刚为修补结束并重新拉起它。
 			p.seen = true
 			startLocal = startLocalLyrics
@@ -433,6 +464,10 @@ func (p *KuGouPlayer) Start() {
 			// 微软商店版：门禁已在提权、结束、修补、拉起之前挡住，不去等 CDP（门禁不过即不连接）。按 storeRecheck 重查，
 			// 用户改装官网版后不必重启 PlayerCap 即可恢复。
 			rs.set(storeBlocked, storeRecheck)
+			blockReason, blockVer, blockMismatchIdx = "store_install", "", 0
+			if p.running() {
+				bt.onBlocked("store_install", "", 0)
+			}
 			if rs.block != prev {
 				log.Warn("KuGou is the Microsoft Store version (%s) and cannot be patched; skipped KuGou lyric capture. To use it, uninstall it and install the official installer version: %s", packaged.ExePath, installerURL)
 				telemetry.ReportOnce("kugou.store_install", "酷狗音乐为微软商店版，无法修补", nil, map[string]any{"exe_path": packaged.ExePath})
@@ -442,6 +477,10 @@ func (p *KuGouPlayer) Start() {
 			// 有 KuGou.exe 在运行而读不到它的映像路径：无从确知不是商店版，门禁已拒绝提权、结束、修补。
 			// 不去 waitForCDP，下一轮重新走修补检查。
 			rs.set(pathBlocked, loopStep)
+			blockReason, blockVer, blockMismatchIdx = "no_admin", "", 0
+			if p.running() {
+				bt.onBlocked("no_admin", "", 0)
+			}
 			if rs.block != prev {
 				log.Warn("Cannot read the installation path of KuGou; auto-repair skipped. Run KuGou with the same privileges as this program")
 			}
@@ -454,6 +493,10 @@ func (p *KuGouPlayer) Start() {
 				log.Error("Failed to obtain administrator rights %d times in a row; stopping auto-repair (retrying only makes the UAC secure desktop repeatedly steal focus). To enable KuGou, restart this program and click \"Yes\" on the UAC prompt", len(elevationBackoffs)+1)
 				rs.noElevate = true
 				rs.set(elevationBlocked, storeRecheck)
+				blockReason, blockVer, blockMismatchIdx = "no_admin", "", 0
+				if p.running() {
+					bt.onBlocked("no_admin", "", 0)
+				}
 				continue
 			}
 			log.Warn("Administrator rights not obtained (attempt %d/%d): %v — retrying in %v",
@@ -463,6 +506,10 @@ func (p *KuGouPlayer) Start() {
 		case errors.Is(err, watchdog.ErrElevationNeeded):
 			// 提权已放弃、DLL 仍未修补：不弹 UAC，按 storeRecheck 重查（用户以其他方式修补之后即可连上）。
 			rs.set(elevationBlocked, storeRecheck)
+			blockReason, blockVer, blockMismatchIdx = "no_admin", "", 0
+			if p.running() {
+				bt.onBlocked("no_admin", "", 0)
+			}
 			continue
 		default:
 			if running && errors.Is(err, watchdog.ErrInstallNotFound) {
@@ -475,11 +522,19 @@ func (p *KuGouPlayer) Start() {
 				// 版本指纹不认识、或在运行而连续多轮找不到安装：不立即重试（版本不认识时重试只会反复弹 UAC），按 storeRecheck 重查。
 				if errors.Is(err, watchdog.ErrVersionUnsupported) {
 					rs.set(versionBlocked, storeRecheck)
+					blockReason, blockVer, blockMismatchIdx = classifyKugouVersionBlock(err)
+					if p.running() {
+						bt.onBlocked(blockReason, blockVer, blockMismatchIdx)
+					}
 					if rs.block != prev {
 						log.Error("Auto-repair failed: %v (downgrade to a supported KuGou version, or retry after adaptation)", err)
 					}
 				} else {
 					rs.set(installBlocked, storeRecheck)
+					blockReason, blockVer, blockMismatchIdx = "running_install_missing", "", 0
+					if p.running() {
+						bt.onBlocked("running_install_missing", "", 0)
+					}
 					if rs.block != prev {
 						log.Error("Auto-repair failed: %v (run the KuGou launch tool manually or check the install path)", err)
 					}
@@ -504,6 +559,7 @@ func (p *KuGouPlayer) Start() {
 			rs.set(player.Blocked{}, 0)
 		}
 
+		waitStart := time.Now()
 		client, err := p.waitForCDP()
 		if err != nil {
 			select {
@@ -517,12 +573,20 @@ func (p *KuGouPlayer) Start() {
 				continue
 			}
 			// CDP 等待超时（酷狗可能已退出）：下一轮按进程是否在运行报状态，再重新走修补检查。
+			if p.running() {
+				bt.onBlocked("cdp_port_not_ready", "", 0)
+			} else {
+				bt.onNotRunning()
+			}
 			log.Warn("CDP not ready; rechecking KuGou status...")
 			rs.set(player.Blocked{}, loopStep)
 			continue
 		}
 
 		p.seen = true
+		bt.onRecovered()
+		meta := lastInstallMeta()
+		p.setSessionAttachMeta(time.Since(waitStart).Milliseconds(), meta.Version, meta.ExeVariant)
 		log.Info("CDP connected, monitoring playback state")
 		p.runSession(client, startLocal)
 		client.Close()
@@ -658,6 +722,7 @@ type onlineWaitOutcome struct {
 	freshSample    *cdpSample
 	localFound     bool
 	localSrc       assoc.Source
+	localFromMem   bool
 	localOffsetMs  int
 	unassociated   bool
 	localNone      bool
@@ -788,6 +853,7 @@ func (p *KuGouPlayer) awaitOnlineOrLocal(
 						freshSample:   latestSameSong,
 						localFound:    true,
 						localSrc:      res.Source,
+						localFromMem:  res.FromMemory,
 						localOffsetMs: res.LyricOffsetMs,
 						preempted:     true,
 					}
@@ -855,6 +921,27 @@ func (j *onlineJobs) start(parent context.Context, hash string, durationMs int, 
 func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsStarter) {
 	offsetSec := float32(p.offsetMs) / 1000.0
 	pollInterval := time.Duration(p.pollMs) * time.Millisecond
+
+	attachMeta := p.takeSessionAttachMeta()
+	rumSess := p.startSessionRUM(attachMeta.version, attachMeta.exeVariant, attachMeta.attachMs)
+	disconnectCause := "cdp_closed"
+	defer func() {
+		if rumSess == nil {
+			return
+		}
+		cause := disconnectCause
+		select {
+		case <-p.StopCh:
+			cause = "stopped"
+		default:
+			if cause == "cdp_closed" && !isKuGouRunning() {
+				cause = "process_exited"
+			}
+		}
+		p.endSessionRUM(rumSess, cause)
+	}()
+
+	var trackGen uint64
 
 	// localCancel 让读取者退出。下面每条返回路径都必须显式调用，写法与理由同下方的 coverCancel：别改成 defer 闭包、
 	// 也别包成 helper，vet 的 lostcancel 只认直接调用。不取消的话读取者 goroutine 在会话结束后仍在，占着同时至多
@@ -956,6 +1043,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				lastLineIdx = -1
 				log.Info("KuGou lyrics unassociated by user; lyrics cleared")
 				currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, nil, offsetSec)
+				rumSess.onLyricUpdated("user_unassociated", 0, false)
 			}
 		case pollFound:
 			onlineJobs.stop()
@@ -974,6 +1062,11 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 					log.Info("KuGou lyric offset changed: %+dms", currentLyricOffsetMs)
 				}
 				currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, display, offsetSec)
+				if contentChanged {
+					rumSess.onLyricUpdated("assoc_changed", currentLyricOffsetMs, true)
+				} else {
+					rumSess.onLyricUpdated("offset_changed", currentLyricOffsetMs, true)
+				}
 				if len(currentLyrics) == 0 {
 					rawLines = nil
 					currentFP = lyricFingerprint(nil)
@@ -990,6 +1083,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 			lastLineIdx = -1
 			log.Info("KuGou has no lyrics for this local file; lyrics cleared")
 			currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, nil, offsetSec)
+			rumSess.onLyricUpdated("assoc_changed", 0, false)
 		case pollRevokeMemNone:
 			onlineJobs.stop()
 			rawLines = nil
@@ -1002,6 +1096,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				log.Info("KuGou has no lyrics for this local file; lyrics cleared")
 			}
 			currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, nil, offsetSec)
+			rumSess.onLyricUpdated("assoc_changed", currentLyricOffsetMs, true)
 			if pl.recoverOnline {
 				onlineJobs.start(localCtx, lastHash, int(currentDurationSec*1000), currentName, currentSinger)
 			}
@@ -1018,6 +1113,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 					display := buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
 					log.Info("KuGou lyric offset changed: %+dms", currentLyricOffsetMs)
 					currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, display, offsetSec)
+					rumSess.onLyricUpdated("offset_changed", currentLyricOffsetMs, true)
 					if len(currentLyrics) == 0 {
 						rawLines = nil
 						currentFP = lyricFingerprint(nil)
@@ -1051,6 +1147,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				display := buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
 				log.Info("Lyrics recovered online in KuGou: %d lines; per-character: %s", len(display), detailedFlag(display))
 				currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, interpSec, display, offsetSec)
+				rumSess.onLyricUpdated("assoc_changed", currentLyricOffsetMs, true)
 				if len(currentLyrics) == 0 {
 					rawLines = nil
 					currentFP = lyricFingerprint(nil)
@@ -1240,6 +1337,9 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 			if coverCancel != nil {
 				coverCancel()
 			}
+			trackStart := time.Now()
+			trackGen++
+			rumSess.beginTrack(trackGen)
 			// 每首歌一个带缓冲的 channel（容量 1），由主循环写入封面 URL
 			coverCh = make(chan string, 1)
 			if currentCover != "" {
@@ -1247,20 +1347,25 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 			}
 			var ctx context.Context
 			ctx, coverCancel = context.WithCancel(context.Background())
-			go p.runCoverFetch(ctx, coverCh, currentName, currentSinger, currentTitle, info.Hash)
+			go p.runCoverFetchWithRUM(ctx, coverCh, currentName, currentSinger, currentTitle, info.Hash, rumSess, trackGen)
 
 			// 获取歌词：先取酷狗为这首歌显示的本地歌词或取消关联状态（至多等 localWait），未命中再走可抢占在线取词（设计 §6.4.4）。
 			aw := local.await(p.StopCh, info.Hash)
 			if aw.stopped {
 				// 等本地歌词时收到停止：同上方各条退出路径直接返回，不再在线取词、不发本首的歌词事件。
 				// 取消照样直接调用，理由见 coverCancel 与 localCancel 的注释。
+				rumSess.discardTrack(trackGen)
 				coverCancel()
 				localCancel()
 				onlineJobs.stop()
 				return
 			}
+			if aw.waited {
+				emitKugouLocalAwaitSample(aw.elapsedMs, aw.verdict)
+			}
 
 			var waitRes onlineWaitOutcome
+			lyricSource := "none"
 			switch {
 			case aw.unassociated:
 				onlineJobs.stop()
@@ -1270,6 +1375,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				currentFP = lyricFingerprint(nil)
 				currentLyricOffsetMs = 0
 				local.carried = false
+				lyricSource = "unassociated"
 				log.Info("KuGou lyrics unassociated by user; lyrics cleared")
 			case aw.found:
 				onlineJobs.stop()
@@ -1278,6 +1384,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				currentFP = lyricFingerprint(rawLines)
 				currentLyricOffsetMs = aw.lyricOffsetMs
 				currentLyrics = buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
+				lyricSource = kugouLocalSourceName(aw.src, aw.fromMemory)
 				log.Info("Lyrics loaded (%s): %d lines; per-character: %s", i18n.T(aw.src.String()), len(currentLyrics), detailedFlag(currentLyrics))
 			default:
 				waitRes = p.awaitOnlineOrLocal(
@@ -1286,6 +1393,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 					aw.none, aw.lyricOffsetMs,
 				)
 				if waitRes.stopped {
+					rumSess.discardTrack(trackGen)
 					coverCancel()
 					localCancel()
 					onlineJobs.stop()
@@ -1293,6 +1401,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				}
 				if waitRes.connErr != nil {
 					log.Warn("GetPlayInfo failed: %v", waitRes.connErr)
+					rumSess.discardTrack(trackGen)
 					coverCancel()
 					localCancel()
 					onlineJobs.stop()
@@ -1300,6 +1409,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				}
 				if waitRes.switched {
 					// 在线取词等待期间酷狗已切到新歌：不发本首歌词，将新读数挂起并立即进入新歌换歌分支。
+					rumSess.discardTrack(trackGen)
 					if !(name == prevName && singer == prevSinger) {
 						rawLines = nil
 						currentLyrics = nil
@@ -1320,6 +1430,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 					currentFP = lyricFingerprint(nil)
 					currentLyricOffsetMs = 0
 					local.carried = false
+					lyricSource = "unassociated"
 					log.Info("KuGou lyrics unassociated by user; lyrics cleared")
 				case waitRes.localFound:
 					onlineJobs.stop()
@@ -1328,6 +1439,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 					currentFP = lyricFingerprint(rawLines)
 					currentLyricOffsetMs = waitRes.localOffsetMs
 					currentLyrics = buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
+					lyricSource = kugouLocalSourceName(waitRes.localSrc, waitRes.localFromMem)
 					log.Info("Lyrics loaded (%s): %d lines; per-character: %s", i18n.T(waitRes.localSrc.String()), len(currentLyrics), detailedFlag(currentLyrics))
 				default:
 					unassociated = false
@@ -1340,24 +1452,28 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 							currentLyricOffsetMs = waitRes.localOffsetMs
 							currentLyrics = buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
 							local.carried = true
+							lyricSource = "online"
 						} else {
 							rawLines = nil
 							currentLyrics = nil
 							currentFP = lyricFingerprint(nil)
 							currentLyricOffsetMs = 0
 							local.carried = false
+							lyricSource = "err"
 						}
 					} else if len(waitRes.lines) > 0 {
 						rawLines = cloneLines(waitRes.lines)
 						currentFP = lyricFingerprint(rawLines)
 						currentLyricOffsetMs = waitRes.localOffsetMs
 						currentLyrics = buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
+						lyricSource = "online"
 						log.Info("Lyrics loaded: %d lines; per-character: %s", len(currentLyrics), detailedFlag(currentLyrics))
 					} else if sameSong && len(rawLines) > 0 {
 						// 同名同歌手但本次取不到（伴唱模式 hash 变化）→ 从未偏移 rawLines 按本首偏移重新生成显示歌词。
 						currentLyricOffsetMs = waitRes.localOffsetMs
 						currentLyrics = buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
 						local.carried = true
+						lyricSource = "online"
 						log.Info("Same song, hash changed; reusing previous lyrics (%d lines); word-by-word: %s", len(currentLyrics), detailedFlag(currentLyrics))
 					} else {
 						rawLines = nil
@@ -1365,6 +1481,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 						currentFP = lyricFingerprint(nil)
 						currentLyricOffsetMs = 0
 						local.carried = false
+						lyricSource = "none"
 						log.Info("Instrumental / no lyrics; word-by-word: %s", detailedFlag(currentLyrics))
 					}
 				}
@@ -1433,6 +1550,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 								currentLyrics = nil
 								currentFP = lyricFingerprint(nil)
 								currentLyricOffsetMs = 0
+								lyricSource = "unassociated"
 								log.Info("KuGou lyrics unassociated by user; lyrics cleared")
 								break rereadLoop
 							case pollRevokeMemNone:
@@ -1442,6 +1560,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 								currentFP = lyricFingerprint(nil)
 								currentLyricOffsetMs = pl.lyricOffsetMs
 								onlineJobs.attempted = false
+								lyricSource = "none"
 								if !pl.recoverOnline {
 									log.Info("KuGou has no lyrics for this local file; lyrics cleared")
 								}
@@ -1455,6 +1574,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 								currentLyrics = nil
 								currentFP = lyricFingerprint(nil)
 								currentLyricOffsetMs = 0
+								lyricSource = "none"
 								log.Info("KuGou has no lyrics for this local file; lyrics cleared")
 								break rereadLoop
 							case pollFound:
@@ -1467,6 +1587,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 									currentFP = nfp
 									currentLyricOffsetMs = pl.lyricOffsetMs
 									currentLyrics = buildDisplayLyrics(rawLines, currentLyricOffsetMs, offsetSec)
+									lyricSource = kugouLocalSourceName(pl.src, res.FromMemory)
 									if contentChanged {
 										log.Info("Lyrics changed in KuGou; reloaded (%s): %d lines; per-character: %s", i18n.T(pl.src.String()), len(currentLyrics), detailedFlag(currentLyrics))
 									} else {
@@ -1529,11 +1650,13 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 			// 进度，并按 fresh 的播放态（emitPlaying）决定是否外推，避免等待期已暂停的样本继续按旧 playing
 			// 往前外推；没有重读到则由取词前的锚点按经过的时间推算。
 			initPlay := player.LivePosition(anchorProgressSec, anchorTime, time.Now(), emitPlaying, currentDurationSec)
-			currentLyrics = p.emitLyrics(currentTitle, currentDurationSec, initPlay, currentLyrics, offsetSec)
+			var pureHint string
+			currentLyrics, pureHint = p.emitLyricsWithHint(currentTitle, currentDurationSec, initPlay, currentLyrics, offsetSec)
 			if len(currentLyrics) == 0 {
 				rawLines = nil
 				currentFP = lyricFingerprint(nil)
 			}
+			rumSess.onTrackLyricSettled(trackGen, lyricSource, currentLyrics, pureHint, time.Since(trackStart).Milliseconds(), true)
 
 			lastStatus = statusAtChange // 取词前的状态，理由见 statusAtChange
 		} else if !confirmed && statusStr(info.PlayStatus) == "standby" && isProgressValid(progressSec, currentDurationSec) {
@@ -1584,6 +1707,7 @@ func (p *KuGouPlayer) runSession(client playInfoSource, startLocal localLyricsSt
 				log.Info("paused @ %.2fs", anchorProgressSec)
 			default:
 				log.Warn("Unknown play_status value: %q", info.PlayStatus)
+				rumSess.onCompat("unknown_play_status", sanitizeKugouPlayStatusCode(info.PlayStatus))
 			}
 		}
 
@@ -1803,6 +1927,11 @@ func isProgressValid(progressSec, durationSec float32) bool {
 // emitLyrics 发出一首歌的全部歌词：all_lyrics，没有歌词时紧随一条 index:-1 的 lyric_update。position 是此刻的整曲
 // 位置，lines 须已套 offset。返回处理后的 currentLyrics（只有纯音乐提示语时为 nil）。换歌拍与播放中换词共用。
 func (p *KuGouPlayer) emitLyrics(title string, duration, position float32, lines []klyric.Line, offsetSec float32) []klyric.Line {
+	out, _ := p.emitLyricsWithHint(title, duration, position, lines, offsetSec)
+	return out
+}
+
+func (p *KuGouPlayer) emitLyricsWithHint(title string, duration, position float32, lines []klyric.Line, offsetSec float32) ([]klyric.Line, string) {
 	lyricItems := toLyricLines(lines, offsetSec)
 	progress := player.ClampProgress(position, duration)
 
@@ -1834,7 +1963,7 @@ func (p *KuGouPlayer) emitLyrics(title string, duration, position float32, lines
 			Index: -1, Text: pureHint, Timestamp: 0, Position: position, Progress: progress,
 		})
 	}
-	return lines
+	return lines, pureHint
 }
 
 func toLyricLines(lines []klyric.Line, offsetSec float32) []player.LyricLine {

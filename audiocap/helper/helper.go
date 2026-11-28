@@ -9,10 +9,12 @@
 package helper
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"Metabox-Nexus-PlayerCap/audiocap/dsp"
@@ -20,25 +22,26 @@ import (
 )
 
 // control 是一行控制命令解析后的结构。op ∈ {"capture","stop"}；归一化字段（norm/target/
-// maxGain）与帧率 fps 仅 capture 命令携带，stop 命令取零值。
+// maxGain）、帧率 fps 与可选会话编号 sessionID 仅 capture 命令携带，stop 命令取零值。
 type control struct {
-	op      string
-	pid     uint32
-	player  string
-	norm    bool // 是否启用音量归一化
-	target  int  // 目标 dBFS（可为负）
-	maxGain int  // 增益封顶 dB
-	fps     int  // 出帧帧率（帧每秒）
+	op        string
+	pid       uint32
+	player    string
+	norm      bool   // 是否启用音量归一化
+	target    int    // 目标 dBFS（可为负）
+	maxGain   int    // 增益封顶 dB
+	fps       int    // 出帧帧率（帧每秒）
+	sessionID uint64 // manager 分配的单调捕获会话编号（可选，缺省为 0）
 }
 
 // parseControl 解析一行控制命令：
 //
-//	"capture <pid> <player> <norm:0|1> <target_dbfs> <maxgain_db> <fps>" → op="capture" + 7 字段
-//	"stop <player>"                                                      → op="stop", player（pid 恒 0）
+//	"capture <pid> <player> <norm:0|1> <target_dbfs> <maxgain_db> <fps> [sid]" → op="capture" + 7 或 8 字段
+//	"stop <player>"                                                            → op="stop", player（pid 恒 0）
 //
-// norm 按 fields[3]=="1" 判定（非 "1" 一律 false）；target/maxGain/fps 走 strconv.Atoi。fps 小于 1
-// 时算不出每帧样本数，按非法处理；取值范围由主服务的配置层钳制，此处不重复判断。
-// 非法（空行 / 字段数不对 / pid 非无符号十进制 / target|maxGain|fps 非整数 / fps 小于 1 / 未知命令）
+// norm 按 fields[3]=="1" 判定（非 "1" 一律 false）；target/maxGain/fps 走 strconv.Atoi；可选的第 8 字段
+// sid 走 strconv.ParseUint(10, 64)。fps 小于 1 时算不出每帧样本数，按非法处理；取值范围由主服务的配置层钳制，
+// 此处不重复判断。非法（空行 / 字段数不对 / pid 或 sid 非无符号十进制 / target|maxGain|fps 非整数 / fps 小于 1 / 未知命令）
 // 返回 error。
 func parseControl(line string) (control, error) {
 	fields := strings.Fields(line)
@@ -47,8 +50,16 @@ func parseControl(line string) (control, error) {
 	}
 	switch fields[0] {
 	case "capture":
-		if len(fields) != 7 {
+		if len(fields) != 7 && len(fields) != 8 {
 			return control{}, i18n.Errorf("capture requires <pid> <player> <norm> <target_dbfs> <maxgain_db> <fps>, got %q", line)
+		}
+		var sid uint64
+		if len(fields) == 8 {
+			parsedSID, e := strconv.ParseUint(fields[7], 10, 64)
+			if e != nil {
+				return control{}, i18n.Errorf("capture requires <pid> <player> <norm> <target_dbfs> <maxgain_db> <fps>, got %q", line)
+			}
+			sid = parsedSID
 		}
 		pid, e := strconv.ParseUint(fields[1], 10, 32)
 		if e != nil {
@@ -66,7 +77,7 @@ func parseControl(line string) (control, error) {
 		if e != nil || fps < 1 {
 			return control{}, i18n.Errorf("invalid capture fps %q", fields[6])
 		}
-		return control{op: "capture", pid: uint32(pid), player: fields[2], norm: fields[3] == "1", target: target, maxGain: maxGain, fps: fps}, nil
+		return control{op: "capture", pid: uint32(pid), player: fields[2], norm: fields[3] == "1", target: target, maxGain: maxGain, fps: fps, sessionID: sid}, nil
 	case "stop":
 		if len(fields) != 2 {
 			return control{}, i18n.Errorf("stop requires <player>, got %q", line)
@@ -314,26 +325,189 @@ func satAdd(a, b uint64) uint64 {
 	return a + b
 }
 
-// enqueue 把帧非阻塞入队：满则丢最旧再放；仍满（并发生产者刚补满）则丢本帧。永不阻塞采集
-// goroutine——这是「采集排空与写解耦」的承重点（§2.5）。纯 channel 逻辑、无平台依赖，故放此。
-func enqueue(ch chan []byte, f []byte) {
+// inFlightDrainGrace 是单路 captureLoop 结束发最终 capture_summary 前，有界等待共享出帧队列中本会话残留帧
+// 排空或淘汰归账的上限；有界设计保证 stdout 阻塞时绝不死锁或拖住 helper 退出。
+const inFlightDrainGrace = 50 * time.Millisecond
+
+// captureDiagStats 保存单路捕获在共享帧队列上的并发丢帧统计与在途帧计数，供跨生产者淘汰归属到真实被淘汰会话。
+type captureDiagStats struct {
+	framesDropped atomic.Uint64
+	inFlight      atomic.Int64
+	mu            sync.Mutex
+	zeroCh        chan struct{}
+
+	// testBeforeZeroLock 仅供单测在 decInFlight 递减归零后、取 mu 之前注入交错同步，生产恒为 nil。
+	testBeforeZeroLock func()
+}
+
+func (s *captureDiagStats) incInFlight() {
+	s.inFlight.Add(1)
+}
+
+func (s *captureDiagStats) decInFlight() {
+	if s.inFlight.Add(-1) == 0 {
+		if s.testBeforeZeroLock != nil {
+			s.testBeforeZeroLock()
+		}
+		s.mu.Lock()
+		if s.inFlight.Load() == 0 && s.zeroCh != nil {
+			close(s.zeroCh)
+			s.zeroCh = nil
+		}
+		s.mu.Unlock()
+	}
+}
+
+// waitInFlightZero 有界等待本会话在共享队列中的全部残留帧被消费或淘汰；超时即返回 false，绝不死锁。
+func (s *captureDiagStats) waitInFlightZero(d time.Duration) bool {
+	if s == nil || s.inFlight.Load() <= 0 {
+		return true
+	}
+	if d <= 0 {
+		return s.inFlight.Load() <= 0
+	}
+	deadline := time.Now().Add(d)
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for {
+		s.mu.Lock()
+		if s.inFlight.Load() <= 0 {
+			s.mu.Unlock()
+			return true
+		}
+		ch := s.zeroCh
+		if ch == nil {
+			ch = make(chan struct{})
+			s.zeroCh = ch
+		}
+		s.mu.Unlock()
+
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return s.inFlight.Load() <= 0
+		}
+		if timer == nil {
+			timer = time.NewTimer(rem)
+		} else {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(rem)
+		}
+		select {
+		case <-ch:
+			if s.inFlight.Load() <= 0 {
+				return true
+			}
+		case <-timer.C:
+			return s.inFlight.Load() <= 0
+		}
+	}
+}
+
+// queuedFrame 是 helper 内部共享出帧队列的元素：仅包裹待写 stdout 的编码帧字节与归属统计指针，
+// 绝不改动 audiocap/frame 二进制线格式。
+type queuedFrame struct {
+	data  []byte
+	owner *captureDiagStats
+}
+
+// enqueueFrame 非阻塞把 f 入队共享帧通道：满则丢弃最旧帧并将丢帧记到被淘汰帧所属会话；
+// 仅当再次尝试入队仍满丢弃本帧时，才记到 f.owner。入队前递增在途计数，被淘汰或未入队时及时递减。
+func enqueueFrame(ch chan queuedFrame, f queuedFrame) {
+	if f.owner != nil {
+		f.owner.incInFlight()
+	}
 	select {
 	case ch <- f:
 		return
 	default:
 	}
+	select { // 丢最旧：把丢帧精确归账到被淘汰帧的 owner，并释放其在途计数
+	case evicted := <-ch:
+		if evicted.owner != nil {
+			evicted.owner.framesDropped.Add(1)
+			evicted.owner.decInFlight()
+		}
+	default:
+	}
+	select { // 再试一次；仍满则丢本帧并归账到当前会话，同时回退其刚加的在途计数
+	case ch <- f:
+	default:
+		if f.owner != nil {
+			f.owner.framesDropped.Add(1)
+			f.owner.decInFlight()
+		}
+	}
+}
+
+// enqueue 把帧非阻塞入队：满则丢最旧再放；仍满（并发生产者刚补满）则丢本帧。永不阻塞采集
+// goroutine——这是「采集排空与写解耦」的承重点（§2.5）。纯 channel 逻辑、无平台依赖，故放此。
+func enqueue(ch chan []byte, f []byte) {
+	_ = enqueueCountDrop(ch, f)
+}
+
+// enqueueCountDrop 非阻塞入队并返回本次入队触发的丢帧数（0、1 或 2）。
+func enqueueCountDrop(ch chan []byte, f []byte) uint64 {
+	select {
+	case ch <- f:
+		return 0
+	default:
+	}
+	var dropped uint64
 	select { // 丢最旧
 	case <-ch:
+		dropped++
 	default:
 	}
 	select { // 再试一次；仍满则丢本帧
 	case ch <- f:
 	default:
+		dropped++
 	}
+	return dropped
 }
 
 // diagChanCap 是采集 goroutine 投递诊断日志的有界队列容量。
 const diagChanCap = 8
+
+// rumDiagPrefix 是 helper 经 stderr 向 manager 传递结构化 RUM 诊断摘要的专用行前缀。
+// manager 侧 pumpStderrWithHook 拦截并消费该前缀行，不转发到控制台，也不写入 Sentry stderr_tail。
+const rumDiagPrefix = "[mbx-rum] "
+
+// rumStatsDiagInterval 为运行中向 manager 周期回传归一化/断流/丢帧累计快照的最小间隔。
+const rumStatsDiagInterval = 30 * time.Second
+
+func formatCaptureDiag(kind, player string, sid, normFrames, cappedFrames, discontinuities, framesDropped uint64) string {
+	return fmt.Sprintf("%skind=%s player=%s sid=%d norm_frames=%d capped_frames=%d discontinuities=%d frames_dropped=%d",
+		rumDiagPrefix, kind, player, sid, normFrames, cappedFrames, discontinuities, framesDropped)
+}
+
+func formatCaptureSummaryDiag(player string, sid, normFrames, cappedFrames, discontinuities, framesDropped uint64, incomplete bool) string {
+	inc := 0
+	if incomplete {
+		inc = 1
+	}
+	return fmt.Sprintf("%s incomplete=%d",
+		formatCaptureDiag("capture_summary", player, sid, normFrames, cappedFrames, discontinuities, framesDropped),
+		inc,
+	)
+}
+
+func formatWASAPIActivateDiag(player string, sid uint64, signalState, stage string, hr uint32) string {
+	if stage == "" {
+		stage = "unknown"
+	}
+	return fmt.Sprintf("%skind=wasapi_activate player=%s sid=%d signal_state=%s activate_stage=%s hresult=0x%08X",
+		rumDiagPrefix, player, sid, signalState, stage, hr)
+}
 
 // sendDiag 把一条诊断非阻塞投递到 ch，返回是否投递成功：满或无人接收即丢本条、返回 false，永不阻塞。
 // 采集 goroutine 不直接写 stderr：stderr 并入主控制台，控制台写可能阻塞，阻塞会冻住采集排空，与帧经
@@ -414,13 +588,23 @@ func gainFactor(rmsEst float64, targetDBFS, maxGainDB int) float64 {
 // warmN 不足 tauN 时为起步期：估计是已计入各帧功率按样本数加权的累计平均，并受 normFloor 与
 // normRestart 保护；满了以后是时间常数为 normTau 的对称指数平均，两项保护不再生效。
 type Normalizer struct {
-	enabled    bool
-	targetDBFS int
-	maxGainDB  int
-	tauN       float64 // normTau 折合的样本数
-	emaMS      float64 // 响度估计：RMS² 的均值（均方）
-	warmN      float64 // 本次起步以来计入的样本数
-	seenN      float64 // 捕获开始以来计入的样本数，累计到 tauN 为止；为 0 即尚无估计
+	enabled       bool
+	targetDBFS    int
+	maxGainDB     int
+	tauN          float64 // normTau 折合的样本数
+	emaMS         float64 // 响度估计：RMS² 的均值（均方）
+	warmN         float64 // 本次起步以来计入的样本数
+	seenN         float64 // 捕获开始以来计入的样本数，累计到 tauN 为止；为 0 即尚无估计
+	appliedFrames uint64  // 累计施加增益的真音频帧数
+	cappedFrames  uint64  // 累计触发增益封顶（targetDBFS - dbfs(rmsEst) >= maxGainDB）的帧数
+}
+
+// CapStats 返回归一化器累计施加增益的帧数与触顶帧数。
+func (nz *Normalizer) CapStats() (applied, capped uint64) {
+	if nz == nil {
+		return 0, 0
+	}
+	return nz.appliedFrames, nz.cappedFrames
 }
 
 // newNormalizer 构造一路的归一化器，sampleRate 为采样率（把 normTau 折合成样本数）。
@@ -459,7 +643,12 @@ func (nz *Normalizer) Apply(r *dsp.Result, n int) float32 {
 	if nz.seenN == 0 {
 		return 1
 	}
-	g := float32(gainFactor(math.Sqrt(nz.emaMS), nz.targetDBFS, nz.maxGainDB))
+	rmsEst := math.Sqrt(nz.emaMS)
+	nz.appliedFrames++
+	if float64(nz.targetDBFS)-dbfs(rmsEst) >= float64(nz.maxGainDB) {
+		nz.cappedFrames++
+	}
+	g := float32(gainFactor(rmsEst, nz.targetDBFS, nz.maxGainDB))
 	r.RMS *= g
 	for i := range r.Bins {
 		r.Bins[i] *= g

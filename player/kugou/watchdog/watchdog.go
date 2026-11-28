@@ -14,11 +14,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"Metabox-Nexus-PlayerCap/logger"
+	"Metabox-Nexus-PlayerCap/player"
 	"Metabox-Nexus-PlayerCap/player/launch"
+	"Metabox-Nexus-PlayerCap/rum"
 	"Metabox-Nexus-PlayerCap/telemetry"
 
 	"Metabox-Nexus-PlayerCap/i18n"
@@ -72,6 +76,106 @@ var TargetProcessNames = []string{HDTargetProcessName, TargetProcessName}
 // 严禁使用前缀、后缀、子串或正则匹配，防止误触酷狗直播、酷狗概念版、酷狗唱唱等其他程序。
 func isKuGouProcessName(name string) bool {
 	return strings.EqualFold(name, TargetProcessName) || strings.EqualFold(name, HDTargetProcessName)
+}
+
+// InstallMeta 保存最近识别到的酷狗脱敏元信息（仅白名单枚举文件名与清洗后版本号，绝不含路径）。
+type InstallMeta struct {
+	Version    string
+	ExeVariant string
+}
+
+// ExeVariant 将酷狗可执行文件路径映射为固定白名单枚举（"KuGou.exe" / "HD_KuGou.exe"），不匹配返回空串。
+func ExeVariant(exePath string) string {
+	base := filepath.Base(strings.TrimSpace(exePath))
+	switch {
+	case strings.EqualFold(base, TargetProcessName):
+		return TargetProcessName
+	case strings.EqualFold(base, HDTargetProcessName):
+		return HDTargetProcessName
+	default:
+		return ""
+	}
+}
+
+var (
+	lastMetaMu            sync.Mutex
+	lastMeta              InstallMeta
+	lastLibcefMismatchIdx atomic.Int32
+	uacPatchAttempt       atomic.Int32
+)
+
+func recordInstallMeta(exePath, ver string) {
+	lastMetaMu.Lock()
+	lastMeta = InstallMeta{
+		Version:    player.SanitizeVersion(ver),
+		ExeVariant: ExeVariant(exePath),
+	}
+	lastMetaMu.Unlock()
+}
+
+// LastInstallMeta 返回最近一次检查或探测记录的酷狗脱敏安装元信息；若为空且酷狗正在运行，尝试只读探测一次。
+func LastInstallMeta() InstallMeta {
+	lastMetaMu.Lock()
+	m := lastMeta
+	lastMetaMu.Unlock()
+	if m.Version != "" || m.ExeVariant != "" {
+		return m
+	}
+	if run, err := runningKuGouFn(); err == nil && run.ExePath != "" {
+		ver := readExeVersion(run.ExePath)
+		recordInstallMeta(run.ExePath, ver)
+		lastMetaMu.Lock()
+		m = lastMeta
+		lastMetaMu.Unlock()
+	}
+	return m
+}
+
+// VersionBlockError 为 ErrVersionUnsupported 附带脱敏版本号与 libcef 1..9 指纹失配位，供上层 RUM 分类上报。
+type VersionBlockError struct {
+	Version          string
+	MismatchIdx      int // 1..9 表示 libcef 指纹失配；0 表示 10.x 等版本不支持
+	IsLibcefMismatch bool
+	Err              error
+}
+
+func (e *VersionBlockError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *VersionBlockError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+type helperTimeoutError struct {
+	err error
+}
+
+func (e *helperTimeoutError) Error() string { return e.err.Error() }
+func (e *helperTimeoutError) Unwrap() error { return e.err }
+
+func emitKugouIntervention(outcome string, attempt int, elapsedMs int64) {
+	if elapsedMs < 0 {
+		elapsedMs = 0
+	}
+	props := rum.Props{
+		"player":  "kugou",
+		"kind":    "kugou_uac_patch",
+		"outcome": outcome,
+	}
+	if attempt > 0 {
+		props["attempt"] = attempt
+	}
+	if elapsedMs > 0 || outcome != "detached_cmd_fallback" {
+		props["elapsed_ms"] = elapsedMs
+	}
+	rum.Track(rum.CatPlayer, "player_intervention", props)
 }
 
 // patchEntry describes one patch at a disk offset in libcef.dll.
@@ -144,12 +248,17 @@ func CheckPatchStatus(libcefPath string) (allPatched bool, canAutoFix bool, err 
 
 // checkPatchStatus 同 CheckPatchStatus；warn 为假时指纹不认识也不打警告（ensurePatched 重查同一份 DLL 时）。
 func checkPatchStatus(libcefPath string, warn bool) (allPatched bool, canAutoFix bool, err error) {
+	lastLibcefMismatchIdx.Store(0)
 	f, err := openShared(libcefPath)
 	if err != nil {
 		return false, false, i18n.Errorf("open libcef.dll: %w", err)
 	}
 	defer f.Close()
-	return classifyLibcef(f, warn)
+	all, fix, mismatchIdx, err := classifyLibcefDetail(f, warn)
+	if !fix && err == nil && mismatchIdx > 0 {
+		lastLibcefMismatchIdx.Store(int32(mismatchIdx))
+	}
+	return all, fix, err
 }
 
 // classifyLibcef 是 CheckPatchStatus 的纯判定核心，只依赖 io.ReaderAt，便于用合成
@@ -157,11 +266,16 @@ func checkPatchStatus(libcefPath string, warn bool) (allPatched bool, canAutoFix
 // 其 ReadAt 在读不满时必返回 error（io.ReaderAt 契约），故无需 io.ReadFull；ReadAt
 // 也不移动文件偏移，与并发/复用同一路径的读写互不干扰。warn 为真时，指纹不认识打一条 Warn，写明哪一处、什么字节。
 func classifyLibcef(r io.ReaderAt, warn bool) (allPatched bool, canAutoFix bool, err error) {
+	all, fix, _, err := classifyLibcefDetail(r, warn)
+	return all, fix, err
+}
+
+func classifyLibcefDetail(r io.ReaderAt, warn bool) (allPatched bool, canAutoFix bool, mismatchIdx int, err error) {
 	allPatched = true // 直到发现某处不等于 data
 	for i, p := range libcefPatches {
 		buf := make([]byte, len(p.data)) // len(orig)==len(data)，见 TestPatchTableConsistency
 		if _, err := r.ReadAt(buf, p.offset); err != nil {
-			return false, false, i18n.Errorf("read Patch%d (offset=0x%X): %w", i+1, p.offset, err)
+			return false, false, 0, i18n.Errorf("read Patch%d (offset=0x%X): %w", i+1, p.offset, err)
 		}
 		isData := bytes.Equal(buf, p.data)
 		isOrig := bytes.Equal(buf, p.orig)
@@ -173,10 +287,10 @@ func classifyLibcef(r io.ReaderAt, warn bool) (allPatched bool, canAutoFix bool,
 			if warn {
 				log.Warn("Patch%d (offset=0x%X) bytes %X are neither original nor patched; libcef.dll version unsupported", i+1, p.offset, buf)
 			}
-			return false, false, nil
+			return false, false, i + 1, nil
 		}
 	}
-	return allPatched, true, nil
+	return allPatched, true, 0, nil
 }
 
 // FindKuGouInstall locates the KuGou executable and the libcef.dll it actually loads.
@@ -500,6 +614,7 @@ func launchKuGou(exePath string) error {
 	}
 	if !detached {
 		log.Warn("%s was started directly (its path, arguments or working directory cannot be passed through cmd.exe unchanged); it stays in PlayerCap's process tree, so tools that end PlayerCap together with its child processes (such as OBS autostart plugins) will close it as well", TargetProcessName)
+		emitKugouIntervention("detached_cmd_fallback", 0, 0)
 	}
 	log.Info("KuGou started; waiting for initialization...")
 	return nil
@@ -786,7 +901,7 @@ func (h *ElevatedHelper) TriggerAndWait() error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return i18n.Errorf("patch timed out (no result within 30s)")
+	return &helperTimeoutError{err: i18n.Errorf("patch timed out (no result within 30s)")}
 }
 
 // running 报告 helper 进程是否可能仍在运行：只有确知已退出时返回 false，调用方据此不结束酷狗（issue #141）。
@@ -1061,7 +1176,7 @@ func (h *ElevatedHelper) waitReady() error {
 	case readyExited:
 		return i18n.Errorf("elevated helper exited at startup without giving a reason")
 	}
-	return i18n.Errorf("elevated helper not ready within 30s (started but unresponsive)")
+	return &helperTimeoutError{err: i18n.Errorf("elevated helper not ready within 30s (started but unresponsive)")}
 }
 
 // readFileText 返回文件内容；读不到返回空串。
@@ -1393,6 +1508,7 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 	// CheckPatchStatus）。KuGou.exe 的版本号与它 vendored 的 CEF 版本相互独立，拿前者当
 	// 正向闸门既会误伤（同 CEF 的点版本被拒）又会漏放（CEF 热修但 exe 版本不变）。
 	ver := effectiveKuGouVersion(readExeVersion(exePath), exePath, libcefPath)
+	recordInstallMeta(exePath, ver)
 	if key := exePath + "|" + ver; key != installLogged {
 		installLogged = key
 		log.Info("KuGou install directory: %s", filepath.Dir(exePath))
@@ -1417,7 +1533,10 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 			"酷狗 10.x 系列不受支持（补丁只针对 20.x 的 CEF 基线）",
 			map[string]string{"kugou.version": ver},
 			map[string]any{"known_version": knownVersion})
-		return i18n.Errorf("%w: KuGou %s is in the 10.x series; patches target only %s (different CEF baseline)", ErrVersionUnsupported, ver, knownVersion)
+		return &VersionBlockError{
+			Version: player.SanitizeVersion(ver),
+			Err:     i18n.Errorf("%w: KuGou %s is in the 10.x series; patches target only %s (different CEF baseline)", ErrVersionUnsupported, ver, knownVersion),
+		}
 	}
 
 	fingerprint := libcefPath + "|" + ver
@@ -1429,6 +1548,7 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 		// 9 处偏移里有字节既非原版也非已 patch：这个 DLL 不是我们逆向针对的那个 CEF。
 		// 拒绝盲打——拿错版本的偏移写 93MB 签名 DLL 会让用户被迫重装酷狗。上层按受阻处理、定时重查。
 		fingerprintWarned = fingerprint
+		mismatchIdx := int(lastLibcefMismatchIdx.Swap(0))
 
 		// 「预期之外」，且是这几条里最值钱的一条：酷狗换了 vendored 的 CEF，而我们的偏移表
 		// 停在 20.1.22.27795 / CEF 89.20.0。上报带上酷狗版本 —— **那正是下一次该逆向哪个
@@ -1441,7 +1561,12 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 				"known_version": knownVersion,
 				"libcef_path":   libcefPath,
 			})
-		return i18n.Errorf("%w: libcef.dll of %s does not match known offsets; refusing blind patch (reverse-engineered against %s)", ErrVersionUnsupported, ver, knownVersion)
+		return &VersionBlockError{
+			Version:          player.SanitizeVersion(ver),
+			MismatchIdx:      mismatchIdx,
+			IsLibcefMismatch: true,
+			Err:              i18n.Errorf("%w: libcef.dll of %s does not match known offsets; refusing blind patch (reverse-engineered against %s)", ErrVersionUnsupported, ver, knownVersion),
+		}
 	}
 
 	if allPatched {
@@ -1458,8 +1583,16 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 		return ErrElevationNeeded
 	}
 	log.Info("libcef.dll needs repair; requesting administrator rights (UAC)...")
+	patchStart := time.Now()
+	attempt := int(uacPatchAttempt.Add(1))
 	helper, err := launchElevatedHelper(libcefPath)
 	if err != nil {
+		outcome := "uac_denied"
+		var hte *helperTimeoutError
+		if errors.As(err, &hte) {
+			outcome = "helper_timeout"
+		}
+		emitKugouIntervention(outcome, attempt, time.Since(patchStart).Milliseconds())
 		return i18n.Errorf("%w (user may have denied UAC): %v", ErrElevationFailed, err)
 	}
 	defer helper.Close()
@@ -1481,6 +1614,10 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 	if err := killAndPatch(exePath, libcefPath, locate, killKuGou, helper.TriggerAndWait, func() error {
 		return checkReadyToKill(stopCh, helper.running)
 	}); err != nil {
+		var hte *helperTimeoutError
+		if errors.As(err, &hte) {
+			emitKugouIntervention("helper_timeout", attempt, time.Since(patchStart).Milliseconds())
+		}
 		return err
 	}
 
@@ -1494,6 +1631,7 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 		// 这不是假想 —— 硬化笔记记着「杀软静默回滚写入时，字节仍为 orig」，酷狗 libcef 补丁
 		// 被回滚是已发生过的真实故障。主播那头只看到「补丁失败」，我们这头需要知道**有多少人
 		// 被杀软挡住**，那决定要不要去做白名单引导之类的事。
+		emitKugouIntervention("patch_reverted_by_av", attempt, time.Since(patchStart).Milliseconds())
 		telemetry.ReportOnce("kugou.patch_reverted",
 			"酷狗补丁写入后字节未变更（疑似被杀软静默回滚）",
 			map[string]string{"kugou.version": ver},
@@ -1501,8 +1639,11 @@ func ensurePatched(stopCh <-chan struct{}, allowElevate bool) error {
 		return i18n.Errorf("post-patch write verification failed: bytes unchanged (check your antivirus software)")
 	}
 
+	uacPatchAttempt.Store(0)
+	emitKugouIntervention("ok", attempt, time.Since(patchStart).Milliseconds())
 	log.Success("libcef.dll patch complete. Restarting KuGou...")
 	if startedExe != "" {
+		recordInstallMeta(startedExe, ver)
 		resolved, rerr := resolveLaunchExe(startedExe, isRegularFileFn)
 		if rerr != nil {
 			log.Warn("Failed to start KuGou: %v (please start it manually)", rerr)

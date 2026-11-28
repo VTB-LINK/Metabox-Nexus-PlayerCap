@@ -63,6 +63,10 @@ const (
 	// 无捕获时，root 与 per-player 订阅者照样每拍收到一帧，据 N=0 即知当前无捕获（无需订阅 /ws），走带器
 	// 也按真实时间排空。推送条件见 idleKeepalive。
 	idleKeepaliveInterval = 100 * time.Millisecond
+
+	// teardownEOFGrace 是 teardownHelper 关 stdin 后等待 helper 自行排空最终 capture_summary 并退出的上限；
+	// 超时则立即关 Job / Process.Kill 兜底强杀。
+	teardownEOFGrace = 150 * time.Millisecond
 )
 
 // helperProc 是一个在跑的 helper 子进程控制柄。
@@ -70,10 +74,13 @@ type helperProc struct {
 	cmd *exec.Cmd
 	// stdin 必须被 Manager 持有引用：exec 的 StdinPipe 返回的 *os.File 带 finalizer，一旦无引用被 GC
 	// 回收就会提前 Close 写端 → helper 误收 stdin EOF 而早退（实测踩过的坑）。存进本结构体即保活。
-	stdin  io.WriteCloser
-	job    windows.Handle // KILL_ON_JOB_CLOSE 的 job；0=未建成或未赋入（拆除退回 Process.Kill，主进程异常退出时仅剩 stdin EOF 防孤儿）
-	exited chan struct{}  // 解复用 goroutine 在 stdout 收尾 + cmd.Wait 后 close
-	start  time.Time      // spawn 时刻，用于快速失败判定
+	stdin    io.WriteCloser
+	job      windows.Handle // KILL_ON_JOB_CLOSE 的 job；0=未建成或未赋入（拆除退回 Process.Kill，主进程异常退出时仅剩 stdin EOF 防孤儿）
+	jobOK    bool           // spawn 阶段是否成功赋入 Job Object（不随 killHelperForRestart 置零 job 句柄而丢失）
+	gen      uint64         // 单调 helper 代际编号，用于隔离不同 helper 独立 stderr 泵的迟到 RUM 诊断行
+	waitDone atomic.Bool    // 仅在 demux 正常完成 hp.cmd.Wait() 后置位；panic 本地恢复时保持 false，供 teardownHelper 兜底强杀
+	exited   chan struct{}  // 解复用 goroutine 在 stdout 收尾 + cmd.Wait 后 close
+	start    time.Time      // spawn 时刻，用于快速失败判定
 	// watchdogKill 为真表示本进程由看门狗判假死而杀：超时各路已逐播放器记账，reapHelper 不再计 helper
 	// 快速失败、不退避。仅 Run 访问。
 	watchdogKill bool
@@ -161,8 +168,20 @@ type Manager struct {
 	// shutdown 由 BeginShutdown 或 Stop 置位，延后的上报触发时见到即丢弃。
 	shutdown atomic.Bool
 	// lastExit、lastTail 是最近一个结算过的 helper 的退出信息与 stderr 尾部，helper_gave_up 用。
-	lastExit exitInfo
-	lastTail *tailBuffer
+	lastExit  exitInfo
+	lastTail  *tailBuffer
+	lastJobOK bool
+
+	// RUM 会话统计与孤儿清扫计数（所有 rum.Track / Props 封装在 rum.go 中）。
+	helperGen    uint64 // 仅 Run 访问，每次 spawnHelper 单调递增
+	rum          rumTracker
+	orphansSwept atomic.Int64
+
+	// 无锁播放态查询（供 demux 热路径读取，绝不调用可能获取服务端锁的 status）：
+	// playingFast 为调用方注入的无锁查询（如 server.IsPlayerPlaying）；
+	// reconcilePlaying 为 reconcile 发布的不可变播放态快照，作为未注入时的无锁回退。
+	playingFast      atomic.Pointer[func(string) bool]
+	reconcilePlaying atomic.Pointer[map[string]bool]
 }
 
 // New 构造管理器。sink 为帧接收/门控能力（server 的 *audioHub），status 为主服务播放状态查询
@@ -213,6 +232,34 @@ func (m *Manager) Stop() {
 // 故障。信号处理不调 Stop（见 main.go），故另设此入口。
 func (m *Manager) BeginShutdown() {
 	m.shutdown.Store(true)
+	m.rum.onHelperEnd(0, time.Now(), false)
+}
+
+// OrphansSwept 返回启动期孤儿清扫已终止的残留 helper 进程数。
+func (m *Manager) OrphansSwept() int {
+	return int(m.orphansSwept.Load())
+}
+
+// SetPlayingQuery 注入无锁播放态查询回调（如 server.IsPlayerPlaying），供音频 demux 热路径使用；
+// 传入 nil 时清除已注入查询并回退到 reconcile 发布的不可变播放态快照。
+func (m *Manager) SetPlayingQuery(fn func(player string) bool) {
+	if fn == nil {
+		m.playingFast.Store(nil)
+		return
+	}
+	m.playingFast.Store(&fn)
+}
+
+// isPlayerPlayingNoLock 无锁判定指定播放器当前是否处于 playing 状态，专供 demux 热路径调用：
+// 优先使用外部注入的 playingFast，未注入时回退读取 reconcilePlaying 不可变快照，绝不调用 m.status。
+func (m *Manager) isPlayerPlayingNoLock(player string) bool {
+	if fnPtr := m.playingFast.Load(); fnPtr != nil && *fnPtr != nil {
+		return (*fnPtr)(player)
+	}
+	if snap := m.reconcilePlaying.Load(); snap != nil {
+		return (*snap)[player]
+	}
+	return false
 }
 
 // Run 阻塞跑管理循环：秒级 ticker 或 Wake 或 helper 退出通知，先到即 reconcile；stopCh 关则拆
@@ -334,11 +381,34 @@ func (m *Manager) reconcile() {
 		return
 	}
 	hasRoot := m.sink.HasRootSubscriber()
-	playing := map[string]bool{}
-	for _, p := range procscan.Players {
-		if m.status(p) == "playing" {
-			playing[p] = true
+	curSnap := m.reconcilePlaying.Load()
+	var curPlaying map[string]bool
+	if curSnap != nil {
+		curPlaying = *curSnap
+	}
+	var nextPlaying map[string]bool
+	changed := false
+	for i, p := range procscan.Players {
+		isPlaying := m.status != nil && m.status(p) == "playing"
+		if isPlaying != curPlaying[p] {
+			if !changed {
+				changed = true
+				nextPlaying = make(map[string]bool, len(procscan.Players))
+				for _, prev := range procscan.Players[:i] {
+					if curPlaying[prev] {
+						nextPlaying[prev] = true
+					}
+				}
+			}
 		}
+		if changed && isPlaying {
+			nextPlaying[p] = true
+		}
+	}
+	playing := curPlaying
+	if changed {
+		m.reconcilePlaying.Store(&nextPlaying)
+		playing = nextPlaying
 	}
 	desired := desiredCaptures(procscan.Players, hasRoot, playing, m.sink.HasSubscribers)
 
@@ -391,15 +461,24 @@ func (m *Manager) applyControls(want map[string]uint32) {
 				continue // 已在捕获且 PID 未变
 			}
 			m.sendControl("stop " + player) // PID 变了（播放器重启）：先停旧
+			m.rum.onCaptureStop(player, time.Now(), m.helper != nil)
 		}
 		np := m.normResolver(player)
-		if m.sendControl(fmt.Sprintf("capture %d %s %s %d %d %d", pid, player, bit(np.Enabled), np.Target, np.MaxGain, m.frameRate)) {
+		sid := m.rum.allocSessionID()
+		if m.sendControl(fmt.Sprintf("capture %d %s %s %d %d %d %d", pid, player, bit(np.Enabled), np.Target, np.MaxGain, m.frameRate, sid)) {
 			now := time.Now()
 			m.dispatched[player] = pid
 			m.dispatchedAt[player] = now
 			m.mu.Lock()
 			m.lastFrame[player] = now // 下发即置基线，给 WASAPI 激活 + 首帧留看门狗宽限
 			m.mu.Unlock()
+			var helperGen uint64
+			var jobOK bool
+			if m.helper != nil {
+				helperGen = m.helper.gen
+				jobOK = m.helper.jobOK
+			}
+			m.rum.onCaptureStart(helperGen, sid, player, now, jobOK, np.Enabled)
 		} else {
 			delete(m.dispatched, player)
 			delete(m.dispatchedAt, player)
@@ -423,6 +502,7 @@ func (m *Manager) stopCapture(player string) {
 	m.mu.Lock()
 	delete(m.lastFrame, player)
 	m.mu.Unlock()
+	m.rum.onCaptureStop(player, time.Now(), m.helper != nil)
 }
 
 // bit 把布尔转为控制命令里的 "1"/"0" 位。
@@ -493,6 +573,9 @@ func (m *Manager) noteCaptureFailure(player string, pid uint32, now time.Time) {
 		}
 		failures := f.count
 		m.reportLater(func() TelemetryEvent { return CaptureGaveUpEvent(player, failures, tail.Snapshot()) })
+		if !m.shutdown.Load() {
+			m.rum.emitGaveUp(player, 0, false, failures, m.helper != nil && m.helper.jobOK)
+		}
 		return
 	}
 	managerLog.Warn("Player %q produced no frames for %v; recording capture failure #%d, retrying in %v", player, hangThreshold, f.count, f.retryAt.Sub(now))
@@ -553,12 +636,13 @@ func (m *Manager) spawnHelper() error {
 		}
 	}
 
-	hp := &helperProc{cmd: cmd, stdin: stdin, job: job, exited: make(chan struct{}), start: time.Now(), stderrTail: &tailBuffer{}}
+	m.helperGen++
+	hp := &helperProc{cmd: cmd, stdin: stdin, job: job, jobOK: job != 0, gen: m.helperGen, exited: make(chan struct{}), start: time.Now(), stderrTail: &tailBuffer{}}
 	m.helper = hp
 	m.dispatched = map[string]uint32{}
 	m.dispatchedAt = map[string]time.Time{}
 
-	go m.pumpHelperStderr(stderrR, hp.stderrTail)
+	go m.pumpHelperStderr(stderrR, hp.stderrTail, hp.gen)
 	go m.demux(hp, stdout)
 
 	managerLog.Info("Audio capture helper started (pid=%d)", cmd.Process.Pid)
@@ -598,14 +682,16 @@ func (m *Manager) demux(hp *helperProc, stdout io.Reader) {
 				// 严格串行，空闲帧不会排在恢复后的真帧之后。时刻取广播返回之后：广播本身若拖延超过
 				// noCaptureAfter，取广播前的时刻会让 idleKeepalive 随即补一帧空闲帧。锁序 m.mu → hub 锁，与
 				// idleKeepalive 一致。defer 解锁：广播 panic 时不把 mu 留在锁定态。
+				var frameNow time.Time
 				func() {
 					m.mu.Lock()
 					defer m.mu.Unlock()
 					m.sink.BroadcastAudioFrame(f.Player, payload)
-					now := time.Now()
-					m.lastFrame[f.Player] = now
-					m.lastForward[f.Player] = now
+					frameNow = time.Now()
+					m.lastFrame[f.Player] = frameNow
+					m.lastForward[f.Player] = frameNow
 				}()
+				m.rum.onFrame(f.Player, f.Flags, frameNow, m.isPlayerPlayingNoLock)
 			}
 		}
 		if err != nil {
@@ -619,13 +705,14 @@ func (m *Manager) demux(hp *helperProc, stdout io.Reader) {
 	// close(exited) 的时机与改动前相同；这里也不得加任何等读泵的步骤：等待会计进 reapHelper / teardownHelper 的
 	// 存活时长，并让等待期间的看门狗对已退出的进程追加失败。
 	hp.cmd.Wait()
+	hp.waitDone.Store(true)
 	hp.recordExit()
 }
 
 // pumpHelperStderr 是 helper stderr 的读泵 goroutine（每个 helper 一个）：经 pumpStderr 读到 EOF，每块先写入
 // tail、再同步写 m.stderrOut（nil 为 os.Stderr），然后关闭读端。监管路径（demux、reapHelper、teardownHelper、
 // 看门狗）都不等它；控制台卡住时它卡在写出这一步，直到控制台恢复或主进程退出。本地 recover，绝不挂 Guard（§1）。
-func (m *Manager) pumpHelperStderr(r *os.File, tail *tailBuffer) {
+func (m *Manager) pumpHelperStderr(r *os.File, tail *tailBuffer, gen uint64) {
 	defer r.Close()
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -636,7 +723,9 @@ func (m *Manager) pumpHelperStderr(r *os.File, tail *tailBuffer) {
 	if out == nil {
 		out = os.Stderr
 	}
-	pumpStderr(r, tail, out)
+	pumpStderrWithHook(r, tail, out, func(line string) {
+		m.rum.handleDiagLineForHelper(gen, line)
+	})
 }
 
 // reapHelper 回收 exited 已 close 的 helper，记账退避 / 快速失败放弃；看门狗所杀的不计快速失败、
@@ -661,6 +750,7 @@ func (m *Manager) reapHelper() {
 	m.mu.Lock()
 	m.lastFrame = map[string]time.Time{}
 	m.mu.Unlock()
+	m.rum.onHelperEnd(hp.gen, time.Now(), false)
 
 	if time.Since(hp.start) >= quickFailWindow {
 		m.quickFails = 0 // 稳定跑过一段 → 重置快速失败计数
@@ -706,7 +796,7 @@ func (m *Manager) settleExit(hp *helperProc) {
 	hp.mu.Lock()
 	e, killedAt := hp.exit, hp.killMarkedAt
 	hp.mu.Unlock()
-	m.lastExit, m.lastTail = e, hp.stderrTail
+	m.lastExit, m.lastTail, m.lastJobOK = e, hp.stderrTail, hp.jobOK
 	if !classifyExit(e, killedAt) {
 		return
 	}
@@ -715,6 +805,9 @@ func (m *Manager) settleExit(hp *helperProc) {
 		alive = 0 // 退出时刻与 hp.start 都按时钟步进取值，刚启动即崩溃时前者可能略早于后者
 	}
 	m.reportLater(func() TelemetryEvent { return HelperExitedEvent(e.code, alive, quickFails, tail.Snapshot()) })
+	if !m.shutdown.Load() {
+		m.rum.emitHelperAbnormalExit(e.code, quickFails, hp.jobOK)
+	}
 }
 
 // reportGaveUp 在 givenUp 由假转真处延后上报 helper_gave_up：cause 为触发放弃的那次快速失败的来源，spawnErr 为
@@ -724,6 +817,9 @@ func (m *Manager) reportGaveUp(cause string, spawnErr error) {
 	m.reportLater(func() TelemetryEvent {
 		return HelperGaveUpEvent(cause, quickFails, last.code, last.known, spawnErr, tail.Snapshot())
 	})
+	if !m.shutdown.Load() {
+		m.rum.emitGaveUp("", last.code, last.known, quickFails, m.lastJobOK)
+	}
 }
 
 // reportLater 在 reportDelay 之后把 build 构造的事件交给 report，不占 Run goroutine。触发时若主服务已开始关停
@@ -788,13 +884,23 @@ func (m *Manager) teardownHelper() {
 	m.dispatchedAt = nil
 
 	hp.markKilled()
-	hp.stdin.Close()
-	if hp.job != 0 {
-		windows.CloseHandle(hp.job)
-	} else {
-		hp.cmd.Process.Kill() // 无 Job（未建成或未赋入）兜底强杀，防 helper 卡死令下方 <-hp.exited 永久阻塞 Run
+	if hp.stdin != nil {
+		hp.stdin.Close()
 	}
-	<-hp.exited // demux 在 stdout 收尾 + cmd.Wait 后 close
+	// 先短等 helper 响应 stdin EOF 排空最终 capture_summary 后自行退出；超时再关 Job / Process.Kill 强杀。
+	// 若 exited 已关闭但 demux 未走到 cmd.Wait()（如 panic 本地恢复），无 Job 时同样必须 Process.Kill() 兜底强杀残留进程。
+	if !waitExitedTimeout(hp.exited, teardownEOFGrace) {
+		if hp.job != 0 {
+			windows.CloseHandle(hp.job)
+		} else if hp.cmd != nil && hp.cmd.Process != nil {
+			hp.cmd.Process.Kill() // 无 Job（未建成或未赋入）兜底强杀，防 helper 卡死令下方 <-hp.exited 永久阻塞 Run
+		}
+		<-hp.exited // demux 在 stdout 收尾 + cmd.Wait 后 close
+	} else if hp.job != 0 {
+		windows.CloseHandle(hp.job) // helper 已自行退出或 demux 提前恢复：关闭 Job 既还句柄又兜底杀残留
+	} else if !hp.waitDone.Load() && hp.cmd != nil && hp.cmd.Process != nil {
+		hp.cmd.Process.Kill() // 无 Job 且 demux 未走到 cmd.Wait()：强杀残留 helper 进程
+	}
 	if time.Since(hp.start) >= quickFailWindow {
 		m.quickFails = 0 // 与 reapHelper 的稳定分支一致，计数不跨订阅会话累积
 		m.backoff = 0
@@ -804,6 +910,7 @@ func (m *Manager) teardownHelper() {
 	m.mu.Lock()
 	m.lastFrame = map[string]time.Time{}
 	m.mu.Unlock()
+	m.rum.onHelperEnd(hp.gen, time.Now(), !m.shutdown.Load())
 }
 
 // sweepOrphans 启动孤儿清扫（best-effort）。Job Object + stdin-EOF 自杀已覆盖「父死→子亡」的
@@ -833,7 +940,9 @@ func (m *Manager) sweepOrphans() {
 			continue
 		}
 		managerLog.Warn("Cleaning up leftover orphaned audio helper process pid=%d", p.Pid)
-		p.Kill()
+		if err := p.Kill(); err == nil {
+			m.orphansSwept.Add(1)
+		}
 	}
 }
 

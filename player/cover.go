@@ -25,6 +25,11 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 	return FetchCoverBase64Context(context.Background(), playerName, coverURL, timeout)
 }
 
+// FetchCoverBase64WithOutcome 下载封面图片并规范化，同时返回不含 URL 的脱敏处理结果。
+func FetchCoverBase64WithOutcome(playerName string, coverURL string, timeout time.Duration) (string, CoverOutcome) {
+	return FetchCoverBase64ContextWithOutcome(context.Background(), playerName, coverURL, timeout)
+}
+
 // FetchCoverBase64Context 下载封面图片，经 CoverDataURI 规范为 800×800 后返回 data URI。
 // ctx 用于中止在途下载（为 nil 时按 context.Background() 处理）；playerName 用于日志前缀标识调用来源；
 // timeout 控制 HTTP 下载超时，超时或出错则返回空字符串（不阻塞主流程）。
@@ -38,20 +43,34 @@ func FetchCoverBase64(playerName string, coverURL string, timeout time.Duration)
 // 下载失败时记一条 Detail，写明原因（错误、HTTP 状态码、超限或不完整），返回值不变（#199）。
 // 调用方经 ctx 主动取消（context.Canceled）时静默返回空串，不记 Detail 日志；超时与其他网络错误照常记 Detail（#168）。
 func FetchCoverBase64Context(ctx context.Context, playerName string, coverURL string, timeout time.Duration) string {
+	uri, _ := FetchCoverBase64ContextWithOutcome(ctx, playerName, coverURL, timeout)
+	return uri
+}
+
+// FetchCoverBase64ContextWithOutcome 是封面下载与规范化的单一真源实现，额外返回脱敏 CoverOutcome 供 RUM 上报。
+func FetchCoverBase64ContextWithOutcome(ctx context.Context, playerName string, coverURL string, timeout time.Duration) (string, CoverOutcome) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if coverURL == "" {
-		return ""
+		return "", CoverOutcome{Action: CoverActionNone}
 	}
 	if ctx.Err() == context.Canceled {
-		return ""
+		return "", CoverOutcome{Action: CoverActionNone}
+	}
+	start := time.Now()
+	errOutcome := func(reason string) CoverOutcome {
+		return CoverOutcome{
+			Action:         CoverActionErr,
+			FallbackReason: reason,
+			DurationMs:     time.Since(start).Milliseconds(),
+		}
 	}
 
 	// scheme 白名单：挡掉 file://、gopher:// 等可被利用的 scheme。
 	if u, err := url.Parse(coverURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		coverLog.Detail("[%s] cover URL is not http/https, skipping: %q", playerName, coverURL)
-		return ""
+		return "", errOutcome("invalid_scheme")
 	}
 
 	// 每次下载都是一个独立的客户端（独立的 Transport）：不回收的话，对端保活时空闲连接与它的两个 goroutine 会一直留着
@@ -61,7 +80,7 @@ func FetchCoverBase64Context(ctx context.Context, playerName string, coverURL st
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coverURL, nil)
 	if err != nil {
 		coverLog.Detail("[%s] cover download failed: %v", playerName, err)
-		return ""
+		return "", errOutcome("http_err")
 	}
 	// 带上通用的浏览器标识（同网易云的歌词请求）：酷狗歌手图的图床拒绝 Go 默认的 User-Agent，http 与 https 都回 403，
 	// 换成浏览器标识或不带即 200（#194，2026-11-14 实测）。
@@ -69,16 +88,16 @@ func FetchCoverBase64Context(ctx context.Context, playerName string, coverURL st
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() == context.Canceled && errors.Is(err, context.Canceled) {
-			return ""
+			return "", CoverOutcome{Action: CoverActionNone}
 		}
 		coverLog.Detail("[%s] cover download failed: %v", playerName, err)
-		return ""
+		return "", errOutcome("http_err")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		coverLog.Detail("[%s] cover download failed: HTTP %d: %s", playerName, resp.StatusCode, coverURL)
-		return ""
+		return "", errOutcome("non_200")
 	}
 
 	// 限制最大 5MB
@@ -86,23 +105,23 @@ func FetchCoverBase64Context(ctx context.Context, playerName string, coverURL st
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
 		if ctx.Err() == context.Canceled && errors.Is(err, context.Canceled) {
-			return ""
+			return "", CoverOutcome{Action: CoverActionNone}
 		}
 		coverLog.Detail("[%s] cover download failed while reading: %v: %s", playerName, err, coverURL)
-		return ""
+		return "", errOutcome("http_err")
 	}
 	if ctx.Err() == context.Canceled {
-		return ""
+		return "", CoverOutcome{Action: CoverActionNone}
 	}
 	if int64(len(body)) > maxSize {
 		coverLog.Detail("[%s] cover larger than %d bytes, sending the URL only: %s", playerName, maxSize, coverURL)
-		return "" // 超过上限，放弃 base64，让前端用 URL 加载
+		return "", errOutcome("too_large") // 超过上限，放弃 base64，让前端用 URL 加载
 	}
 	// 校验 Content-Length（如有）防止被 LimitReader 静默截断
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		if expected, err := strconv.ParseInt(cl, 10, 64); err == nil && int64(len(body)) < expected {
 			coverLog.Detail("[%s] cover download incomplete (%d of %d bytes): %s", playerName, len(body), expected, coverURL)
-			return "" // 下载不完整
+			return "", errOutcome("truncated") // 下载不完整
 		}
 	}
 
@@ -115,7 +134,9 @@ func FetchCoverBase64Context(ctx context.Context, playerName string, coverURL st
 	}
 
 	coverLog.Detail("[%s] cover fetched (%d bytes → base64)", playerName, len(body))
-	return CoverDataURI(playerName, body, mimeType)
+	uri, out := CoverDataURIWithOutcome(playerName, body, mimeType)
+	out.DurationMs = time.Since(start).Milliseconds()
+	return uri, out
 }
 
 // newCoverClient 构造封面下载用的 HTTP 客户端。做成包级变量只为测试能换成直连 httptest 回环服务的客户端
@@ -147,17 +168,30 @@ var newCoverClient = func(timeout time.Duration) *http.Client {
 // 长边两端）再缩放到 800×800、编码为 JPEG。处理不了的（读不出头、格式不在白名单、尺寸超限、CMYK、JPEG 扫描次数超限、解码或编码失败）原字节、原 mime
 // 发出，并打一条警告。在调用方的 goroutine 里同步执行：本机缩放一张 1200² 的 JPEG 约 75ms（BenchmarkNormalizeCover）。
 func CoverDataURI(playerName string, b []byte, mime string) string {
+	uri, _ := CoverDataURIWithOutcome(playerName, b, mime)
+	return uri
+}
+
+// CoverDataURIWithOutcome 是 CoverDataURI 的单一真源实现，同时返回脱敏 CoverOutcome 供 RUM 上报。
+func CoverDataURIWithOutcome(playerName string, b []byte, mime string) (string, CoverOutcome) {
 	if len(b) == 0 {
-		return ""
+		return "", CoverOutcome{Action: CoverActionNone}
 	}
 	start := time.Now()
-	out, outMIME, w, h, err := normalizeCover(b, mime)
+	out, outMIME, w, h, reason, err := normalizeCoverWithReason(b, mime)
+	durMs := time.Since(start).Milliseconds()
+	outcome := CoverOutcome{DurationMs: durMs}
 	if err != nil {
 		coverLog.Warn("[%s] cover not normalized, sent as is: %v", playerName, err)
+		outcome.Action = CoverActionFallbackRaw
+		outcome.FallbackReason = reason
 	} else if w != coverSide || h != coverSide {
 		coverLog.Detail("[%s] cover resized %dx%d → 800x800 (%d → %d bytes, %v)", playerName, w, h, len(b), len(out), time.Since(start))
+		outcome.Action = CoverActionResized800
+	} else {
+		outcome.Action = CoverActionPassthrough800
 	}
-	return "data:" + outMIME + ";base64," + base64.StdEncoding.EncodeToString(out)
+	return "data:" + outMIME + ";base64," + base64.StdEncoding.EncodeToString(out), outcome
 }
 
 // isBlockedCoverIP 判断目标 IP 是否属于封面下载 SSRF 防护必须拒绝的范围（issue #12）：

@@ -29,9 +29,15 @@ const (
 // 返回原字节、原 mime 与说明原因的错误。
 // w、h 是源图尺寸（读不出头时为 0）。
 func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int, err error) {
+	out, outMIME, w, h, _, err = normalizeCoverWithReason(b, mime)
+	return out, outMIME, w, h, err
+}
+
+// normalizeCoverWithReason 是 normalizeCover 的单一真源实现，在失败时同时返回不含敏感文本的稳定短枚举 reason。
+func normalizeCoverWithReason(b []byte, mime string) (out []byte, outMIME string, w, h int, reason string, err error) {
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(b))
 	if err != nil {
-		return b, mime, 0, 0, i18n.Errorf("cannot read the image header: %v", err)
+		return b, mime, 0, 0, "decode_config_err", i18n.Errorf("cannot read the image header: %v", err)
 	}
 	w, h = cfg.Width, cfg.Height
 	switch format {
@@ -40,31 +46,31 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 	case "png":
 		outMIME = "image/png"
 	default: // 本包只注册了 jpeg 与 png；这一支防将来有依赖注册了别的格式
-		return b, mime, w, h, i18n.Errorf("unsupported image format %q", format)
+		return b, mime, w, h, "unsupported_format", i18n.Errorf("unsupported image format %q", format)
 	}
 	if w == coverSide && h == coverSide {
-		return b, outMIME, w, h, nil // 放行不解码：只改标签不改字节
+		return b, outMIME, w, h, "", nil // 放行不解码：只改标签不改字节
 	}
 	if w < 1 || h < 1 || w > coverMaxSide || h > coverMaxSide {
-		return b, mime, w, h, i18n.Errorf("image size %dx%d is outside 1-%d", w, h, coverMaxSide)
+		return b, mime, w, h, "dimension_out_of_range", i18n.Errorf("image size %dx%d is outside 1-%d", w, h, coverMaxSide)
 	}
 
 	if format == "jpeg" {
 		// 4 分量 JPEG 被 Go 按固定公式转色、不做色彩管理，重编码后偏色；原样交给浏览器。在解码前拦下，
 		// 也省掉渐进式 CMYK 解码时的大块内存。
 		if cfg.ColorModel == color.CMYKModel {
-			return b, mime, w, h, i18n.Errorf("CMYK JPEG is not re-encoded")
+			return b, mime, w, h, "cmyk_jpeg", i18n.Errorf("CMYK JPEG is not re-encoded")
 		}
 		if err := jpegScanBudget(b); err != nil {
-			return b, mime, w, h, err
+			return b, mime, w, h, "scan_budget_exceeded", err
 		}
 	}
 	src, _, err := image.Decode(bytes.NewReader(b))
 	if err != nil {
-		return b, mime, w, h, i18n.Errorf("image decode failed: %v", err)
+		return b, mime, w, h, "decode_err", i18n.Errorf("image decode failed: %v", err)
 	}
 	if _, ok := src.(*image.CMYK); ok { // 上面已按头部拦下，这里兜底
-		return b, mime, w, h, i18n.Errorf("CMYK JPEG is not re-encoded")
+		return b, mime, w, h, "cmyk_jpeg", i18n.Errorf("CMYK JPEG is not re-encoded")
 	}
 
 	// 源矩形取居中的正方形：非正方形裁去长边两端、等比缩放，不变形（issue #113）。一次重采样完成，不先缩放再裁。
@@ -73,9 +79,9 @@ func normalizeCover(b []byte, mime string) (out []byte, outMIME string, w, h int
 	xdraw.BiLinear.Scale(dst, dst.Bounds(), src, centerSquare(src.Bounds()), xdraw.Src, nil)
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: coverQuality}); err != nil {
-		return b, mime, w, h, i18n.Errorf("JPEG encode failed: %v", err)
+		return b, mime, w, h, "encode_err", i18n.Errorf("JPEG encode failed: %v", err)
 	}
-	return buf.Bytes(), "image/jpeg", w, h, nil
+	return buf.Bytes(), "image/jpeg", w, h, "", nil
 }
 
 // centerSquare 返回 r 内居中的正方形：边长取宽高中较小者，长边两端各裁去一半。宽高之差为奇数时多出的 1 像素

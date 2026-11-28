@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"Metabox-Nexus-PlayerCap/logger"
 	"Metabox-Nexus-PlayerCap/player/kuwo/cdp"
 	"Metabox-Nexus-PlayerCap/player/launch"
+	"Metabox-Nexus-PlayerCap/rum"
 )
 
 const TargetProcessName = "kwmusic.exe"
@@ -74,6 +76,42 @@ type operations struct {
 	wait     func(context.Context, time.Duration) error
 }
 
+var channelSuffixRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,16}$`)
+
+// SanitizeChannelSuffix 用白名单正则 ^[a-zA-Z0-9_-]{1,16}$ 清洗酷我渠道后缀，
+// 含路径、空格、中文、特殊字符或超 16 字符一律归一为 "other"。
+func SanitizeChannelSuffix(raw string) string {
+	if channelSuffixRe.MatchString(raw) {
+		return raw
+	}
+	return "other"
+}
+
+func channelSuffixFromExe(exe string) string {
+	clean := filepath.Clean(exe)
+	grandparent := filepath.Base(filepath.Dir(filepath.Dir(clean)))
+	if len(grandparent) > len(buildDirPrefix) && strings.EqualFold(grandparent[:len(buildDirPrefix)], buildDirPrefix) {
+		return SanitizeChannelSuffix(grandparent[len(buildDirPrefix):])
+	}
+	return "other"
+}
+
+func emitKuwoRestartIntervention(outcome, channelSuffix string, elapsedMs int64) {
+	if elapsedMs < 0 {
+		elapsedMs = 0
+	}
+	props := rum.Props{
+		"player":         "kuwo",
+		"kind":           "controlled_restart",
+		"outcome":        outcome,
+		"channel_suffix": SanitizeChannelSuffix(channelSuffix),
+	}
+	if elapsedMs > 0 || outcome == "ok" || outcome == "port_timeout" {
+		props["elapsed_ms"] = elapsedMs
+	}
+	rum.Track(rum.CatPlayer, "player_intervention", props)
+}
+
 type manager struct {
 	mu sync.Mutex
 	// limited is set when a restart begins and cleared only by confirmAfterProbe.
@@ -90,8 +128,10 @@ type manager struct {
 	// next normally opened instance at most, and if the launcher still drops
 	// the flag, that restart's instance is unconfirmed and the limit stays: no
 	// loop.
-	launched instance
-	ops      operations
+	launched          instance
+	unverifiedPID     int
+	unverifiedCreated uint64
+	ops               operations
 }
 
 // confirmAfterProbe runs after the port answered. before is the instance found
@@ -166,7 +206,12 @@ func (m *manager) ensure(ctx context.Context) error {
 	}
 	// An unverified build is not eligible for a destructive restart: report it
 	// as such so the user is told to launch with the debug port manually.
+	chSuffix := channelSuffixFromExe(i.Exe)
 	if err = m.ops.verify(i.Exe); err != nil {
+		if m.unverifiedPID != i.PID || m.unverifiedCreated != i.Created {
+			m.unverifiedPID, m.unverifiedCreated = i.PID, i.Created
+			emitKuwoRestartIntervention("unverified_channel_skipped", chSuffix, 0)
+		}
 		return ErrRestartNotAuthorized
 	}
 	args, err := debugArgs(i.Args)
@@ -186,6 +231,7 @@ func (m *manager) ensure(ctx context.Context) error {
 		return err
 	}
 	m.limited, m.launched = true, instance{}
+	restartStart := time.Now()
 	log.Warn("Kuwo needs its debug port; restarting the verified instance once (playback may pause)")
 	if err = m.ops.stop(ctx, i); err != nil {
 		return i18n.Errorf("kuwo: controlled restart failed: %w", err)
@@ -203,6 +249,7 @@ func (m *manager) ensure(ctx context.Context) error {
 	// Installation could have updated while shutting down; never start a
 	// different executable under the authority of the earlier fingerprint.
 	if err = m.ops.verify(i.Exe); err != nil {
+		emitKuwoRestartIntervention("unverified_channel_skipped", chSuffix, time.Since(restartStart).Milliseconds())
 		return ErrRestartNotAuthorized
 	}
 	if err := ctx.Err(); err != nil {
@@ -225,6 +272,7 @@ func (m *manager) ensure(ctx context.Context) error {
 		}
 		if err := m.ops.ready(ctx); err == nil {
 			m.confirmAfterProbe(ctx, m.launched)
+			emitKuwoRestartIntervention("ok", chSuffix, time.Since(restartStart).Milliseconds())
 			return nil
 		} else if errors.Is(err, cdp.ErrVersionUnsupported) {
 			return err
@@ -233,6 +281,7 @@ func (m *manager) ensure(ctx context.Context) error {
 			return err
 		}
 	}
+	emitKuwoRestartIntervention("port_timeout", chSuffix, time.Since(restartStart).Milliseconds())
 	return ErrPortNotReady
 }
 
